@@ -6,7 +6,7 @@ in cartesian geometry, adapted from the engine by [Luchini & Quadrio, J. Comp. P
 <img align="left" src="https://github.com/davecats/channel/blob/master/couette.png">
 <p> 
  <br/><br/><br/><br/><br/>
-Turbulent Couette flow at a friction Reynolds number of Reτ=500</p>
+Turbulent Couette flow <br/> at a friction Reynolds number of Reτ=500</p>
 <br clear="left"/>
   
 The code has been explicitly designed for shortness, compactness and simplicity, while still being parallel. Simplicity is preferred over excessive optimization. The code is optimized for reasonable parallel performance on up to O(2000) cores in 1024^3-sized problems. The main features are:
