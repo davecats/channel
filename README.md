@@ -17,8 +17,21 @@ The code has been explicitly designed for shortness, compactness and simplicity,
 * *elegant*: data transposition with MPI interleaved datatypes and nonblocking communication
 * *validated*: based on the engine developed by  [Luchini & Quadrio, J. Comp. Phys. (2006)](https://www.sciencedirect.com/science/article/pii/S0021999105002871?via%3Dihub)
 
-## Requisites 
+## Required dependencies
 
+* **GNU Make**
 * **MPI**: version 3.1 or above with exposed mpi_f08 Fortran interface
 * **FFTW**: version 3.x or above
 * **FORTRAN**: any fortran f08 compliant compiler
+
+## Download and Compile
+
+Once you have all required dependencies listed above, acquire the source code by cloning the git repository:
+
+    git clone https://github.com/davecats/channel.git
+
+Then compiling the code is as easy as hitting
+
+    make
+    
+You may want to edit the *Makefile* and change the MPI/Fortran compiler, the optimization flag and the location of the *FFTW* library and headers. 
