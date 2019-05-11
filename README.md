@@ -35,3 +35,14 @@ Then compiling the code is as easy as hitting
     make
     
 You may want to edit the *Makefile* and change the MPI/Fortran compiler, the optimization flag and the location of the *FFTW* library and headers. 
+
+## Contacts
+
+Dr. Davide Gatti  
+davide.gatti [at] kit.edu  
+msc.davide.gatti [at] gmail.com  
+
+Karlsruhe Institute of Technology  
+Institute of Fluid Dynamics  
+Kaiserstraße 10  
+76131 Karlsruhe  
