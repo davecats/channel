@@ -11,10 +11,7 @@
 ! Date  : 28/Jul/2015
 !
 
-! Force (nxd,nzd) to be at most the product of a
-! power of 2 and a single factor 3.
-#define useFFTfit
-
+#include 'header.h'
 
 MODULE dnsdata
 
@@ -48,6 +45,9 @@ MODULE dnsdata
   !Solution
   TYPE(RHSTYPE),  allocatable :: memrhs(:,:,:), oldrhs(:,:,:)
   complex(C_DOUBLE_COMPLEX), allocatable :: V(:,:,:,:)
+#ifdef bodyforce
+  complex(C_DOUBLE_COMPLEX), allocatable :: F(:,:,:,:)
+#endif
   !Boundary conditions
   real(C_DOUBLE), dimension(-2:2) :: v0bc,v0m1bc,vnbc,vnp1bc,eta0bc,eta0m1bc,etanbc,etanp1bc
   TYPE(BCOND),    allocatable :: bc0(:,:), bcn(:,:)
@@ -91,6 +91,9 @@ MODULE dnsdata
     INTEGER(C_INT) :: ix,iz
     logical, intent(IN) :: solveNS
     ALLOCATE(V(ny0-2:nyN+2,-nz:nz,nx0:nxN,1:3))
+#ifdef bodyforce
+    ALLOCATE(F(ny0-2:nyn+2,-nz:nz,nx0:nxN,1:3))
+#endif
     IF (solveNS) ALLOCATE(memrhs(0:2,-nz:nz,nx0:nxN),oldrhs(MAX(1,ny0-2):MIN(ny-1,nyN+2),-nz:nz,nx0:nxN),bc0(-nz:nz,nx0:nxN),bcn(-nz:nz,nx0:nxN))
 #define newrhs(iy,iz,ix) memrhs(MOD(iy+1000,3),iz,ix)
 #define imod(iy) MOD(iy+1000,5)
@@ -334,19 +337,6 @@ MODULE dnsdata
             V(:,iz,ix,3)=(ibeta(iz)*V(:,iz,ix,3)+ialfa(ix)*V(:,iz,ix,1))/k2(iz,ix)
             V(:,iz,ix,1)=temp
         END IF
-!  IF (ix==0 .AND. iz==0) THEN
-!  DO i=0,nproc-1
-!  IF (iproc==i) THEN
-!  WRITE(*,*) iproc
-!  DO iy=ny0-2,nyN+2
-!    WRITE(*,*) iy,V(iy,iz,ix,1),ny0,nyN
-!  END DO
-!  WRITE(*,*)  
-!  END IF
-!  CALL MPI_Barrier(MPI_COMM_WORLD)
-!  END DO
-!  IF (ix==0 .AND. iz==0) STOP
-!  END IF
       END DO
     END DO
   END SUBROUTINE linsolve
@@ -391,8 +381,22 @@ MODULE dnsdata
   SUBROUTINE buildrhs(ODE,compute_cfl)
     logical, intent(in) :: compute_cfl
     real(C_DOUBLE), intent(in) :: ODE(1:3)
-    integer(C_INT) :: iy,iz,ix,im2,im1,i0,i1,i2
+    integer(C_INT) :: iy,iz,ix,i,im2,im1,i0,i1,i2
     complex(C_DOUBLE_COMPLEX) :: rhsu,rhsv,rhsw,DD0_6,DD1_6,expl
+#ifdef bodyforce
+    IF (first) THEN 
+        iy=1; F(-1:0,:,:,:)=0
+        DO CONCURRENT (iz=-nz:nz, ix=nx0:nxN, i=1:3)
+          F(-1,iz,ix,i)=-D4(F,i)/der(iy)%d4(-2) 
+        END DO
+    END IF 
+    IF (last) THEN
+        iy=ny-1; F(ny:ny+1,:,:,:)=0
+        DO CONCURRENT (iz=-nz:nz, ix=nx0:nxN, i=1:3)
+          F(ny+1,iz,ix,i)=-D4(F,i)/der(iy)%d4(2)
+        END DO
+    END IF
+#endif
     DO iy=ny0-4,nyN+2 !-3,ny+1
       IF (iy<=nyN) THEN !(iy<=ny-1) THEN
       CALL convolutions(iy+2,imod(iy+2)+1,compute_cfl)
@@ -406,14 +410,23 @@ MODULE dnsdata
             rhsw=-ialfa(ix)*DD0_6-DD(d1,5)-ibeta(iz)*DD(d0,3)
             expl=(ialfa(ix)*(ialfa(ix)*DD(d1,1)+DD(d2,4)+ibeta(iz)*DD1_6)+&
                   ibeta(iz)*(ialfa(ix)*DD1_6+DD(d2,5)+ibeta(iz)*DD(d1,3))-k2(iz,ix)*rhsv &
+#ifdef bodyforce
+                 - k2(ix,iz)*D0(F,2)-ialfa(ix)*D1(F,1)-ibeta(iz)*D1(F,3) &
+#endif
                  )
             timescheme(newrhs(iy,iz,ix)%D2v, oldrhs(iy,iz,ix)%D2v, D2(V,2)-k2(iz,ix)*D0(V,2),sum(OS(iy,-2:2)*V(iy-2:iy+2,iz,ix,2)),expl); !(D2v)
             IF (ix==0 .AND. iz==0) THEN
               expl=(dcmplx(dreal(rhsu)+meanpx,dreal(rhsw)+meanpz) &
+#ifdef bodyforce
+                   +rD0(F,1,3) &
+#endif
                    )
-              timescheme(newrhs(iy,0,0)%eta,oldrhs(iy,0,0)%eta,rD0(V,1,3),ni*rD2(V,1,3),expl) !(Ubar, Wbar)
+              timescheme(newrhs(iy,0,0)%eta,oldrhs(iy,0,0)%eta,rD0(V,1,3),ni*rD2(V,1,3),expl)!(Ubar, Wbar)
             ELSE
               expl=(ibeta(iz)*rhsu-ialfa(ix)*rhsw &
+#ifdef bodyforce
+                   +ibeta(iz)*D0(F,1)-ialfa(ix)*D0(F,3) &
+#endif
                    )
               timescheme(newrhs(iy,iz,ix)%eta, oldrhs(iy,iz,ix)%eta,ibeta(iz)*D0(V,1)-ialfa(ix)*D0(V,3),sum(SQ(iy,-2:2)*[ibeta(iz)*V(iy-2:iy+2,iz,ix,1)-ialfa(ix)*V(iy-2:iy+2,iz,ix,3)]),expl) !(eta)
             END IF

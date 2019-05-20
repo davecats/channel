@@ -11,8 +11,7 @@
 ! Author: Dr.-Ing. Davide Gatti
 ! 
 
-! Measure per timestep execution time
-#define chron
+#include 'header.h'
 
 PROGRAM channel
 

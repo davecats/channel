@@ -11,7 +11,7 @@
 ! Date  : 15/Apr/2019
 ! 
 
-!#define ycontiguous
+#include 'header.h'
 
 MODULE mpi_transpose
   
