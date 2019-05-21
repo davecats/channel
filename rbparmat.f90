@@ -44,6 +44,7 @@ SUBROUTINE LU5decompStep(A)
   ELSE
     buf=A(0:1,:)
     CALL MPI_ISend(buf,10,MPI_DOUBLE_PRECISION,ipy-1,TAG_LUDECOMP,MPI_COMM_Y,Rs)
+    CALL MPI_Wait(Rr,S)
   END IF
 END SUBROUTINE LU5decompStep
 !-----------------------------------------------------!
@@ -69,6 +70,7 @@ SUBROUTINE LeftLU5divStep1(x,A,b)
   END DO
   IF (.NOT. first) THEN 
     CALL MPI_ISend(x(0:1),2,cmpl,ipy-1,TAG_LUDIVSTEP1,MPI_COMM_Y,Rs)
+    CALL MPI_Wait(Rr,S)
   END IF
 END SUBROUTINE LeftLU5divStep1
 !-----------------------------------------------------!
@@ -91,6 +93,7 @@ SUBROUTINE LeftLU5divStep2(A,b)
   END DO
   IF (.NOT. last) THEN 
     CALL MPI_ISend(b(HI1-3:HI1-2),2,cmpl,ipy+1,TAG_LUDIVSTEP2,MPI_COMM_Y,Rs)
+    CALL MPI_Wait(Rr,S)
   END IF
 END SUBROUTINE LeftLU5divStep2
 !-----------------------------------------------------!
