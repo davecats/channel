@@ -22,7 +22,7 @@ read_restart_file()
 ! invert u and w top part of channel
 !WITH V(*,*,ny DIV 2 + 1..ny+1): u=~*(-1); w=~*(-1) 
 ! save
-!WRITE "Writing CPL field..."
+WRITE "Writing CPL field..."
 !time = dt_save
 !outstats()
 ! save in Fortran format

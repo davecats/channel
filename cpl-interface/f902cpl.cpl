@@ -1,0 +1,20 @@
+gamma=0
+USE dnsdata
+USE dnsdirect
+!USE rtchecks
+USE ./tke/convenience
+
+INTEGER nfmin=atoi(COMMANDLINE(4))
+INTEGER nfmax=atoi(COMMANDLINE(5))
+
+LOOP FOR if=nfmin TO nfmax
+  STRING fnm=WRITE("Dati.cart."if".out")
+  read_field_fortran(fnm,V)
+
+  dt_save = 10
+  deltat = 0.1
+  time = 10
+  cfl=1.0
+  outstats()
+
+REPEAT
