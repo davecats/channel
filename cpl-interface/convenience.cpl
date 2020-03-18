@@ -1,0 +1,189 @@
+DERIVS = STRUCTURED ARRAY(ux,uy,uz,vx,vy,vz,wx,wy,wz) OF COMPLEX
+DERPRODS = STRUCTURE(COMPLEX ux2,vx2,wx2,uy2,vy2,wy2,uz2,vz2,wz2)
+DERPRODSEXT = STRUCTURE(COMPLEX ux2,vx2,wx2,uy2,vy2,wy2,uz2,vz2,wz2,uxvx,uyvy,uzvz,uxwx,uywy,uzwz,vxwx,vywy,vzwz)
+
+STRUCTURE[ARRAY(-2..2) OF REAL d1,d2] derivs_standalone(nyl-2..nyh+2)
+INLINE REAL FUNCTION D1(REAL f(*)) = d1(-2)*f(-2)+d1(-1)*f(-1)+d1(0)*f(0)+d1(1)*f(1)+d1(2)*f(2)
+INLINE REAL FUNCTION D2(REAL f(*)) = d2(-2)*f(-2)+d2(-1)*f(-1)+d2(0)*f(0)+d2(1)*f(1)+d2(2)*f(2)
+INLINE COMPLEX FUNCTION D1(COMPLEX f(*)) = D1(f.REAL)+I*D1(f.IMAG)
+INLINE COMPLEX FUNCTION D2(COMPLEX f(*)) = D2(f.REAL)+I*D2(f.IMAG)
+LOOP FOR iy=MAX(1,nyl-2) TO MIN(ny-1,nyh+2) WITH derivs_standalone(iy):
+  ARRAY(0..4,0..4) OF REAL matder=0
+  ARRAY(0..4) OF REAL tnder=0
+  DO matder(ir,ic) = (y(iy-2+ic)-y(iy))^(4-ir) FOR ic=0 TO 4 AND ir=0 TO 4
+  LUdecomp matder
+  d1=0; tnder=0; tnder(3) = 1
+  d1(-2+(*)) = matder\tnder
+  d2=0; tnder=0; tnder(2) = 2
+  d2(-2+(*)) = matder\tnder
+REPEAT
+IF first THEN WITH derivs_standalone: d1(-1,*)=d14m1; d2(-1,*)=d24m1; d1(0,*)=d140; d2(0,*)=d240;
+IF last  THEN WITH derivs_standalone: d1(ny,*)=d14n;  d2(ny,*)=d24n;  d1(ny+1,*)=d14np1; d2(ny+1,*)=d24np1;
+
+SUBROUTINE ByteSwap(POINTER TO SINGLE xxx) FOLLOWS
+SUBROUTINE fourier2physical(ARRAY(*,*) OF COMPLEX plane; POINTER TO ARRAY(*,*) OF COMPLEX planed) FOLLOWS
+SUBROUTINE read_field_parallel(STRING field_name) FOLLOWS
+SUBROUTINE read_field_fortran(STRING field_name; POINTER TO ARRAY(*,*,*,*) OF COMPLEX R) FOLLOWS
+SUBROUTINE read_field(STRING field_name) FOLLOWS
+SUBROUTINE read_field_uvw(STRING field_name) FOLLOWS
+SUBROUTINE velocity_gradient(POINTER TO ARRAY(*,*,*) OF DERIVS Vder) FOLLOWS
+SUBROUTINE deriv2(ARRAY(*) OF REAL f0,f2^) FOLLOWS
+REAL FUNCTION yintf(REAL f(*)) FOLLOWS
+SUBROUTINE convolution(ARRAY(*) OF COMPLEX h,f,g; ARRAY(*,*) OF REAL conv^) FOLLOWS
+
+MODULE convenience
+
+SUBROUTINE ByteSwap(POINTER TO SINGLE xxx)
+C SECTION
+  register char a;
+  register char * b = (char *) xxx_;
+  register int  i = 0;
+  register int  j = sizeof(*xxx_)-1;
+  while (i<j)
+    {
+     a = b[i];
+     b[i] = b[j];
+     b[j] = a;
+     i++, j--;
+     }
+END C SECTION
+END ByteSwap
+
+SUBROUTINE fourier2physical(ARRAY(*,*) OF COMPLEX plane; POINTER TO ARRAY(*,*) OF COMPLEX planed)
+  LOOP FOR ix = 0 TO nx
+    planed(ix,0..nz)=plane(ix,0..nz)
+    planed(ix,nzd+(-nz..-1))=plane(ix,-nz..-1)
+    IFT(planed(ix,*))
+  REPEAT LOOP
+  DO RFT(planed(*,iz)) FOR ALL iz
+END fourier2physical
+
+REAL FUNCTION yintf(REAL f(*))
+  RESULT=0
+  ! Change to adapt to both cases nproc=1 and nproc>1 in the same run
+  LOOP FOR iy=[nyl DIV 2]*2+1 TO nyh BY 2
+   yp1=y(iy+1)-y(iy); ym1=y(iy-1)-y(iy)
+   a1=-1/3*ym1+1/6*yp1+1/6*yp1*yp1/ym1
+   a3=+1/3*yp1-1/6*ym1-1/6*ym1*ym1/yp1
+   a2=yp1-ym1-a1-a3
+   RESULT=~+a1*f(iy-1) + a2*f(iy) + a3*f(iy+1)
+  REPEAT
+END yintf
+
+SUBROUTINE read_field_fortran(STRING field_name; POINTER TO ARRAY(*,*,*,*) OF COMPLEX R)
+  IF has_terminal THEN WRITE "Reading field_file",field_name
+  INTEGER sz=SIZEOF(INTEGER)*3+SIZEOF(REAL)*7
+  POINTER TO STORED STRUCTURE(
+    ARRAY(0..sz-1) OF CHAR dummy
+    ARRAY(0..2,0..nx,-nz..nz,-1..ny+1) OF COMPLEX fieldfimage
+  ) diskffield
+  diskffield=OPENRO(field_name)
+  ARRAY(0..2,-nz..nz,-1..ny+1) OF COMPLEX fbuf
+  DO WITH diskffield: 
+    DO fbuf(i,*,*)=fieldfimage(i,ix,*,*) FOR i=0 TO 2
+    R(ix,-nz..nz,nyl-2..nyh+2,0)=fbuf(0,*,nyl-2..nyh+2)
+    R(ix,-nz..nz,nyl-2..nyh+2,1)=fbuf(1,*,nyl-2..nyh+2)
+    R(ix,-nz..nz,nyl-2..nyh+2,2)=fbuf(2,*,nyl-2..nyh+2)
+  FOR ix=0 TO nx
+END read_field_fortran
+
+SUBROUTINE read_field_parallel(STRING field_name)
+  IF has_terminal THEN WRITE "Reading field_file",field_name
+  IF NOT first THEN READ FROM prev
+    diskfield=OPEN(field_name)
+    WITH diskfield:
+     V(0,0,*).u.REAL=uavimage(nyl-2..nyh+2)
+     V(0,0,*).w.REAL=wavimage(nyl-2..nyh+2)
+     LOOP FOR iy=nyl-2 TO nyh+2
+        DO V(ix,iz,iy).v=fieldimage(iy,ix,iz).v FOR ALL ix,iz EXCEPT ix=0 AND iz=0
+        DO V(ix,iz,iy).u=fieldimage(iy,ix,iz).eta FOR ALL ix,iz EXCEPT ix=0 AND iz=0
+     REPEAT LOOP
+     CLOSE diskfield
+  IF NOT last THEN WRITE TO next
+  vetaTOuvw
+  IF NOT first THEN READ FROM prev
+    diskfield=OPEN(field_name)
+    WITH diskfield:
+     V(0,0,*).u.REAL=uavimage(nyl-2..nyh+2)
+     V(0,0,*).w.REAL=wavimage(nyl-2..nyh+2)
+     CLOSE diskfield
+  IF NOT last THEN WRITE TO next
+END read_field_parallel
+
+SUBROUTINE read_field(STRING field_name)
+  IF has_terminal THEN WRITE "Reading field_file",field_name
+  IF NOT first THEN READ FROM prev
+    diskfield=OPEN(field_name)
+    WITH diskfield:
+     V(0,0,*).u.REAL=uavimage(nyl-2..nyh+2)
+     V(0,0,*).w.REAL=wavimage(nyl-2..nyh+2)
+     LOOP FOR iy=nyl-2 TO nyh+2
+        DO V(ix,iz,iy).v=fieldimage(iy,ix,iz).v FOR ALL ix,iz EXCEPT ix=0 AND iz=0
+        DO V(ix,iz,iy).u=fieldimage(iy,ix,iz).eta FOR ALL ix,iz EXCEPT ix=0 AND iz=0
+     REPEAT LOOP
+     CLOSE diskfield
+  IF NOT last THEN WRITE TO next
+END read_field
+
+SUBROUTINE read_field_uvw(STRING field_name)
+  WRITE "Reading field_file",field_name
+  diskfield=OPEN(field_name)
+  WITH diskfield
+    LOOP FOR iy = nyl-2 TO nyh+2
+      DO V(ix,*,iy).v=fieldimage(iy,ix,*).v; V(ix,*,iy).u=fieldimage(iy,ix,*).eta FOR ALL ix
+    REPEAT LOOP
+    V(0,0,*).u.REAL=uavimage(nyl-2..nyh+2)
+    V(0,0,*).w.REAL=wavimage(nyl-2..nyh+2)
+    vetaTOuvw
+    V(0,0,*).u.REAL=uavimage(nyl-2..nyh+2)
+    V(0,0,*).w.REAL=wavimage(nyl-2..nyh+2)
+  CLOSE diskfield
+END read_field_uvw
+
+SUBROUTINE velocity_gradient(POINTER TO ARRAY(*,*,*) OF DERIVS Vder)
+  LOOP FOR ix=0 TO nx
+    ialfa = I*alfa0*ix
+    LOOP FOR iz=-nz TO nz WITH Vder(ix,iz,*), V(ix,iz,*)
+      ibeta = I*beta0*iz
+      ux(*)=ialfa*u(*); vx(*)=ialfa*v(*); wx(*)=ialfa*w(*)
+      uz(*)=ibeta*u(*); vz(*)=ibeta*v(*); wz(*)=ibeta*w(*)
+      deriv(u(*).REAL,uy.REAL); deriv(u(*).IMAG,uy.IMAG)
+      deriv(v(*).REAL,vy.REAL); deriv(v(*).IMAG,vy.IMAG)
+      deriv(w(*).REAL,wy.REAL); deriv(w(*).IMAG,wy.IMAG)
+      LeftLUDivStep2(uy.REAL,D0mat); LeftLUDivStep2(uy.IMAG,D0mat)
+      LeftLUDivStep2(vy.REAL,D0mat); LeftLUDivStep2(vy.IMAG,D0mat)
+      LeftLUDivStep2(wy.REAL,D0mat); LeftLUDivStep2(wy.IMAG,D0mat)
+    REPEAT
+    FlushStep2
+  REPEAT
+END velocity_gradient
+
+SUBROUTINE deriv2(ARRAY(*) OF REAL f0,f2^)
+IF first THEN
+  f2(0)=SUM d240(i)*f0(1+i) FOR i=-2 TO 2
+  f2(-1)=SUM d24m1(i)*f0(1+i) FOR i=-2 TO 2
+END IF
+IF last THEN
+  f2(ny)=SUM d24n(i)*f0(ny-1+i) FOR i=-2 TO 2
+  f2(ny+1)=SUM d24np1(i)*f0(ny-1+i) FOR i=-2 TO 2
+END IF
+DO WITH derivatives(iy) f2(iy) = (SUM d2(i)*f0(iy+i) FOR i=-2 TO 2) FOR iy=nyl TO nyh
+IF first THEN
+  WITH derivatives(1): f2(1)=~-(d0(-1)*f2(0)+d0(-2)*f2(-1))
+  WITH derivatives(2): f2(2)=~-d0(-2)*f2(0)
+END IF
+IF last THEN
+  WITH derivatives(ny-1): f2(ny-1)=~-(d0(1)*f2(ny)+d0(2)*f2(ny+1))
+  WITH derivatives(ny-2): f2(ny-2)=~-d0(2)*f2(ny)
+END IF
+LeftLUDivStep1(f2,D0mat,f2)
+END deriv2
+
+SUBROUTINE convolution(ARRAY(*) OF COMPLEX h,f,g; ARRAY(*,*) OF REAL conv^)
+  LOOP FOR n=0 TO f.HI
+    c=IF n=0 THEN 1 ELSE 2
+    DO conv(n,m)=~+c*{h(n)*f(m)*g(n-m)}.REAL FOR m=f.LO TO f.HI EXCEPT ABS(n-m)>f.HI
+  REPEAT
+END convolution
+
+END convenience

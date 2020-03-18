@@ -1,0 +1,34 @@
+gamma=0
+USE dnsdata
+USE dnsdirect
+!USE rtchecks
+
+
+! Convert Channel -> Couette
+! ------------------------------------
+!
+! read channel
+read_restart_file()
+! make mean flow symmetric
+!DO WITH V(0,0,*):
+!    v(iy)=0.5*[u(iy)+u(ny-iy)]
+!FOR iy=-1 TO ny+1
+!WITH V(0,0,*): u=v; v=0
+! make centerline velocity equal 1.0
+!Uc=V(0,0,ny DIV 2).u.REAL
+!DO WITH V(ix,iz,iy): u=~/Uc; v=~/Uc; w=~/Uc FOR ALL ix,iz,iy
+! subtract centerline velocity from channel
+!DO WITH V(0,0,iy): u=~-1 FOR ALL iy
+! invert u and w top part of channel
+!WITH V(*,*,ny DIV 2 + 1..ny+1): u=~*(-1); w=~*(-1) 
+! save
+!WRITE "Writing CPL field..."
+!time = dt_save
+!outstats()
+! save in Fortran format
+WRITE "Writing Fortran field..."
+FILE fortranfield = CREATE("Dati.cart.fort")
+WRITE BINARY TO fortranfield nx,ny,nz,alfa0,beta0,ni,a,ymin,ymax,time
+WRITE BINARY TO fortranfield V(0..nx,*,*).u, V(0..nx,*,*).v, V(0..nx,*,*).w
+CLOSE(fortranfield)
+

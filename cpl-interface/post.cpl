@@ -1,0 +1,67 @@
+REAL gamma=0.0
+USE dnsdata
+USE dnsdirect
+USE convenience
+
+STRING fieldname
+INTEGER nfmin, nfmax, nftot, dn
+ASK nfmin, nfmax, dn
+nftot=[(nfmax-nfmin) DIV dn]+1
+FILE outfile
+
+SHARED ARRAY(0..nzd-1,-1..ny+1,1..9) OF REAL meangrad=0
+SHARED ARRAY(0..nzd-1,-1..ny+1,1..3) OF REAL mean=0
+SHARED ARRAY(0..nzd-1,-1..ny+1,1..3) OF REAL meanF=0
+SHARED ARRAY(0..nzd-1,-1..ny+1,1..6) OF REAL var=0
+
+SHARED ARRAY(0..nx,-nz..nz,nyl-2..nyh+2,0..2) OF COMPLEX F=0
+SHARED ARRAY(0..nxd-1,0..nzd-1,0..2) OF COMPLEX Fd=0
+SHARED ARRAY(0..nx,-nz..nz,nyl-2..nyh+2) OF DERIVS Vder=0
+SHARED ARRAY(0..nxd-1,0..nzd-1) OF DERIVS Vderd=0
+
+
+LOOP files FOR n=nfmin TO nfmax
+  fieldname = WRITE('../Dati.cart.'n'.out') 
+  read_field_fortran(fieldname,V(*,*,*,*))
+  velocity_gradient(Vder)
+  fieldname = WRITE('../Force.cart.'n'.out') 
+  read_field_fortran(fieldname,F(*,*,*,*))
+  PARALLEL LOOP FOR ismp=0 TO nsmp-1
+  LOOP FOR iy=nyl-2 TO nyh+2
+    LOOP FOR ix=ismp*(nx+1) DIV nsmp TO (ismp+1)*(nx+1) DIV nsmp -1
+      Vd(ix,0..nz)=V(ix,0..nz,iy);       Vd(ix,nz+1..nzd-nz-1)=0;    Vd(ix,nzd+(-nz..-1))=V(ix,-nz..-1,iy)
+      WITH Vd(ix,*):    INLINE LOOP FOR i  IN (u,v,w); IFT(i); REPEAT
+      Fd(ix,0..nz)=F(ix,0..nz,iy);       Fd(ix,nz+1..nzd-nz-1)=0;    Fd(ix,nzd+(-nz..-1))=F(ix,-nz..-1,iy)
+      DO IFT[Fd(ix,*,i)] FOR i=0 TO 2 
+      Vderd(ix,0..nz)=Vder(ix,0..nz,iy); Vderd(ix,nz+1..nzd-nz-1)=0; Vderd(ix,nzd+(-nz..-1))=Vder(ix,-nz..-1,iy)
+      WITH Vderd(ix,*): INLINE LOOP FOR ii IN (ux,vx,wx,uy,vy,wy,uz,vz,wz); IFT(ii); REPEAT
+    REPEAT LOOP
+    IF ismp=0 THEN Vd(nx+1..nxd-1)=0; Vderd(nx+1..nxd-1)=0; Fd(nx+1..nxd-1)=0
+    SYNC(ismp,nsmp)
+    DO
+      WITH Vderd(*,iz): INLINE LOOP FOR ii IN (ux,vx,wx,uy,vy,wy,uz,vz,wz); RFT(ii); REPEAT
+      DO RFT[Fd(*,iz,i)] FOR i=0 TO 2 
+      WITH Vd(*,iz):    INLINE LOOP FOR i  IN (u,v,w); RFT(i); REPEAT
+      mean(iz,iy,1)=~+[SUM Vd(*,iz).u.REALIFIED(ix) FOR ix=0 TO 2*nxd-1]/(2*nxd) 
+      mean(iz,iy,2)=~+[SUM Vd(*,iz).v.REALIFIED(ix) FOR ix=0 TO 2*nxd-1]/(2*nxd)
+      mean(iz,iy,3)=~+[SUM Vd(*,iz).w.REALIFIED(ix) FOR ix=0 TO 2*nxd-1]/(2*nxd)
+      var(iz,iy,1)=~+[SUM Vd(*,iz).u.REALIFIED(ix)**2 FOR ix=0 TO 2*nxd-1]/(2*nxd)
+      var(iz,iy,2)=~+[SUM Vd(*,iz).v.REALIFIED(ix)**2 FOR ix=0 TO 2*nxd-1]/(2*nxd)
+      var(iz,iy,3)=~+[SUM Vd(*,iz).w.REALIFIED(ix)**2 FOR ix=0 TO 2*nxd-1]/(2*nxd)
+      var(iz,iy,4)=~+[SUM Vd(*,iz).u.REALIFIED(ix)*Vd(*,iz).v.REALIFIED(ix) FOR ix=0 TO 2*nxd-1]/(2*nxd)
+      var(iz,iy,5)=~+[SUM Vd(*,iz).v.REALIFIED(ix)*Vd(*,iz).w.REALIFIED(ix) FOR ix=0 TO 2*nxd-1]/(2*nxd)
+      var(iz,iy,6)=~+[SUM Vd(*,iz).u.REALIFIED(ix)*Vd(*,iz).w.REALIFIED(ix) FOR ix=0 TO 2*nxd-1]/(2*nxd)
+      DO meangrad(iz,iy,iii+1)=~+[SUM Vderd(*,iz,iii).REALIFIED(ix) FOR ix=0 TO 2*nxd-1]/(2*nxd) FOR iii=0 TO 8
+      DO meanF(iz,iy,iii+1)=~+[SUM Fd(*,iz,iii).REALIFIED(ix) FOR ix=0 TO 2*nxd-1]/(2*nxd) FOR iii=0 TO 2
+    FOR iz=ismp*(HI+1) DIV nsmp TO (ismp+1)*(HI+1) DIV nsmp -1
+    SYNC(ismp,nsmp)
+  REPEAT LOOP
+  REPEAT LOOP
+REPEAT files
+mean=~/nftot; var=~/nftot; meangrad=~/nftot; meanF=~/nftot
+outfile=CREATE("post.bin")
+WRITE BINARY TO outfile 4,3,nzd,ny+3,3, 3,nzd,ny+3,6, 3,nzd,ny+3,9, 3,nzd,ny+3,3
+WRITE BINARY TO outfile mean
+WRITE BINARY TO outfile var
+WRITE BINARY TO outfile meangrad
+WRITE BINARY TO outfile meanF

@@ -1,0 +1,169 @@
+!USE rtchecks
+REAL gamma=0.0
+USE dnsdata
+USE dnsdirect
+USE convenience
+
+#define lambda2
+
+
+STRING fieldname, vtkname
+INTEGER nfmin, nfmax
+ASK nfmin, nfmax
+FILE outfile
+SINGLE tmpu, tmpv, tmpw, tmp
+ARRAY(0..nxd-1,0..nzd-1,-1..ny+1) OF VELOCITY Vdd=0
+#ifdef lambda2 
+ARRAY(0..nx,-nz..nz,-1..ny+1) OF STRUCTURE(COMPLEX ux,uy,uz,vx,vy,vz,wx,wy,wz) gradV=0
+ARRAY(0..nxd-1,0..nzd-1) OF STRUCTURE(COMPLEX ux,uy,uz,vx,vy,vz,wx,wy,wz) gradVd=0
+ARRAY(0..2*nxd-1,0..nzd-1,0..ny) OF REAL lambda2=0
+REAL aa,bb,cc,dd,ee,ff,AA,BB,CC,DD,trace
+COMPLEX lam1,lam2,lam3,Par1,Par2,Par3
+#endif
+
+LOOP files FOR n=nfmin TO nfmax
+
+  fieldname = WRITE('../Dati.cart.'n'.out') 
+  vtkname = WRITE('Field'n'.vtk')
+  WRITE fieldname ' --> ' vtkname
+  read_field_fortran(fieldname,V(*,*,*,*))
+  outfile=CREATE(vtkname)
+
+  Vdd=0
+  LOOP FOR iy=0 TO ny
+    !V(0,0,iy)=0 !Solo fluttuazioni rispetto alla media spaziale
+    LOOP FOR ix=0 TO nx
+      Vdd(ix,0..nz,iy)=V(ix,0..nz,iy)
+      Vdd(ix,nzd+(-nz..-1),iy)=V(ix,-nz..-1,iy)
+      WITH Vdd(ix,*,iy): IFT(u); IFT(v); IFT(w) 
+    REPEAT
+    DO WITH Vdd(*,iz,iy): RFT(u); RFT(v); RFT(w) FOR ALL iz
+  REPEAT
+
+!(
+  DO 
+    ARRAY(0..nzd-1,1..3) OF REAL Vm=0
+    Vm(iz,1) = SUM Vdd(*,iz,iy).u.REALIFIED(ix)/[2*nxd] FOR ix=0 TO 2*nxd-1
+    Vm(iz,2) = SUM Vdd(*,iz,iy).v.REALIFIED(ix)/[2*nxd] FOR ix=0 TO 2*nxd-1
+    Vm(iz,3) = SUM Vdd(*,iz,iy).w.REALIFIED(ix)/[2*nxd] FOR ix=0 TO 2*nxd-1
+    DO 
+       Vdd(*,iz,iy).u.REALIFIED(ix)=~-Vm(iz,1) 
+       Vdd(*,iz,iy).v.REALIFIED(ix)=~-Vm(iz,2) 
+       Vdd(*,iz,iy).w.REALIFIED(ix)=~-Vm(iz,3) 
+    FOR ix=0 TO 2*nxd-1
+  FOR iz=0 TO nzd-1 AND iy=-1 TO ny+1
+!)
+
+#ifdef lambda2
+  DO WITH V(ix,iz,*), gradV(ix,iz,*):
+    ux=I*ix*alfa0*u; vx=I*ix*alfa0*v; wx=I*ix*alfa0*w
+    uz=I*iz*beta0*u; vz=I*iz*beta0*v; wz=I*iz*beta0*w
+    deriv(u.REAL,uy.REAL); deriv(u.IMAG,uy.IMAG)
+    deriv(v.REAL,vy.REAL); deriv(v.IMAG,vy.IMAG)
+    deriv(w.REAL,wy.REAL); deriv(w.IMAG,wy.IMAG)
+  FOR ALL ix,iz
+
+  LOOP FOR iy=0 TO ny
+    gradVd=0
+    LOOP FOR ix=0 TO nx
+      gradVd(ix,0..nz)=gradV(ix,0..nz,iy)
+      gradVd(ix,nzd+(-nz..-1))=gradV(ix,-nz..-1,iy)
+      WITH gradVd(ix,*): IFT(ux); IFT(vx); IFT(wx); IFT(uy); IFT(vy); IFT(wy); IFT(uz); IFT(vz); IFT(wz) 
+    REPEAT
+    DO WITH gradVd(*,iz): RFT(ux); RFT(vx); RFT(wx); RFT(uy); RFT(vy); RFT(wy); RFT(uz); RFT(vz); RFT(wz) FOR ALL iz
+		
+    DO WITH gradVd(*,iz):
+      LOOP FOR ix=0 TO 2*nxd-1
+        !! coefficienti del tensore 
+        !!			     / aa dd ee \
+	!! (S_ik S_kj + O_ik O_kj) = | dd bb ff |
+        !!			     \ ee ff cc /
+		
+	aa= 	( ux.REALIFIED(ix)*ux.REALIFIED(ix) + ux.REALIFIED(ix)*ux.REALIFIED(ix) + 
+		  uy.REALIFIED(ix)*vx.REALIFIED(ix) + vx.REALIFIED(ix)*uy.REALIFIED(ix) +
+		  uz.REALIFIED(ix)*wx.REALIFIED(ix) + wx.REALIFIED(ix)*uz.REALIFIED(ix) )/2
+	bb= 	( vx.REALIFIED(ix)*uy.REALIFIED(ix) + uy.REALIFIED(ix)*vx.REALIFIED(ix) +
+		  vy.REALIFIED(ix)*vy.REALIFIED(ix) + vy.REALIFIED(ix)*vy.REALIFIED(ix) + 
+		  vz.REALIFIED(ix)*wy.REALIFIED(ix) + wy.REALIFIED(ix)*vz.REALIFIED(ix) )/2
+	cc= 	( wx.REALIFIED(ix)*uz.REALIFIED(ix) + uz.REALIFIED(ix)*wx.REALIFIED(ix) +
+		  wy.REALIFIED(ix)*vz.REALIFIED(ix) + vz.REALIFIED(ix)*wy.REALIFIED(ix) +
+		  wz.REALIFIED(ix)*wz.REALIFIED(ix) + wz.REALIFIED(ix)*wz.REALIFIED(ix) )/2
+	dd=     ( ux.REALIFIED(ix)*uy.REALIFIED(ix) + ux.REALIFIED(ix)*vx.REALIFIED(ix) +
+		  uy.REALIFIED(ix)*vy.REALIFIED(ix) + vx.REALIFIED(ix)*vy.REALIFIED(ix) +
+		  uz.REALIFIED(ix)*wy.REALIFIED(ix) + wx.REALIFIED(ix)*vz.REALIFIED(ix) )/2
+	ee= 	( ux.REALIFIED(ix)*uz.REALIFIED(ix) + ux.REALIFIED(ix)*wx.REALIFIED(ix) +
+		  uy.REALIFIED(ix)*vz.REALIFIED(ix) + vx.REALIFIED(ix)*wy.REALIFIED(ix) +
+		  uz.REALIFIED(ix)*wz.REALIFIED(ix) + wx.REALIFIED(ix)*wz.REALIFIED(ix) )/2
+	ff= 	( vx.REALIFIED(ix)*uz.REALIFIED(ix) + uy.REALIFIED(ix)*wx.REALIFIED(ix) +
+		  vy.REALIFIED(ix)*vz.REALIFIED(ix) + vy.REALIFIED(ix)*wy.REALIFIED(ix) +
+		  vz.REALIFIED(ix)*wz.REALIFIED(ix) + wy.REALIFIED(ix)*wz.REALIFIED(ix) )/2
+	
+	trace = aa+bb+cc
+		
+	!coefficienti del polinomio caratteristico
+	!AA x^3 + BB x^2 + CC x + DD = 0	
+	AA=1
+	BB=-aa-bb-cc
+	CC=aa*bb+aa*cc+bb*cc-dd^2-ee^2-ff^2
+	DD=-aa*bb*cc+cc*dd^2+bb*ee^2-2*dd*ee*ff+aa*ff^2
+
+	!radici del polinomio caratteristico
+	Par1= -2*BB^3 + 9*BB*CC - 27*DD
+	Par2= (-BB^2*CC^2 + 4*CC^3 + 4*BB^3*DD - 18*BB*CC*DD + 27*DD^2)
+	Par2= 3^(3/2)*(Par2)^(1/2)
+	Par3= (-BB^2 + 3*CC)/(3*2^(2/3)*(Par1 + Par2)^(1/3))
+	lam1= -BB/3 - 2^(1/3)*(-BB^2 + 3*CC)/(3*(Par1 + Par2)^(1/3)) + (1/(3*2^(1/3)))*((Par1 + Par2)^(1/3))
+	lam2= -BB/3 + (1 + I*3^(1/2))*Par3 - (1/(6*2^(1/3)))*(1 - I*3^(1/2))*(Par1 + Par2)^(1/3)
+	lam3= trace - lam2 -lam1
+
+	!selecting lambda2
+	lambda2(ix,iz,iy)=REAL(lam1)
+	IF REAL(lam1)=MIN(REAL(lam1),REAL(lam2),REAL(lam3)) THEN
+          lambda2(ix,iz,iy) = MIN(REAL(lam2),REAL(lam3))
+	END IF
+	IF REAL(lam1)=MAX(REAL(lam1),REAL(lam2),REAL(lam3)) THEN
+          lambda2(ix,iz,iy) = MAX(REAL(lam2),REAL(lam3))
+	END IF
+      REPEAT
+    FOR iz=0 TO nzd-1
+  REPEAT
+#endif
+
+  WRITE TO outfile "# vtk DataFile Version 2.0"
+  WRITE TO outfile "DNS vector field + lambda2"
+  WRITE TO outfile "BINARY"
+  WRITE TO outfile "DATASET RECTILINEAR_GRID"
+  WRITE TO outfile "DIMENSIONS "2*nxd" "ny+1" "nzd
+  WRITE TO outfile "X_COORDINATES "2*nxd" float"
+  LOOP FOR ix=0 TO 2*nxd-1
+    tmp=SINGLE(2*PI/alfa0*ix/(2*nxd))
+    ByteSwap(^tmp); WRITE BINARY TO outfile tmp
+  REPEAT
+  WRITE TO outfile "Y_COORDINATES "ny+1" float"
+  LOOP FOR iy=0 TO ny 
+    tmp=SINGLE(y(iy) - 1)
+    ByteSwap(^tmp); WRITE BINARY TO outfile tmp
+  REPEAT
+  WRITE TO outfile "Z_COORDINATES "nzd" float"
+  LOOP FOR iz=0 TO nzd-1
+    tmp=SINGLE(2*PI/beta0*iz/nzd)
+    ByteSwap(^tmp); WRITE BINARY TO outfile tmp
+  REPEAT
+  WRITE TO outfile "POINT_DATA " 2*nxd*nzd*(ny+1)
+
+#ifdef lambda2
+WRITE TO outfile "SCALARS lambda2 float 1"
+WRITE TO outfile "LOOKUP_TABLE default"
+LOOP FOR iz=0 TO nzd-1 AND iy=0 TO ny AND ix=0 TO 2*nxd-1
+      tmp=SINGLE(lambda2(ix,iz,iy)); ByteSwap(^tmp); WRITE BINARY TO outfile tmp 
+REPEAT
+#endif
+
+WRITE TO outfile "VECTORS velocity float"
+LOOP FOR iz=0 TO nzd-1 AND iy=0 TO ny AND ix=0 TO 2*nxd-1
+  tmpu=SINGLE(Vdd(*,iz,iy).u.REALIFIED(ix)); tmpv=SINGLE(Vdd(*,iz,iy).v.REALIFIED(ix)); tmpw=SINGLE(Vdd(*,iz,iy).w.REALIFIED(ix)) 
+  ByteSwap(^tmpu); ByteSwap(^tmpv);ByteSwap(^tmpw); WRITE BINARY TO outfile tmpu,tmpv,tmpw 
+REPEAT
+CLOSE outfile
+
+REPEAT files

@@ -1,0 +1,451 @@
+!USE rtchecks
+ARRAY(0..nx,-nz..nz) OF STRUCTURE(COMPLEX u,v,w,vy,eta,ph) bc0=0, bcn=0
+SUBROUTINE buildrhs[SUBROUTINE(COMPLEX rhs^,old^(*),unknown,implicit_part,explicit_part) timescheme] FOLLOWS
+SUBROUTINE linsolve(REAL lambda) FOLLOWS
+SUBROUTINE vetaTOuvw FOLLOWS
+COMPLEX FUNCTION calcp0(INTEGER ix,iz) FOLLOWS
+COMPLEX FUNCTION calcpn(INTEGER ix,iz) FOLLOWS
+SUBROUTINE computeflowrate(REAL lambda) FOLLOWS
+SUBROUTINE deriv(ARRAY(*) OF REAL f0,f1^) FOLLOWS
+#ifdef scalar
+SUBROUTINE convolutions(ARRAY(*,*) OF VELOCITY Vplane;ARRAY(*,*) OF COMPLEX phiplane;POINTER TO ARRAY(*,*) OF MOMFLUX VVplane;POINTER TO ARRAY(*,*)OF SFLUX SVplane) FOLLOWS
+#else
+SUBROUTINE convolutions(ARRAY(*,*) OF VELOCITY Vplane; POINTER TO ARRAY(*,*) OF MOMFLUX VVplane) FOLLOWS
+#endif
+
+MODULE dnsdirect
+
+#ifdef scalar
+SUBROUTINE convolutions(ARRAY(*,*) OF VELOCITY Vplane; ARRAY(*,*) OF COMPLEX phiplane; POINTER TO ARRAY(*,*) OF MOMFLUX VVplane; POINTER TO ARRAY(*,*)OF SFLUX SVplane)
+#else
+SUBROUTINE convolutions(ARRAY(*,*) OF VELOCITY Vplane; POINTER TO ARRAY(*,*) OF MOMFLUX VVplane)
+#endif
+
+  ! LOOP FOR ix=ismp TO nx BY nsmp
+  LOOP FOR ix=ismp*(nx+1) DIV nsmp TO (ismp+1)*(nx+1) DIV nsmp -1
+    Vd(ix,0..nz)=Vplane(ix,0..nz)
+    Vd(ix,nz+1..nzd-nz-1)=0
+    Vd(ix,nzd+(-nz..-1))=Vplane(ix,-nz..-1)
+    WITH Vd(ix,*): IFTU(u); IFTU(v); IFTU(w)
+  REPEAT LOOP
+  IF ismp=0 THEN Vd(nx+1..nxd-1)=0
+  SYNC(ismp,nsmp)
+  DO
+    WITH Vd(*,iz): RFTU(u); RFTU(v); RFTU(w)
+    DO WITH Vd(ix,iz), VVplane(ix,iz)
+      uu.REAL=u.REAL*u.REAL; uu.IMAG=u.IMAG*u.IMAG
+      uv.REAL=u.REAL*v.REAL; uv.IMAG=u.IMAG*v.IMAG
+      vv.REAL=v.REAL*v.REAL; vv.IMAG=v.IMAG*v.IMAG
+      vw.REAL=v.REAL*w.REAL; vw.IMAG=v.IMAG*w.IMAG
+      ww.REAL=w.REAL*w.REAL; ww.IMAG=w.IMAG*w.IMAG
+      uw.REAL=u.REAL*w.REAL; uw.IMAG=u.IMAG*w.IMAG
+    FOR ALL ix
+    WITH VVplane(*,iz): HFTU(uu); HFTU(uv); HFTU(vv); HFTU(vw); HFTU(ww); HFTU(uw)
+  ! FOR iz=ismp TO HI BY nsmp
+  FOR iz=ismp*(HI+1) DIV nsmp TO (ismp+1)*(HI+1) DIV nsmp -1
+  SYNC(ismp,nsmp)
+  DO WITH VVplane(ix,*): FFTU(uu); FFTU(uv); FFTU(vv); FFTU(vw); FFTU(ww); FFTU(uw)
+  ! FOR ix=ismp TO nx BY nsmp
+  FOR ix=ismp*(nx+1) DIV nsmp TO (ismp+1)*(nx+1) DIV nsmp -1
+
+#ifdef scalar
+  LOOP FOR ix=ismp*(nx+1) DIV nsmp TO (ismp+1)*(nx+1) DIV nsmp -1
+    phid(ix,0..nz)=phiplane(ix,0..nz)
+    phid(ix,nz+1..nzd-nz-1)=0
+    phid(ix,nzd+(-nz..-1))=phiplane(ix,-nz..-1)
+    IFTU(phid(ix,*))
+  REPEAT LOOP
+  IF ismp=0 THEN phid(nx+1..nxd-1)=0
+  SYNC(ismp,nsmp)
+  DO
+    RFTU(phid(*,iz))
+    DO WITH Vd(ix,iz), SVplane(ix,iz)
+      phiu.REAL=phid(ix,iz).REAL*u.REAL; phiu.IMAG=phid(ix,iz).IMAG*u.IMAG
+      phiv.REAL=phid(ix,iz).REAL*v.REAL; phiv.IMAG=phid(ix,iz).IMAG*v.IMAG
+      phiw.REAL=phid(ix,iz).REAL*w.REAL; phiw.IMAG=phid(ix,iz).IMAG*w.IMAG
+    FOR ALL ix
+    WITH SVplane(*,iz): HFTU(phiu); HFTU(phiv); HFTU(phiw)
+  FOR iz=ismp*(HI+1) DIV nsmp TO (ismp+1)*(HI+1) DIV nsmp -1
+  SYNC(ismp,nsmp)
+  DO WITH SVplane(ix,*): FFTU(phiu); FFTU(phiv); FFTU(phiw)
+  FOR ix=ismp*(nx+1) DIV nsmp TO (ismp+1)*(nx+1) DIV nsmp -1
+#endif
+
+END convolutions
+
+INLINE REAL FUNCTION D0(REAL f(*)) = d0(-2)*f(-2)+d0(-1)*f(-1)+d0(0)*f(0)+d0(1)*f(1)+d0(2)*f(2)
+INLINE REAL FUNCTION D1(REAL f(*)) = d1(-2)*f(-2)+d1(-1)*f(-1)+d1(0)*f(0)+d1(1)*f(1)+d1(2)*f(2)
+INLINE REAL FUNCTION D2(REAL f(*)) = d2(-2)*f(-2)+d2(-1)*f(-1)+d2(0)*f(0)+d2(1)*f(1)+d2(2)*f(2)
+INLINE REAL FUNCTION D4(REAL f(*)) = d4(-2)*f(-2)+d4(-1)*f(-1)+d4(0)*f(0)+d4(1)*f(1)+d4(2)*f(2)
+INLINE COMPLEX FUNCTION D0(COMPLEX f(*)) = D0(f.REAL)+I*D0(f.IMAG)
+INLINE COMPLEX FUNCTION D1(COMPLEX f(*)) = D1(f.REAL)+I*D1(f.IMAG)
+INLINE COMPLEX FUNCTION D2(COMPLEX f(*)) = D2(f.REAL)+I*D2(f.IMAG)
+INLINE COMPLEX FUNCTION D4(COMPLEX f(*)) = D4(f.REAL)+I*D4(f.IMAG)
+
+SUBROUTINE buildrhs[SUBROUTINE(COMPLEX rhs^,old^(*),unknown,implicit_part,explicit_part) timescheme]
+#ifdef bodyforce
+IF first THEN WITH derivatives(1)
+  F(*,*,-1..0)=0
+  DO WITH F(ix,iz,*)
+    fx(-1)=-D4(fx(1+(-2..2)))/d4(-2); fy(-1)=-D4(fy(1+(-2..2)))/d4(-2); fz(-1)=-D4(fz(1+(-2..2)))/d4(-2)
+  FOR ALL ix,iz
+END IF
+IF last THEN WITH derivatives(ny-1)
+  F(*,*,ny..ny+1)=0
+  DO  WITH F(ix,iz,*)
+    fx(ny+1)=-D4(fx(ny-1+(-2..2)))/d4(2); fy(ny+1)=-D4(fy(ny-1+(-2..2)))/d4(2); fz(ny+1)=-D4(fz(ny-1+(-2..2)))/d4(2)
+  FOR ALL ix,iz
+END IF
+#endif
+PARALLEL LOOP FOR ismp=0 TO nsmp-1
+ LOOP FOR iy=nyl-4 TO nyh+2
+  IF iy<=nyh THEN
+#ifdef scalar
+   convolutions(V(*,*,iy+2),phi(*,*,iy+2),VVd(*,*,imod(iy+2)),SVd(*,*,imod(iy+2)))
+#else
+   convolutions(V(*,*,iy+2),VVd(*,*,imod(iy+2)))
+#endif
+   IF iy>=nyl THEN
+    ! WITH derivatives(iy) LOOP FOR ix=ismp TO nx BY nsmp AND iz=-nz TO nz
+    WITH derivatives(iy) LOOP FOR ix=ismp*(nx+1) DIV nsmp TO (ismp+1)*(nx+1) DIV nsmp -1 AND iz=-nz TO nz
+      alfa=alfa0*ix; beta=beta0*iz
+      ialfa==I*alfa; ibeta==I*beta
+      k2=alfa^2+beta^2
+      POINTER TO MOMFLUX VVm2,VVm1,VV0,VV1,VV2
+      IF iz>=0 THEN
+        VVm2=VVd(ix,iz,imod(iy-2));VVm1=VVd(ix,iz,imod(iy-1));VV0=VVd(ix,iz,imod(iy));VV1=VVd(ix,iz,imod(iy+1));VV2=VVd(ix,iz,imod(iy+2))
+      ELSE
+        VVm2=VVd(ix,nzd+iz,imod(iy-2));VVm1=VVd(ix,nzd+iz,imod(iy-1));VV0=VVd(ix,nzd+iz,imod(iy));VV1=VVd(ix,nzd+iz,imod(iy+1));VV2=VVd(ix,nzd+iz,imod(iy+2))
+      END IF
+#define D(d,f) d(-2)*VVm2.f+d(-1)*VVm1.f+d(0)*VV0.f+d(1)*VV1.f+d(2)*VV2.f
+      WITH V(ix,iz,iy+(-2..2)):
+      D0_uw_=D(d0,uw)
+      D1_uw_=D(d1,uw)
+      rhsu=-ialfa*D(d0,uu)-D(d1,uv)-ibeta*D0_uw_
+      rhsv=-ialfa*D(d0,uv)-D(d1,vv)-ibeta*D(d0,vw)
+      rhsw=-ialfa*D0_uw_-D(d1,vw)-ibeta*D(d0,ww)
+
+COMPLEX expl = ialfa*[ialfa*D(d1,uu)+D(d2,uv)+ibeta*D1_uw_]+
+               ibeta*[ialfa*D1_uw_+D(d2,vw)+ibeta*D(d1,ww)]-k2*rhsv
+
+#ifdef bodyforce
+      WITH F(ix,iz,iy+(-2..2))
+      timescheme{newrhs(ix,iz,iy).D2v,oldrhs(ix,iz,iy).D2v,D2(v)-k2*D0(v),
+      		 (SUM OS(iy,i)*v(i) FOR ALL i),
+                 expl - k2*D0(fy)-ialfa*D1(fx)-ibeta*D1(fz)}
+#else
+      timescheme{newrhs(ix,iz,iy).D2v,oldrhs(ix,iz,iy).D2v,D2(v)-k2*D0(v),
+      		 (SUM OS(iy,i)*v(i) FOR ALL i),expl}
+#endif
+      IF ix=0 AND iz=0 THEN
+       ! u media conservata in eta.REAL e w media in eta.IMAG
+
+#ifdef buoyancy
+       expl = rhsu.REAL+px+D0(gr*phi(0,0,iy+(-2..2)).REAL)+[rhsw.REAL+pz]*I
+#else
+       expl = rhsu.REAL+px+[rhsw.REAL+pz]*I
+#endif
+
+#ifdef bodyforce
+       timescheme{newrhs(0,0,iy).eta,oldrhs(0,0,iy).eta,D0(u.REAL)+D0(w.REAL)*I,
+                  ni*[D2(u.REAL)]+ni*D2(w.REAL)*I,
+                  expl+D0(fx.REAL)+[D0(fz.REAL)]*I}
+
+#else
+       timescheme{newrhs(0,0,iy).eta,oldrhs(0,0,iy).eta,D0(u.REAL)+D0(w.REAL)*I,
+                  ni*[D2(u.REAL)]+ni*D2(w.REAL)*I,
+                  expl}
+#endif
+      ELSE
+
+#ifdef buoyancy
+      expl = ibeta*rhsu-ialfa*rhsw+gr*(ibeta*D0(phi(ix,iz,iy+(-2..2))))
+#else
+      expl = ibeta*rhsu-ialfa*rhsw
+#endif
+
+#ifdef bodyforce
+	timescheme{newrhs(ix,iz,iy).eta,oldrhs(ix,iz,iy).eta,ibeta*D0(u)-ialfa*D0(w),
+        	   (SUM SQ(iy,i)*[ibeta*u(i)-ialfa*w(i)] FOR ALL i),
+                   expl+ibeta*D0(fx)-ialfa*D0(fz)}
+#else
+	timescheme{newrhs(ix,iz,iy).eta,oldrhs(ix,iz,iy).eta,ibeta*D0(u)-ialfa*D0(w),
+        	   (SUM SQ(iy,i)*[ibeta*u(i)-ialfa*w(i)] FOR ALL i),
+                   expl}
+#endif
+      END IF
+
+#ifdef scalar
+      POINTER TO SFLUX SVm2,SVm1,SV0,SV1,SV2
+      IF iz>=0 THEN
+        SVm2=SVd(ix,iz,imod(iy-2));SVm1=SVd(ix,iz,imod(iy-1));SV0=SVd(ix,iz,imod(iy));SV1=SVd(ix,iz,imod(iy+1));SV2=SVd(ix,iz,imod(iy+2))
+      ELSE
+        SVm2=SVd(ix,nzd+iz,imod(iy-2));SVm1=SVd(ix,nzd+iz,imod(iy-1));SV0=SVd(ix,nzd+iz,imod(iy));SV1=SVd(ix,nzd+iz,imod(iy+1));SV2=SVd(ix,nzd+iz,imod(iy+2))
+      END IF
+#define DS(d,f) d(-2)*SVm2.f+d(-1)*SVm1.f+d(0)*SV0.f+d(1)*SV1.f+d(2)*SV2.f
+      rhst=-ialfa*DS(d0,phiu)-DS(d1,phiv)-ibeta*DS(d0,phiw)
+      timescheme{newphirhs(ix,iz,iy),oldphirhs(ix,iz,iy),D0(phi(ix,iz,iy+(-2..2))),
+                 (SUM SQ(iy,i)*phi(ix,iz,iy+i)*pr FOR i=-2 TO 2),rhst}
+#endif
+
+    REPEAT
+   END IF
+  END IF
+  IF iy-2>=nyl THEN
+    DO WITH V(ix,iz,iy-2),newrhs(ix,iz,iy-2): u=eta; v=D2v
+#ifdef scalar
+                                              phi(ix,iz,iy-2)=newphirhs(ix,iz,iy-2)
+#endif
+    ! FOR ix=ismp TO nx BY nsmp AND ALL iz
+    FOR ix=ismp*(nx+1) DIV nsmp TO (ismp+1)*(nx+1) DIV nsmp -1 AND ALL iz
+  END IF
+ REPEAT
+REPEAT
+END buildrhs
+
+INLINE FUNCTION D20(ARRAY(*) OF COMPLEX f)=d240(-2)*f(-1)+d240(-1)*f(0)+d240(0)*f(1)+d240(1)*f(2)+d240(2)*f(3)
+COMPLEX FUNCTION calcp0(INTEGER ix,iz)
+  alfa=alfa0*ix; beta=beta0*iz
+  ialfa==I*alfa; ibeta==I*beta
+  k2=alfa^2+beta^2
+  WITH V(ix,iz)
+  IF k2>0 THEN
+    RESULT=-ni/k2*[ialfa*D20(u)+ibeta*D20(w)]
+  ELSE
+    RESULT=0
+  END IF
+END calcp0
+INLINE FUNCTION D2n(ARRAY(*) OF COMPLEX f)=d24n(-2)*f(ny-3)+d24n(-1)*f(ny-2)+d24n(0)*f(ny-1)+d24n(1)*f(ny)+d24n(2)*f(ny+1)
+COMPLEX FUNCTION calcpn(INTEGER ix,iz)
+  alfa=alfa0*ix; beta=beta0*iz
+  ialfa==I*alfa; ibeta==I*beta
+  k2=alfa^2+beta^2
+  WITH V(ix,iz)
+  IF k2>0 THEN
+    RESULT=-ni/k2*[ialfa*D2n(u)+ibeta*D2n(w)]
+  ELSE
+    RESULT=0
+  END IF
+END calcpn
+
+SUBROUTINE linsolve(REAL lambda)
+LOOP FOR ix=0 TO nx
+  alfa=alfa0*ix; ialfa==I*alfa
+  LOOP FOR ALL iz
+    beta=beta0*iz; ibeta==I*beta
+    k2=alfa^2+beta^2
+    LOOP FOR iy=nyl TO nyh AND ALL i WITH derivatives(iy)
+      D2vmat(iz,iy,i)=lambda*[d2(i)-k2*d0(i)]-OS(iy,i)
+      etamat(iz,iy,i)=lambda*d0(i)-SQ(iy,i)
+#ifdef scalar
+      phimat(iz,iy,i)=lambda*d0(i)-pr*(SQ(iy,i))
+#endif
+    REPEAT
+    ! condizioni al contorno
+    IF first THEN WITH bc0(ix,iz)
+      IF ix=0 AND iz=0 THEN
+        u=u_conv+u0
+        w=~+w_conv+w0
+ 	v=0; vy=0; eta=u+I*w
+        ph=t0
+      ELSE
+        vy=-ialfa*u-ibeta*w
+        eta=ibeta*u-ialfa*w
+      END IF
+      v=~-v0bc(0,-2)*vy/v0bc(-1,-2)
+      applybc_0(D2vmat(iz),v0bc)
+      applybc_0(etamat(iz),eta0bc)
+      V(ix,iz,1).v=~-D2vmat(iz,1,-2)*vy/v0bc(-1,-2)-D2vmat(iz,1,-1)*v/v0bc(0,-1)
+      V(ix,iz,2).v=~-D2vmat(iz,2,-2)*v/v0bc(0,-1)
+      V(ix,iz,1).u=~-etamat(iz,1,-1)*eta/eta0bc(0,-1)
+      V(ix,iz,2).u=~-etamat(iz,2,-2)*eta/eta0bc(0,-1)
+#ifdef scalar
+      applybc_0(phimat(iz),phi0bc)
+      phi(ix,iz,1)=~-phimat(iz,1,-1)*ph/phi0bc(0,-1)
+      phi(ix,iz,2)=~-phimat(iz,2,-2)*ph/phi0bc(0,-1)
+#endif
+    END IF
+    IF last THEN WITH bcn(ix,iz)
+      IF ix=0 AND iz=0 THEN
+        u=u_conv+un
+        w=~+w_conv+wn
+	v=0; vy=0; eta=u+I*w
+        ph=tn
+      ELSE
+        vy=-ialfa*u-ibeta*w
+        eta=ibeta*u-ialfa*w
+      END IF
+      v=~-vnbc(0)(2)*vy/vnbc(1)(2)
+      applybc_n(D2vmat(iz),vnbc)
+      applybc_n(etamat(iz),etanbc)
+      V(ix,iz,ny-1).v=~-D2vmat(iz,ny-1,2)*vy/vnbc(1,2)-D2vmat(iz,ny-1,1)*v/vnbc(0,1)
+      V(ix,iz,ny-2).v=~-D2vmat(iz,ny-2,2)*v/vnbc(0,1)
+      V(ix,iz,ny-1).u=~-etamat(iz,ny-1,1)*eta/etanbc(0,1)
+      V(ix,iz,ny-2).u=~-etamat(iz,ny-2,2)*eta/etanbc(0,1)
+#ifdef scalar
+      applybc_n(phimat(iz),phinbc)
+      phi(ix,iz,ny-1)=~-phimat(iz,ny-1,1)*ph/phinbc(0,1)
+      phi(ix,iz,ny-2)=~-phimat(iz,ny-2,2)*ph/phinbc(0,1)
+#endif
+    END IF
+    LUdecompStep D2vmat(iz); LUdecompStep etamat(iz)
+    WITH V(ix,iz,*)
+    LeftLUDivStep1(v.REAL,D2vmat(iz),v.REAL)
+    LeftLUDivStep1(v.IMAG,D2vmat(iz),v.IMAG)
+    LeftLUDivStep1(u.REAL,etamat(iz),u.REAL)
+    LeftLUDivStep1(u.IMAG,etamat(iz),u.IMAG)
+#ifdef scalar
+    LUdecompStep phimat(iz)
+    LeftLUDivStep1(phi(ix,iz,*).REAL,phimat(iz),phi(ix,iz,*).REAL)
+    LeftLUDivStep1(phi(ix,iz,*).IMAG,phimat(iz),phi(ix,iz,*).IMAG)
+#endif
+  REPEAT
+  FlushStep1
+  LOOP FOR ALL iz
+    WITH V(ix,iz,*):
+    LeftLUDivStep2(v.REAL,D2vmat(iz))
+    LeftLUDivStep2(v.IMAG,D2vmat(iz))
+    LeftLUDivStep2(u.REAL,etamat(iz))
+    LeftLUDivStep2(u.IMAG,etamat(iz))
+#ifdef scalar
+    LeftLUDivStep2(phi(ix,iz,*).REAL,phimat(iz))
+    LeftLUDivStep2(phi(ix,iz,*).IMAG,phimat(iz))
+#endif
+    IF last THEN
+      v(ny)  =(bcn(ix,iz).v  -SUM v(ny-1+i)*vnbc(0,i) FOR i=-2 TO 0)/vnbc(0,1)
+      v(ny+1)=(bcn(ix,iz).vy -SUM v(ny-1+i)*vnbc(1,i) FOR i=-2 TO 1)/vnbc(1,2)
+      u(ny)=(bcn(ix,iz).eta-SUM u(ny-1+i)*etanbc(0,i) FOR i=-2 TO 0)/etanbc(0,1)
+      u(ny+1)=(-SUM u(ny-1+i)*etanbc(1,i) FOR i=-2 TO 1)/etanbc(1,2)
+#ifdef scalar
+      phi(ix,iz,ny)  =(bcn(ix,iz).ph-SUM phi(ix,iz,ny-1+i)*etanbc(0,i) FOR i=-2 TO 0)/etanbc(0,1)
+      phi(ix,iz,ny+1)=(-SUM phi(ix,iz,ny-1+i)*etanbc(1,i) FOR i=-2 TO 1)/etanbc(1,2)
+#endif
+    END IF
+    IF first THEN
+      v(0) =(bc0(ix,iz).v-SUM v(1+i)*v0bc(0,i) FOR i=0 TO 2)/v0bc(0,-1)
+      v(-1)=(bc0(ix,iz).vy-SUM v(1+i)*v0bc(-1,i) FOR i=-1 TO 2)/v0bc(-1,-2)
+      u(0) =(bc0(ix,iz).eta-SUM u(1+i)*eta0bc(0,i) FOR i=0 TO 2)/eta0bc(0,-1)
+      u(-1)=(-SUM u(1+i)*eta0bc(-1,i) FOR i=-1 TO 2)/eta0bc(-1,-2)
+#ifdef scalar
+      phi(ix,iz,0) =(bc0(ix,iz).ph-SUM phi(ix,iz,1+i)*eta0bc(0,i) FOR i=0 TO 2)/eta0bc(0,-1)
+      phi(ix,iz,-1)=(-SUM phi(ix,iz,1+i)*eta0bc(-1,i) FOR i=-1 TO 2)/eta0bc(-1,-2)
+#endif
+    END IF
+  REPEAT
+  FlushStep2
+REPEAT
+END linsolve
+
+SUBROUTINE deriv(ARRAY(*) OF REAL f0,f1^)
+IF first THEN
+  f1(0)=SUM d140(i)*f0(1+i) FOR i=-2 TO 2
+  f1(-1)=SUM d14m1(i)*f0(1+i) FOR i=-2 TO 2
+END IF
+IF last THEN
+  f1(ny)=SUM d14n(i)*f0(ny-1+i) FOR i=-2 TO 2
+  f1(ny+1)=SUM d14np1(i)*f0(ny-1+i) FOR i=-2 TO 2
+END IF
+DO WITH derivatives(i) f1(i)=D1(f0(i+(*))) FOR i=nyl TO nyh
+IF first THEN
+  WITH derivatives(1): f1(1)=~-(d0(-1)*f1(0)+d0(-2)*f1(-1))
+  WITH derivatives(2): f1(2)=~-d0(-2)*f1(0)
+END IF
+IF last THEN
+  WITH derivatives(ny-1): f1(ny-1)=~-(d0(1)*f1(ny)+d0(2)*f1(ny+1))
+  WITH derivatives(ny-2): f1(ny-2)=~-d0(2)*f1(ny)
+END IF
+LeftLUDivStep1(f1,D0mat,f1)
+END deriv
+
+SUBROUTINE vetaTOuvw
+! Remember: eta=+I*beta*u-I*alfa*w
+WITH V(0,0,*): w.REAL=u.IMAG; u.IMAG=0; w.IMAG=0
+LOOP FOR ALL ix,iz EXCEPT ix=0 AND iz=0
+  WITH V(ix,iz,*):
+  deriv(v.REAL,w.REAL)
+  deriv(v.IMAG,w.IMAG)
+REPEAT
+FlushStep1
+LOOP FOR ALL ix
+  alfa=alfa0*ix
+  LOOP FOR ALL iz EXCEPT ix=0 AND iz=0
+    WITH V(ix,iz,*):
+    LeftLUDivStep2(w.REAL,D0mat)
+    LeftLUDivStep2(w.IMAG,D0mat)
+    FlushStep2
+    beta=beta0*iz; k2=alfa^2+beta^2
+    DO temp=I*(alfa*w(iy)-beta*u(iy))/k2
+      w(iy)=I*(beta*w(iy)+alfa*u(iy))/k2
+      u(iy)=temp
+    FOR ALL iy
+  REPEAT
+REPEAT
+FlushStep2
+END vetaTOuvw
+
+SUBROUTINE computeflowrate(REAL lambda)
+  REAL ucorr(nyl-2..nyh+2)=0
+  DO ucorr(iy)=1 FOR iy=nyl TO nyh
+  LOOP FOR iy=nyl TO nyh WITH derivatives(iy)
+     etamat(0,iy)=lambda*d0-ni*d2
+  REPEAT
+  IF first THEN applybc_0(etamat(0),eta0bc)
+  IF last  THEN applybc_n(etamat(0),etanbc)
+  LUdecompStep etamat(0)
+  LeftLUDivStep1(ucorr,etamat(0),ucorr)
+  FlushStep1
+  LeftLUDivStep2(ucorr,etamat(0))
+  FlushStep2
+  IF last THEN
+    ucorr(ny)  =(-SUM ucorr(ny-1+i)*etanbc(0)(i) FOR i=-2 TO 0)/etanbc(0)(1)
+    ucorr(ny+1)=(-SUM ucorr(ny-1+i)*etanbc(1)(i) FOR i=-2 TO 1)/etanbc(1)(2)
+  END IF
+  IF first THEN
+    ucorr(0) =(-SUM ucorr(1+i)*eta0bc(0)(i) FOR i=0 TO 2)/eta0bc(0)(-1)
+    ucorr(-1)=(-SUM ucorr(1+i)*eta0bc(-1)(i) FOR i=-1 TO 2)/eta0bc(-1)(-2)
+  END IF
+  STRUCTURE(REAL u,w,uc,wc) fr
+  WITH V(0, 0, *)
+  DO v(iy)=0 FOR ALL iy
+  IF NOT first THEN READ BINARY FROM prev fr ELSE fr=0
+  yintegr(fr.u, u.REAL)
+  yintegr(fr.w, w.REAL)
+  yintegr(fr.uc, ucorr)
+  IF NOT last THEN WRITE BINARY TO next fr; FLUSH next; READ BINARY FROM next fr
+  IF NOT first THEN WRITE BINARY TO prev fr; FLUSH prev
+  px = (1-gamma)*6*ni/fr.u   !Constant Power Input
+!  pz = (1-gamma)*6*ni/fr.w   !Constant Power Input
+  IF meanflowx # -99 THEN
+    px=0; corrpx=(meanflowx+u_conv*(ymax-ymin)-fr.u)/fr.uc ! Constant Q
+    u.REAL=~+corrpx*ucorr
+  END IF
+  IF meanflowz # -99 THEN
+    pz=0; corrpz=(meanflowz+w_conv*(ymax-ymin)-fr.w)/fr.uc  ! Constant Q
+    w.REAL=~+corrpz*ucorr
+  END IF
+  IF meanpx # -99 THEN px = meanpx ! Constant Px
+  IF meanpz # -99 THEN pz = meanpz ! Constant Pz
+  IF NOT first THEN READ BINARY FROM prev fr ELSE fr=0
+  yintegr(fr.u, u.REAL)
+  yintegr(fr.w, w.REAL)
+  yintegr(fr.uc, ucorr)
+  IF NOT last THEN WRITE BINARY TO next fr; FLUSH next; READ BINARY FROM next fr
+  IF NOT first THEN WRITE BINARY TO prev fr; FLUSH prev
+  flowx=fr.u-u_conv*(ymax-ymin); flowz=fr.w-w_conv*(ymax-ymin)
+  IF first THEN
+     u1zero=SUM d140(i)*V(0, 0, i+1).u.REAL FOR i=-2 TO 2
+     w1zero=SUM d140(i)*V(0, 0, i+1).w.REAL FOR i=-2 TO 2
+#ifdef scalar
+     phi1zero=SUM d140(i)*phi(0,0,1+i).REAL FOR i=-2 TO 2
+#endif
+  END IF
+#ifdef scalar
+  IF NOT first THEN READ BINARY FROM prev u1zero, w1zero, phi1zero; FLUSH prev
+  IF NOT last  THEN WRITE BINARY TO next u1zero, w1zero, phi1zero; FLUSH next
+#else
+  IF NOT first THEN READ BINARY FROM prev u1zero, w1zero; FLUSH prev
+  IF NOT last  THEN WRITE BINARY TO next u1zero, w1zero; FLUSH next
+#endif
+END computeflowrate
+
+END dnsdirect
