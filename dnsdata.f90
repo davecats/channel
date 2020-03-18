@@ -25,7 +25,7 @@ MODULE dnsdata
   !Simulation parameters
   real(C_DOUBLE) :: PI=3.1415926535897932384626433832795028841971
   integer(C_INT) :: nx,ny,nz,nxd,nzd
-  real(C_DOUBLE) :: alfa0,beta0,ni,a,ymin,ymax,deltat,cflmax,time,dt_field,dt_save,t_max
+  real(C_DOUBLE) :: alfa0,beta0,ni,a,ymin,ymax,deltat,cflmax,time,time0=0,dt_field,dt_save,t_max
   real(C_DOUBLE) :: meanpx,meanpz,meanflowx,meanflowz
   integer(C_INT), allocatable :: izd(:)
   complex(C_DOUBLE_COMPLEX), allocatable :: ialfa(:),ibeta(:)
@@ -47,6 +47,14 @@ MODULE dnsdata
   complex(C_DOUBLE_COMPLEX), allocatable :: V(:,:,:,:)
 #ifdef bodyforce
   complex(C_DOUBLE_COMPLEX), allocatable :: F(:,:,:,:)
+#ifdef ibm
+  real(C_DOUBLE) :: ibmp=5000, ibmi=10000
+  real(C_DOUBLE), allocatable :: dUint(:,:,:,:,:) 
+  real(C_DOUBLE), allocatable :: Ut(:,:,:,:) 
+  complex(C_DOUBLE_COMPLEX), pointer, dimension(:,:,:,:) :: Fdx, Fdz   ! Fourier-transformable (ffts.f90)
+  real(C_DOUBLE), pointer, dimension(:,:,:,:) :: rFdx                  ! Fourier-transformable (ffts.f90)
+  real(C_DOUBLE), allocatable, dimension(:,:,:,:) :: InBody          
+#endif
 #endif
   !Boundary conditions
   real(C_DOUBLE), dimension(-2:2) :: v0bc,v0m1bc,vnbc,vnp1bc,eta0bc,eta0m1bc,etanbc,etanp1bc
@@ -63,6 +71,13 @@ MODULE dnsdata
   real(C_DOUBLE) :: fr(1:3)
   !Restart file
   character(len=40) :: fname
+  !Convection velocity calculation
+#ifdef convvel
+  complex(C_DOUBLE_COMPLEX), allocatable :: Voldz(:,:,:,:)
+  real(C_DOUBLE), allocatable :: uconv(:,:,:,:)
+  integer(C_LONG) :: convvel_cnt=-1
+  logical, save :: compute_convvel=.FALSE.
+#endif
 
   CONTAINS
 
@@ -90,9 +105,17 @@ MODULE dnsdata
   SUBROUTINE init_memory(solveNS)
     INTEGER(C_INT) :: ix,iz
     logical, intent(IN) :: solveNS
-    ALLOCATE(V(ny0-2:nyN+2,-nz:nz,nx0:nxN,1:3))
+    ALLOCATE(V(ny0-2:nyN+2,-nz:nz,nx0:nxN,1:3)); V=0
 #ifdef bodyforce
-    ALLOCATE(F(ny0-2:nyn+2,-nz:nz,nx0:nxN,1:3))
+    ALLOCATE(F(ny0-2:nyn+2,-nz:nz,nx0:nxN,1:3)); F=0
+#ifdef ibm
+    ALLOCATE(dUint(1:2*nxd,1:nzB,ny0-2:nyN+2,1:3,-1:0)); dUint=0
+    ALLOCATE(Ut(1:2*nxd,1:nzB,ny0-2:nyN+2,1:3)); Ut=0
+    ALLOCATE(InBody(1:2*nxd,1:nzB,ny0-2:nyN+2,1:1)); 
+#endif
+#endif
+#ifdef convvel
+    ALLOCATE(Voldz(1:nzd,1:nxB,ny0-2:nyN+2,1:3), uconv(1:nzd,1:nxB,ny0-2:nyN+2,1:3)); Voldz=0; uconv=0
 #endif
     IF (solveNS) ALLOCATE(memrhs(0:2,-nz:nz,nx0:nxN),oldrhs(MAX(1,ny0-2):MIN(ny-1,nyN+2),-nz:nz,nx0:nxN),bc0(-nz:nz,nx0:nxN),bcn(-nz:nz,nx0:nxN))
 #define newrhs(iy,iz,ix) memrhs(MOD(iy+1000,3),iz,ix)
@@ -100,7 +123,11 @@ MODULE dnsdata
     ALLOCATE(der(MAX(1,ny0-2):MIN(ny-1,nyN+2)),d0mat(ny0:nyN+2,-2:2),etamat(ny0:nyN+2,-2:2,-nz:nz),D2vmat(ny0:nyN+2,-2:2,-nz:nz))
     ALLOCATE(y(MAX(-1,ny0-4):MIN(ny+1,nyN+4)),dy(MAX(1,ny0-2):MIN(ny-1,nyN+2)))
     ALLOCATE(izd(-nz:nz),ialfa(nx0:nxN),ibeta(-nz:nz),k2(-nz:nz,nx0:nxN)) 
-    FORALL (iy=MAX(-1,ny0-4):MIN(ny+1,nyN+4)) y(iy)=ymin+0.5d0*(ymax-ymin)*(tanh(a*(2.0d0*real(iy)/real(ny)-1))/tanh(a)+0.5d0*(ymax-ymin))
+#ifdef halfchannel
+    FORALL (iy=MAX(-1,ny0-4):MIN(ny+1,nyN+4)) y(iy)=ymin+(ymax-ymin)*(tanh(a*(real(iy)/real(ny)-1))/tanh(a)+1)
+#else
+    FORALL (iy=MAX(-1,ny0-4):MIN(ny+1,nyN+4)) y(iy)=ymin+0.5d0*(ymax-ymin)*(tanh(a*(2.0d0*real(iy)/real(ny)-1))/tanh(a)+1)
+#endif
     FORALL (iy=MAX(1,ny0-2):MIN(ny-1,nyN+2)) dy(iy)=0.5d0*(y(iy+1)-y(iy-1))
     izd=(/(merge(iz,nzd+iz,iz>=0),iz=-nz,nz)/);     ialfa=(/(dcmplx(0.0d0,ix*alfa0),ix=nx0,nxN)/);
     ibeta=(/(dcmplx(0.0d0,iz*beta0),iz=-nz,nz)/); 
@@ -165,7 +192,11 @@ MODULE dnsdata
       eta0bc(-1:2)=eta0bc(-1:2)-eta0bc(-2)*eta0m1bc(-1:2)/eta0m1bc(-2)
     END IF
     IF (last) THEN 
+#ifdef halfchannel
+      vnbc=d04n; vnp1bc=d24n; etanbc=d14n
+#else
       vnbc=d04n; vnp1bc=d14n; etanbc=d04n
+#endif
       etanp1bc=der(ny-1)%d4
       vnbc(-2:1)=vnbc(-2:1)-vnbc(2)*vnp1bc(-2:1)/vnp1bc(2)
       etanbc(-2:1)=etanbc(-2:1)-etanbc(2)*etanp1bc(-2:1)/etanp1bc(2)
@@ -307,7 +338,7 @@ MODULE dnsdata
         END IF
         IF (ix==0 .AND. iz==0) THEN       
             V(:,0,0,3) = dcmplx(dimag(V(:,0,0,1)),0.d0); 
-            V(:,0,0,1) = dcmplx(dreal(V(:,0,0,1)),0.d0); 
+            V(:,0,0,1) = dcmplx(dreal(V(:,0,0,1)),0.d0);
             ucor(ny0-2:ny0-1)=0; ucor(ny0:nyN)=1; ucor(nyN+1:nyN+2)=0
             ! XXX TODO Make computation of ucor communication-free
             CALL LeftLU5divStep1(ucor,etamat(:,:,iz),ucor)
@@ -343,22 +374,75 @@ MODULE dnsdata
 
   !--------------------------------------------------------------!
   !------------------------ convolutions ------------------------!
-  SUBROUTINE convolutions(iy,i,compute_cfl)
+#define timescheme(rhs,old,unkn,impl,expl) rhs=ODE(1)*(unkn)/deltat+(impl)+ODE(2)*(expl)-ODE(3)*(old); old=expl                   
+  SUBROUTINE convolutions(iy,i,compute_cfl,ODE)
+     real(C_DOUBLE), intent(in) :: ODE(1:3)
      integer(C_INT), intent(in) :: iy,i
      logical, intent(in) :: compute_cfl
-     integer(C_INT) :: iV
+     integer(C_INT) :: iV,ix,iz
+#ifdef ibm
+     real(C_DOUBLE) :: dU(1:3)
+#endif
+#ifdef convvel
+     integer(C_INT) :: ix0
+     real(C_DOUBLE) :: cu
+     complex(C_DOUBLE_COMPLEX) :: dtu,ust
+#endif
      VVdz(1:nz+1,1:nxB,1:3,i)=V(iy,0:nz,nx0:nxN,1:3);         VVdz(nz+2:nzd-nz,1:nxB,1:3,i)=0;
      VVdz(nzd+1-nz:nzd,1:nxB,1:3,i)=V(iy,-nz:-1,nx0:nxN,1:3); 
      DO iV=1,3
-       CALL IFT(VVdz(1:nzd,1:nxB,iV,i)); CALL MPI_Alltoall(VVdz(:,:,iV,i), 1, Mdz, VVdx(:,:,iV,i), 1, Mdx, MPI_COMM_X)
+       CALL IFT(VVdz(1:nzd,1:nxB,iV,i))  
+#ifdef convvel
+       IF (compute_convvel) THEN
+         IF (convvel_cnt>-1) THEN
+           DO CONCURRENT (iz=1:nzd, ix=1:nxB) 
+              ix0=ix-1+nx0; 
+#define phase(n) ATAN2(dimag(n),dreal(n))
+              IF (ix0>0) THEN 
+                dtu = (VVdz(iz,ix,iV,i) - Voldz(iz,ix,iy,iV))/deltat
+                ust = 0.5*(VVdz(iz,ix,iV,i) + Voldz(iz,ix,iy,iV))
+                cu = dimag(dconjg(ust)*dtu)/(ix0*alfa0*ust*dconjg(ust))
+                uconv(iz,ix,iy,iV)=  uconv(iz,ix,iy,iV) + cu
+              END IF
+           END DO
+         END IF
+         Voldz(1:nzd,1:nxB,iy,iV)=VVdz(1:nzd,1:nxB,iV,i)
+       END IF
+#endif
+       CALL MPI_Alltoall(VVdz(:,:,iV,i), 1, Mdz, VVdx(:,:,iV,i), 1, Mdx, MPI_COMM_X)
        VVdx(nx+2:nxd+1,1:nzB,iV,i)=0;    CALL RFT(VVdx(1:nxd+1,1:nzB,iV,i),rVVdx(1:2*nxd+2,1:nzB,iV,i));
      END DO
-     VVdx(nx+2:nxd+1,1:nzB,4:6,i)=0;
+#ifdef convvel
+     IF (iy==nyN+2 .AND. compute_convvel) THEN
+       convvel_cnt=convvel_cnt+1
+       compute_convvel=.FALSE.
+     END IF
+#endif
+     VVdx(nx+2:nxd+1,1:nzB,4:6,i)=0
      IF (compute_cfl .and. iy>=1 .and. iy<=ny-1) THEN
            cfl=max(cfl,(maxval(abs(rVVdx(1:2*nxd,1:nzB,1,i))/dx     + &
                                abs(rVVdx(1:2*nxd,1:nzB,2,i))/dy(iy) + &
                                abs(rVVdx(1:2*nxd,1:nzB,3,i))/dz)))
      END IF
+#ifdef ibm
+     rFdx=0; Fdz=0
+     DO CONCURRENT (ix=1:2*nxd, iz=1:nzB, iV=1:3)
+       ! Velocity difference
+       dU(iV)=Ut(ix,iz,iy,iV) - rVVdx(ix,iz,iV,i)
+       ! Integral velocity difference
+       timescheme(dUint(ix,iz,iy,iV,0),dUint(ix,iz,iy,iV,-1),dUint(ix,iz,iy,iV,0),0,dU(iV));
+       dUint(ix,iz,iy,iV,0)=dUint(ix,iz,iy,iV,0)*deltat/ODE(1)
+       ! Define body force
+       rFdx(ix,iz,iV,1)=(dU(iV)*ibmp + dUint(ix,iz,iy,iV,0)*ibmi)*InBody(ix,iz,iy,1)
+     END DO
+     DO iV=1,3
+       CALL HFT(rFdx(1:2*nxd+2,1:nzB,iV,1), Fdx(1:nxd+1,1:nzB,iV,1))
+       CALL MPI_Alltoall(Fdx(:,:,iV,1), 1, Mdx, Fdz(:,:,iV,1), 1, Mdz, MPI_COMM_X)
+       CALL FFT(Fdz(1:nzd,1:nxB,iV,1))
+     END DO
+     F(iy,0:nz,nx0:nxN,1:3)=Fdz(1:nz+1,1:nxB,1:3,1)*factor
+     F(iy,-nz:-1,nx0:nxN,1:3)=Fdz(nzd+1-nz:nzd,1:nxB,1:3,1)*factor
+#endif
      rVVdx(1:2*nxd,1:nzB,4,i)  = rVVdx(1:2*nxd,1:nzB,1,i)  * rVVdx(1:2*nxd,1:nzB,2,i)*factor
      rVVdx(1:2*nxd,1:nzB,5,i)  = rVVdx(1:2*nxd,1:nzB,2,i)  * rVVdx(1:2*nxd,1:nzB,3,i)*factor
      rVVdx(1:2*nxd,1:nzB,6,i)  = rVVdx(1:2*nxd,1:nzB,1,i)  * rVVdx(1:2*nxd,1:nzB,3,i)*factor
@@ -368,7 +452,7 @@ MODULE dnsdata
        CALL MPI_Alltoall(VVdx(:,:,iV,i), 1, Mdx, VVdz(:,:,iV,i), 1, Mdz, MPI_COMM_X)
        CALL FFT(VVdz(1:nzd,1:nxB,iV,i));
      END DO
-   END SUBROUTINE convolutions
+  END SUBROUTINE convolutions
 
 
   !--------------------------------------------------------------!
@@ -377,7 +461,6 @@ MODULE dnsdata
   ! (uu,vv,ww,uv,vw,uw) = (1,2,3,4,5,6)
 #define DD(f,k) ( der(iy)%f(-2)*VVdz(izd(iz)+1,ix+1-nx0,k,im2)+der(iy)%f(-1)*VVdz(izd(iz)+1,ix+1-nx0,k,im1)+der(iy)%f(0)*VVdz(izd(iz)+1,ix+1-nx0,k,i0)+ \
                   der(iy)%f(1 )*VVdz(izd(iz)+1,ix+1-nx0,k,i1 )+der(iy)%f(2 )*VVdz(izd(iz)+1,ix+1-nx0,k,i2 ) )
-#define timescheme(rhs,old,unkn,impl,expl) rhs=ODE(1)*(unkn)/deltat+(impl)+ODE(2)*(expl)-ODE(3)*(old); old=expl                   
   SUBROUTINE buildrhs(ODE,compute_cfl)
     logical, intent(in) :: compute_cfl
     real(C_DOUBLE), intent(in) :: ODE(1:3)
@@ -399,7 +482,7 @@ MODULE dnsdata
 #endif
     DO iy=ny0-4,nyN+2 !-3,ny+1
       IF (iy<=nyN) THEN !(iy<=ny-1) THEN
-      CALL convolutions(iy+2,imod(iy+2)+1,compute_cfl)
+      CALL convolutions(iy+2,imod(iy+2)+1,compute_cfl,ODE)
       IF (iy>=ny0) THEN !(iy>=1) THEN
         im2=imod(iy-2)+1; im1=imod(iy-1)+1; i0=imod(iy)+1; i1=imod(iy+1)+1; i2=imod(iy+2)+1;
         DO iz=-nz,nz 
@@ -411,7 +494,7 @@ MODULE dnsdata
             expl=(ialfa(ix)*(ialfa(ix)*DD(d1,1)+DD(d2,4)+ibeta(iz)*DD1_6)+&
                   ibeta(iz)*(ialfa(ix)*DD1_6+DD(d2,5)+ibeta(iz)*DD(d1,3))-k2(iz,ix)*rhsv &
 #ifdef bodyforce
-                 - k2(ix,iz)*D0(F,2)-ialfa(ix)*D1(F,1)-ibeta(iz)*D1(F,3) &
+                 - k2(iz,ix)*D0(F,2)-ialfa(ix)*D1(F,1)-ibeta(iz)*D1(F,3) &
 #endif
                  )
             timescheme(newrhs(iy,iz,ix)%D2v, oldrhs(iy,iz,ix)%D2v, D2(V,2)-k2(iz,ix)*D0(V,2),sum(OS(iy,-2:2)*V(iy-2:iy+2,iz,ix,2)),expl); !(D2v)
@@ -444,7 +527,8 @@ MODULE dnsdata
 
   !--------------------------------------------------------------!
   !-------------------- read_restart_file -----------------------! 
-  SUBROUTINE read_restart_file(filename)
+  SUBROUTINE read_restart_file(filename,R)
+    complex(C_DOUBLE_COMPLEX), intent(INOUT) :: R(ny0-2:nyN+2,-nz:nz,nx0:nxN,1:3)
     character(len=40), intent(IN) :: filename
     integer(C_SIZE_T) :: iV,ix,iy,iz,io,nxB_t,nx_t,nz_t,ny_t,iproc_t,br=8,bc=16,b1=1,b7=7,b3=3
     integer(C_SIZE_T) :: pos
@@ -461,30 +545,129 @@ MODULE dnsdata
                   bc*(INT(ix,C_SIZE_T))*nz_t*ny_t + & 
                   bc*(INT(iz,C_SIZE_T)+INT(nz,C_SIZE_T))*ny_t + &
                   bc*(INT(ny0-2,C_SIZE_T)+b1)
-              READ(100,POS=pos) V(ny0-2:nyN+2,iz,ix,iV)
+              READ(100,POS=pos) R(ny0-2:nyN+2,iz,ix,iV)
             END DO
           END DO
       END DO
       CLOSE(100)
     ELSE
-      V=0
+      R=0
       IF (has_terminal) WRITE(*,*) "Generating initial field..."
       DO iy=ny0-2,nyN+2; DO ix=nx0,nxN; DO iz=-nz,nz
           CALL RANDOM_NUMBER(rn)
-          V(iy,iz,ix,1) = 0.0001*EXP(dcmplx(0,rn(1)-0.5));  V(iy,iz,ix,2) = 0.0001*EXP(dcmplx(0,rn(2)-0.5));  V(iy,iz,ix,3) = 0.0001*EXP(dcmplx(0,rn(3)-0.5));
+          R(iy,iz,ix,1) = 0.0001*EXP(dcmplx(0,rn(1)-0.5));  R(iy,iz,ix,2) = 0.0001*EXP(dcmplx(0,rn(2)-0.5));  R(iy,iz,ix,3) = 0.0001*EXP(dcmplx(0,rn(3)-0.5));
       END DO;        END DO;        END DO
       IF (has_average) THEN
         DO CONCURRENT (iy=ny0-2:nyN+2)
-          1V(iy,0,0,1)=y(iy)*(2-y(iy))*3.d0/2.d0 + 0.001*SIN(8*y(iy)*2*PI);
-          V(iy,0,0,1)=y(iy)-1
+          R(iy,0,0,1)=0.5*y(iy)*(2-y(iy))/ni  + 0.01*SIN(8*y(iy)*2*PI)/ni
+          !V(iy,0,0,1)=y(iy)*(2-y(iy))*3.d0/2.d0 + 0.001*SIN(8*y(iy)*2*PI);
+          !V(iy,0,0,1)=y(iy)-1
         END DO
       END IF
     END IF
   END SUBROUTINE read_restart_file
 
+#ifdef ibm
+  !--------------------------------------------------------------!
+  !---------------------- read_body_file ------------------------! 
+  SUBROUTINE read_body_file(filename,R)
+    real(C_DOUBLE), intent(INOUT) :: R(1:,1:,ny0-2:,1:)
+    character(len=40), intent(IN) :: filename
+    integer(C_SIZE_T) :: iV,nV,ix,iy,iz,io,nxB_t,nx_t,nz_t,ny_t,iproc_t,br=8,bc=16,b1=1,b7=7,b3=3
+    integer(C_SIZE_T) :: pos
+    nV=SIZE(R,4)
+    OPEN(UNIT=100,FILE=TRIM(filename),access="stream",status="old",action="read",iostat=io)
+    nx_t=2*nxd; ny_t=ny+3; nz_t=nzd; nV=SIZE(R,4)
+    IF (io==0) THEN
+      IF (has_terminal) WRITE(*,*) "Reading "//TRIM(ADJUSTL(filename))//" ..."
+       DO iV=1,nV
+        DO iy=miny,maxy
+          DO iz=nz0,nzN
+              pos=b1+br*(INT(iV-1,C_SIZE_T))*nx_t*nz_t*ny_t + &
+                     br*(INT(iy+1,C_SIZE_T))*nx_t*nz_t + &
+                     br*(INT(iz,C_SIZE_T))*nx_t
+              READ(100,POS=pos) R(:,iz-nz0+1,iy,iV)
+          END DO
+        END DO
+       END DO
+      CLOSE(100)
+    ELSE
+      IF (has_terminal) WRITE(*,*) TRIM(ADJUSTL(filename)) // " not loaded: file does not exist"
+    END IF
+  END SUBROUTINE read_body_file
+
+  !--------------------------------------------------------------!
+  !---------------------- save_body_file ------------------------! 
+  SUBROUTINE save_body_file(filename,R)
+    real(C_DOUBLE), intent(IN) :: R(1:,1:,ny0-2:,1:)
+    character(len=40), intent(IN) :: filename
+    integer(C_SIZE_T) :: iV,nV,ix,iy,iz,io,i,nxB_t,nx_t,nz_t,ny_t,iproc_t,br=8,bc=16,b1=1,b7=7,b3=3
+    integer(C_SIZE_T) :: pos
+    nV=SIZE(R,4)
+    DO i=0,nproc-1
+      IF (i==iproc) THEN
+      OPEN(UNIT=100,FILE=TRIM(filename),access="stream",action="write")
+      nx_t=2*nxd; ny_t=ny+3; nz_t=nzd
+        IF (has_terminal) WRITE(*,*) "Writing "//TRIM(ADJUSTL(filename))//" ..."
+        DO iV=1,nV
+          DO iy=miny,maxy
+            DO iz=nz0,nzN
+                pos=b1+br*(INT(iV-1,C_SIZE_T))*nx_t*nz_t*ny_t + &
+                       br*(INT(iy+1,C_SIZE_T))*nx_t*nz_t + &
+                       br*(INT(iz,C_SIZE_T))*nx_t
+                WRITE(100,POS=pos) R(:,iz-nz0+1,iy,iV)
+            END DO
+          END DO
+        END DO
+        CLOSE(100)
+      END IF
+      CALL MPI_Barrier(MPI_COMM_WORLD)
+    END DO
+  END SUBROUTINE save_body_file
+
+!  !--------------------------------------------------------------!
+!  !------------------ define where the body is ------------------!
+!  PURE FUNCTION InBody(ix,iz,iy)
+!     integer(C_INT), intent(in) :: ix,iz,iy
+!     integer(C_INT) :: InBody
+!     InBody = MERGE(1,0,( MOD(iz-1,nzd/8) < MAX(0,16-NINT(16*MERGE(ymax-y(iy),y(iy),y(iy)>1)/0.2)) ) ) 
+!  END FUNCTION InBody
+#endif
+
+#ifdef convvel
+  !--------------------------------------------------------------!
+  !-------------------- save_convvel_file -----------------------! 
+  SUBROUTINE save_convvel_file(filename,R)
+    real(C_DOUBLE), intent(IN) :: R(1:,1:,ny0-2:,1:)
+    character(len=40), intent(IN) :: filename
+    integer(C_SIZE_T) :: iV,nV,ix,iy,iz,io,i,nxB_t,nx_t,nz_t,ny_t,iproc_t,br=8,bc=16,b1=1,b7=7,b3=3
+    integer(C_SIZE_T) :: pos
+    nV=SIZE(R,4)
+    DO i=0,nproc-1
+      IF (i==iproc) THEN
+        OPEN(UNIT=100,FILE=TRIM(filename),access="stream",action="write")
+        nx_t=nx+1; ny_t=ny+3; nz_t=nzd
+        DO iV=1,nV
+          DO iy=miny,maxy
+            DO ix=nx0,nxN
+              pos=b1+br*(INT(iV-1,C_SIZE_T))*nx_t*nz_t*ny_t + &
+                     br*(INT(iy+1,C_SIZE_T))*nx_t*nz_t + &
+                     br*(INT(ix,C_SIZE_T))*nz_t
+              WRITE(100,POS=pos) R(:,ix-nx0+1,iy,iV)
+            END DO
+          END DO
+         END DO
+         CLOSE(100)
+      END IF
+      CALL MPI_Barrier(MPI_COMM_WORLD)
+    END DO
+  END SUBROUTINE save_convvel_file
+#endif
+
   !--------------------------------------------------------------!
   !-------------------- save_restart_file -----------------------!
-  SUBROUTINE save_restart_file(filename)
+  SUBROUTINE save_restart_file(filename,R)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: R(ny0-2:nyN+2,-nz:nz,nx0:nxN,1:3)
     integer(C_SIZE_T) :: iV,ix,iz,nxB_t,nx_t,nz_t,ny_t,iproc_t,br=8,bc=16,b1=1,b7=7,b3=3
     integer(C_SIZE_T) :: pos,i
     character(len=40) :: filename
@@ -500,7 +683,7 @@ MODULE dnsdata
                   bc*(INT(ix,C_SIZE_T))*nz_t*ny_t + & 
                   bc*(INT(iz,C_SIZE_T)+INT(nz,C_SIZE_T))*ny_t + &
                   bc*(INT(miny,C_SIZE_T)+b1)
-              WRITE(100,POS=pos) V(miny:maxy,iz,ix,iV)
+              WRITE(100,POS=pos) R(miny:maxy,iz,ix,iV)
             END DO
           END DO
         END DO
@@ -518,6 +701,9 @@ MODULE dnsdata
    character(len=40) :: istring, filename
    TYPE(MPI_REQUEST) :: Rs,Rr
    TYPE(MPI_STATUS) :: S
+#ifdef convvel
+   compute_convvel=.TRUE.
+#endif
    CALL MPI_Allreduce(cfl,runtime_global,1,MPI_DOUBLE_PRECISION,MPI_MAX,MPI_COMM_WORLD); cfl=0;
    IF (cflmax>0)  deltat=cflmax/runtime_global;
    IF (ipx==0) THEN 
@@ -540,12 +726,26 @@ MODULE dnsdata
    !Save Dati.cart.out
    IF ( ((FLOOR((time+0.5*deltat)/dt_save) > FLOOR((time-0.5*deltat)/dt_save)) .AND. (istep>1)) .OR. istep==nstep ) THEN
      IF (has_terminal) WRITE(*,*) "Writing Dati.cart.out at time ", time
-     filename="Dati.cart.out"; CALL save_restart_file(filename)
+     filename="Dati.cart.out"; CALL save_restart_file(filename,V)
+#ifdef ibm
+     IF (has_terminal) WRITE(*,*) "Writing dUint.cart.out at time ", time
+     filename="dUint.cart.out"; CALL save_body_file(filename,dUint(:,:,:,:,0))
+#endif 
    END IF
-   IF ( (FLOOR((time+0.5*deltat)/dt_field) > FLOOR((time-0.5*deltat)/dt_field)) .AND. (time>0) ) THEN
+   IF ( (FLOOR((time+0.5*deltat)/dt_field) > FLOOR((time-0.5*deltat)/dt_field)) .AND. (time>time0) ) THEN
      ifield=ifield+1; WRITE(istring,*) ifield
      IF (has_terminal) WRITE(*,*) "Writing Dati.cart."//TRIM(ADJUSTL(istring))//".out at time ", time
-     filename="Dati.cart."//TRIM(ADJUSTL(istring))//".out"; CALL save_restart_file(filename)
+     filename="Dati.cart."//TRIM(ADJUSTL(istring))//".out"; CALL save_restart_file(filename,V)
+#ifdef bodyforce
+     IF (has_terminal) WRITE(*,*) "Writing Force.cart."//TRIM(ADJUSTL(istring))//".out at time ", time
+     filename="Force.cart."//TRIM(ADJUSTL(istring))//".out"; CALL save_restart_file(filename,F)
+#endif
+#ifdef convvel
+     IF (has_terminal) WRITE(*,*) "Writing Convvel.cart."//TRIM(ADJUSTL(istring))//".out at time ", time
+     uconv=uconv/convvel_cnt
+     filename="Convvel.cart."//TRIM(ADJUSTL(istring))//".out"; CALL save_convvel_file(filename,uconv)
+     uconv=0; convvel_cnt=0
+#endif
    END IF
   END SUBROUTINE outstats
 

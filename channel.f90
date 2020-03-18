@@ -19,6 +19,7 @@ PROGRAM channel
 #ifdef crhon
   REAL timei,timee
 #endif
+  REAL(C_DOUBLE) :: frl(1:3)
 
   ! Init MPI
   CALL MPI_INIT(ierr)
@@ -29,14 +30,23 @@ PROGRAM channel
   CALL init_memory(.TRUE.) 
 
   ! Init various subroutines
+#ifdef ibm
+  CALL init_fft(VVdz,VVdx,rVVdx,Fdz,Fdx,rFdx,nxd,nxB,nzd,nzB)
+#else
   CALL init_fft(VVdz,VVdx,rVVdx,nxd,nxB,nzd,nzB)
+#endif
   CALL setup_derivatives()
   CALL setup_boundary_conditions()
-  fname="Dati.cart.out";       CALL read_restart_file(fname)
+  fname="Dati.cart.out";       CALL read_restart_file(fname,V)
   IF (.NOT. time_from_restart) CALL read_dnsin() 
+#ifdef ibm
+  fname="ibm.bin";             CALL read_body_file(fname,InBody(:,:,:,:))
+  fname="dUint.cart.out";      CALL read_body_file(fname,dUint(:,:,:,:,0))
+#endif
 
   ! Field number (for output)
   ifield=FLOOR(time/dt_field)
+  time0=time
 
 IF (has_terminal) THEN
   ! Output DNS.in
@@ -56,10 +66,15 @@ END IF
 
   ! Compute CFL
   DO iy=ny0,nyN
-   CALL convolutions(iy,1,.TRUE.)
+  deltat=1.0; CALL convolutions(iy,1,.TRUE.,RK1_rai(1))
   END DO
-  ! Time loop
+  ! Compute flow rate flow rate
+  IF (has_average) THEN
+    frl(1)=yintegr(dreal(V(:,0,0,1))); frl(2)=yintegr(dreal(V(:,0,0,3)));
+    CALL MPI_Allreduce(frl,fr,3,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_Y)
+  END IF
   CALL outstats()
+  ! Time loop 
   timeloop: DO WHILE ((time<t_max-deltat/2.0) .AND. (istep<nstep))
 #ifdef chron
     CALL CPU_TIME(timei)

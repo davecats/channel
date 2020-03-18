@@ -16,6 +16,11 @@ MODULE typedef
   USE, intrinsic :: iso_c_binding
   IMPLICIT NONE
 
+  TYPE :: REFINEMENT
+    integer(C_INT) :: n
+    real(C_DOUBLE) :: y
+  END TYPE REFINEMENT
+
   TYPE :: RHSTYPE
     complex(C_DOUBLE_COMPLEX) :: eta,d2v
   END TYPE RHSTYPE

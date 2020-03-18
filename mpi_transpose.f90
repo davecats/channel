@@ -20,7 +20,7 @@ MODULE mpi_transpose
   USE mpi_f08
 
   TYPE(MPI_Comm) :: MPI_COMM_X, MPI_COMM_Y, MPI_COMM_NEXT, MPI_COMM_PREV
-  integer(C_INT),save :: nproc,iproc,ierr,npx,ipx,npy=20,ipy
+  integer(C_INT),save :: nproc,iproc,ierr,npx,ipx,npy=5,ipy
   integer(C_INT), save :: nx0,nxN,nxB,nz0,nzN,nzB,block
   integer(C_INT), save :: ny0,nyN,miny,maxy
   integer(C_INT), parameter :: TAG_LUDECOMP=100, TAG_LUDIVSTEP1=101, TAG_LUDIVSTEP2=102, TAG_DUDY=103
@@ -62,7 +62,9 @@ CONTAINS
     block=max(nxB*nzd,nx*nzB)
     has_average=(nx0==0)
     ! Communicators only with previous and next in Y
+#ifdef mpiverbose
     WRITE(*,*) "iproc=",iproc,"ipx=",ipx,"ipy=",ipy, "nx0=",nx0," nxN=",nxN," nxB=",nxB, "nz0=",nz0," nzN=",nzN," nzB=",nzB, "ny0=", ny0, "nyN=", nyN 
+#endif
     ! MPI derived datatyped - basics
     CALL MPI_Type_contiguous(2,MPI_DOUBLE_PRECISION,cmpl)   !complex
     CALL MPI_Type_commit(cmpl)
