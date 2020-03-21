@@ -11,7 +11,7 @@
 ! Date  : 28/Jul/2015
 !
 
-#include 'header.h'
+#include "header.h"
 
 MODULE dnsdata
 
@@ -381,6 +381,7 @@ MODULE dnsdata
      logical, intent(in) :: compute_cfl
      integer(C_INT) :: iV,ix,iz
 #ifdef ibm
+     real(C_DOUBLE) :: newcoef,oldcoef
      real(C_DOUBLE) :: dU(1:3)
 #endif
 #ifdef convvel
@@ -430,8 +431,10 @@ MODULE dnsdata
        ! Velocity difference
        dU(iV)=Ut(ix,iz,iy,iV) - rVVdx(ix,iz,iV,i)
        ! Integral velocity difference
-       timescheme(dUint(ix,iz,iy,iV,0),dUint(ix,iz,iy,iV,-1),dUint(ix,iz,iy,iV,0),0,dU(iV));
-       dUint(ix,iz,iy,iV,0)=dUint(ix,iz,iy,iV,0)*deltat/ODE(1)
+       dUint(ix,iz,iy,iV,0)=dUint(ix,iz,iy,iV,0)+deltat*(dUint(ix,iz,iy,iV,-1)*oldcoef+dU(iV)*newcoef)
+       dUint(ix,iz,iy,iV,-1)=dU(iV)
+       !timescheme(dUint(ix,iz,iy,iV,0),dUint(ix,iz,iy,iV,-1),dUint(ix,iz,iy,iV,0),0,dU(iV));
+       !dUint(ix,iz,iy,iV,0)=dUint(ix,iz,iy,iV,0)*deltat/ODE(1)
        ! Define body force
        rFdx(ix,iz,iV,1)=(dU(iV)*ibmp + dUint(ix,iz,iy,iV,0)*ibmi)*InBody(ix,iz,iy,1)
      END DO
@@ -581,11 +584,11 @@ MODULE dnsdata
     IF (io==0) THEN
       IF (has_terminal) WRITE(*,*) "Reading "//TRIM(ADJUSTL(filename))//" ..."
        DO iV=1,nV
-        DO iy=miny,maxy
+        DO iy=ny0-2,nyN+2
           DO iz=nz0,nzN
               pos=b1+br*(INT(iV-1,C_SIZE_T))*nx_t*nz_t*ny_t + &
                      br*(INT(iy+1,C_SIZE_T))*nx_t*nz_t + &
-                     br*(INT(iz,C_SIZE_T))*nx_t
+                     br*(INT(iz,  C_SIZE_T))*nx_t
               READ(100,POS=pos) R(:,iz-nz0+1,iy,iV)
           END DO
         END DO
@@ -610,11 +613,11 @@ MODULE dnsdata
       nx_t=2*nxd; ny_t=ny+3; nz_t=nzd
         IF (has_terminal) WRITE(*,*) "Writing "//TRIM(ADJUSTL(filename))//" ..."
         DO iV=1,nV
-          DO iy=miny,maxy
+          DO iy=ny0-2,nyN+2
             DO iz=nz0,nzN
                 pos=b1+br*(INT(iV-1,C_SIZE_T))*nx_t*nz_t*ny_t + &
                        br*(INT(iy+1,C_SIZE_T))*nx_t*nz_t + &
-                       br*(INT(iz,C_SIZE_T))*nx_t
+                       br*(INT(iz,  C_SIZE_T))*nx_t
                 WRITE(100,POS=pos) R(:,iz-nz0+1,iy,iV)
             END DO
           END DO
