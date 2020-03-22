@@ -107,7 +107,7 @@ MODULE dnsdata
     logical, intent(IN) :: solveNS
     ALLOCATE(V(ny0-2:nyN+2,-nz:nz,nx0:nxN,1:3)); V=0
 #ifdef bodyforce
-    ALLOCATE(F(ny0-2:nyn+2,-nz:nz,nx0:nxN,1:3)); F=0
+    ALLOCATE(F(ny0-2:nyN+2,-nz:nz,nx0:nxN,1:3)); F=0
 #ifdef ibm
     ALLOCATE(dUint(1:2*nxd,1:nzB,ny0-2:nyN+2,1:3,-1:0)); dUint=0
     ALLOCATE(Ut(1:2*nxd,1:nzB,ny0-2:nyN+2,1:3)); Ut=0
@@ -375,10 +375,10 @@ MODULE dnsdata
   !--------------------------------------------------------------!
   !------------------------ convolutions ------------------------!
 #define timescheme(rhs,old,unkn,impl,expl) rhs=ODE(1)*(unkn)/deltat+(impl)+ODE(2)*(expl)-ODE(3)*(old); old=expl                   
-  SUBROUTINE convolutions(iy,i,compute_cfl,ODE)
+  SUBROUTINE convolutions(iy,i,compute_cfl,in_timeloop,ODE)
      real(C_DOUBLE), intent(in) :: ODE(1:3)
      integer(C_INT), intent(in) :: iy,i
-     logical, intent(in) :: compute_cfl
+     logical, intent(in) :: compute_cfl, in_timeloop
      integer(C_INT) :: iV,ix,iz
 #ifdef ibm
      real(C_DOUBLE) :: newcoef,oldcoef
@@ -391,6 +391,9 @@ MODULE dnsdata
 #endif
      VVdz(1:nz+1,1:nxB,1:3,i)=V(iy,0:nz,nx0:nxN,1:3);         VVdz(nz+2:nzd-nz,1:nxB,1:3,i)=0;
      VVdz(nzd+1-nz:nzd,1:nxB,1:3,i)=V(iy,-nz:-1,nx0:nxN,1:3); 
+#ifdef ibm
+     newcoef=ODE(2)/ODE(1); oldcoef=-ODE(3)/ODE(1)
+#endif
      DO iV=1,3
        CALL IFT(VVdz(1:nzd,1:nxB,iV,i))  
 #ifdef convvel
@@ -426,25 +429,27 @@ MODULE dnsdata
                                abs(rVVdx(1:2*nxd,1:nzB,3,i))/dz)))
      END IF
 #ifdef ibm
-     rFdx=0; Fdz=0
-     DO CONCURRENT (ix=1:2*nxd, iz=1:nzB, iV=1:3)
-       ! Velocity difference
-       dU(iV)=Ut(ix,iz,iy,iV) - rVVdx(ix,iz,iV,i)
-       ! Integral velocity difference
-       dUint(ix,iz,iy,iV,0)=dUint(ix,iz,iy,iV,0)+deltat*(dUint(ix,iz,iy,iV,-1)*oldcoef+dU(iV)*newcoef)
-       dUint(ix,iz,iy,iV,-1)=dU(iV)
-       !timescheme(dUint(ix,iz,iy,iV,0),dUint(ix,iz,iy,iV,-1),dUint(ix,iz,iy,iV,0),0,dU(iV));
-       !dUint(ix,iz,iy,iV,0)=dUint(ix,iz,iy,iV,0)*deltat/ODE(1)
-       ! Define body force
-       rFdx(ix,iz,iV,1)=(dU(iV)*ibmp + dUint(ix,iz,iy,iV,0)*ibmi)*InBody(ix,iz,iy,1)
-     END DO
-     DO iV=1,3
-       CALL HFT(rFdx(1:2*nxd+2,1:nzB,iV,1), Fdx(1:nxd+1,1:nzB,iV,1))
-       CALL MPI_Alltoall(Fdx(:,:,iV,1), 1, Mdx, Fdz(:,:,iV,1), 1, Mdz, MPI_COMM_X)
-       CALL FFT(Fdz(1:nzd,1:nxB,iV,1))
-     END DO
-     F(iy,0:nz,nx0:nxN,1:3)=Fdz(1:nz+1,1:nxB,1:3,1)*factor
-     F(iy,-nz:-1,nx0:nxN,1:3)=Fdz(nzd+1-nz:nzd,1:nxB,1:3,1)*factor
+     IF (in_timeloop) THEN
+       rFdx=0; Fdz=0
+       DO CONCURRENT (ix=1:2*nxd, iz=1:nzB, iV=1:3)
+         ! Velocity difference
+         dU(iV)=(Ut(ix,iz,iy,iV) - rVVdx(ix,iz,iV,i))*InBody(ix,iz,iy,1)
+         ! Integral velocity difference
+         dUint(ix,iz,iy,iV, 0)=dUint(ix,iz,iy,iV,0)+deltat*(dUint(ix,iz,iy,iV,-1)*oldcoef+dU(iV)*newcoef)
+         dUint(ix,iz,iy,iV,-1)=dU(iV)
+         !timescheme(dUint(ix,iz,iy,iV,0),dUint(ix,iz,iy,iV,-1),dUint(ix,iz,iy,iV,0),0,dU(iV));
+         !dUint(ix,iz,iy,iV,0)=dUint(ix,iz,iy,iV,0)*deltat/ODE(1)
+         ! Define body force
+         rFdx(ix,iz,iV,1)=(dU(iV)*ibmp + dUint(ix,iz,iy,iV,0)*ibmi)
+       END DO
+       DO iV=1,3
+         CALL HFT(rFdx(1:2*nxd+2,1:nzB,iV,1), Fdx(1:nxd+1,1:nzB,iV,1))
+         CALL MPI_Alltoall(Fdx(:,:,iV,1), 1, Mdx, Fdz(:,:,iV,1), 1, Mdz, MPI_COMM_X)
+         CALL FFT(Fdz(1:nzd,1:nxB,iV,1))
+       END DO
+       F(iy,0:nz,nx0:nxN,1:3)=Fdz(1:nz+1,1:nxB,1:3,1)*factor
+       F(iy,-nz:-1,nx0:nxN,1:3)=Fdz(nzd+1-nz:nzd,1:nxB,1:3,1)*factor
+     END IF
 #endif
      rVVdx(1:2*nxd,1:nzB,4,i)  = rVVdx(1:2*nxd,1:nzB,1,i)  * rVVdx(1:2*nxd,1:nzB,2,i)*factor
      rVVdx(1:2*nxd,1:nzB,5,i)  = rVVdx(1:2*nxd,1:nzB,2,i)  * rVVdx(1:2*nxd,1:nzB,3,i)*factor
@@ -485,7 +490,7 @@ MODULE dnsdata
 #endif
     DO iy=ny0-4,nyN+2 !-3,ny+1
       IF (iy<=nyN) THEN !(iy<=ny-1) THEN
-      CALL convolutions(iy+2,imod(iy+2)+1,compute_cfl,ODE)
+      CALL convolutions(iy+2,imod(iy+2)+1,compute_cfl,.TRUE.,ODE)
       IF (iy>=ny0) THEN !(iy>=1) THEN
         im2=imod(iy-2)+1; im1=imod(iy-1)+1; i0=imod(iy)+1; i1=imod(iy+1)+1; i2=imod(iy+2)+1;
         DO iz=-nz,nz 
@@ -558,11 +563,11 @@ MODULE dnsdata
       IF (has_terminal) WRITE(*,*) "Generating initial field..."
       DO iy=ny0-2,nyN+2; DO ix=nx0,nxN; DO iz=-nz,nz
           CALL RANDOM_NUMBER(rn)
-          R(iy,iz,ix,1) = 0.0001*EXP(dcmplx(0,rn(1)-0.5));  R(iy,iz,ix,2) = 0.0001*EXP(dcmplx(0,rn(2)-0.5));  R(iy,iz,ix,3) = 0.0001*EXP(dcmplx(0,rn(3)-0.5));
+          R(iy,iz,ix,1) = 0.000*EXP(dcmplx(0,rn(1)-0.5));  R(iy,iz,ix,2) = 0.000*EXP(dcmplx(0,rn(2)-0.5));  R(iy,iz,ix,3) = 0.000*EXP(dcmplx(0,rn(3)-0.5));
       END DO;        END DO;        END DO
       IF (has_average) THEN
         DO CONCURRENT (iy=ny0-2:nyN+2)
-          R(iy,0,0,1)=0.5*y(iy)*(2-y(iy))/ni  + 0.01*SIN(8*y(iy)*2*PI)/ni
+          R(iy,0,0,1)=3*0.5*y(iy)*(2-y(iy))  !+ 0.01*SIN(8*y(iy)*2*PI)/ni
           !V(iy,0,0,1)=y(iy)*(2-y(iy))*3.d0/2.d0 + 0.001*SIN(8*y(iy)*2*PI);
           !V(iy,0,0,1)=y(iy)-1
         END DO
@@ -729,7 +734,7 @@ MODULE dnsdata
    !Save Dati.cart.out
    IF ( ((FLOOR((time+0.5*deltat)/dt_save) > FLOOR((time-0.5*deltat)/dt_save)) .AND. (istep>1)) .OR. istep==nstep ) THEN
      IF (has_terminal) WRITE(*,*) "Writing Dati.cart.out at time ", time
-     filename="Dati.cart.out"; CALL save_restart_file(filename,V)
+     filename="Dati.cart.out";  CALL save_restart_file(filename,V)
 #ifdef ibm
      IF (has_terminal) WRITE(*,*) "Writing dUint.cart.out at time ", time
      filename="dUint.cart.out"; CALL save_body_file(filename,dUint(:,:,:,:,0))

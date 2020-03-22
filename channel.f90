@@ -11,7 +11,7 @@
 ! Author: Dr.-Ing. Davide Gatti
 ! 
 
-#include 'header.h'
+#include "header.h"
 
 PROGRAM channel
 
@@ -66,11 +66,11 @@ END IF
 
   ! Compute CFL
   DO iy=ny0,nyN
-  deltat=1.0; CALL convolutions(iy,1,.TRUE.,RK1_rai(1))
+  deltat=1.0; CALL convolutions(iy,1,.TRUE.,.FALSE.,RK1_rai(1))
   END DO
   ! Compute flow rate flow rate
   IF (has_average) THEN
-    frl(1)=yintegr(dreal(V(:,0,0,1))); frl(2)=yintegr(dreal(V(:,0,0,3)));
+    frl(1)=yintegr(dreal(V(:,0,0,1))); frl(2)=yintegr(dreal(V(:,0,0,3))); 
     CALL MPI_Allreduce(frl,fr,3,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_Y)
   END IF
   CALL outstats()
@@ -80,18 +80,18 @@ END IF
     CALL CPU_TIME(timei)
 #endif
     ! Couette R.B.
-    IF (has_average) THEN 
-      bc0(0,0)%u=-1; bcn(0,0)%u=1
-    END IF
+    !IF (has_average) THEN 
+    !  bc0(0,0)%u=-1; bcn(0,0)%u=1
+    !END IF
     ! Increment number of steps
     istep=istep+1
     ! Solve
     time=time+2.0/RK1_rai(1)*deltat
-    CALL buildrhs(RK1_rai,.FALSE. ); CALL linsolve(RK1_rai(1)/deltat)
+    CALL buildrhs(RK1_rai,.FALSE. ); CALL linsolve(RK1_rai(1)/deltat)    
     time=time+2.0/RK2_rai(1)*deltat
     CALL buildrhs(RK2_rai,.FALSE.); CALL linsolve(RK2_rai(1)/deltat)
     time=time+2.0/RK3_rai(1)*deltat
-    CALL buildrhs(RK3_rai,.TRUE.); CALL linsolve(RK3_rai(1)/deltat)
+    CALL buildrhs(RK3_rai,.TRUE.); CALL linsolve(RK3_rai(1)/deltat)    
     CALL outstats()
 #ifdef chron
     CALL CPU_TIME(timee)
