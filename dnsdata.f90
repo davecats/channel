@@ -25,7 +25,10 @@ MODULE dnsdata
   !Simulation parameters
   real(C_DOUBLE) :: PI=3.1415926535897932384626433832795028841971
   integer(C_INT) :: nx,ny,nz,nxd,nzd
-  real(C_DOUBLE) :: alfa0,beta0,ni,a,ymin,ymax,deltat,cflmax,time,time0=0,dt_field,dt_save,t_max
+  real(C_DOUBLE) :: alfa0,beta0,ni,a,ymin,ymax,deltat,cflmax,time,time0=0,dt_field,dt_save,t_max,gamma
+  real(C_DOUBLE) :: u0,uN
+  logical :: CPI
+  integer(C_INT) :: CPI_type
   real(C_DOUBLE) :: meanpx,meanpz,meanflowx,meanflowz
   integer(C_INT), allocatable :: izd(:)
   complex(C_DOUBLE_COMPLEX), allocatable :: ialfa(:),ibeta(:)
@@ -78,6 +81,8 @@ MODULE dnsdata
   integer(C_LONG) :: convvel_cnt=-1
   logical, save :: compute_convvel=.FALSE.
 #endif
+logical::rtd_exists ! flag to check existence of Runtimedata
+
 
   CONTAINS
 
@@ -92,7 +97,9 @@ MODULE dnsdata
     i=fftFIT(nzd); DO WHILE (.NOT. i); nzd=nzd+1; i=fftFIT(nzd); END DO
 #endif
     READ(15, *) ni; READ(15, *) a, ymin, ymax; ni=1/ni
+    READ(15, *) CPI, CPI_type, gamma
     READ(15, *) meanpx, meanpz; READ(15, *) meanflowx, meanflowz
+    READ(15, *) u0,uN
     READ(15, *) deltat, cflmax, time
     READ(15, *) dt_field, dt_save, t_max, time_from_restart
     READ(15, *) nstep
@@ -132,7 +139,12 @@ MODULE dnsdata
     izd=(/(merge(iz,nzd+iz,iz>=0),iz=-nz,nz)/);     ialfa=(/(dcmplx(0.0d0,ix*alfa0),ix=nx0,nxN)/);
     ibeta=(/(dcmplx(0.0d0,iz*beta0),iz=-nz,nz)/); 
     FORALL  (iz=-nz:nz,ix=nx0:nxN) k2(iz,ix)=(alfa0*ix)**2.0d0+(beta0*iz)**2.0d0
-    IF (has_terminal) OPEN(UNIT=101,FILE='Runtimedata',ACTION='write')
+    INQUIRE(FILE="Runtimedata", EXIST=rtd_exists)
+    IF (has_terminal .AND. rtd_exists) THEN
+      OPEN(UNIT=101,FILE='Runtimedata',STATUS="old",POSITION="append",ACTION="write")
+    ELSE IF (has_terminal) THEN
+      OPEN(UNIT=101,FILE='Runtimedata',ACTION='write')
+    END IF
   END SUBROUTINE init_memory
 
   !--------------------------------------------------------------!
@@ -353,14 +365,25 @@ MODULE dnsdata
             END IF
             frl(1)=yintegr(dreal(V(:,0,0,1))); frl(2)=yintegr(dreal(V(:,0,0,3))); frl(3)=yintegr(dreal(ucor))
             CALL MPI_Allreduce(frl,fr,3,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_Y)
-            IF (abs(meanflowx)>1.0d-7) THEN
+            IF (abs(meanflowx)>1.0d-7 .AND. .NOT. CPI) THEN
               corrpx = (meanflowx-fr(1))/fr(3)
               V(:,0,0,1)=dcmplx(dreal(V(:,0,0,1))+corrpx*dreal(ucor),dimag(V(:,0,0,1)))
             END IF
-            IF (abs(meanflowz)>1.0d-7) THEN
+            IF (abs(meanflowz)>1.0d-7 .AND. .NOT. CPI) THEN
               corrpz = (meanflowz-fr(2))/fr(3)
               V(:,0,0,3)=dcmplx(dreal(V(:,0,0,3))+corrpz*dreal(ucor),dimag(V(:,0,0,3)))
             END IF
+            IF (CPI) THEN
+              SELECT CASE (CPI_type)
+                 CASE (0)
+                    meanpx = (1-gamma)*6*ni/fr(1)
+                 CASE (1)
+                    meanpx = (1.5d0/gamma)*fr(1)*ni 
+                 CASE DEFAULT
+                    WRITE(*,*) "Wrong selection of CPI_Type"
+                    STOP
+              END SELECT
+            END IF 
         ELSE
             CALL COMPLEXderiv(V(:,iz,ix,2),V(:,iz,ix,3))
             CALL LeftLU5divStep2(D0mat,V(:,iz,ix,3))

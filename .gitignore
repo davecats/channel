@@ -1,3 +1,6 @@
+# Ignore compiled channel
+channel
+
 # Prerequisites
 *.d
 

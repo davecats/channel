@@ -72,6 +72,17 @@ END IF
   IF (has_average) THEN
     frl(1)=yintegr(dreal(V(:,0,0,1))); frl(2)=yintegr(dreal(V(:,0,0,3))); 
     CALL MPI_Allreduce(frl,fr,3,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_Y)
+    IF (CPI) THEN
+      SELECT CASE (CPI_type)
+        CASE (0)
+          meanpx = (1-gamma)*6*ni/fr(1)
+        CASE (1)
+          meanpx = (1.5d0/gamma)*fr(1)*ni 
+        CASE DEFAULT
+          WRITE(*,*) "Wrong selection of CPI_Type"
+          STOP
+      END SELECT
+    END IF
   END IF
   CALL outstats()
   ! Time loop 
@@ -79,10 +90,9 @@ END IF
 #ifdef chron
     CALL CPU_TIME(timei)
 #endif
-    ! Couette R.B.
-    !IF (has_average) THEN 
-    !  bc0(0,0)%u=-1; bcn(0,0)%u=1
-    !END IF
+    IF (has_average) THEN ! apply boundary conditions from dns.in (Couette-like)
+      bc0(0,0)%u=u0; bcn(0,0)%u=uN
+    END IF
     ! Increment number of steps
     istep=istep+1
     ! Solve

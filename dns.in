@@ -1,9 +1,11 @@
-1023 250 1024       	!nx, ny, nz
-0.125 0.25    		!alfa0 beta0  
-10133       		!ni
-1.66 0.0 2.0       !a, ymin, ymax
-0.0 0.0  		!meanpx, meanpz
-0.0  0.0 	        !meanflowx meanflowz
-0.0 1.0 0.0       !deltat, cflmax time
-10.0 10.00 9000.0 .TRUE.  !dt_field, dt_dave, t_max
-5500                   !nstep
+191 384 189                     ! nx, ny, nz
+0.5d0 1.0d0                     ! alfa0 beta0  
+12431.d0                        ! ni
+1.5d0 0.0d0 2.0d0               ! a, ymin, ymax
+.TRUE. 1 0.161436d0             ! CPI, CPItype, gamma
+0.0d0  0.0d0                    ! meanpx, meanpz
+0.0d0  0.0d0                    ! meanflowx meanflowz
+0.0d0  0.0d0                    ! u0 uN
+0.00d0 1.0d0 0.0d0              ! deltat, cflmax, time
+30.d0 30.d0 7000.d0 .TRUE.      ! dt_field, dt_save, t_max, time_from_restart
+999999                          ! nstep
