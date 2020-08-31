@@ -20,7 +20,7 @@ MODULE mpi_transpose
   USE mpi_f08
 
   TYPE(MPI_Comm) :: MPI_COMM_X, MPI_COMM_Y, MPI_COMM_NEXT, MPI_COMM_PREV
-  integer(C_INT),save :: nproc,iproc,ierr,npx,ipx,npy=5,ipy
+  integer(C_INT),save :: nproc,iproc,ierr,npx,ipx,npy=1,ipy
   integer(C_INT), save :: nx0,nxN,nxB,nz0,nzN,nzB,block
   integer(C_INT), save :: ny0,nyN,miny,maxy
   integer(C_INT), parameter :: TAG_LUDECOMP=100, TAG_LUDIVSTEP1=101, TAG_LUDIVSTEP2=102, TAG_DUDY=103

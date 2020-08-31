@@ -140,7 +140,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
     ibeta=(/(dcmplx(0.0d0,iz*beta0),iz=-nz,nz)/); 
     FORALL  (iz=-nz:nz,ix=nx0:nxN) k2(iz,ix)=(alfa0*ix)**2.0d0+(beta0*iz)**2.0d0
     INQUIRE(FILE="Runtimedata", EXIST=rtd_exists)
-    IF (has_terminal .AND. rtd_exists) THEN
+    IF (has_terminal .AND. rtd_exists .AND. time_from_restart) THEN
       OPEN(UNIT=101,FILE='Runtimedata',STATUS="old",POSITION="append",ACTION="write")
     ELSE IF (has_terminal) THEN
       OPEN(UNIT=101,FILE='Runtimedata',ACTION='write')
