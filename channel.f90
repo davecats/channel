@@ -38,7 +38,12 @@ PROGRAM channel
   CALL setup_derivatives()
   CALL setup_boundary_conditions()
   fname="Dati.cart.out";       CALL read_restart_file(fname,V)
-  IF (.NOT. time_from_restart) CALL read_dnsin() 
+  ! move cursor to desired record
+  IF (time_from_restart .AND. rtd_exists) THEN
+    CALL get_record(time)
+  ELSE IF (.NOT. time_from_restart) THEN
+    CALL read_dnsin()
+  END IF
 #ifdef ibm
   fname="ibm.bin";             CALL read_body_file(fname,InBody(:,:,:,:))
   fname="dUint.cart.out";      CALL read_body_file(fname,dUint(:,:,:,:,0))

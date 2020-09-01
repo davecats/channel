@@ -140,12 +140,36 @@ logical::rtd_exists ! flag to check existence of Runtimedata
     ibeta=(/(dcmplx(0.0d0,iz*beta0),iz=-nz,nz)/); 
     FORALL  (iz=-nz:nz,ix=nx0:nxN) k2(iz,ix)=(alfa0*ix)**2.0d0+(beta0*iz)**2.0d0
     INQUIRE(FILE="Runtimedata", EXIST=rtd_exists)
-    IF (has_terminal .AND. rtd_exists .AND. time_from_restart) THEN
-      OPEN(UNIT=101,FILE='Runtimedata',STATUS="old",POSITION="append",ACTION="write")
-    ELSE IF (has_terminal) THEN
-      OPEN(UNIT=101,FILE='Runtimedata',ACTION='write')
+    IF (has_terminal) THEN
+      IF (time_from_restart .AND. rtd_exists) THEN
+        WRITE(*,*) 'Found existing Runtimedata...'
+        OPEN(UNIT=101,FILE='Runtimedata',ACTION='readwrite')
+      ELSE
+        WRITE(*,*) 'Creating new Runtimedata...'
+        OPEN(UNIT=101,FILE='Runtimedata',ACTION='write')
+      END IF
     END IF
   END SUBROUTINE init_memory
+
+  !-------------------------------------------------------------------------------------!
+  !--------------- Move cursor to correct instant in time in Runtimedata ---------------!
+  SUBROUTINE get_record(threshold)
+  IMPLICIT NONE
+    REAL(C_DOUBLE), INTENT(IN) :: threshold
+    REAL(C_DOUBLE) :: selectime,a,b,c,d,e,f,g,h,i,curr_dt
+    INTEGER :: negative_if_eof = 0
+    LOGICAL :: end_of_file = .FALSE., threshold_reached
+    IF (has_terminal) THEN
+      DO WHILE (.NOT. threshold_reached .AND. negative_if_eof >= 0)
+        READ(101,*,IOSTAT=negative_if_eof) selectime,a,b,c,d,e,f,g,h,i,curr_dt
+        threshold_reached = ABS(selectime - threshold) < (0.5*curr_dt)
+      END DO
+      IF (negative_if_eof >= 0) THEN
+        BACKSPACE(101)
+      END IF
+      PRINT *, 'In Runtimedata: starting from time', selectime
+    END IF
+  END SUBROUTINE get_record
 
   !--------------------------------------------------------------!
   !--------------- Deallocate memory for solution ---------------!
