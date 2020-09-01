@@ -174,6 +174,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
         PRINT *, 'No instant of time matching restart file has been found in Runtimedata.'
         PRINT *, 'Skipping one line and appending.'
         PRINT *, ''
+        WRITE(101,*) ''
       END IF
       PRINT *, 'In Runtimedata: starting from time', selectime
     END IF
