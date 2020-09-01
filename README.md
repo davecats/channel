@@ -96,13 +96,13 @@ The main program _channel_ must be run with mpi, in the following fashion:
 ```bash
 mpirun -np number_of_cores /path/to/channel
 ```
-where *number_of_cores* is indeed the number of cores used for parallel execution; it must be chosen so that _npxz_ is a divisor of _nx+1_ and _nzb_. While _nzb_ is printed out at the beginning of execution, _npxz_ can be found from *number_of_cores* with the following formula:
+where *number_of_cores* is indeed the number of cores used for parallel execution; it must be chosen so that _npxz_ is a divisor of _nx+1_ and _nzd_. While _nzd_ is printed out at the beginning of execution, _npxz_ can be found from *number_of_cores* with the following formula:
 ```
 number_of_cores = npxz*npy
 ```
 where _npy_ is defined in the file `mpi_transpose.f90` and is thus hardcoded. In a nutshell, two types of parallelisation are possible: in the statistically homogeneous directions x, z, and in the wall normal direction y. *npxz* specifies in how many subdivisions are performed for the parallelisation in x,z, while *npy* indicates the number of subdivisions in the y direction. Thus, the product of the two is the total number of parallel processes.
 
-> Hint: *nxd*, *nzd* (defined as 
+> Hint: *nzd* is always a power of 2 multiplied by 3; no other prime factors appear.
 
 #### Quick note on needed input files
 
