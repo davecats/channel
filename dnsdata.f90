@@ -158,7 +158,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
     REAL(C_DOUBLE), INTENT(IN) :: threshold
     REAL(C_DOUBLE) :: selectime,a,b,c,d,e,f,g,h,i,curr_dt
     INTEGER :: negative_if_eof = 0
-    LOGICAL :: end_of_file = .FALSE., threshold_reached
+    LOGICAL :: threshold_reached
     IF (has_terminal) THEN
       DO WHILE (.NOT. threshold_reached .AND. negative_if_eof >= 0)
         READ(101,*,IOSTAT=negative_if_eof) selectime,a,b,c,d,e,f,g,h,i,curr_dt
