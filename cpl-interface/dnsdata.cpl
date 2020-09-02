@@ -239,10 +239,10 @@ POINTER TO STORED STRUCTURE(
 #endif
 
 INTEGER cont=0,outcont=1000
-FILE time_file; IF has_terminal THEN time_file=CREATE("Runtimedata")
-#ifdef scalar
- FILE scalar_file; IF has_terminal THEN scalar_file=CREATE("Scalardata")
-#endif
+!FILE time_file; IF has_terminal THEN time_file=CREATE("Runtimedata")
+!#ifdef scalar
+! FILE scalar_file; IF has_terminal THEN scalar_file=CREATE("Scalardata")
+!#endif
 INTEGER miny,maxy
 IF first THEN miny=nyl-2; maxy=nyh   ELSE miny=nyl
 IF last  THEN miny=nyl;   maxy=nyh+2 ELSE maxy=nyh
@@ -318,13 +318,13 @@ IF outcont>0 THEN
 	  WRITE time:1.9, u1zero:1.9, SUM -d14n(i)*V(0,0,ny-1+i).u.REAL FOR i=-2 TO 2 :1.9,
         	w1zero :1.9, SUM -d14n(i)*V(0,0,ny-1+i).w.REAL FOR i=-2 TO 2 :1.9,
 		flowx,px+corrpx,flowz,pz+corrpz,cflm*deltat,deltat,energy,diss
-	  WRITE TO time_file time:1.9,
-        	u1zero:1.9, SUM -d14n(i)*V(0,0,ny-1+i).u.REAL FOR i=-2 TO 2 :1.9,
-	        w1zero :1.9, SUM -d14n(i)*V(0,0,ny-1+i).w.REAL FOR i=-2 TO 2 :1.9,
-	        flowx,px+corrpx,flowz,pz+corrpz,cflm*deltat,deltat,energy,diss; FLUSH(time_file)
-#ifdef scalar
-		WRITE TO scalar_file time:1.9, phi1zero, (SUM d14n(i)*phi(0,0,ny-1+i).REAL FOR ALL i); FLUSH(scalar_file)
-#endif
+	  !WRITE TO time_file time:1.9,
+    !    	u1zero:1.9, SUM -d14n(i)*V(0,0,ny-1+i).u.REAL FOR i=-2 TO 2 :1.9,
+	  !      w1zero :1.9, SUM -d14n(i)*V(0,0,ny-1+i).w.REAL FOR i=-2 TO 2 :1.9,
+	  !      flowx,px+corrpx,flowz,pz+corrpz,cflm*deltat,deltat,energy,diss; FLUSH(time_file)
+!#ifdef scalar
+!		WRITE TO scalar_file time:1.9, phi1zero, (SUM d14n(i)*phi(0,0,ny-1+i).REAL FOR ALL i); FLUSH(scalar_file)
+!#endif
 	END IF
 END IF
 
