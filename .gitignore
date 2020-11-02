@@ -1,3 +1,22 @@
+# Ignore all files without extension
+*
+!*.*
+!*/
+
+# Ignore Python cache
+__pycache__/
+*/__pycache__/
+*/*/__pycache__/
+*/*/*/__pycache__/
+*/*/*/*/__pycache__/
+
+# Ignore CPL cache
+.cpl/
+*/.cpl/
+*/*/.cpl/
+*/*/*/.cpl/
+*/*/*/*/.cpl/
+
 # Ignore compiled channel
 channel
 

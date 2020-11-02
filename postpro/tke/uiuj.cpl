@@ -1,0 +1,218 @@
+! This program computes the MKE and TKE budgets
+! and their volume integrals for a channel flow
+! with spanwise wall oscillations
+
+!
+! mean TKE buget according to equation:
+!
+! INST    --> dK/dt
+! CONV    --> Ui*dK/dxi
+! PROD    --> -<uiuj>dUj/dxi
+! DISS*   --> nu<(duj/dxi + dui/dxj)*duj/dxi>
+! TDIFF   --> -0.5*d/dxi<ui*uj*uj>
+! PDIFF   --> -d/dxi<ui*p>
+! VDIFF1  --> nu*d2K/dxi2
+! VDIFF2* --> nu*d2/dxjdxi<ui*uj>
+!
+! *-terms can be summed into the PDISS=nu*<duj/dxi*duj/dxi>
+!
+! which in a statistically stationary and fully-developed turbulent
+! channel flow with spanwise wall oscillations reduces to
+!
+! PROD  --> -<uv>dU/dy-<vw>dW/dy         [this is computed after the fields loop]
+! PDISS --> nu*<dui/dxj*dui/dxj>
+! TDIFF --> -0.5*d/dy(<vuu>+<vvv>+<vww>)
+! PDIFF --> -d/dy<vp>
+! VDIFF --> nu*d2K/dy2                   [this is computed after the fields loop]
+!
+
+!
+! MKE buget equation, which in a statistically stationary
+! and fully-developed turbulent channel flow
+! with spanwise wall oscillations reduces to
+!
+! pump  --> -dP/dx*U = tau_w*U
+! TPROD  --> <uv>dU/dy+<vw>dW/dy         [TKE production, here a sink]
+! ttrsp  --> -d(<uv>U)/dy-d(<vw>W)/dy
+! vdiff  --> ni*d(U*Uy)/dy+d(W*Wy)/dy
+! dissU  --> ni*dUdy^2
+! dissW  --> ni*dWdy^2
+!
+! all these terms are computed after the fields loop.
+
+! This code is NOT parallel
+
+gamma=0
+outinterv=10
+USE ../dnsdata
+USE ../dnsdirect
+!USE rtchecks
+USE ../convenience
+
+! Parameters
+! -----------------------------
+INTEGER nfmin,nfmax,dn
+nfmin=atoi(COMMANDLINE(4))
+nfmax=atoi(COMMANDLINE(5))
+dn=atoi(COMMANDLINE(6))
+!------------------------------
+nftot=[(nfmax-nfmin) DIV dn]+1
+
+! Definitions
+! ------------------------------------
+#define cprod(f,g,h) h.REAL=f.REAL*g.REAL; h.IMAG=f.IMAG*g.IMAG
+#define cprod3(f,g,k,h) h.REAL=f.REAL*g.REAL*k.REAL; h.IMAG=f.IMAG*g.IMAG*k.IMAG
+MEANTERMS = STRUCTURE(REAL U,W,Uy,Wy,Uyy,Wyy,P)
+MKETERMS = STRUCTURE(REAL pump,produv,prodvw,ttrsp,vdiff,dissU,dissW,PHIttrsp,PHIvdiff)
+BALANCE = STRUCTURE(ARRAY(1..6) OF REAL var,prod,psdiss,ttrsp,vdiff,pstrain,ptrsp,PHIttrsp,PHIvdiff,PHIptrsp)
+
+SHARED ARRAY(0..nx,-nz..nz,nyl-2..nyh+2) OF COMPLEX pressure=0
+SHARED ARRAY(0..nx,-nz..nz,nyl-2..nyh+2) OF DERIVS Vder=0
+POINTER TO STORED ARRAY(0..nx,-nz..nz,nyl-2..nyh+2) OF COMPLEX pressuredata
+
+SHARED ARRAY(0..nxd-1,0..nzd-1) OF DERIVS Vderd=0
+SHARED ARRAY(0..nxd-1,0..nzd-1) OF DERPRODSEXT VVderd=0
+SHARED ARRAY(0..nxd-1,0..nzd-1,1..6) OF COMPLEX PHIttrspd=0
+
+SHARED ARRAY(nyl-2..nyh+2) OF MEANTERMS mean=0
+SHARED ARRAY(nyl-2..nyh+2) OF BALANCE uiuj=0
+SHARED ARRAY(nyl-2..nyh+2) OF MKETERMS mke=0
+
+
+! Compute the average field
+! ------------------------------------
+LOOP files FOR n=nfmin TO nfmax BY dn
+  IF NOT first THEN READ FROM prev
+  STRING field_name = WRITE('Field'n'.fld')
+  STRING pressure_name = WRITE('pField'n'.fld')
+  diskfield=OPEN(field_name); pressuredata=OPEN(pressure_name)
+  WITH diskfield,mean(*):
+    U=~+uavimage(nyl-2..nyh+2); W=~+wavimage(nyl-2..nyh+2)
+    P=~+pressuredata(0,0,nyl-2..nyh+2).REAL
+  CLOSE(diskfield); CLOSE(pressuredata)
+  IF NOT last THEN WRITE TO next
+REPEAT files
+WITH mean: U=~/nftot; W=~/nftot; P=~/nftot
+WITH mean:  deriv(U, Uy);  LeftLUDivStep2(Uy,  D0mat); deriv(W, Wy);   LeftLUDivStep2(Wy, D0mat)
+WITH mean: deriv2(U, Uyy); LeftLUDivStep2(Uyy, D0mat) deriv2(W, Wyy); LeftLUDivStep2(Wyy, D0mat)
+     
+
+! Compute the TKE budget
+! ------------------------------------
+LOOP fields FOR n=nfmin TO nfmax BY dn
+  ! Read field
+  STRING field_name = WRITE('Field'n'.fld')
+  read_field_parallel(field_name)
+  ! Pressure field
+  STRING pressure_name = WRITE('pField'n'.fld'); pressuredata=OPEN(pressure_name)
+  pressure=pressuredata; CLOSE(pressuredata)
+  ! Compute fluctuating field
+  WITH mean(*),V(0,0,*),Vder(0,0,*): u.REAL=~-U; w.REAL=~-W; pressure(0,0,*)=~-P;
+  ! Compute derivatives
+  velocity_gradient(Vder)
+  ! Parseval theorem method for var and pstrain
+  LOOP FOR iy=nyl-2 TO nyh+2 WITH uiuj(iy):
+    LOOP FOR ALL ix,iz WITH V(ix,iz,iy),Vder(ix,iz,iy):
+      p == pressure(ix,iz,iy)
+      c=IF ix=0 THEN 1 ELSE 2
+      var(1) = ~ + c*(u|u).REAL; var(2) = ~ + c*(v|v).REAL; var(3) = ~ + c*(w|w).REAL
+      var(4) = ~ + c*(u|v).REAL; var(5) = ~ + c*(u|w).REAL; var(6) = ~ + c*(v|w).REAL
+      PHIptrsp(2) = ~ - 2*c*(v|p).REAL; PHIptrsp(4) = ~ - c*(u|p).REAL;  PHIptrsp(6) = ~ - c*(w|p).REAL
+      pstrain(1) = ~ + 2*c*[ux|p].REAL; pstrain(4) = ~ + c*[(uy|p)+(vx|p)].REAL
+      pstrain(2) = ~ + 2*c*[vy|p].REAL; pstrain(5) = ~ + c*[(uz|p)+(wx|p)].REAL
+      pstrain(3) = ~ + 2*c*[wz|p].REAL; pstrain(6) = ~ + c*[(vz|p)+(wy|p)].REAL
+    REPEAT
+  REPEAT
+  ! Pseudo-spectral method for psdiss and PHIttrsp
+  PARALLEL LOOP FOR ismp=0 TO nsmp-1
+  LOOP FOR iy=nyl-2 TO nyh+2
+    LOOP FOR ix=ismp*(nx+1) DIV nsmp TO (ismp+1)*(nx+1) DIV nsmp -1
+      Vderd(ix,0..nz)=Vder(ix,0..nz,iy); Vderd(ix,nz+1..nzd-nz-1)=0; Vderd(ix,nzd+(-nz..-1))=Vder(ix,-nz..-1,iy)
+      Vd(ix,0..nz)=V(ix,0..nz,iy);       Vd(ix,nz+1..nzd-nz-1)=0;    Vd(ix,nzd+(-nz..-1))=V(ix,-nz..-1,iy)
+      WITH Vderd(ix,*): INLINE LOOP FOR ii IN (ux,vx,wx,uy,vy,wy,uz,vz,wz); IFT(ii); REPEAT
+      WITH Vd(ix,*):    INLINE LOOP FOR i  IN (u,v,w); IFT(i); REPEAT
+    REPEAT LOOP
+    IF ismp=0 THEN Vd(nx+1..nxd-1)=0; Vderd(nx+1..nxd-1)=0
+    SYNC(ismp,nsmp)
+    DO
+      WITH Vderd(*,iz): INLINE LOOP FOR ii IN (ux,vx,wx,uy,vy,wy,uz,vz,wz); RFT(ii); REPEAT
+      WITH Vd(*,iz):    INLINE LOOP FOR i  IN (u,v,w); RFT(i); REPEAT
+      DO WITH Vderd(ix,iz), VVderd(ix,iz), Vd(ix,iz):
+          cprod(ux,ux,ux2);  cprod(uy,uy,uy2);  cprod(uz,uz,uz2);  cprod(vx,vx,vx2);  cprod(vy,vy,vy2);  cprod(vz,vz,vz2)
+          cprod(wx,wx,wx2);  cprod(wy,wy,wy2);  cprod(wz,wz,wz2);  cprod(ux,vx,uxvx); cprod(uy,vy,uyvy); cprod(uz,vz,uzvz)
+          cprod(ux,wx,uxwx); cprod(uy,wy,uywy); cprod(uz,wz,uzwz); cprod(vx,wx,vxwx); cprod(vy,wy,vywy); cprod(vz,wz,vzwz)
+          cprod3(v,u,u,PHIttrspd(ix,iz,1));   cprod3(v,v,v,PHIttrspd(ix,iz,2));    cprod3(v,w,w,PHIttrspd(ix,iz,3))
+          cprod3(u,v,v,PHIttrspd(ix,iz,4));   cprod3(u,v,w,PHIttrspd(ix,iz,5));    cprod3(v,v,w,PHIttrspd(ix,iz,6));
+      FOR ALL ix
+      WITH VVderd(*,iz): INLINE LOOP FOR iii IN (ux2,vx2,wx2,uy2,vy2,wy2,uz2,vz2,wz2,uxvx,uyvy,uzvz,uxwx,uywy,uzwz,vxwx,vywy,vzwz); HFT(iii); REPEAT
+      DO HFT(PHIttrspd(*,iz,i)) FOR ALL i
+    FOR iz=ismp*(HI+1) DIV nsmp TO (ismp+1)*(HI+1) DIV nsmp -1
+    SYNC(ismp,nsmp)
+    DO WITH VVderd(ix,*):
+      INLINE LOOP FOR iii IN (ux2,vx2,wx2,uy2,vy2,wy2,uz2,vz2,wz2,uxvx,uyvy,uzvz,uxwx,uywy,uzwz,vxwx,vywy,vzwz); FFT(iii); REPEAT
+      DO FFT(PHIttrspd(ix,*,i)); FOR ALL i
+    FOR ix=ismp*(nx+1) DIV nsmp TO (ismp+1)*(nx+1) DIV nsmp -1
+    SYNC(ismp,nsmp)
+    IF ismp=0 THEN WITH VVderd(0,0), uiuj(iy):
+      psdiss(1)=~-2*ni*REAL[ux2+uy2+uz2]; psdiss(4)=~-2*ni*REAL[uxvx+uyvy+uzvz]; PHIttrsp(1)=~-PHIttrspd(0,0,1).REAL; PHIttrsp(4)=~-PHIttrspd(0,0,4).REAL
+      psdiss(2)=~-2*ni*REAL[vx2+vy2+vz2]; psdiss(5)=~-2*ni*REAL[uxwx+uywy+uzwz]; PHIttrsp(2)=~-PHIttrspd(0,0,2).REAL; PHIttrsp(4)=~-PHIttrspd(0,0,5).REAL
+      psdiss(3)=~-2*ni*REAL[wx2+wy2+wz2]; psdiss(6)=~-2*ni*REAL[vxwx+vywy+vzwz]; PHIttrsp(3)=~-PHIttrspd(0,0,3).REAL; PHIttrsp(4)=~-PHIttrspd(0,0,6).REAL
+    END IF
+  REPEAT LOOP
+  REPEAT LOOP
+REPEAT fields
+! var,PHIttrsp,psdiss,pstrain
+DO WITH uiuj(iy): var(i)=~/nftot; PHIptrsp(i)=~/nftot; PHIttrsp(i)=~/nftot; psdiss(i)=~/nftot; pstrain(i)=~/nftot FOR ALL i,iy
+! PHIvdiff, vdiff
+DO WITH uiuj:  deriv(var(*,i),PHIvdiff(*,i)); LeftLUDivStep2(PHIvdiff(*,i),D0mat); PHIvdiff(*,i)=~*ni; FOR ALL i;
+DO WITH uiuj: deriv2(var(*,i),vdiff(*,i));    LeftLUDivStep2(vdiff(*,i),D0mat);    vdiff(*,i)=~*ni;    FOR ALL i;
+! ttrsp
+DO WITH uiuj: deriv(PHIttrsp(*,i),ttrsp(*,i)); LeftLUDivStep2(ttrsp(*,i),D0mat); FOR ALL i;
+! ptrsp
+DO WITH uiuj: deriv(PHIptrsp(*,i),ptrsp(*,i)); LeftLUDivStep2(ptrsp(*,i),D0mat); FOR ALL i;
+! prod
+DO WITH mean(iy), uiuj(iy): prod(1)=-2*var(4)*Uy; prod(3)=-2*var(6)*Wy; prod(4)=-var(2)*Uy; prod(5)=-var(4)*Wy-var(6)*Uy; prod(6)=-var(2)*Wy; FOR ALL iy
+DO WITH mean(iy), uiuj(iy), mke(iy): produv=-prod(1)*0.5; prodvw=-prod(3)*0.5 FOR ALL iy
+! dissU(MKE) and dissW(MKE)
+DO WITH mean(iy), mke(iy): dissU=-ni*Uy^2; dissW=-ni*Wy^2 FOR ALL iy
+! ttrsp(MKE)
+DO WITH mean(iy), uiuj(iy), mke(iy): mke(iy).PHIttrsp=-var(4)*U-var(6)*W FOR ALL iy
+WITH mke: deriv(PHIttrsp,ttrsp);  LeftLUDivStep2(ttrsp,D0mat);
+! vdiff(MKE)
+DO WITH mean(iy), mke(iy): PHIvdiff=ni*(U*Uy+W*Wy) FOR ALL iy
+WITH mke: deriv(PHIvdiff,vdiff);  LeftLUDivStep2(vdiff,D0mat);
+! pump(MKE)
+REAL Uy0,Uym
+IF first THEN WITH mean: Uy0=Uy(0)
+IF NOT first THEN READ FROM prev Uy0
+IF NOT last  THEN WRITE TO next Uy0
+IF last  THEN WITH mean: Uym=0.5*(Uy0-Uy(ny))
+IF NOT last THEN READ FROM next Uym
+IF NOT first THEN WRITE TO prev Uym
+WITH mke,mean: pump=ni*Uym*U
+
+! Write to binary file
+! ------------------------------------
+POINTER TO STORED STRUCTURE[
+        INTEGER nmin, nmax, deltan, ntot
+        ARRAY(-1..ny+1) OF MEANTERMS meandata
+        ARRAY(-1..ny+1) OF MKETERMS mkedata
+        ARRAY(-1..ny+1) OF BALANCE uiujdata
+] uiujimage
+IF NOT first THEN READ FROM prev
+  uiujimage = OPEN("uiuj.bin")
+  WITH uiujimage:
+    nmin = nfmin
+    nmax = nfmax
+    deltan = dn
+    ntot = nftot
+    meandata(miny..maxy)=mean(miny..maxy)
+    mkedata(miny..maxy)=mke(miny..maxy)
+    uiujdata(miny..maxy)=uiuj(miny..maxy)
+  CLOSE(uiujimage)
+IF NOT last THEN WRITE TO next
+
+! Be polite and say goodbye
+! ------------------------------------
+WRITE " "
+WRITE "Goodbye, man!"

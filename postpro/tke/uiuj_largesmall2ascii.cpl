@@ -1,0 +1,107 @@
+! This program converst the output tke.bin of tke.cpl
+! into several human-readable ASCII files that represents
+! the energy box. This is needed because ASCII writing is
+! typically done serially.
+
+gamma=0
+outinterv=10
+USE ../dnsdata
+USE ../dnsdirect
+USE rtchecks
+USE ../convenience
+
+
+
+! Definitions
+! ------------------------------------
+
+#define sumint(g) [SUM yintf(g(*,i)) FOR i=1 TO 3]
+
+ARRAY(1..12) OF STRING terms, intterms
+terms(1)="uu_large.dat"; terms(2)="vv_large.dat"; terms(3)="ww_large.dat"; terms(4)="uv_large.dat"; terms(5)="uw_large.dat"; terms(6)="vw_large.dat"
+terms(7)="uu_small.dat"; terms(8)="vv_small.dat"; terms(9)="ww_small.dat"; terms(10)="uv_small.dat"; terms(11)="uw_small.dat"; terms(12)="vw_small.dat"
+intterms(1)="uuintegrals_large.dat"; intterms(2)="vvintegrals_large.dat"; intterms(3)="wwintegrals_large.dat";
+intterms(4)="uvintegrals_large.dat"; intterms(5)="uwintegrals_large.dat"; intterms(6)="vwintegrals_large.dat"
+intterms(7)="uuintegrals_small.dat"; intterms(8)="vvintegrals_small.dat"; intterms(9)="wwintegrals_small.dat";
+intterms(10)="uvintegrals_small.dat"; intterms(11)="uwintegrals_small.dat"; intterms(12)="vwintegrals_small.dat"
+
+! definitions below must match the ones in uiuj_largesmall
+MEANTERMS = STRUCTURE(REAL U,W,Uy,Wy,Uyy,Wyy,P)
+BALANCE = STRUCTURED ARRAY(var,prod,psdiss,ttrsp,tcross,vdiff,pstrain,ptrsp,PHIttrsp,PHIvdiff,PHIptrsp) OF ARRAY(1..6) OF REAL
+POINTER TO STORED STRUCTURE[
+        INTEGER nmin, nmax, deltan, ntot
+        ARRAY(-1..ny+1) OF MEANTERMS meandata
+        ARRAY(-1..ny+1) OF BALANCE luiujprofilesdata
+        ARRAY(-1..ny+1) OF BALANCE suiujprofilesdata
+] uiujimage
+
+
+
+! Write to ASCII file
+! ------------------------------------
+! reynolds tensor
+uiujimage = OPEN("uiuj_largesmall.bin")
+LOOP FOR i=1 TO 12
+  FILE outfile=CREATE(terms(i))
+  WITH uiujimage WRITE TO outfile "Averaged on fields from " nmin " to " nmax " with dn=" deltan "; total number of fields = " ntot
+  WRITE TO outfile "y","var","prod","psdiss","ttrsp","tcross","vdiff","pstrain","ptrsp","PHIttrsp","PHIvdiff","PHIptrsp"
+  IF i<=6 THEN
+    DO WITH uiujimage.luiujprofilesdata(iy):
+      WRITE TO outfile y(iy),var(i),prod(i),psdiss(i),ttrsp(i),tcross(i),vdiff(i),pstrain(i),ptrsp(i),PHIttrsp(i),PHIvdiff(i),PHIptrsp(i)
+    FOR iy=0 TO ny
+  ELSE
+    DO WITH uiujimage.suiujprofilesdata(iy):
+      WRITE TO outfile y(iy),var(i-6),prod(i-6),psdiss(i-6),ttrsp(i-6),tcross(i-6),vdiff(i-6),pstrain(i-6),ptrsp(i-6),PHIttrsp(i-6),PHIvdiff(i-6),PHIptrsp(i-6)
+    FOR iy=0 TO ny
+  END IF
+  CLOSE(outfile)
+REPEAT
+! reynolds tensor - integrals
+LOOP FOR i=1 TO 12
+  FILE outfile=CREATE(intterms(i))
+  WITH uiujimage WRITE TO outfile "Averaged on fields from " nmin " to " nmax " with dn=" deltan "; total number of fields = " ntot
+  WRITE TO outfile "var","prod","psdiss","ttrsp","tcross","vdiff","pstrain","ptrsp"
+  IF i<=6 THEN
+    WITH uiujimage.luiujprofilesdata: WRITE TO outfile yintf(var(*,i)),yintf(prod(*,i)),yintf(psdiss(*,i)),yintf(ttrsp(*,i)),yintf(tcross(*,i)),
+                                            yintf(vdiff(*,i)),yintf(pstrain(*,i)),yintf(ptrsp(*,i))
+  ELSE
+    WITH uiujimage.suiujprofilesdata: WRITE TO outfile yintf(var(*,i-6)),yintf(prod(*,i-6)),yintf(psdiss(*,i-6)),yintf(ttrsp(*,i-6)),yintf(tcross(*,i-6)),
+                                            yintf(vdiff(*,i-6)),yintf(pstrain(*,i-6)),yintf(ptrsp(*,i-6))
+  END IF
+  CLOSE(outfile)
+REPEAT
+! tke
+FILE outfile=CREATE("tke_large.dat")
+WITH uiujimage WRITE TO outfile "Averaged on fields from " nmin " to " nmax " with dn=" deltan "; total number of fields = " ntot
+WRITE TO outfile "y","var","prod","psdiss","ttrsp","tcross","vdiff","pstrain","ptrsp","PHIttrsp","PHIvdiff","PHIptrsp"
+DO WITH uiujimage.luiujprofilesdata(iy):
+  WRITE TO outfile y(iy),SUM(var(1..3))/2,SUM(prod(1..3))/2,SUM(psdiss(1..3))/2,SUM(ttrsp(1..3))/2,SUM(tcross(1..3))/2,SUM(vdiff(1..3))/2,
+                   SUM(pstrain(1..3))/2,SUM(ptrsp(1..3))/2,SUM(PHIttrsp(1..3))/2,SUM(PHIvdiff(1..3))/2,SUM(PHIptrsp(1..3))/2
+FOR iy=0 TO ny
+CLOSE(outfile)
+FILE outfile=CREATE("tke_small.dat")
+WITH uiujimage WRITE TO outfile "Averaged on fields from " nmin " to " nmax " with dn=" deltan "; total number of fields = " ntot
+WRITE TO outfile "y","var","prod","psdiss","ttrsp","tcross","vdiff","pstrain","ptrsp","PHIttrsp","PHIvdiff","PHIptrsp"
+DO WITH uiujimage.suiujprofilesdata(iy):
+  WRITE TO outfile y(iy),SUM(var(1..3))/2,SUM(prod(1..3))/2,SUM(psdiss(1..3))/2,SUM(ttrsp(1..3))/2,SUM(tcross(1..3))/2,SUM(vdiff(1..3))/2,
+                   SUM(pstrain(1..3))/2,SUM(ptrsp(1..3))/2,SUM(PHIttrsp(1..3))/2,SUM(PHIvdiff(1..3))/2,SUM(PHIptrsp(1..3))/2
+FOR iy=0 TO ny
+CLOSE(outfile)
+! tke - integrals
+FILE outfile=CREATE("tkeintegrals_large.dat")
+WITH uiujimage WRITE TO outfile "Averaged on fields from " nmin " to " nmax " with dn=" deltan "; total number of fields = " ntot
+WRITE TO outfile "var","prod","psdiss","ttrsp","tcross","vdiff","pstrain","ptrsp"
+WITH uiujimage.luiujprofilesdata(*): WRITE TO outfile sumint(var)/2,sumint(prod)/2,sumint(psdiss)/2,sumint(ttrsp)/2,sumint(tcross)/2,sumint(vdiff)/2,sumint(pstrain)/2,sumint(ptrsp)/2
+CLOSE(outfile)
+FILE outfile=CREATE("tkeintegrals_small.dat")
+WITH uiujimage WRITE TO outfile "Averaged on fields from " nmin " to " nmax " with dn=" deltan "; total number of fields = " ntot
+WRITE TO outfile "var","prod","psdiss","ttrsp","tcross","vdiff","pstrain","ptrsp"
+WITH uiujimage.suiujprofilesdata(*): WRITE TO outfile sumint(var)/2,sumint(prod)/2,sumint(psdiss)/2,sumint(ttrsp)/2,sumint(tcross)/2,sumint(vdiff)/2,sumint(pstrain)/2,sumint(ptrsp)/2
+CLOSE(outfile)
+! mean
+FILE outfile=CREATE("mean.dat")
+WITH uiujimage WRITE TO outfile "Averaged on fields from " nmin " to " nmax " with dn=" deltan "; total number of fields = " ntot
+WRITE TO outfile "y","U","W","Uy","Wy","Uyy","Wyy"
+DO WITH uiujimage.meandata(iy): WRITE TO outfile y(iy),U,W,Uy,Wy,Uyy,Wyy FOR iy=0 TO ny
+CLOSE(outfile)
+CLOSE(uiujimage)

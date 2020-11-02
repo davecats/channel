@@ -1,4 +1,4 @@
-!USE rtchecks
+! USE rtchecks
 USE fft
 USE rbmat
 USE parallel
@@ -39,12 +39,15 @@ SUBROUTINE read_initial_data
  READ FROM in_data alfa0,beta0
  READ FROM in_data ni; ni=1/ni; pr=1.0; gr=1.0 ! XXX ADD SCALAR SOONER OR LATER
  READ FROM in_data a, ymin, ymax
+ READ FROM in_data ! this ends previous line (the one of a, ymin, ymax)
+ READ FROM in_data ! this skips line of cpi
  READ FROM in_data meanpx, meanpz
  READ FROM in_data meanflowx, meanflowz
+ READ FROM in_data u0, un
  READ FROM in_data deltat, cflmax, time
  
  u_conv=0.0; w_conv=0.0
- u0=0.0; un=0.0; w0=0.0; wn=0.0; t0=0.0; tn=0.0
+ u0=-0.0; un=0.0; w0=0.0; wn=0.0; t0=0.0; tn=0.0
  t_max=100; time_from_restart=NO; dt_field=100; dt_save=100
  restart_file="Dati.cart.out"
  CLOSE in_data
