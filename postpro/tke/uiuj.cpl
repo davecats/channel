@@ -1,3 +1,9 @@
+! TODO: verify parallelisation!
+
+
+
+
+
 ! This program computes the MKE and TKE budgets
 ! and their volume integrals for a channel flow
 ! with spanwise wall oscillations
@@ -81,15 +87,22 @@ SHARED ARRAY(nyl-2..nyh+2) OF MKETERMS mke=0
 
 ! Compute the average field
 ! ------------------------------------
+WRITE "Computing average..."
 LOOP files FOR n=nfmin TO nfmax BY dn
   IF NOT first THEN READ FROM prev
-  STRING field_name = WRITE('Field'n'.fld')
+  STRING field_name = WRITE('Dati.cart.'n'.out')
   STRING pressure_name = WRITE('pField'n'.fld')
-  diskfield=OPEN(field_name); pressuredata=OPEN(pressure_name)
-  WITH diskfield,mean(*):
-    U=~+uavimage(nyl-2..nyh+2); W=~+wavimage(nyl-2..nyh+2)
+  INTEGER sz=SIZEOF(INTEGER)*3+SIZEOF(REAL)*7
+  POINTER TO STORED STRUCTURE(
+    ARRAY(0..sz-1) OF CHAR dummy
+    ARRAY(0..2,0..nx,-nz..nz,-1..ny+1) OF COMPLEX fieldimage_fortran
+  ) diskfield_fortran
+  diskfield_fortran=OPEN(field_name); pressuredata=OPEN(pressure_name)
+  WITH diskfield_fortran,mean(*):
+    U=~+fieldimage_fortran(0,0,0,nyl-2..nyh+2).REAL
+    W=~+fieldimage_fortran(2,0,0,nyl-2..nyh+2).REAL
     P=~+pressuredata(0,0,nyl-2..nyh+2).REAL
-  CLOSE(diskfield); CLOSE(pressuredata)
+  CLOSE(diskfield_fortran); CLOSE(pressuredata)
   IF NOT last THEN WRITE TO next
 REPEAT files
 WITH mean: U=~/nftot; W=~/nftot; P=~/nftot
@@ -101,8 +114,8 @@ WITH mean: deriv2(U, Uyy); LeftLUDivStep2(Uyy, D0mat) deriv2(W, Wyy); LeftLUDivS
 ! ------------------------------------
 LOOP fields FOR n=nfmin TO nfmax BY dn
   ! Read field
-  STRING field_name = WRITE('Field'n'.fld')
-  read_field_parallel(field_name)
+  STRING field_name = WRITE('Dati.cart.'n'.out')
+  read_field_fortran(field_name)
   ! Pressure field
   STRING pressure_name = WRITE('pField'n'.fld'); pressuredata=OPEN(pressure_name)
   pressure=pressuredata; CLOSE(pressuredata)
@@ -191,6 +204,14 @@ IF NOT last THEN READ FROM next Uym
 IF NOT first THEN WRITE TO prev Uym
 WITH mke,mean: pump=ni*Uym*U
 
+! Create output directory
+! ------------------------------------
+<*
+#include <sys/stat.h>
+#include <sys/types.h>
+int ifold_create = mkdir("profiles", 0777);
+*>
+
 ! Write to binary file
 ! ------------------------------------
 POINTER TO STORED STRUCTURE[
@@ -200,7 +221,7 @@ POINTER TO STORED STRUCTURE[
         ARRAY(-1..ny+1) OF BALANCE uiujdata
 ] uiujimage
 IF NOT first THEN READ FROM prev
-  uiujimage = OPEN("uiuj.bin")
+  uiujimage = OPEN("profiles/uiuj.bin")
   WITH uiujimage:
     nmin = nfmin
     nmax = nfmax

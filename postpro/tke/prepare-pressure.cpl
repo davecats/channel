@@ -22,13 +22,13 @@ SHARED ARRAY(0..nx,-nz..nz,nyl-2..nyh+2) OF COMPLEX pressure=0
 SHARED ARRAY(0..nx,-nz..nz,nyl-2..nyh+2) OF DERIVS Vder=0
 POINTER TO STORED ARRAY(0..nx,-nz..nz,nyl-2..nyh+2) OF COMPLEX pressuredata
 
-USE ../poisson/poisson
+USE ../poisson
 
 ! Compute the pressure field
 ! ------------------------------------
 LOOP files FOR n=nfmin TO nfmax BY dn
-  STRING field_name = WRITE('Field'n'.fld')
-  read_field_parallel(field_name)
+  STRING field_name = WRITE('Dati.cart.'n'.out')
+  read_field_fortran(field_name)
   compute_pressure(Vder,pressure)
   STRING pfield_name = WRITE('pField'n'.fld')
   pressuredata = CREATE(pfield_name)

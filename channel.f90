@@ -20,6 +20,7 @@ PROGRAM channel
   REAL timei,timee
 #endif
   REAL(C_DOUBLE) :: frl(1:3)
+  CHARACTER(len = 40) :: end_filename
 
   ! Init MPI
   CALL MPI_INIT(ierr)
@@ -50,7 +51,7 @@ PROGRAM channel
 #endif
 
   ! Field number (for output)
-  ifield=FLOOR(time/dt_field)
+  ifield=FLOOR(time/dt_field + 0.5*deltat/dt_field)
   time0=time
 
 IF (has_terminal) THEN
@@ -113,6 +114,7 @@ END IF
     IF (has_terminal) WRITE(*,*) timee-timei
 #endif
   END DO timeloop
+  end_filename="Dati.cart.out";  CALL save_restart_file(end_filename,V)
   IF (has_terminal) CLOSE(102)
   ! Realease memory
   CALL free_fft()

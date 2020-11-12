@@ -2,7 +2,7 @@
 ARRAY(0..nx,-nz..nz) OF STRUCTURE(COMPLEX u,v,w,vy,eta,ph) bc0=0, bcn=0
 SUBROUTINE buildrhs[SUBROUTINE(COMPLEX rhs^,old^(*),unknown,implicit_part,explicit_part) timescheme] FOLLOWS
 SUBROUTINE linsolve(REAL lambda) FOLLOWS
-SUBROUTINE vetaTOuvw FOLLOWS
+!SUBROUTINE vetaTOuvw FOLLOWS
 COMPLEX FUNCTION calcp0(INTEGER ix,iz) FOLLOWS
 COMPLEX FUNCTION calcpn(INTEGER ix,iz) FOLLOWS
 SUBROUTINE computeflowrate(REAL lambda) FOLLOWS
@@ -357,31 +357,31 @@ END IF
 LeftLUDivStep1(f1,D0mat,f1)
 END deriv
 
-SUBROUTINE vetaTOuvw
-! Remember: eta=+I*beta*u-I*alfa*w
-WITH V(0,0,*): w.REAL=u.IMAG; u.IMAG=0; w.IMAG=0
-LOOP FOR ALL ix,iz EXCEPT ix=0 AND iz=0
-  WITH V(ix,iz,*):
-  deriv(v.REAL,w.REAL)
-  deriv(v.IMAG,w.IMAG)
-REPEAT
-FlushStep1
-LOOP FOR ALL ix
-  alfa=alfa0*ix
-  LOOP FOR ALL iz EXCEPT ix=0 AND iz=0
-    WITH V(ix,iz,*):
-    LeftLUDivStep2(w.REAL,D0mat)
-    LeftLUDivStep2(w.IMAG,D0mat)
-    FlushStep2
-    beta=beta0*iz; k2=alfa^2+beta^2
-    DO temp=I*(alfa*w(iy)-beta*u(iy))/k2
-      w(iy)=I*(beta*w(iy)+alfa*u(iy))/k2
-      u(iy)=temp
-    FOR ALL iy
-  REPEAT
-REPEAT
-FlushStep2
-END vetaTOuvw
+!SUBROUTINE vetaTOuvw
+!! Remember: eta=+I*beta*u-I*alfa*w
+!WITH V(0,0,*): w.REAL=u.IMAG; u.IMAG=0; w.IMAG=0
+!LOOP FOR ALL ix,iz EXCEPT ix=0 AND iz=0
+!  WITH V(ix,iz,*):
+!  deriv(v.REAL,w.REAL)
+!  deriv(v.IMAG,w.IMAG)
+!REPEAT
+!FlushStep1
+!LOOP FOR ALL ix
+!  alfa=alfa0*ix
+!  LOOP FOR ALL iz EXCEPT ix=0 AND iz=0
+!    WITH V(ix,iz,*):
+!    LeftLUDivStep2(w.REAL,D0mat)
+!    LeftLUDivStep2(w.IMAG,D0mat)
+!    FlushStep2
+!    beta=beta0*iz; k2=alfa^2+beta^2
+!    DO temp=I*(alfa*w(iy)-beta*u(iy))/k2
+!      w(iy)=I*(beta*w(iy)+alfa*u(iy))/k2
+!      u(iy)=temp
+!    FOR ALL iy
+!  REPEAT
+!REPEAT
+!FlushStep2
+!END vetaTOuvw
 
 SUBROUTINE computeflowrate(REAL lambda)
   REAL ucorr(nyl-2..nyh+2)=0

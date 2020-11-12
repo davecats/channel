@@ -65,6 +65,7 @@ channel
 *.pdb
 
 # Kernel Module Compile Results
+*.pyc
 *.mod*
 *.cmd
 .tmp_versions/

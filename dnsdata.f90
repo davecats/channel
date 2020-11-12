@@ -177,6 +177,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
         WRITE(101,*) ''
       END IF
       PRINT *, 'In Runtimedata: starting from time', selectime
+      deltat = curr_dt
     END IF
   END SUBROUTINE get_record
 
@@ -812,5 +813,31 @@ logical::rtd_exists ! flag to check existence of Runtimedata
 #endif
    END IF
   END SUBROUTINE outstats
+
+
+  !--------------------------------------------------------------!
+  !------------------------- filedmap ---------------------------!
+  ! access a field on disk without loading it in memory
+  function fieldmap(unit, iy_zero, iz_zero, ix_zero, ic_zero) result(element)
+        integer, intent(in) :: unit, ix_zero, iy_zero, iz_zero, ic_zero
+        integer(C_SIZE_T) :: ix, iy, iz, ic
+        complex(C_DOUBLE_COMPLEX) :: element
+        integer(C_SIZE_T) :: position, el_idx ! position
+        integer :: base = 3*C_INT + 7*C_DOUBLE ! base address
+        
+        ! calculate indices starting from 1
+        ix = ix_zero + 1
+        iz = iz_zero + nz + 1
+        iy = iy_zero + 2
+        ic = ic_zero
+
+        ! calculate position
+        el_idx = (ic-1_C_SIZE_T)*(nx+1_C_SIZE_T)*(2_C_SIZE_T*nz+1_C_SIZE_T)*(ny+3_C_SIZE_T) + (ix-1_C_SIZE_T)*(2_C_SIZE_T*nz+1_C_SIZE_T)*(ny+3_C_SIZE_T) + (iz-1_C_SIZE_T)*(ny+3_C_SIZE_T) + iy
+        position = base + 1_C_SIZE_T + (el_idx - 1) * 2*C_DOUBLE_COMPLEX
+
+        ! read element
+        read(unit,pos=position) element
+
+    end function
 
 END MODULE dnsdata

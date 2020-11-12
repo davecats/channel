@@ -1,2 +1,2 @@
-from dns_channel.spectra.plot_spectra import *
-from dns_channel.spectra.read_psd import *
+from channel.postpro.spectra.plot_spectra import *
+from channel.postpro.spectra.read_psd import *

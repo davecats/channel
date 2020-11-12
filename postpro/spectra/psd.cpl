@@ -55,14 +55,20 @@ POINTER TO STORED STRUCTURE[
 ] psd_file
 
 ! Compute the average field
+WRITE "Computing average..."
 LOOP FOR n=nfmin TO nfmax
-  STRING field_name = WRITE('Field'n'.fld')
+  STRING field_name = WRITE('Dati.cart.'n'.out')
   IF NOT first THEN READ FROM prev
-  diskfield=OPEN(field_name)
-  WITH diskfield,meandata(*):
-    U=~+uavimage(nyl-2..nyh+2)
-    W=~+wavimage(nyl-2..nyh+2)
-  CLOSE diskfield
+  INTEGER sz=SIZEOF(INTEGER)*3+SIZEOF(REAL)*7
+  POINTER TO STORED STRUCTURE(
+    ARRAY(0..sz-1) OF CHAR dummy
+    ARRAY(0..2,0..nx,-nz..nz,-1..ny+1) OF COMPLEX fieldimage_fortran
+  ) diskfield_fortran
+  diskfield_fortran=OPEN(field_name);
+  WITH diskfield_fortran,meandata(*):
+    U=~+fieldimage_fortran(0,0,0,nyl-2..nyh+2).REAL
+    W=~+fieldimage_fortran(2,0,0,nyl-2..nyh+2).REAL
+  CLOSE diskfield_fortran
   IF NOT last THEN WRITE TO next
 REPEAT 
 DO WITH meandata(iy): U=U/nftot; W=W/nftot; FOR ALL iy 
@@ -70,8 +76,8 @@ DO WITH meandata(iy): U=U/nftot; W=W/nftot; FOR ALL iy
 ! Main loop on files
 LOOP files FOR n=nfmin TO nfmax
     ! Read field
-    STRING field_name = WRITE('Field'n'.fld')
-    read_field_parallel(field_name)
+    STRING field_name = WRITE('Dati.cart.'n'.out')
+    read_field_fortran(field_name)
     WITH V(0,0,*),meandata(*): u=~-U; w=~-W
     ! Compute PSD and CSD
     DO
@@ -84,10 +90,18 @@ REPEAT files
 ! Average
 DO psd(ic,iy,iz,ix) = ~ / nftot FOR ALL ic,iy,iz,ix
 
+! Create output directory
+! ------------------------------------
+<*
+#include <sys/stat.h>
+#include <sys/types.h>
+int ifold_create = mkdir("spectra", 0777);
+*>
+
 ! Save to binary
 IF has_terminal THEN WRITE "Saving to psd.bin"
 IF NOT first THEN READ FROM prev
-	psd_file = OPEN('psd.bin')
+	psd_file = OPEN('spectra/psd.bin')
   LOOP FOR   ic = 1 TO 6   AND   iy = 0 TO ny   AND   iz = 0 TO nz   AND   ix = 0 TO nx
     IF iz = 0 THEN
       WITH psd_file: psd_image(ic,iy,iz,ix) = psd(ic,iy,iz,ix)
@@ -98,5 +112,14 @@ IF NOT first THEN READ FROM prev
 	CLOSE psd_file
 IF NOT last THEN WRITE TO next
 
+! add metadata to spectra folder
+IF first THEN
+  FILE metadata_file
+  metadata_file=OPEN("spectra/psd_metadata.txt")
+  WRITE TO metadata_file "Tot. fields used for calculation of spectra: ", nftot
+  WRITE TO metadata_file "nmin: ", nfmin
+  WRITE TO metadata_file "nmax: ", nfmax
+  WRITE TO metadata_file "dn:   ", dn
+END IF
 ! Be polite and say goodbye
 WRITE "Goodbye, man!"
