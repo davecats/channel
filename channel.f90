@@ -114,6 +114,7 @@ END IF
     IF (has_terminal) WRITE(*,*) timee-timei
 #endif
   END DO timeloop
+  IF (has_terminal) WRITE(*,*) "End of time loop: writing Dati.cart.out at time ", time
   end_filename="Dati.cart.out";  CALL save_restart_file(end_filename,V)
   IF (has_terminal) CLOSE(102)
   ! Realease memory
