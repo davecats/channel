@@ -145,7 +145,15 @@ logical::rtd_exists ! flag to check existence of Runtimedata
         WRITE(*,*) 'Found existing Runtimedata...'
         OPEN(UNIT=101,FILE='Runtimedata',ACTION='readwrite')
       ELSE
-        WRITE(*,*) 'Creating new Runtimedata...'
+        IF (time_from_restart) THEN
+          WRITE(*,*) 'Runtimedata not found...'
+#ifdef cluster_mode
+          WRITE(*,*) 'Stopping!'
+          STOP
+#endif
+          CALL wanna_continue()
+        END IF
+        WRITE(*,*) 'Creating new Runtimedata.'
         OPEN(UNIT=101,FILE='Runtimedata',ACTION='write')
       END IF
     END IF
@@ -157,27 +165,33 @@ logical::rtd_exists ! flag to check existence of Runtimedata
   IMPLICIT NONE
     REAL(C_DOUBLE), INTENT(IN) :: threshold
     REAL(C_DOUBLE) :: selectime,a,b,c,d,e,f,g,h,i,curr_dt
-    INTEGER :: negative_if_eof = 0
+    INTEGER :: negative_if_eof = 0, cntr = 0
     LOGICAL :: threshold_reached
     IF (has_terminal) THEN
       DO WHILE (.NOT. threshold_reached .AND. negative_if_eof >= 0)
         READ(101,*,IOSTAT=negative_if_eof) selectime,a,b,c,d,e,f,g,h,i,curr_dt
         threshold_reached = ABS(selectime - threshold) < (0.5*curr_dt)
+        cntr = cntr+1
       END DO
       IF (negative_if_eof >= 0) THEN
         BACKSPACE(101)
+        PRINT *, 'In Runtimedata: starting from time', selectime
+        deltat = curr_dt
       ELSE
         PRINT *, ''
         PRINT *, '###############'
         PRINT *, '#   WARNING   #'
         PRINT *, '###############'
         PRINT *, 'No instant of time matching restart file has been found in Runtimedata.'
-        PRINT *, 'Skipping one line and appending.'
         PRINT *, ''
         WRITE(101,*) ''
+#ifdef cluster_mode
+        WRITE(*,*) 'Stopping!'
+        STOP
+#endif
+        CALL wanna_continue()
+        PRINT *, 'Skipping one line and appending.'
       END IF
-      PRINT *, 'In Runtimedata: starting from time', selectime
-      deltat = curr_dt
     END IF
   END SUBROUTINE get_record
 
@@ -789,14 +803,18 @@ logical::rtd_exists ! flag to check existence of Runtimedata
    END IF
    runtime_global=0
    !Save Dati.cart.out
+#ifndef cluster_mode
    IF ( ((FLOOR((time+0.5*deltat)/dt_save) > FLOOR((time-0.5*deltat)/dt_save)) .AND. (istep>1)) .OR. istep==nstep ) THEN
      IF (has_terminal) WRITE(*,*) "Writing Dati.cart.out at time ", time
      filename="Dati.cart.out";  CALL save_restart_file(filename,V)
+   END IF
+#endif
 #ifdef ibm
+   IF ( ((FLOOR((time+0.5*deltat)/dt_save) > FLOOR((time-0.5*deltat)/dt_save)) .AND. (istep>1)) .OR. istep==nstep ) THEN
      IF (has_terminal) WRITE(*,*) "Writing dUint.cart.out at time ", time
      filename="dUint.cart.out"; CALL save_body_file(filename,dUint(:,:,:,:,0))
-#endif 
    END IF
+#endif
    IF ( (FLOOR((time+0.5*deltat)/dt_field) > FLOOR((time-0.5*deltat)/dt_field)) .AND. (time>time0) ) THEN
      ifield=ifield+1; WRITE(istring,*) ifield
      IF (has_terminal) WRITE(*,*) "Writing Dati.cart."//TRIM(ADJUSTL(istring))//".out at time ", time
@@ -839,5 +857,19 @@ logical::rtd_exists ! flag to check existence of Runtimedata
         read(unit,pos=position) element
 
     end function
+
+
+!--------------------------------------------------------------!
+!---------------------- wanna_continue ------------------------!
+! asks user whether to continue or not; possibly stops execution
+    SUBROUTINE wanna_continue()
+      character :: yn 
+
+      IF (has_terminal) THEN
+        WRITE(*,"(a,$)"), "Do you want to continue? (y/n) "
+        READ(*,*) yn
+        IF (yn == 'n') STOP
+      END IF
+    END SUBROUTINE
 
 END MODULE dnsdata

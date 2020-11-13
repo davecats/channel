@@ -1,6 +1,9 @@
 ! ==============================================
 ! C preprocessor defines
 ! ==============================================
+! Cluster mode: stop if Runtimedata is absent and
+! time from restart is true; do not write save files.
+!#define cluster_mode !      <-----------------------------------------------------------------------------------------
 ! Force (nxd,nzd) to be at most the product of a
 ! power of 2 and a single factor 3
 #define useFFTfit
