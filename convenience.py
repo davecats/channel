@@ -5,7 +5,46 @@
 
 import numpy
 from struct import unpack
-from math import pi
+from math import pi, floor
+
+
+
+class mesh():
+# Extracts mesh and properties. All mesh properties here calculated are meant
+# as in the standard scaling units (which is, the ones used for the simulation).
+# Syntax:
+# mesh_obj = mesh(dns_dictionary)
+# where dns_dictionary can be extracted from dns.in with read_dnsin()
+
+    def __init__(self, dnsdata):
+
+        self.nx = dnsdata['nx']
+        self.ny = dnsdata['ny']
+        self.nz = dnsdata['nz']
+        self.alfa0 = dnsdata['alfa0']
+        self.beta0 = dnsdata['beta0']
+        self.a = dnsdata['a']
+
+        # find nxd,nzd
+        self.nxd=3*self.nx//2-1
+        self.nzd=3*self.nz-1
+
+        # set grid
+        self.y = numpy.tanh(self.a*(2*numpy.arange(-1,self.ny+2)/self.ny-1))/numpy.tanh(self.a)+1
+        self.kx = self.alfa0*numpy.arange(0,self.nx+1)
+        self.kz = self.beta0*numpy.arange(0,self.nz+1)
+
+        # calculate domain size
+        self.lx_pih = 2 / self.alfa0
+        self.lz_pih = 2 / self.beta0
+
+        # calculate resolution
+        self.dx = self.lx_pih/(2*self.nx) * pi
+        self.dz = self.lz_pih/(2*self.nz) * pi
+        self.dyw = abs(self.y[1] - self.y[2]) # watch out for ghost cell!
+        idxy = floor((self.ny + 3) / 2)
+        self.dyc = abs(self.y[idxy] - self.y[idxy+1])
+
 
 
 

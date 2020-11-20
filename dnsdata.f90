@@ -747,9 +747,18 @@ logical::rtd_exists ! flag to check existence of Runtimedata
   !-------------------- save_restart_file -----------------------!
   SUBROUTINE save_restart_file(filename,R)
     complex(C_DOUBLE_COMPLEX), intent(in) :: R(ny0-2:nyN+2,-nz:nz,nx0:nxN,1:3)
+    !integer :: ndims = 4, array_of_sizes(ndims), array_of_subsizes(ndims), array_of_starts(ndims), order
     integer(C_SIZE_T) :: iV,ix,iz,nxB_t,nx_t,nz_t,ny_t,iproc_t,br=8,bc=16,b1=1,b7=7,b3=3
     integer(C_SIZE_T) :: pos,i
     character(len=40) :: filename
+    TYPE(MPI_File) :: fh
+    TYPE(MPI_Datatype) :: etype
+    TYPE(MPI_Datatype) :: filetype
+    INTEGER(MPI_OFFSET_KIND) :: disp 
+    TYPE(MPI_Status) :: status
+
+    ! boundaries for indices: miny:maxy, -nz:nz, nx0, nxN, 1:3
+
     DO i=0,nproc-1
       IF (i==iproc) THEN
         OPEN(UNIT=100,FILE=TRIM(filename),access="stream",action="write")
