@@ -747,38 +747,30 @@ logical::rtd_exists ! flag to check existence of Runtimedata
   !-------------------- save_restart_file -----------------------!
   SUBROUTINE save_restart_file(filename,R)
     complex(C_DOUBLE_COMPLEX), intent(in) :: R(ny0-2:nyN+2,-nz:nz,nx0:nxN,1:3)
-    !integer :: ndims = 4, array_of_sizes(ndims), array_of_subsizes(ndims), array_of_starts(ndims), order
-    integer(C_SIZE_T) :: iV,ix,iz,nxB_t,nx_t,nz_t,ny_t,iproc_t,br=8,bc=16,b1=1,b7=7,b3=3
-    integer(C_SIZE_T) :: pos,i
-    character(len=40) :: filename
+    character(len=40), intent(in) :: filename
+    ! mpi stuff
     TYPE(MPI_File) :: fh
-    TYPE(MPI_Datatype) :: etype
-    TYPE(MPI_Datatype) :: filetype
     INTEGER(MPI_OFFSET_KIND) :: disp 
     TYPE(MPI_Status) :: status
 
-    ! boundaries for indices: miny:maxy, -nz:nz, nx0, nxN, 1:3
+    ! boundaries for indices: miny:maxy, -nz:nz, nx0:nxN, 1:3
 
-    DO i=0,nproc-1
-      IF (i==iproc) THEN
-        OPEN(UNIT=100,FILE=TRIM(filename),access="stream",action="write")
-        nx_t=nx+1; ny_t=ny+3; nz_t=2*nz+1; iproc_t=iproc; nxB_t=nxB
-        IF (has_terminal) WRITE(UNIT=100,POS=1) nx,ny,nz,alfa0,beta0,ni,a,ymin,ymax,time
-        DO iV=1,3 ! XXX TODO Use MPI I/O for parallel read/write
-          DO ix=nx0,nxN
-            DO iz=-nz,nz
-              pos=b1+(br*b7+b3*SIZEOF(nx))+bc*(INT(iV,C_SIZE_T)-b1)*(ny_t*nz_t*nx_t) + & 
-                  bc*(INT(ix,C_SIZE_T))*nz_t*ny_t + & 
-                  bc*(INT(iz,C_SIZE_T)+INT(nz,C_SIZE_T))*ny_t + &
-                  bc*(INT(miny,C_SIZE_T)+b1)
-              WRITE(100,POS=pos) R(miny:maxy,iz,ix,iV)
-            END DO
-          END DO
-        END DO
-        CLOSE(100)
-      END IF
-      CALL MPI_Barrier(MPI_COMM_WORLD)
-    END DO
+    ! open file
+    CALL MPI_File_open(MPI_COMM_WORLD, TRIM(filename), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh) 
+
+    ! write header
+    IF (has_terminal) THEN ! only one process does this
+      CALL MPI_file_write(fh, [nx,ny,nz], 3, MPI_INTEGER, status)
+      CALL MPI_file_write(fh, [alfa0,beta0,ni,a,ymin,ymax,time], 7, MPI_DOUBLE_PRECISION, status)
+    END IF
+
+    ! set view to subarray
+    disp = 3*C_INT + 7*C_DOUBLE ! offset to skip header
+    CALL MPI_File_set_view(fh, disp, etype, filetype, 'native', MPI_INFO_NULL)
+
+    ! finally write field
+    CALL MPI_File_write_all(fh, R(miny:maxy,:,nx0:nxN,:), SIZE(R(miny:maxy,:,nx0:nxN,:)), MPI_DOUBLE_COMPLEX, status)
+
   END SUBROUTINE save_restart_file
 
 
@@ -799,14 +791,14 @@ logical::rtd_exists ! flag to check existence of Runtimedata
        dudy(1,2)=-sum(d14n(-2:2)*dreal(V(ny-3:ny+1,0,0,1))); dudy(2,2)=-sum(d14n(-2:2)*dreal(V(ny-3:ny+1,0,0,3)))
        CALL MPI_ISend(dudy(1:2,2),2,MPI_DOUBLE_PRECISION,0,TAG_DUDY,MPI_COMM_Y,Rs)
      END IF
-     IF (ipy==0) THEN 
+     IF (ipy==0) THEN
        dudy(1,1)=sum(d140(-2:2)*dreal(V(-1:3,0,0,1)));       dudy(2,1)=sum(d140(-2:2)*dreal(V(-1:3,0,0,3)))
        CALL MPI_IRecv(dudy(1:2,2),2,MPI_DOUBLE_PRECISION,npy-1,TAG_DUDY,MPI_COMM_Y,Rr)
        CALL MPI_Wait(Rr,S)
      END IF
    END IF
    IF (has_terminal) THEN
-     WRITE(*,"(F6.4,3X,4(F11.6,3X),4(F9.4,3X),2(F9.6,3X))") &
+     WRITE(*,"(F10.4,3X,4(F11.6,3X),4(F9.4,3X),2(F9.6,3X))") &
            time,dudy(1,1),dudy(1,2),dudy(2,1),dudy(2,2),fr(1)+corrpx*fr(3),meanpx+corrpx,fr(2)+corrpz*fr(3),meanpz+corrpz,runtime_global*deltat,deltat
      WRITE(101,*) time,dudy(1,1),dudy(1,2),dudy(2,1),dudy(2,2),fr(1)+corrpx*fr(3),meanpx+corrpx,fr(2)+corrpz*fr(3),meanpz+corrpz,runtime_global*deltat,deltat
    END IF

@@ -25,17 +25,19 @@ MODULE mpi_transpose
   integer(C_INT), save :: ny0,nyN,miny,maxy
   integer(C_INT), parameter :: TAG_LUDECOMP=100, TAG_LUDIVSTEP1=101, TAG_LUDIVSTEP2=102, TAG_DUDY=103
   logical, save :: first,last,has_terminal,has_average
-  TYPE(MPI_Datatype), save :: Mdz,Mdx,cmpl,iVc,vel,velc
+  TYPE(MPI_Datatype), save :: Mdz,Mdx,cmpl,iVc,vel,velc,filetype,etype
 
 
 CONTAINS
 
   !------- Divide the problem in 1D slices -------! 
   !-----------------------------------------------!
-  SUBROUTINE init_MPI(nx,nz,ny,nxd,nzd)
-    integer(C_INT), intent(in)  :: nx,nz,ny,nxd,nzd
+  SUBROUTINE init_MPI(nxpp,nz,ny,nxd,nzd)
+    integer(C_INT), intent(in)  :: nxpp,nz,ny,nxd,nzd
     TYPE(MPI_Datatype) :: row,column,tmp
     integer(kind=MPI_ADDRESS_KIND) :: stride,lb
+    integer, parameter :: ndims = 4 
+    integer :: array_of_sizes(ndims), array_of_subsizes(ndims), array_of_starts(ndims), order, ierror
     ! Define which process write on screen
     has_terminal=(iproc==0)
     ! Processor decomposition
@@ -57,9 +59,9 @@ CONTAINS
     IF (last)  THEN; miny=ny0;   maxy=nyN+2; ELSE; maxy=nyN; END IF
     IF (first .AND. last) THEN;  miny=ny0-2; maxy=nyN+2;     END IF
     ! Calculate domain division 
-    nx0=ipx*(nx)/npx;  nxN=(ipx+1)*(nx)/npx-1;  nxB=nxN-nx0+1;
+    nx0=ipx*(nxpp)/npx;  nxN=(ipx+1)*(nxpp)/npx-1;  nxB=nxN-nx0+1;
     nz0=ipx*nzd/npx;   nzN=(ipx+1)*nzd/npx-1;   nzB=nzN-nz0+1;
-    block=max(nxB*nzd,nx*nzB)
+    block=max(nxB*nzd,nxpp*nzB)
     has_average=(nx0==0)
     ! Communicators only with previous and next in Y
 #ifdef mpiverbose
@@ -80,9 +82,19 @@ CONTAINS
     CALL MPI_Type_contiguous(nxB*(2*nz+1)*(ny+3),cmpl,iVc);
     CALL MPI_Type_commit(iVc)
     CALL MPI_Type_vector(3,1,nproc,iVc,vel); tmp=vel
-    lb=8*2*nxB*(2*nz+1)*(ny+3)*iproc; stride=8*2*nx*(2*nz+1)*(ny+3); 
+    lb=8*2*nxB*(2*nz+1)*(ny+3)*iproc; stride=8*2*nxpp*(2*nz+1)*(ny+3); 
     CALL MPI_Type_create_resized(tmp,lb,stride,vel)
     CALL MPI_Type_commit(vel)
+    ! Datatypes to map distributed velocity vector to file
+    etype = MPI_DOUBLE_COMPLEX ! elemental type of array
+    array_of_sizes = [ny+3, 2*nz+1, nxpp, 3] ! size along each dimension of the WHOLE array ON DISK
+    IF (has_terminal) print *, 'size', array_of_sizes
+    array_of_subsizes = [maxy-miny+1, 2*nz+1, nxB, 3] ! size of the PORTION of array OWNED BY PROCESS
+    print *, array_of_subsizes
+    array_of_starts = [miny+1, 0, nx0, 0] ! starting position of each component; !!! IT'S ZERO BASED !!!
+    order = MPI_ORDER_FORTRAN ! self-explanatory
+    CALL MPI_Type_create_subarray(ndims, array_of_sizes, array_of_subsizes, array_of_starts, order, etype, filetype, ierror)
+    CALL MPI_Type_commit(filetype, ierror)
   END SUBROUTINE init_MPI
   
   INCLUDE 'rbparmat.f90'
