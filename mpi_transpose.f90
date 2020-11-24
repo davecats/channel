@@ -93,9 +93,7 @@ CONTAINS
     CALL MPI_Type_commit(writeview_type, ierror)
     ! For WRITING, SKIPPING HALO CELLS: datatype with holes to skip halo cells and select only data to be written
     array_of_sizes = [(nyN+2)-(ny0-2)+1, 2*nz+1, nxB, 3] ! size along each dimension of the array IN MEMORY owned by each process
-    IF (has_terminal) print *, 'size', array_of_sizes
     array_of_subsizes = [maxy-miny+1, 2*nz+1, nxB, 3] ! size of the PORTION of array TO BE WRITTEN BY EACH PROCESS
-    print *, array_of_subsizes
     array_of_starts = [miny-(ny0-2), 0, 0, 0] ! starting position of each component; !!! IT'S ZERO BASED AND WRT TO ARRAY IN MEMORY !!!
     CALL MPI_Type_create_subarray(ndims, array_of_sizes, array_of_subsizes, array_of_starts, MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, owned2write_type, ierror)
     CALL MPI_Type_commit(owned2write_type, ierror)
