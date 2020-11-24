@@ -25,7 +25,7 @@ MODULE mpi_transpose
   integer(C_INT), save :: ny0,nyN,miny,maxy
   integer(C_INT), parameter :: TAG_LUDECOMP=100, TAG_LUDIVSTEP1=101, TAG_LUDIVSTEP2=102, TAG_DUDY=103
   logical, save :: first,last,has_terminal,has_average
-  TYPE(MPI_Datatype), save :: Mdz,Mdx,cmpl,iVc,vel,velc,filetype,etype
+  TYPE(MPI_Datatype), save :: Mdz,Mdx,cmpl,iVc,vel,velc,writeview_type,owned2write_type
 
 
 CONTAINS
@@ -37,7 +37,7 @@ CONTAINS
     TYPE(MPI_Datatype) :: row,column,tmp
     integer(kind=MPI_ADDRESS_KIND) :: stride,lb
     integer, parameter :: ndims = 4 
-    integer :: array_of_sizes(ndims), array_of_subsizes(ndims), array_of_starts(ndims), order, ierror
+    integer :: array_of_sizes(ndims), array_of_subsizes(ndims), array_of_starts(ndims), ierror
     ! Define which process write on screen
     has_terminal=(iproc==0)
     ! Processor decomposition
@@ -85,16 +85,20 @@ CONTAINS
     lb=8*2*nxB*(2*nz+1)*(ny+3)*iproc; stride=8*2*nxpp*(2*nz+1)*(ny+3); 
     CALL MPI_Type_create_resized(tmp,lb,stride,vel)
     CALL MPI_Type_commit(vel)
-    ! Datatypes to map distributed velocity vector to file
-    etype = MPI_DOUBLE_COMPLEX ! elemental type of array
+    ! For WRITING, SETTING VIEW: datatype to map distributed velocity array to file
     array_of_sizes = [ny+3, 2*nz+1, nxpp, 3] ! size along each dimension of the WHOLE array ON DISK
-    IF (has_terminal) print *, 'size', array_of_sizes
-    array_of_subsizes = [maxy-miny+1, 2*nz+1, nxB, 3] ! size of the PORTION of array OWNED BY PROCESS
-    print *, array_of_subsizes
+    array_of_subsizes = [maxy-miny+1, 2*nz+1, nxB, 3] ! size of the PORTION of array TO BE WRITTEN BY EACH PROCESS
     array_of_starts = [miny+1, 0, nx0, 0] ! starting position of each component; !!! IT'S ZERO BASED !!!
-    order = MPI_ORDER_FORTRAN ! self-explanatory
-    CALL MPI_Type_create_subarray(ndims, array_of_sizes, array_of_subsizes, array_of_starts, order, etype, filetype, ierror)
-    CALL MPI_Type_commit(filetype, ierror)
+    CALL MPI_Type_create_subarray(ndims, array_of_sizes, array_of_subsizes, array_of_starts, MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, writeview_type, ierror)
+    CALL MPI_Type_commit(writeview_type, ierror)
+    ! For WRITING, SKIPPING HALO CELLS: datatype with holes to skip halo cells and select only data to be written
+    array_of_sizes = [(nyN+2)-(ny0-2)+1, 2*nz+1, nxB, 3] ! size along each dimension of the array IN MEMORY owned by each process
+    IF (has_terminal) print *, 'size', array_of_sizes
+    array_of_subsizes = [maxy-miny+1, 2*nz+1, nxB, 3] ! size of the PORTION of array TO BE WRITTEN BY EACH PROCESS
+    print *, array_of_subsizes
+    array_of_starts = [miny-(ny0-2), 0, 0, 0] ! starting position of each component; !!! IT'S ZERO BASED AND WRT TO ARRAY IN MEMORY !!!
+    CALL MPI_Type_create_subarray(ndims, array_of_sizes, array_of_subsizes, array_of_starts, MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, owned2write_type, ierror)
+    CALL MPI_Type_commit(owned2write_type, ierror)
   END SUBROUTINE init_MPI
   
   INCLUDE 'rbparmat.f90'

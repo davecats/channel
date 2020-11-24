@@ -766,10 +766,10 @@ logical::rtd_exists ! flag to check existence of Runtimedata
 
     ! set view to subarray
     disp = 3*C_INT + 7*C_DOUBLE ! offset to skip header
-    CALL MPI_File_set_view(fh, disp, etype, filetype, 'native', MPI_INFO_NULL)
+    CALL MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, writeview_type, 'native', MPI_INFO_NULL)
 
     ! finally write field
-    CALL MPI_File_write_all(fh, R(miny:maxy,:,nx0:nxN,:), SIZE(R(miny:maxy,:,nx0:nxN,:)), MPI_DOUBLE_COMPLEX, status)
+    CALL MPI_File_write_all(fh, R, 1, owned2write_type, status)
 
   END SUBROUTINE save_restart_file
 
