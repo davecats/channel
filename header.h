@@ -1,13 +1,13 @@
 ! ==============================================
 ! C preprocessor defines
 ! ==============================================
+! Stop program when warnings or interactive prompts
+! are met; suggested for execution on cluster.
+#define warnings_are_fatal !      <-----------------------------------------------------------------------------------------
 ! Use nonblocking communication in XZ directions
 !#define nonblockingXZ
 ! Use nonblocking communication in Y direction
 !#define nonblockingY
-! Cluster mode: stop if Runtimedata is absent and
-! time from restart is true; do not write save files.
-#define cluster_mode !      <-----------------------------------------------------------------------------------------
 ! Force (nxd,nzd) to be at most the product of a
 ! power of 2 and a single factor 3
 #define useFFTfit

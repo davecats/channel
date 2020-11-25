@@ -126,6 +126,10 @@ END IF
   END DO timeloop
   IF (has_terminal) WRITE(*,*) "End of time/iterations loop: writing restart file at time ", time
   end_filename="Dati.cart.out";  CALL save_restart_file(end_filename,V)
+#ifdef ibm
+  IF (has_terminal) WRITE(*,*) "End of time/iterations loop: writing dUint.cart.out at time ", time
+  filename="dUint.cart.out"; CALL save_body_file(filename,dUint(:,:,:,:,0))
+#endif
   IF (has_terminal) CLOSE(102)
   ! Realease memory
   CALL free_fft()

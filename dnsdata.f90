@@ -103,6 +103,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
     READ(15, *) deltat, cflmax, time
     READ(15, *) dt_field, dt_save, t_max, time_from_restart
     READ(15, *) nstep
+    READ(15, *) npy
     CLOSE(15)
     dx=PI/(alfa0*nxd); dz=2.0d0*PI/(beta0*nzd);  factor=1.0d0/(2.0d0*nxd*nzd)
   END SUBROUTINE read_dnsin
@@ -147,7 +148,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
       ELSE
         IF (time_from_restart) THEN
           WRITE(*,*) 'Runtimedata not found...'
-#ifdef cluster_mode
+#ifdef warnings_are_fatal
           WRITE(*,*) 'Stopping!'
           STOP
 #endif
@@ -185,7 +186,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
         PRINT *, 'No instant of time matching restart file has been found in Runtimedata.'
         PRINT *, ''
         WRITE(101,*) ''
-#ifdef cluster_mode
+#ifdef warnings_are_fatal
         WRITE(*,*) 'Stopping!'
         STOP
 #endif
@@ -742,19 +743,18 @@ logical::rtd_exists ! flag to check existence of Runtimedata
      WRITE(101,*) time,dudy(1,1),dudy(1,2),dudy(2,1),dudy(2,2),fr(1)+corrpx*fr(3),meanpx+corrpx,fr(2)+corrpz*fr(3),meanpz+corrpz,runtime_global*deltat,deltat
    END IF
    runtime_global=0
-   !Save Dati.cart.out
-#ifndef cluster_mode
-   IF ( ((FLOOR((time+0.5*deltat)/dt_save) > FLOOR((time-0.5*deltat)/dt_save)) .AND. (istep>1)) .OR. istep==nstep ) THEN
-     IF (has_terminal) WRITE(*,*) "Writing Dati.cart.out at time ", time
-     filename="Dati.cart.out";  CALL save_restart_file(filename,V)
-   END IF
-#endif
+   IF (dt_save > 0) THEN ! save restart file
+     IF ( ((FLOOR((time+0.5*deltat)/dt_save) > FLOOR((time-0.5*deltat)/dt_save)) .AND. (istep>1)) .OR. istep==nstep ) THEN
+       IF (has_terminal) WRITE(*,*) "Writing Dati.cart.out at time ", time
+       filename="Dati.cart.out";  CALL save_restart_file(filename,V)
+     END IF
 #ifdef ibm
-   IF ( ((FLOOR((time+0.5*deltat)/dt_save) > FLOOR((time-0.5*deltat)/dt_save)) .AND. (istep>1)) .OR. istep==nstep ) THEN
-     IF (has_terminal) WRITE(*,*) "Writing dUint.cart.out at time ", time
-     filename="dUint.cart.out"; CALL save_body_file(filename,dUint(:,:,:,:,0))
-   END IF
+     IF ( ((FLOOR((time+0.5*deltat)/dt_save) > FLOOR((time-0.5*deltat)/dt_save)) .AND. (istep>1)) .OR. istep==nstep ) THEN
+       IF (has_terminal) WRITE(*,*) "Writing dUint.cart.out at time ", time
+       filename="dUint.cart.out"; CALL save_body_file(filename,dUint(:,:,:,:,0))
+     END IF
 #endif
+   END IF ! end of saving restart file
    IF ( (FLOOR((time+0.5*deltat)/dt_field) > FLOOR((time-0.5*deltat)/dt_field)) .AND. (time>time0) ) THEN
      ifield=ifield+1; WRITE(istring,*) ifield
      IF (has_terminal) WRITE(*,*) "Writing Dati.cart."//TRIM(ADJUSTL(istring))//".out at time ", time
