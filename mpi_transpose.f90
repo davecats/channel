@@ -25,8 +25,11 @@ MODULE mpi_transpose
   integer(C_INT), save :: ny0,nyN,miny,maxy
   integer(C_INT), parameter :: TAG_LUDECOMP=100, TAG_LUDIVSTEP1=101, TAG_LUDIVSTEP2=102, TAG_DUDY=103
   logical, save :: first,last,has_terminal,has_average
-  TYPE(MPI_Datatype), save :: Mdz,Mdx,cmpl,iVc,vel,velc,writeview_type,owned2write_type
-
+  TYPE(MPI_Datatype), save :: Mdz,Mdx,cmpl,writeview_type,owned2write_type
+#ifdef nonblockingY
+  ! Array of requests for nonblocking communication in linsolve
+  TYPE(MPI_REQUEST), allocatable :: REQlinSolve(:), REQvetaTOuvw(:)
+#endif
 
 CONTAINS
 
@@ -78,13 +81,6 @@ CONTAINS
     lb=0; stride=8*2;  CALL MPI_Type_create_resized(column,lb,stride,tmp)
     CALL MPI_Type_contiguous(nxB,tmp,Mdx)
     CALL MPI_Type_commit(Mdx)    
-    ! interlaved MPI datatypes - map velocity field to file
-    CALL MPI_Type_contiguous(nxB*(2*nz+1)*(ny+3),cmpl,iVc);
-    CALL MPI_Type_commit(iVc)
-    CALL MPI_Type_vector(3,1,nproc,iVc,vel); tmp=vel
-    lb=8*2*nxB*(2*nz+1)*(ny+3)*iproc; stride=8*2*nxpp*(2*nz+1)*(ny+3); 
-    CALL MPI_Type_create_resized(tmp,lb,stride,vel)
-    CALL MPI_Type_commit(vel)
     ! For WRITING, SETTING VIEW: datatype to map distributed velocity array to file
     array_of_sizes = [ny+3, 2*nz+1, nxpp, 3] ! size along each dimension of the WHOLE array ON DISK
     array_of_subsizes = [maxy-miny+1, 2*nz+1, nxB, 3] ! size of the PORTION of array TO BE WRITTEN BY EACH PROCESS
@@ -97,8 +93,16 @@ CONTAINS
     array_of_starts = [miny-(ny0-2), 0, 0, 0] ! starting position of each component; !!! IT'S ZERO BASED AND WRT TO ARRAY IN MEMORY !!!
     CALL MPI_Type_create_subarray(ndims, array_of_sizes, array_of_subsizes, array_of_starts, MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, owned2write_type, ierror)
     CALL MPI_Type_commit(owned2write_type, ierror)
+#ifdef nonblockingY
+    ! Allocate memory for requests
+    ALLOCATE(REQlinSolve(1:(2*nz+1)*4), REQvetaTOuvw(1:(nxB+1)*(2*nz+1)))
+#endif
   END SUBROUTINE init_MPI
   
-  INCLUDE 'rbparmat.f90'
+#ifdef nonblockingY
+  INCLUDE "rbparmat_nonblocking.f90"
+#else
+  INCLUDE "rbparmat_blocking.f90"
+#endif
 
 END MODULE mpi_transpose

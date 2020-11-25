@@ -41,7 +41,7 @@ MODULE dnsdata
   !Derivatives
   TYPE(Di), allocatable :: der(:)
   real(C_DOUBLE), dimension(-2:2) :: d040,d140,d14m1,d04n,d14n,d24n,d14np1
-  real(C_DOUBLE), allocatable :: D0mat(:,:), etamat(:,:,:), D2vmat(:,:,:)
+  real(C_DOUBLE), allocatable :: D0mat(:,:), etamat(:,:,:), eta00mat(:,:), D2vmat(:,:,:)
   !Fourier-transformable arrays (allocated in ffts.f90)
   complex(C_DOUBLE_COMPLEX), pointer, dimension(:,:,:,:) :: VVdx, VVdz
   real(C_DOUBLE), pointer, dimension(:,:,:,:) :: rVVdx
@@ -127,7 +127,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
     IF (solveNS) ALLOCATE(memrhs(0:2,-nz:nz,nx0:nxN),oldrhs(MAX(1,ny0-2):MIN(ny-1,nyN+2),-nz:nz,nx0:nxN),bc0(-nz:nz,nx0:nxN),bcn(-nz:nz,nx0:nxN))
 #define newrhs(iy,iz,ix) memrhs(MOD(iy+1000,3),iz,ix)
 #define imod(iy) MOD(iy+1000,5)
-    ALLOCATE(der(MAX(1,ny0-2):MIN(ny-1,nyN+2)),d0mat(ny0:nyN+2,-2:2),etamat(ny0:nyN+2,-2:2,-nz:nz),D2vmat(ny0:nyN+2,-2:2,-nz:nz))
+    ALLOCATE(der(MAX(1,ny0-2):MIN(ny-1,nyN+2)),d0mat(ny0:nyN+2,-2:2),etamat(ny0:nyN+2,-2:2,-nz:nz),eta00mat(ny0:nyN+2,-2:2),D2vmat(ny0:nyN+2,-2:2,-nz:nz))
     ALLOCATE(y(MAX(-1,ny0-4):MIN(ny+1,nyN+4)),dy(MAX(1,ny0-2):MIN(ny-1,nyN+2)))
     ALLOCATE(izd(-nz:nz),ialfa(nx0:nxN),ibeta(-nz:nz),k2(-nz:nz,nx0:nxN)) 
 #ifdef halfchannel
@@ -207,8 +207,9 @@ logical::rtd_exists ! flag to check existence of Runtimedata
   !--------------------------------------------------------------!
   !--------------- Set-up the compact derivatives ---------------!
   SUBROUTINE setup_derivatives()
-    real(C_DOUBLE) :: M(0:4,0:4), t(0:4)
-    integer(C_INT) :: iy,i,j
+    real(C_DOUBLE)    :: M(0:4,0:4), t(0:4)
+    integer(C_INT)    :: iy,i,j
+    TYPE(MPI_REQUEST) :: Rs 
     DO iy=MAX(1,ny0-2),MIN(ny-1,nyN+2)
       FORALL (i=0:4, j=0:4) M(i,j)=(y(iy-2+j)-y(iy))**(4.0d0-i); CALL LUdecomp(M)
       t=0; t(0)=24
@@ -238,7 +239,12 @@ logical::rtd_exists ! flag to check existence of Runtimedata
       d04n=0; d04n(1)=1;
     END IF
     FORALL (iy=ny0:nyN) D0mat(iy,-2:2)=der(iy)%d0(-2:2); 
+#ifdef nonblockingY
+    CALL LU5decompStep(D0mat,Rs)
+    IF ( .NOT. first ) CALL MPI_Wait(Rs,MPI_STATUS_IGNORE)
+#else
     CALL LU5decompStep(D0mat)
+#endif
   END SUBROUTINE setup_derivatives
 
   !--------------------------------------------------------------!
@@ -289,9 +295,16 @@ logical::rtd_exists ! flag to check existence of Runtimedata
 #define D4(f,g) sum(dcmplx(der(iy)%d4(-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy)%d4(-2:2)*dimag(f(iy-2:iy+2,iz,ix,g))))
   !--------------------------------------------------------------!
   !---COMPLEX----- derivative in the y-direction ----------------!
+#ifdef nonblockingY
+  SUBROUTINE COMPLEXderiv(f0,f1,Rs)
+#else
   SUBROUTINE COMPLEXderiv(f0,f1)
+#endif
     complex(C_DOUBLE_COMPLEX), intent(in)  :: f0(ny0-2:nyN+2)
     complex(C_DOUBLE_COMPLEX), intent(out) :: f1(ny0-2:nyN+2)
+#ifdef nonblockingY
+    TYPE(MPI_REQUEST), intent(out) :: Rs
+#endif
     IF (first) THEN 
       f1(0)=sum(d140(-2:2)*f0(-1:3))
       f1(-1)=sum(d14m1(-2:2)*f0(-1:3))
@@ -311,7 +324,11 @@ logical::rtd_exists ! flag to check existence of Runtimedata
       f1(ny-1)=f1(ny-1)-(der(ny-1)%d0(1)*f1(ny)+der(ny-1)%d0(2)*f1(ny+1))
       f1(ny-2)=f1(ny-2)-der(ny-2)%d0(2)*f1(ny)
     END IF
+#ifdef nonblockingY
+    CALL LeftLU5divStep1(f1,D0mat,f1,Rs)
+#else
     CALL LeftLU5divStep1(f1,D0mat,f1)
+#endif
   END SUBROUTINE COMPLEXderiv
 
   !--------------------------------------------------------------!
@@ -332,116 +349,15 @@ logical::rtd_exists ! flag to check existence of Runtimedata
     EQ(ny-2,-1:1)=EQ(ny-2,-1:1)-EQ(ny-2,2)*bcn(-2:0)/bcn(1)
   END SUBROUTINE applybc_n
 
-
-#define OS(iy,j) (ni*(der(iy)%d4(j)-2.0d0*k2(iz,ix)*der(iy)%d2(j)+k2(iz,ix)*k2(iz,ix)*der(iy)%d0(j)))
-#define SQ(iy,j) (ni*(der(iy)%d2(j)-k2(iz,ix)*der(iy)%d0(j)))
   !--------------------------------------------------------------!
   !------------------- solve the linear system  -----------------!
-  SUBROUTINE linsolve(lambda)
-    real(C_DOUBLE), intent(in) :: lambda
-    integer(C_INT) :: ix,iz,i
-    complex(C_DOUBLE_COMPLEX) :: temp(ny0-2:nyN+2)
-    complex(C_DOUBLE_COMPLEX) :: ucor(ny0-2:nyN+2)
-    real(C_DOUBLE) :: frl(1:3)
-    DO ix=nx0,nxN
-      DO iz=-nz,nz
-        DO CONCURRENT (iy=ny0:nyN)
-          D2vmat(iy,-2:2,iz)=lambda*(der(iy)%d2(-2:2)-k2(iz,ix)*der(iy)%d0(-2:2))-OS(iy,-2:2)
-          etamat(iy,-2:2,iz)=lambda*der(iy)%d0(-2:2)-SQ(iy,-2:2)
-        END DO
-        IF (first) THEN 
-          IF (ix==0 .AND. iz==0) THEN
-            bc0(iz,ix)%v=0; bc0(iz,ix)%vy=0; bc0(iz,ix)%eta=dcmplx(dreal(bc0(iz,ix)%u)-dimag(bc0(iz,ix)%w),dimag(bc0(iz,ix)%u)+dreal(bc0(iz,ix)%w))
-          ELSE
-            bc0(iz,ix)%vy=-ialfa(ix)*bc0(iz,ix)%u-ibeta(iz)*bc0(iz,ix)%w; bc0(iz,ix)%eta=ibeta(iz)*bc0(iz,ix)%u-ialfa(ix)*bc0(iz,ix)%w
-          END IF
-          bc0(iz,ix)%v=bc0(iz,ix)%v-v0bc(-2)*bc0(iz,ix)%vy/v0m1bc(-2)
-          CALL applybc_0(D2vmat(:,:,iz),v0bc,v0m1bc)
-          V(1,iz,ix,2)=V(1,iz,ix,2)-D2vmat(1,-2,iz)*bc0(iz,ix)%vy/v0m1bc(-2)-D2vmat(1,-1,iz)*bc0(iz,ix)%v/v0bc(-1)
-          V(2,iz,ix,2)=V(2,iz,ix,2)-D2vmat(2,-2,iz)*bc0(iz,ix)%v/v0bc(-1)       
-          CALL applybc_0(etamat(:,:,iz),eta0bc,eta0m1bc)
-          V(1,iz,ix,1)=V(1,iz,ix,1)-etamat(1,-1,iz)*bc0(iz,ix)%eta/eta0bc(-1)
-          V(2,iz,ix,1)=V(2,iz,ix,1)-etamat(2,-2,iz)*bc0(iz,ix)%eta/eta0bc(-1)
-        END IF
-        IF (last) THEN 
-          IF (ix==0 .AND. iz==0) THEN
-            bcn(iz,ix)%v=0; bcn(iz,ix)%vy=0; bcn(iz,ix)%eta=dcmplx(dreal(bcn(iz,ix)%u)-dimag(bcn(iz,ix)%w),dimag(bcn(iz,ix)%u)+dreal(bcn(iz,ix)%w))
-          ELSE
-            bcn(iz,ix)%vy=-ialfa(ix)*bcn(iz,ix)%u-ibeta(iz)*bcn(iz,ix)%w; bcn(iz,ix)%eta=ibeta(iz)*bcn(iz,ix)%u-ialfa(ix)*bcn(iz,ix)%w
-          END IF
-          bcn(iz,ix)%v=bcn(iz,ix)%v-vnbc(2)*bcn(iz,ix)%vy/vnp1bc(2)
-          CALL applybc_n(D2vmat(:,:,iz),vnbc,vnp1bc)
-          V(ny-1,iz,ix,2)=V(ny-1,iz,ix,2)-D2vmat(ny-1,2,iz)*bcn(iz,ix)%vy/vnp1bc(2)-D2vmat(ny-1,1,iz)*bcn(iz,ix)%v/vnbc(1)
-          V(ny-2,iz,ix,2)=V(ny-2,iz,ix,2)-D2vmat(ny-2,2,iz)*bcn(iz,ix)%v/vnbc(1)
-          CALL applybc_n(etamat(:,:,iz),etanbc,etanp1bc)
-          V(ny-1,iz,ix,1)=V(ny-1,iz,ix,1)-etamat(ny-1,1,iz)*bcn(iz,ix)%eta/etanbc(1) 
-          V(ny-2,iz,ix,1)=V(ny-2,iz,ix,1)-etamat(ny-2,2,iz)*bcn(iz,ix)%eta/etanbc(1)
-        END IF 
-        CALL LU5decompStep(D2vmat(:,:,iz)); CALL LU5decompStep(etamat(:,:,iz))
-        CALL LeftLU5divStep1(V(:,iz,ix,2),D2vmat(:,:,iz),V(:,iz,ix,2))
-        CALL LeftLU5divStep1(V(:,iz,ix,1),etamat(:,:,iz),V(:,iz,ix,1))
-      END DO    
-      DO iz=-nz,nz
-        CALL LeftLU5divStep2(D2vmat(:,:,iz),V(:,iz,ix,2))
-        CALL LeftLU5divStep2(etamat(:,:,iz),V(:,iz,ix,1))
-        IF (first) THEN
-          V(0,iz,ix,2)=(bc0(iz,ix)%v-sum(V(1:3,iz,ix,2)*v0bc(0:2)))/v0bc(-1)
-          V(-1,iz,ix,2)=(bc0(iz,ix)%vy-sum(V(0:3,iz,ix,2)*v0m1bc(-1:2)))/v0m1bc(-2)
-          V(0,iz,ix,1)=(bc0(iz,ix)%eta-sum(V(1:3,iz,ix,1)*eta0bc(0:2)))/eta0bc(-1)
-          V(-1,iz,ix,1)=-sum(V(0:3,iz,ix,1)*eta0m1bc(-1:2))/eta0m1bc(-2)
-        END IF
-        IF (last) THEN 
-          V(ny,iz,ix,2)=(bcn(iz,ix)%v-sum(V(ny-3:ny-1,iz,ix,2)*vnbc(-2:0)))/vnbc(1)
-          V(ny+1,iz,ix,2)=(bcn(iz,ix)%vy-sum(V(ny-3:ny,iz,ix,2)*vnp1bc(-2:1)))/vnp1bc(2)
-          V(ny,iz,ix,1)=(bcn(iz,ix)%eta-sum(V(ny-3:ny-1,iz,ix,1)*etanbc(-2:0)))/etanbc(1)
-          V(ny+1,iz,ix,1)=-sum(V(ny-3:ny,iz,ix,1)*etanp1bc(-2:1))/etanp1bc(2)
-        END IF
-        IF (ix==0 .AND. iz==0) THEN       
-            V(:,0,0,3) = dcmplx(dimag(V(:,0,0,1)),0.d0); 
-            V(:,0,0,1) = dcmplx(dreal(V(:,0,0,1)),0.d0);
-            ucor(ny0-2:ny0-1)=0; ucor(ny0:nyN)=1; ucor(nyN+1:nyN+2)=0
-            ! XXX TODO Make computation of ucor communication-free
-            CALL LeftLU5divStep1(ucor,etamat(:,:,iz),ucor)
-            CALL LeftLU5divStep2(etamat(:,:,iz),ucor)
-            IF (first) THEN
-              ucor(0)=-sum(ucor(1:3)*eta0bc(0:2))/eta0bc(-1)
-              ucor(-1)=-sum(ucor(0:3)*eta0m1bc(-1:2))/eta0m1bc(-2)
-            END IF
-            IF (last) THEN 
-              ucor(ny)=-sum(ucor(ny-3:ny-1)*etanbc(-2:0))/etanbc(1)
-              ucor(ny+1)=-sum(ucor(ny-3:ny)*etanp1bc(-2:1))/etanp1bc(2)  
-            END IF
-            frl(1)=yintegr(dreal(V(:,0,0,1))); frl(2)=yintegr(dreal(V(:,0,0,3))); frl(3)=yintegr(dreal(ucor))
-            CALL MPI_Allreduce(frl,fr,3,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_Y)
-            IF (abs(meanflowx)>1.0d-7 .AND. .NOT. CPI) THEN
-              corrpx = (meanflowx-fr(1))/fr(3)
-              V(:,0,0,1)=dcmplx(dreal(V(:,0,0,1))+corrpx*dreal(ucor),dimag(V(:,0,0,1)))
-            END IF
-            IF (abs(meanflowz)>1.0d-7 .AND. .NOT. CPI) THEN
-              corrpz = (meanflowz-fr(2))/fr(3)
-              V(:,0,0,3)=dcmplx(dreal(V(:,0,0,3))+corrpz*dreal(ucor),dimag(V(:,0,0,3)))
-            END IF
-            IF (CPI) THEN
-              SELECT CASE (CPI_type)
-                 CASE (0)
-                    meanpx = (1-gamma)*6*ni/fr(1)
-                 CASE (1)
-                    meanpx = (1.5d0/gamma)*fr(1)*ni 
-                 CASE DEFAULT
-                    WRITE(*,*) "Wrong selection of CPI_Type"
-                    STOP
-              END SELECT
-            END IF 
-        ELSE
-            CALL COMPLEXderiv(V(:,iz,ix,2),V(:,iz,ix,3))
-            CALL LeftLU5divStep2(D0mat,V(:,iz,ix,3))
-            temp=(ialfa(ix)*V(:,iz,ix,3)-ibeta(iz)*V(:,iz,ix,1))/k2(iz,ix)
-            V(:,iz,ix,3)=(ibeta(iz)*V(:,iz,ix,3)+ialfa(ix)*V(:,iz,ix,1))/k2(iz,ix)
-            V(:,iz,ix,1)=temp
-        END IF
-      END DO
-    END DO
-  END SUBROUTINE linsolve
+#define OS(iy,j) (ni*(der(iy)%d4(j)-2.0d0*k2(iz,ix)*der(iy)%d2(j)+k2(iz,ix)*k2(iz,ix)*der(iy)%d0(j)))
+#define SQ(iy,j) (ni*(der(iy)%d2(j)-k2(iz,ix)*der(iy)%d0(j)))
+#ifdef nonblockingY
+#include "linsolve_nonblocking.inc"
+#else
+#include "linsolve_blocking.inc"
+#endif
 
   !--------------------------------------------------------------!
   !------------------------ convolutions ------------------------!
@@ -451,6 +367,9 @@ logical::rtd_exists ! flag to check existence of Runtimedata
      integer(C_INT), intent(in) :: iy,i
      logical, intent(in) :: compute_cfl, in_timeloop
      integer(C_INT) :: iV,ix,iz
+#ifdef nonblockingXZ
+     TYPE(MPI_REQUEST) :: Rs(1:6)
+#endif
 #ifdef ibm
      real(C_DOUBLE) :: newcoef,oldcoef
      real(C_DOUBLE) :: dU(1:3)
@@ -467,6 +386,9 @@ logical::rtd_exists ! flag to check existence of Runtimedata
 #endif
      DO iV=1,3
        CALL IFT(VVdz(1:nzd,1:nxB,iV,i))  
+#ifdef nonblockingXZ
+       CALL MPI_IAlltoall(VVdz(:,:,iV,i), 1, Mdz, VVdx(:,:,iV,i), 1, Mdx, MPI_COMM_X, Rs(iV))
+#endif
 #ifdef convvel
        IF (compute_convvel) THEN
          IF (convvel_cnt>-1) THEN
@@ -484,9 +406,18 @@ logical::rtd_exists ! flag to check existence of Runtimedata
          Voldz(1:nzd,1:nxB,iy,iV)=VVdz(1:nzd,1:nxB,iV,i)
        END IF
 #endif
+#ifndef nonblockingXZ
        CALL MPI_Alltoall(VVdz(:,:,iV,i), 1, Mdz, VVdx(:,:,iV,i), 1, Mdx, MPI_COMM_X)
-       VVdx(nx+2:nxd+1,1:nzB,iV,i)=0;    CALL RFT(VVdx(1:nxd+1,1:nzB,iV,i),rVVdx(1:2*nxd+2,1:nzB,iV,i));
+       VVdx(nx+2:nxd+1,1:nzB,iV,i)=0;    CALL RFT(VVdx(1:nxd+1,1:nzB,iV,i),rVVdx(1:2*nxd+2,1:nzB,iV,i))
+#endif
      END DO
+#ifdef nonblockingXZ
+     DO iV=1,3
+       CALL MPI_wait(Rs(iV),MPI_STATUS_IGNORE); 
+       VVdx(nx+2:nxd+1,1:nzB,iV,i)=0; 
+       CALL RFT(VVdx(1:nxd+1,1:nzB,iV,i),rVVdx(1:2*nxd+2,1:nzB,iV,i));
+     END DO
+#endif
 #ifdef convvel
      IF (iy==nyN+2 .AND. compute_convvel) THEN
        convvel_cnt=convvel_cnt+1
@@ -528,9 +459,19 @@ logical::rtd_exists ! flag to check existence of Runtimedata
      rVVdx(1:2*nxd,1:nzB,1:3,i)= rVVdx(1:2*nxd,1:nzB,1:3,i)* rVVdx(1:2*nxd,1:nzB,1:3,i)*factor
      DO iV=1,6
        CALL HFT(rVVdx(1:2*nxd+2,1:nzB,iV,i),VVdx(1:nxd+1,1:nzB,iV,i)); 
+#ifndef nonblockingXZ
        CALL MPI_Alltoall(VVdx(:,:,iV,i), 1, Mdx, VVdz(:,:,iV,i), 1, Mdz, MPI_COMM_X)
        CALL FFT(VVdz(1:nzd,1:nxB,iV,i));
+#else 
+       CALL MPI_IAlltoall(VVdx(:,:,iV,i), 1, Mdx, VVdz(:,:,iV,i), 1, Mdz, MPI_COMM_X, Rs(iV))
+#endif
      END DO
+#ifdef nonblockingXZ
+     DO iV=1,6
+       CALL MPI_Wait(Rs(iV),MPI_STATUS_IGNORE)
+       CALL FFT(VVdz(1:nzd,1:nxB,iV,i));
+     END DO
+#endif
   END SUBROUTINE convolutions
 
 
@@ -752,9 +693,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
     TYPE(MPI_File) :: fh
     INTEGER(MPI_OFFSET_KIND) :: disp 
     TYPE(MPI_Status) :: status
-
-    ! boundaries for indices: miny:maxy, -nz:nz, nx0:nxN, 1:3
-
+    
     ! open file
     CALL MPI_File_open(MPI_COMM_WORLD, TRIM(filename), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh) 
 
@@ -794,7 +733,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
      IF (ipy==0) THEN
        dudy(1,1)=sum(d140(-2:2)*dreal(V(-1:3,0,0,1)));       dudy(2,1)=sum(d140(-2:2)*dreal(V(-1:3,0,0,3)))
        CALL MPI_IRecv(dudy(1:2,2),2,MPI_DOUBLE_PRECISION,npy-1,TAG_DUDY,MPI_COMM_Y,Rr)
-       CALL MPI_Wait(Rr,S)
+       CALL MPI_Wait(Rr,S); CALL MPI_Wait(Rs,S)
      END IF
    END IF
    IF (has_terminal) THEN
@@ -867,7 +806,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
       character :: yn 
 
       IF (has_terminal) THEN
-        WRITE(*,"(a,$)"), "Do you want to continue? (y/n) "
+        WRITE(*,"(a,$)") "Do you want to continue? (y/n) "
         READ(*,*) yn
         IF (yn == 'n') STOP
       END IF

@@ -72,7 +72,8 @@ END IF
 
   ! Compute CFL
   DO iy=ny0,nyN
-  deltat=1.0; CALL convolutions(iy,1,.TRUE.,.FALSE.,RK1_rai(1))
+    IF (deltat==0) deltat=1.0; 
+    CALL convolutions(iy,1,.TRUE.,.FALSE.,RK1_rai(1))
   END DO
   ! Compute flow rate flow rate
   IF (has_average) THEN
@@ -103,18 +104,27 @@ END IF
     istep=istep+1
     ! Solve
     time=time+2.0/RK1_rai(1)*deltat
-    CALL buildrhs(RK1_rai,.FALSE. ); CALL linsolve(RK1_rai(1)/deltat)    
+    CALL buildrhs(RK1_rai,.FALSE. ); CALL MPI_Barrier(MPI_COMM_Y); CALL linsolve(RK1_rai(1)/deltat)
+#ifdef nonblockingY
+    CALL vetaTOuvw(); CALL computeflowrate(RK1_rai(1)/deltat)
+#endif
     time=time+2.0/RK2_rai(1)*deltat
-    CALL buildrhs(RK2_rai,.FALSE.); CALL linsolve(RK2_rai(1)/deltat)
+    CALL buildrhs(RK2_rai,.FALSE.);  CALL MPI_Barrier(MPI_COMM_Y); CALL linsolve(RK2_rai(1)/deltat)
+#ifdef nonblockingY
+    CALL vetaTOuvw(); CALL computeflowrate(RK2_rai(1)/deltat)
+#endif
     time=time+2.0/RK3_rai(1)*deltat
-    CALL buildrhs(RK3_rai,.TRUE.); CALL linsolve(RK3_rai(1)/deltat)    
+    CALL buildrhs(RK3_rai,.TRUE.);   CALL MPI_Barrier(MPI_COMM_Y); CALL linsolve(RK3_rai(1)/deltat)
+#ifdef nonblockingY
+    CALL vetaTOuvw(); CALL computeflowrate(RK3_rai(1)/deltat)
+#endif
     CALL outstats()
 #ifdef chron
     CALL CPU_TIME(timee)
     IF (has_terminal) WRITE(*,*) timee-timei
 #endif
   END DO timeloop
-  IF (has_terminal) WRITE(*,*) "End of time loop: writing Dati.cart.out at time ", time
+  IF (has_terminal) WRITE(*,*) "End of time/iterations loop: writing restart file at time ", time
   end_filename="Dati.cart.out";  CALL save_restart_file(end_filename,V)
   IF (has_terminal) CLOSE(102)
   ! Realease memory
