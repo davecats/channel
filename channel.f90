@@ -51,7 +51,7 @@ PROGRAM channel
 #endif
 
   ! Field number (for output)
-  ifield=FLOOR(time/dt_field + 0.5*deltat/dt_field)
+  ifield=FLOOR((time+0.5*deltat)/dt_field)
   time0=time
 
 IF (has_terminal) THEN

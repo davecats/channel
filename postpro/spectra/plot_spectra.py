@@ -57,7 +57,7 @@ def plot_premultiplied(all_spectra, component, desired_y, y, kx, kz, **kwargs):
     labels = (r'$k_x$', r'$k_z$')
     xlabel_alt = r'$\lambda_x$'
     ylabel_alt = r'$\lambda_z$'
-    fig_title = r'$\displaystyle k_xk_z \langle \hat{'+cmp[0]+r'}^\dagger \hat{'+cmp[1]+r'} \rangle$'
+    fig_title = r'$k_xk_z \langle \hat{'+cmp[0]+r'}^\dagger \hat{'+cmp[1]+r'} \rangle$'
     xlog = True
     ylog = True
     save_name = cmp + '_premultiplied_y{}'.format(round(y[y_idx], 3))
@@ -136,7 +136,7 @@ def plot(all_spectra, component, desired_y, y, kx, kz, **kwargs):
 
     # function specific parameters
     labels = (r'$k_x$', r'$k_z$')
-    fig_title = r'$\displaystyle \tilde{'+cmp[0]+r'}^\dagger \tilde{'+cmp[1]+'}$'
+    fig_title = r'$\tilde{'+cmp[0]+r'}^\dagger \tilde{'+cmp[1]+'}$'
 
     # convert component to index
     idx = get_comp_idx(component)
@@ -167,7 +167,7 @@ def plot_cumulative_zy(all_spectra, component, y, kz, **kwargs):
     # function specific parameters
     labels = (r'$k_z$', r'$y$')
     xlabel_alt = r'$\lambda_z$'
-    fig_title = r'$\displaystyle k_z\sum_{k_x} \langle \hat{'+cmp[0]+r'}^\dagger\hat{'+cmp[1]+r'} \rangle$'
+    fig_title = r'$k_z\sum_{k_x} \langle \hat{'+cmp[0]+r'}^\dagger\hat{'+cmp[1]+r'} \rangle$'
     xlog = True
     ylog = False
     save_name = cmp + '_cumulative_zy'
@@ -246,7 +246,7 @@ def plot_cumulative_xy(all_spectra, component, y, kx, **kwargs):
     # function specific parameters
     labels = (r'$k_x$', r'$y$')
     xlabel_alt = r'$\lambda_x$'
-    fig_title = r'$\displaystyle k_x\sum_{k_z} \langle \hat{'+cmp[0]+r'}^\dagger\hat{'+cmp[1]+r'} \rangle$'
+    fig_title = r'$k_x\sum_{k_z} \langle \hat{'+cmp[0]+r'}^\dagger\hat{'+cmp[1]+r'} \rangle$'
     xlog = True
     ylog = False
     save_name = cmp + '_cumulative_xy'

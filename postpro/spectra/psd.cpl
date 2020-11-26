@@ -37,7 +37,7 @@ USE ../convenience.cpl
 
 ! Parameters
 ! -----------------------------
-INTEGER nfmin,nfmax,dn
+INTEGER nfmin,nfmax,dn,factor
 nfmin=atoi(COMMANDLINE(4))
 nfmax=atoi(COMMANDLINE(5))
 dn=atoi(COMMANDLINE(6))
@@ -48,7 +48,7 @@ nftot=[(nfmax-nfmin) DIV dn]+1
 MEANTERMS = STRUCTURE(REAL U,W)
 
 ! Array declarations
-ARRAY(1..6,nyl-2..nyh+2,-nz..nz,0..nx) OF REAL psd=0
+ARRAY(1..6,nyl-2..nyh+2,0..nz,0..nx) OF REAL psd=0
 ARRAY(nyl-2..nyh+2) OF MEANTERMS meandata=0
 POINTER TO STORED STRUCTURE[
         ARRAY(1..6,0..ny,0..nz,0..nx) OF REAL psd_image
@@ -81,11 +81,21 @@ LOOP files FOR n=nfmin TO nfmax
     WITH V(0,0,*),meandata(*): u=~-U; w=~-W
     ! Compute PSD and CSD
     DO
-      DO WITH V(ix,iz,iy): psd(1,iy,iz,ix)=~+2*NORM[u]; psd(2,iy,iz,ix)=~+2*NORM[v]; psd(3,iy,iz,ix)=~+2*NORM[w]; psd(4,iy,iz,ix)=~+2*[u|v].REAL; psd(5,iy,iz,ix)=~+2*[u|w].REAL; psd(6,iy,iz,ix)=~+2*[v|w].REAL FOR ix=1 TO nx
-         WITH V(0,iz,iy):  psd(1,iy,iz,0) =~+  NORM[u]; psd(2,iy,iz,0) =~+  NORM[v]; psd(3,iy,iz,0) =~+  NORM[w]; psd(4,iy,iz,0) =~+  [u|v].REAL; psd(5,iy,iz,0) =~+  [u|w].REAL; psd(6,iy,iz,0) =~+  [v|w].REAL
-    FOR ALL iy,iz 
+      LOOP FOR iz=0 TO nz
+        LOOP FOR ix=0 TO nx
+          IF ix=0 THEN
+            factor=1
+          ELSE
+            factor=2
+          END IF
+          WITH V(ix,iz,iy): psd(1,iy,iz,ix)=~+factor*NORM[u]; psd(2,iy,iz,ix)=~+factor*NORM[v]; psd(3,iy,iz,ix)=~+factor*NORM[w]; psd(4,iy,iz,ix)=~+factor*[u|v].REAL; psd(5,iy,iz,ix)=~+factor*[u|w].REAL; psd(6,iy,iz,ix)=~+factor*[v|w].REAL
+          IF iz#0 THEN
+            WITH V(ix,-iz,iy): psd(1,iy,iz,ix)=~+factor*NORM[u]; psd(2,iy,iz,ix)=~+factor*NORM[v]; psd(3,iy,iz,ix)=~+factor*NORM[w]; psd(4,iy,iz,ix)=~+factor*[u|v].REAL; psd(5,iy,iz,ix)=~+factor*[u|w].REAL; psd(6,iy,iz,ix)=~+factor*[v|w].REAL
+          END IF
+        REPEAT
+      REPEAT
+    FOR ALL iy
 REPEAT files
-! TODO: scrivi direttamente in kx, kz
 
 ! Average
 DO psd(ic,iy,iz,ix) = ~ / nftot FOR ALL ic,iy,iz,ix
@@ -102,17 +112,12 @@ int ifold_create = mkdir("spectra", 0777);
 IF has_terminal THEN WRITE "Saving to psd.bin"
 IF NOT first THEN READ FROM prev
 	psd_file = OPEN('spectra/psd.bin')
-  LOOP FOR   ic = 1 TO 6   AND   iy = 0 TO ny   AND   iz = 0 TO nz   AND   ix = 0 TO nx
-    IF iz = 0 THEN
-      WITH psd_file: psd_image(ic,iy,iz,ix) = psd(ic,iy,iz,ix)
-    ELSE
-      WITH psd_file: psd_image(ic,iy,iz,ix) = psd(ic,iy,iz,ix) + psd(ic,iy,-iz,ix)
-    END IF
-  REPEAT
+    WITH psd_file: psd_image = psd
 	CLOSE psd_file
 IF NOT last THEN WRITE TO next
 
 ! add metadata to spectra folder
+IF has_terminal THEN WRITE "Saving metadata."
 IF first THEN
   FILE metadata_file
   metadata_file=OPEN("spectra/psd_metadata.txt")

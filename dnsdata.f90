@@ -72,6 +72,7 @@ MODULE dnsdata
   real(C_DOUBLE) :: cfl=0.0d0
   integer(C_SIZE_T) :: istep,nstep,ifield
   real(C_DOUBLE) :: fr(1:3)
+  logical :: prev_was_close = .FALSE.
   !Restart file
   character(len=40) :: fname
   !Convection velocity calculation
@@ -755,20 +756,26 @@ logical::rtd_exists ! flag to check existence of Runtimedata
      END IF
 #endif
    END IF ! end of saving restart file
-   IF ( (FLOOR((time+0.5*deltat)/dt_field) > FLOOR((time-0.5*deltat)/dt_field)) .AND. (time>time0) ) THEN
-     ifield=ifield+1; WRITE(istring,*) ifield
-     IF (has_terminal) WRITE(*,*) "Writing Dati.cart."//TRIM(ADJUSTL(istring))//".out at time ", time
-     filename="Dati.cart."//TRIM(ADJUSTL(istring))//".out"; CALL save_restart_file(filename,V)
+   ! Save i-th field
+   IF ( time+deltat >= (ifield+1)*dt_field ) THEN ! fast evaluation
+     IF ( prev_was_close .OR. ((FLOOR((time+0.5*deltat)/dt_field) > FLOOR((time-0.5*deltat)/dt_field)) .AND. (time>time0)) ) THEN ! accurate evaluation
+       ifield=ifield+1; WRITE(istring,*) ifield
+       IF (has_terminal) WRITE(*,*) "Writing Dati.cart."//TRIM(ADJUSTL(istring))//".out at time ", time
+       filename="Dati.cart."//TRIM(ADJUSTL(istring))//".out"; CALL save_restart_file(filename,V)
 #ifdef bodyforce
-     IF (has_terminal) WRITE(*,*) "Writing Force.cart."//TRIM(ADJUSTL(istring))//".out at time ", time
-     filename="Force.cart."//TRIM(ADJUSTL(istring))//".out"; CALL save_restart_file(filename,F)
+       IF (has_terminal) WRITE(*,*) "Writing Force.cart."//TRIM(ADJUSTL(istring))//".out at time ", time
+       filename="Force.cart."//TRIM(ADJUSTL(istring))//".out"; CALL save_restart_file(filename,F)
 #endif
 #ifdef convvel
-     IF (has_terminal) WRITE(*,*) "Writing Convvel.cart."//TRIM(ADJUSTL(istring))//".out at time ", time
-     uconv=uconv/convvel_cnt
-     filename="Convvel.cart."//TRIM(ADJUSTL(istring))//".out"; CALL save_convvel_file(filename,uconv)
-     uconv=0; convvel_cnt=0
+       IF (has_terminal) WRITE(*,*) "Writing Convvel.cart."//TRIM(ADJUSTL(istring))//".out at time ", time
+       uconv=uconv/convvel_cnt
+       filename="Convvel.cart."//TRIM(ADJUSTL(istring))//".out"; CALL save_convvel_file(filename,uconv)
+       uconv=0; convvel_cnt=0
 #endif
+       prev_was_close = .FALSE.
+     ELSE
+       prev_was_close = .TRUE.
+     END IF
    END IF
   END SUBROUTINE outstats
 

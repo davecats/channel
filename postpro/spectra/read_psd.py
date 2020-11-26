@@ -1,6 +1,6 @@
 import numpy as np
 import tactical as tct
-import dns_channel as ch
+import channel as ch
 
 
 
@@ -8,10 +8,10 @@ def read_psd(fdir, **kwargs):
 
     y_symm = kwargs.get('y_symm', True)
     
-    fname = fdir + 'psd.bin' # generate file name
+    fname = fdir + 'spectra/' + 'psd.bin' # generate file name
 
     # fetch nx, ny, nz
-    dnsdict = ch.read_dnsin(fdir)
+    dnsdict = ch.read_dnsin(fdir+'dns.in')
     mesh = ch.mesh(dnsdict)
 
     # create memmap
