@@ -1,6 +1,4 @@
 import pandas as pd
-from dns_channel.dnsdata import read_dnsin
-
 
 
 def read(fdir, **kwargs):
@@ -26,11 +24,11 @@ def read(fdir, **kwargs):
 
     # read Reynolds stress tensor components from uiuj
 
-    uvPanda = pd.read_csv(fdir + filenames[1], header = head_len, delim_whitespace=True) # reynolds stresses
-    uuPanda = pd.read_csv(fdir + filenames[2], header = head_len, delim_whitespace=True) # kinetic energy: uu
-    vvPanda = pd.read_csv(fdir + filenames[3], header = head_len, delim_whitespace=True) # kinetic energy: vv
-    wwPanda = pd.read_csv(fdir + filenames[4], header = head_len, delim_whitespace=True) # kinetic energy: ww
-    kkPanda = pd.read_csv(fdir + filenames[5], header = head_len, delim_whitespace=True) # turbulent kinetic energy
+    uvPanda = pd.read_csv(fdir + 'profiles/' + filenames[1], header = head_len, delim_whitespace=True) # reynolds stresses
+    uuPanda = pd.read_csv(fdir + 'profiles/' + filenames[2], header = head_len, delim_whitespace=True) # kinetic energy: uu
+    vvPanda = pd.read_csv(fdir + 'profiles/' + filenames[3], header = head_len, delim_whitespace=True) # kinetic energy: vv
+    wwPanda = pd.read_csv(fdir + 'profiles/' + filenames[4], header = head_len, delim_whitespace=True) # kinetic energy: ww
+    kkPanda = pd.read_csv(fdir + 'profiles/' + filenames[5], header = head_len, delim_whitespace=True) # turbulent kinetic energy
     
 
     # read mke and runtimedata
@@ -43,8 +41,8 @@ def read(fdir, **kwargs):
     
     else:
         
-        mkPanda = pd.read_csv(fdir + filenames[6], header = head_len, delim_whitespace=True) # mean kinetic energy
-        mePanda = pd.read_csv(fdir + filenames[0], header = head_len, delim_whitespace=True) # mean field
+        mkPanda = pd.read_csv(fdir + 'profiles/' + filenames[6], header = head_len, delim_whitespace=True) # mean kinetic energy
+        mePanda = pd.read_csv(fdir + 'profiles/' + filenames[0], header = head_len, delim_whitespace=True) # mean field
         
         # read Runtimedata
 
@@ -73,6 +71,8 @@ def read_integrals(fdir, **kwargs):
     # fidr: string - directory where output of uiuj and Runtimedata is contained
     variant = kwargs.get('variant', None)   # variant of uiuj used for postprocessing
     head_len = kwargs.get('head_len', 1) # length of header (notice that the column names should be OUTSIDE OF HEADER!)
+
+    fdir = fdir + 'profiles/'
 
     # filenames
     filenames = ['uv', 'uu', 'vv', 'ww', 'tke', 'mke']
@@ -128,7 +128,7 @@ def readLM(fabel, **kwargs):
 
 def get_nfield(fdir):
 
-    with open(fdir + 'uu.dat') as infile:
+    with open(fdir + 'profiles/uu.dat') as infile:
         fline = infile.readline()
 
     tmp = ''
