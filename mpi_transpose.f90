@@ -23,7 +23,7 @@ MODULE mpi_transpose
   integer(C_INT),save :: nproc,iproc,ierr,npx,ipx,npy,ipy
   integer(C_INT), save :: nx0,nxN,nxB,nz0,nzN,nzB,block
   integer(C_INT), save :: ny0,nyN,miny,maxy
-  integer(C_INT), parameter :: TAG_LUDECOMP=100, TAG_LUDIVSTEP1=101, TAG_LUDIVSTEP2=102, TAG_DUDY=103
+  integer(C_INT), save :: TAG_LUDECOMP=100, TAG_LUDIVSTEP1=101, TAG_LUDIVSTEP2=102, TAG_DUDY=103
   logical, save :: first,last,has_terminal,has_average
   TYPE(MPI_Datatype), save :: Mdz,Mdx,cmpl,writeview_type,owned2write_type
 #ifdef nonblockingY
@@ -43,6 +43,12 @@ CONTAINS
     integer :: array_of_sizes(ndims), array_of_subsizes(ndims), array_of_starts(ndims), ierror
     ! Define which process write on screen
     has_terminal=(iproc==0)
+#ifdef nonblockingY
+    TAG_LUDECOMP=0
+    TAG_LUDIVSTEP1=(2*nz+1)
+    TAG_LUDIVSTEP2=2*(2*nz+1)
+    TAG_DUDY=3*(2*nz+1)
+#endif
     ! Processor decomposition
 #ifdef ycontiguous
     npx=nproc/npy; ipx=iproc/npy; 

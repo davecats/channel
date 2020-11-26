@@ -38,15 +38,15 @@
           V(ny-1,iz,ix,1)=V(ny-1,iz,ix,1)-etamat(ny-1,1,iz)*bcn(iz,ix)%eta/etanbc(1) 
           V(ny-2,iz,ix,1)=V(ny-2,iz,ix,1)-etamat(ny-2,2,iz)*bcn(iz,ix)%eta/etanbc(1)
         END IF
-        CALL LU5decompStep(D2vmat(:,:,iz),req(ReqLinSolve,iz,0)); CALL LU5decompStep(etamat(:,:,iz),req(ReqLinSolve,iz,1))
-        CALL LeftLU5divStep1(V(:,iz,ix,2),D2vmat(:,:,iz),V(:,iz,ix,2),req(ReqLinSolve,iz,2))
-        CALL LeftLU5divStep1(V(:,iz,ix,1),etamat(:,:,iz),V(:,iz,ix,1),req(ReqLinSolve,iz,3))
+        CALL LU5decompStep(D2vmat(:,:,iz),req(ReqLinSolve,iz,0),iz+nz); CALL LU5decompStep(etamat(:,:,iz),req(ReqLinSolve,iz,1),iz+nz)
+        CALL LeftLU5divStep1(V(:,iz,ix,2),D2vmat(:,:,iz),V(:,iz,ix,2),req(ReqLinSolve,iz,2),iz+nz)
+        CALL LeftLU5divStep1(V(:,iz,ix,1),etamat(:,:,iz),V(:,iz,ix,1),req(ReqLinSolve,iz,3),iz+nz)
       END DO    
       IF (.NOT. first) CALL MPI_Waitall((2*nz+1)*4,ReqLinSolve,MPI_STATUSES_IGNORE)
       IF (ix==0) eta00mat=etamat(:,:,0)
       DO iz=-nz,nz
-        CALL LeftLU5divStep2(D2vmat(:,:,iz),V(:,iz,ix,2),req(ReqLinSolve,iz,0))
-        CALL LeftLU5divStep2(etamat(:,:,iz),V(:,iz,ix,1),req(ReqLinSolve,iz,1))
+        CALL LeftLU5divStep2(D2vmat(:,:,iz),V(:,iz,ix,2),req(ReqLinSolve,iz,0),iz+nz)
+        CALL LeftLU5divStep2(etamat(:,:,iz),V(:,iz,ix,1),req(ReqLinSolve,iz,1),iz+nz)
         IF (first) THEN
           V(0,iz,ix,2)=(bc0(iz,ix)%v-sum(V(1:3,iz,ix,2)*v0bc(0:2)))/v0bc(-1)
           V(-1,iz,ix,2)=(bc0(iz,ix)%vy-sum(V(0:3,iz,ix,2)*v0m1bc(-1:2)))/v0m1bc(-2)
@@ -74,9 +74,9 @@
     IF (has_average) THEN
          ucor(ny0-2:ny0-1)=0; ucor(ny0:nyN)=1; ucor(nyN+1:nyN+2)=0
          ! XXX TODO Make computation of ucor communication-free
-         CALL LeftLU5divStep1(ucor,eta00mat(:,:),ucor,Rs)
+         CALL LeftLU5divStep1(ucor,eta00mat(:,:),ucor,Rs,0)
          IF (.NOT. first) CALL MPI_WAIT(Rs,MPI_STATUS_IGNORE)
-         CALL LeftLU5divStep2(eta00mat(:,:),ucor,Rs)
+         CALL LeftLU5divStep2(eta00mat(:,:),ucor,Rs,0)
          IF (.NOT. last)  CALL MPI_WAIT(Rs,MPI_STATUS_IGNORE)
          IF (first) THEN
            ucor(0)=-sum(ucor(1:3)*eta0bc(0:2))/eta0bc(-1)
@@ -123,7 +123,7 @@
     DO ix=nx0,nxN
       DO iz=-nz,nz
           IF ( .NOT. (ix==0 .AND. iz==0) )  THEN
-            CALL COMPLEXderiv(V(:,iz,ix,2),V(:,iz,ix,3),REQvetaTOuvw(cnt_req)); cnt_req=cnt_req+1
+            CALL COMPLEXderiv(V(:,iz,ix,2),V(:,iz,ix,3),REQvetaTOuvw(cnt_req),iz+nz); cnt_req=cnt_req+1
           END IF
       END DO
     END DO
@@ -132,7 +132,7 @@
     DO ix=nx0,nxN
       DO iz=-nz,nz
           IF (.NOT. ( ix==0 .AND. iz==0) ) THEN
-            CALL LeftLU5divStep2(D0mat,V(:,iz,ix,3),REQvetaTOuvw(cnt_req)); cnt_req=cnt_req+1
+            CALL LeftLU5divStep2(D0mat,V(:,iz,ix,3),REQvetaTOuvw(cnt_req),iz+nz); cnt_req=cnt_req+1
             temp=(ialfa(ix)*V(:,iz,ix,3)-ibeta(iz)*V(:,iz,ix,1))/k2(iz,ix)
             V(:,iz,ix,3)=(ibeta(iz)*V(:,iz,ix,3)+ialfa(ix)*V(:,iz,ix,1))/k2(iz,ix)
             V(:,iz,ix,1)=temp

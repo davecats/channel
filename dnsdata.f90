@@ -242,7 +242,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
     END IF
     FORALL (iy=ny0:nyN) D0mat(iy,-2:2)=der(iy)%d0(-2:2); 
 #ifdef nonblockingY
-    CALL LU5decompStep(D0mat,Rs)
+    CALL LU5decompStep(D0mat,Rs,0)
     IF ( .NOT. first ) CALL MPI_Wait(Rs,MPI_STATUS_IGNORE)
 #else
     CALL LU5decompStep(D0mat)
@@ -298,7 +298,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
   !--------------------------------------------------------------!
   !---COMPLEX----- derivative in the y-direction ----------------!
 #ifdef nonblockingY
-  SUBROUTINE COMPLEXderiv(f0,f1,Rs)
+  SUBROUTINE COMPLEXderiv(f0,f1,Rs,itag)
 #else
   SUBROUTINE COMPLEXderiv(f0,f1)
 #endif
@@ -306,6 +306,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
     complex(C_DOUBLE_COMPLEX), intent(out) :: f1(ny0-2:nyN+2)
 #ifdef nonblockingY
     TYPE(MPI_REQUEST), intent(out) :: Rs
+    integer(C_INT), intent(in) :: itag
 #endif
     IF (first) THEN 
       f1(0)=sum(d140(-2:2)*f0(-1:3))
@@ -327,7 +328,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
       f1(ny-2)=f1(ny-2)-der(ny-2)%d0(2)*f1(ny)
     END IF
 #ifdef nonblockingY
-    CALL LeftLU5divStep1(f1,D0mat,f1,Rs)
+    CALL LeftLU5divStep1(f1,D0mat,f1,Rs,itag)
 #else
     CALL LeftLU5divStep1(f1,D0mat,f1)
 #endif
@@ -577,7 +578,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
       IF (has_terminal) WRITE(*,*) "Generating initial field..."
       DO iy=ny0-2,nyN+2; DO ix=nx0,nxN; DO iz=-nz,nz
           CALL RANDOM_NUMBER(rn)
-          R(iy,iz,ix,1) = 0.000*EXP(dcmplx(0,rn(1)-0.5));  R(iy,iz,ix,2) = 0.000*EXP(dcmplx(0,rn(2)-0.5));  R(iy,iz,ix,3) = 0.000*EXP(dcmplx(0,rn(3)-0.5));
+          R(iy,iz,ix,1) = 0.01*EXP(dcmplx(0,rn(1)-0.5));  R(iy,iz,ix,2) = 0.01*EXP(dcmplx(0,rn(2)-0.5));  R(iy,iz,ix,3) = 0.01*EXP(dcmplx(0,rn(3)-0.5));
       END DO;        END DO;        END DO
       IF (has_average) THEN
         DO CONCURRENT (iy=ny0-2:nyN+2)
@@ -735,13 +736,15 @@ logical::rtd_exists ! flag to check existence of Runtimedata
      IF (ipy==0) THEN
        dudy(1,1)=sum(d140(-2:2)*dreal(V(-1:3,0,0,1)));       dudy(2,1)=sum(d140(-2:2)*dreal(V(-1:3,0,0,3)))
        CALL MPI_IRecv(dudy(1:2,2),2,MPI_DOUBLE_PRECISION,npy-1,TAG_DUDY,MPI_COMM_Y,Rr)
-       CALL MPI_Wait(Rr,S); CALL MPI_Wait(Rs,S)
+       CALL MPI_Wait(Rr,S);
      END IF
+     IF (ipy==npy-1) CALL MPI_Wait(Rs,S)
    END IF
    IF (has_terminal) THEN
      WRITE(*,"(F10.4,3X,4(F11.6,3X),4(F9.4,3X),2(F9.6,3X))") &
            time,dudy(1,1),dudy(1,2),dudy(2,1),dudy(2,2),fr(1)+corrpx*fr(3),meanpx+corrpx,fr(2)+corrpz*fr(3),meanpz+corrpz,runtime_global*deltat,deltat
      WRITE(101,*) time,dudy(1,1),dudy(1,2),dudy(2,1),dudy(2,2),fr(1)+corrpx*fr(3),meanpx+corrpx,fr(2)+corrpz*fr(3),meanpz+corrpz,runtime_global*deltat,deltat
+     FLUSH(101)
    END IF
    runtime_global=0
    IF (dt_save > 0) THEN ! save restart file

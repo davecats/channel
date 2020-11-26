@@ -26,6 +26,11 @@
 !#define convvel
 ! Verbose echo of parallel parameters
 !#define mpiverbose
+! Disable code optimisation where possible (FFTW),
+! in order to get code whose behaviour can be replicated
+! exactly with different parallelisations. Useful for 
+! testing.
+!#define no_optimising_code
 
 
 ! ==============================================
