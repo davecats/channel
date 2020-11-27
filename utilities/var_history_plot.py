@@ -1,9 +1,20 @@
-import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib import cm
 import channel as ch
 from math import sqrt
 import pandas as pd
+from argparse import ArgumentParser
+
+import matplotlib
+import matplotlib.pyplot as plt
+from matplotlib import cm
+from matplotlib.animation import FuncAnimation
+matplotlib.use('qt5Agg')
+
+argpar = ArgumentParser(description='Plot the variance history previously calculated by var_history.')
+argpar.add_argument('--animate', help=   '''Animate the plot of instantaneous variances of selected components.
+                                            For instance, "--animate uv" creates the animation for components u
+                                            and v, while "--animate w" only animates the w component.''')
+settings = argpar.parse_args()
 
 # read postpro
 cumul = np.fromfile("var_history/cumulative.bin", dtype=np.float64)
@@ -19,7 +30,9 @@ m = ch.mesh(meshdata)
 m.y = m.y[1:-1] # remove ghost cells
 
 # get viscous units
-dudy = (25.4095 + 25.4133)/2
+with open('var_history/dudy.txt') as f:
+    dudy = float(f.readline())
+    #dudy = 500
 tauw = 1/re * dudy
 utau = sqrt(tauw)
 retau = re * utau
@@ -84,3 +97,29 @@ for ii in range(noflds):
 
 # show all plots
 plt.show()
+
+# now animate if requested
+if settings.animate:
+    
+    # first off, define parse components
+    cmpnt = []
+    for char in settings.animate:
+        if char == 'u':
+            cmpnt.append(0)
+        if char == 'v':
+            cmpnt.append(1)
+        if char == 'w':
+            cmpnt.append(2)
+
+    # now animate
+    for it,c in enumerate(cmpnt):
+        fig, ax = plt.subplots()
+        ii = 0
+        graph = ax.plot(m.y, insta[0,c,:]) # first plot
+        ax.set_title(settings.animate[it]+settings.animate[it]+' fluctuation, field '+str(1))
+        def one_frame(ii):
+            graph[0].set_data(m.y, insta[ii,c,:])
+            ax.set_title(settings.animate[it]+settings.animate[it]+' fluctuation, field '+str(ii))
+            return graph
+        animation = FuncAnimation(fig, func=one_frame, frames=range(1,noflds), interval=100)
+        plt.show()
