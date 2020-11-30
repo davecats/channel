@@ -1,52 +1,46 @@
 ! TODO: verify parallelisation!
 
+IF COMMANDLINE(1)="-h" THEN
+  WRITE "Usage: uiuj [-h] 1 1 localhost nfmin nfmax dn [--custom_mean nmin_m nmax_m dn_m]"
+  WRITE ""
+  WRITE "Calculates MKE and TKE statistics on files ranging from index nfmin to nfmax with step dn. If the flag --custom_mean is passed, the mean field is calculated on fields (nmin_m nmax_m dn_m); the remaining statistics are still calculated on (nfmin nfmax dn)."
+  WRITE ""
+  WRITE "This program is meant to be used on plane channels."
+  WRITE ""
+  WRITE "Results are output to uiuj.bin. Use uiuj2ascii to get the results in a human readable format."
+  WRITE ""
+  WRITE "Mean TKE budget terms are calculated as:"
+  WRITE "INST    --> dK/dt"
+  WRITE "CONV    --> Ui*dK/dxi"
+  WRITE "PROD    --> -<uiuj>dUj/dxi"
+  WRITE "DISS*   --> nu<(duj/dxi + dui/dxj)*duj/dxi>"
+  WRITE "TDIFF   --> -0.5*d/dxi<ui*uj*uj>"
+  WRITE "PDIFF   --> -d/dxi<ui*p>"
+  WRITE "VDIFF1  --> nu*d2K/dxi2"
+  WRITE "VDIFF2* --> nu*d2/dxjdxi<ui*uj>"
+  WRITE "*-terms can be summed into the PDISS=nu*<duj/dxi*duj/dxi>"
+  WRITE 
+  WRITE  "which in a statistically stationary and fully-developed turbulent"
+  WRITE  "channel flow with spanwise wall oscillations reduces to"
+  WRITE  "PROD  --> -<uv>dU/dy-<vw>dW/dy         [this is computed after the fields loop]"
+  WRITE  "PDISS --> nu*<dui/dxj*dui/dxj>"
+  WRITE  "TDIFF --> -0.5*d/dy(<vuu>+<vvv>+<vww>)"
+  WRITE  "PDIFF --> -d/dy<vp>"
+  WRITE  "VDIFF --> nu*d2K/dy2"
+  WRITE 
+  WRITE  "The MKE buget equation, in a statistically stationary"
+  WRITE  "and fully-developed turbulent channel flow, reduces to"
+  WRITE  "pump  --> -dP/dx*U = tau_w*U"
+  WRITE  "TPROD  --> <uv>dU/dy+<vw>dW/dy         [TKE production, here a sink]"
+  WRITE  "ttrsp  --> -d(<uv>U)/dy-d(<vw>W)/dy"
+  WRITE  "vdiff  --> ni*d(U*Uy)/dy+d(W*Wy)/dy"
+  WRITE  "dissU  --> ni*dUdy^2"
+  WRITE  "dissW  --> ni*dWdy^2"
+  STOP
+END IF
 
-
-
-
-! This program computes the MKE and TKE budgets
-! and their volume integrals for a channel flow
-! with spanwise wall oscillations
-
-!
-! mean TKE buget according to equation:
-!
-! INST    --> dK/dt
-! CONV    --> Ui*dK/dxi
-! PROD    --> -<uiuj>dUj/dxi
-! DISS*   --> nu<(duj/dxi + dui/dxj)*duj/dxi>
-! TDIFF   --> -0.5*d/dxi<ui*uj*uj>
-! PDIFF   --> -d/dxi<ui*p>
-! VDIFF1  --> nu*d2K/dxi2
-! VDIFF2* --> nu*d2/dxjdxi<ui*uj>
-!
-! *-terms can be summed into the PDISS=nu*<duj/dxi*duj/dxi>
-!
-! which in a statistically stationary and fully-developed turbulent
-! channel flow with spanwise wall oscillations reduces to
-!
-! PROD  --> -<uv>dU/dy-<vw>dW/dy         [this is computed after the fields loop]
-! PDISS --> nu*<dui/dxj*dui/dxj>
-! TDIFF --> -0.5*d/dy(<vuu>+<vvv>+<vww>)
-! PDIFF --> -d/dy<vp>
-! VDIFF --> nu*d2K/dy2                   [this is computed after the fields loop]
-!
-
-!
-! MKE buget equation, which in a statistically stationary
-! and fully-developed turbulent channel flow
-! with spanwise wall oscillations reduces to
-!
-! pump  --> -dP/dx*U = tau_w*U
-! TPROD  --> <uv>dU/dy+<vw>dW/dy         [TKE production, here a sink]
-! ttrsp  --> -d(<uv>U)/dy-d(<vw>W)/dy
-! vdiff  --> ni*d(U*Uy)/dy+d(W*Wy)/dy
-! dissU  --> ni*dUdy^2
-! dissW  --> ni*dWdy^2
-!
-! all these terms are computed after the fields loop.
-
-! This code is NOT parallel
+! END OF HELP/DOCUMENTATION
+!------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 gamma=0
 outinterv=10
@@ -55,12 +49,22 @@ USE ../dnsdirect
 !USE rtchecks
 USE ../convenience
 
+BOOLEAN custom_mean = FALSE
+
 ! Parameters
 ! -----------------------------
 INTEGER nfmin,nfmax,dn
 nfmin=atoi(COMMANDLINE(4))
 nfmax=atoi(COMMANDLINE(5))
 dn=atoi(COMMANDLINE(6))
+IF COMMANDLINE.HI=10 THEN
+  IF COMMANDLINE(7)="--custom_mean" OR COMMANDLINE(7)="-custom_mean" THEN
+    custom_mean = TRUE
+    nfmin=atoi(COMMANDLINE(8))
+    nfmax=atoi(COMMANDLINE(9))
+    dn=atoi(COMMANDLINE(10))
+  END IF
+END IF
 !------------------------------
 nftot=[(nfmax-nfmin) DIV dn]+1
 
@@ -108,7 +112,14 @@ REPEAT files
 WITH mean: U=~/nftot; W=~/nftot; P=~/nftot
 WITH mean:  deriv(U, Uy);  LeftLUDivStep2(Uy,  D0mat); deriv(W, Wy);   LeftLUDivStep2(Wy, D0mat)
 WITH mean: deriv2(U, Uyy); LeftLUDivStep2(Uyy, D0mat) deriv2(W, Wyy); LeftLUDivStep2(Wyy, D0mat)
-     
+
+! If necessary, switch back to correct fields for statistics
+IF custom_mean THEN
+  nfmin=atoi(COMMANDLINE(4))
+  nfmax=atoi(COMMANDLINE(5))
+  dn=atoi(COMMANDLINE(6))
+END IF
+
 
 ! Compute the TKE budget
 ! ------------------------------------
@@ -209,8 +220,17 @@ WITH mke,mean: pump=ni*Uym*U
 <*
 #include <sys/stat.h>
 #include <sys/types.h>
+*>
+
+IF NOT custom_mean THEN
+<*
 int ifold_create = mkdir("profiles", 0777);
 *>
+ELSE
+<*
+int ifold_create = mkdir("cm_profiles", 0777);
+*>
+END IF
 
 ! Write to binary file
 ! ------------------------------------
@@ -221,7 +241,11 @@ POINTER TO STORED STRUCTURE[
         ARRAY(-1..ny+1) OF BALANCE uiujdata
 ] uiujimage
 IF NOT first THEN READ FROM prev
-  uiujimage = OPEN("profiles/uiuj.bin")
+  IF NOT custom_mean THEN
+    uiujimage = OPEN("profiles/uiuj.bin")
+  ELSE
+    uiujimage = OPEN("cm_profiles/uiuj.bin")
+  END IF
   WITH uiujimage:
     nmin = nfmin
     nmax = nfmax
