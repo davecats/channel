@@ -20,12 +20,12 @@ MODULE ffts
   IMPLICIT NONE
   INCLUDE 'fftw3.f03'
 
-  integer, save        :: plan_type=FFTW_PATIENT
-  TYPE(C_PTR), save    :: pFFT,pIFT,pRFT,pHFT,ptrVVdx,ptrVVdz,ptrFdx,ptrFdz
-
 #ifdef no_optimising_code
-  plan_type=FFTW_ESTIMATE ! disable optimisations for fftw
+  integer, save        :: plan_type=FFTW_ESTIMATE
+#else
+  integer, save        :: plan_type=FFTW_PATIENT
 #endif
+  TYPE(C_PTR), save    :: pFFT,pIFT,pRFT,pHFT,ptrVVdx,ptrVVdz,ptrFdx,ptrFdz
 
 CONTAINS
 
