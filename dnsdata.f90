@@ -748,12 +748,12 @@ logical::rtd_exists ! flag to check existence of Runtimedata
    END IF
    runtime_global=0
    IF (dt_save > 0) THEN ! save restart file
-     IF ( ((FLOOR((time+0.5*deltat)/dt_save) > FLOOR((time-0.5*deltat)/dt_save)) .AND. (istep>1)) .OR. istep==nstep ) THEN
+     IF ( ((FLOOR((time+0.5*deltat)/dt_save) > FLOOR((time-0.5*deltat)/dt_save)) .AND. (istep>1))) THEN
        IF (has_terminal) WRITE(*,*) "Writing Dati.cart.out at time ", time
        filename="Dati.cart.out";  CALL save_restart_file(filename,V)
      END IF
 #ifdef ibm
-     IF ( ((FLOOR((time+0.5*deltat)/dt_save) > FLOOR((time-0.5*deltat)/dt_save)) .AND. (istep>1)) .OR. istep==nstep ) THEN
+     IF ( ((FLOOR((time+0.5*deltat)/dt_save) > FLOOR((time-0.5*deltat)/dt_save)) .AND. (istep>1))) THEN
        IF (has_terminal) WRITE(*,*) "Writing dUint.cart.out at time ", time
        filename="dUint.cart.out"; CALL save_body_file(filename,dUint(:,:,:,:,0))
      END IF
