@@ -19,7 +19,7 @@ PROGRAM channel
 #ifdef crhon
   REAL timei,timee
 #endif
-  REAL(C_DOUBLE) :: frl(1:3)
+  REAL(C_DOUBLE) :: frl(1:3), deltat_from_dnsin
   CHARACTER(len = 40) :: end_filename
 
   ! Init MPI
@@ -27,6 +27,7 @@ PROGRAM channel
   CALL MPI_COMM_RANK(MPI_COMM_WORLD,iproc,ierr)
   CALL MPI_COMM_SIZE(MPI_COMM_WORLD,nproc,ierr)
   CALL read_dnsin()
+  deltat_from_dnsin = deltat
   CALL init_MPI(nx+1,nz,ny,nxd+1,nzd)
   CALL init_memory(.TRUE.) 
 
@@ -53,6 +54,11 @@ PROGRAM channel
   ! Field number (for output)
   ifield=FLOOR((time+0.5*deltat)/dt_field)
   time0=time
+
+  ! Reset desired dt
+  IF (cflmax == 0) THEN
+    deltat = deltat_from_dnsin
+  END IF
 
 IF (has_terminal) THEN
   ! Output DNS.in
