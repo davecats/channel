@@ -178,7 +178,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
       IF (negative_if_eof >= 0) THEN
         BACKSPACE(101)
         PRINT *, 'In Runtimedata: starting from time', selectime
-        deltat = curr_dt
+        deltat = curr_dt ! this is only executed by machine WITH TERMINAL!
       ELSE
         PRINT *, ''
         PRINT *, '###############'
@@ -195,6 +195,12 @@ logical::rtd_exists ! flag to check existence of Runtimedata
         PRINT *, 'Skipping one line and appending.'
       END IF
     END IF
+
+    ! Broadcast deltat of machine with terminal to the remaining ones.
+    ! This is not always needed, but it is if the deltat = curr_dt
+    ! instruction above has been executed.
+    CALL MPI_bcast(deltat,1,MPI_DOUBLE_PRECISION,0,MPI_COMM_WORLD) ! iproc == 0 has terminal
+
   END SUBROUTINE get_record
 
   !--------------------------------------------------------------!
