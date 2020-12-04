@@ -41,12 +41,12 @@ else:
 ii = len(lines)
 for line in reversed(lines):
     ii -= 1
-    if 'End of time loop' in line:
+    if ('End of' in line) and ('writing restart' in line):
         print("Found end of time iterations. Deleting unnecessary lines...")
         break
-# check if beginning was found
+# check if end was found
 if ii == 0:
-    print("Beginning of time iterations was not found.")
+    print("End of time iterations was not found.")
 # delete unnecessary lines
 else:
     lines = lines[:ii]

@@ -47,4 +47,4 @@ if not maxdiff == 0:
 else:
     print('No difference detected in velocity field.')
 
-show()
+#show()
