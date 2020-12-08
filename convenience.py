@@ -1,8 +1,3 @@
-# read_field
-# Reads the field file output by channel (FORTRAN).
-
-
-
 import numpy
 from struct import unpack
 from math import pi, floor
@@ -99,7 +94,9 @@ def read_time(bin_file, **kwargs):
 
 
 def read_field(bin_file, **kwargs):
-# usage: v_field, nx, ny, nz = read_field(bin_file, dns_file)
+# Load a velocity field into memory; ghost cells are omitted.
+# usage: v_field, nx, ny, nz = read_field( 'Dati.cart.whatever.out' [, integer_size=4] )
+# Arguments in square brackets are optional.
 
     integer_size = kwargs.get('int_size', 4) # size (in bytes) of an integer
 
@@ -132,8 +129,14 @@ def read_field(bin_file, **kwargs):
 
 
 
-def field_as_memmap(bin_file, np, **kwargs):
-# np is passed because its reading from disk would affect performance, thus making the whole memmapping thing pointless!
+def field_as_memmap(bin_file, **kwargs):
+# Accesses a field on disk as a memmap, meaning it is not loaded to memory.
+# FOR SAFETY REASONS, ACCESS IS READ ONLY BY DEFAULT.
+# THE MEMMAP INCLUDES GHOST CELLS; this prevents unnecessary slicing.
+# Usage:    v_field = field_as_memmap( 'Dati.cart.whatever.out' [, integer_size=4] )
+# Arguments in square brackets are optional.
+
+    np = numpy.fromfile(bin_file, count=3, dtype=numpy.int32) # read files from disk
 
     integer_size = kwargs.get('int_size', 4) # size (in bytes) of an integer
 
@@ -144,8 +147,7 @@ def field_as_memmap(bin_file, np, **kwargs):
     # read array
     v_field = numpy.memmap(bin_file, dtype=numpy.complex128, mode='r', offset=bytes_to_skip, shape=(3, np[0]+1, 2*np[2]+1, np[1]+3))
     
-    # get rid of ghost cells while returning
-    return v_field[:,:,:,1:-1]
+    return v_field
 
 
 def get_dim_dnsin(dnsin_file):
