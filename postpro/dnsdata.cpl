@@ -3,7 +3,23 @@ USE fft
 USE rbmat
 USE parallel
 
-nsmp=4
+! parse nsmp from commandline; if not provided, defaults to 4
+INTEGER cntr = 1
+INTEGER tempnsp = 4 ! temporary value of nsmp, defaulting to 4
+LOOP parse_nsmp WHILE cntr<=COMMANDLINE.HI ! loop over arguments
+  IF COMMANDLINE(cntr)="--sh_mem_proc" OR COMMANDLINE(cntr)="-sh_mem_proc" THEN
+    IF cntr+1 > COMMANDLINE.HI THEN
+      WRITE "Error: not enough arguments for sh_mem_proc."
+      STOP
+    END IF
+    tempnsp = atoi(COMMANDLINE(cntr+1))
+    EXIT parse_nsmp
+  END IF
+  cntr = cntr+1
+REPEAT parse_nsmp
+! assign constant
+nsmp = tempnsp
+
 
 
 ! Parallel - initialization

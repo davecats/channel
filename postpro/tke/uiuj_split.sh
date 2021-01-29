@@ -10,9 +10,9 @@ then
     echo
     echo "The compute command calls uiuj to calculate statistics; the following arguments are required:"
     echo
-    echo "   uiuj_split.sh compute nmin nmax with_mean mean_min mean_max"
+    echo "   uiuj_split.sh compute nmin nmax with_mean mean_min mean_max [--sh_mem_proc nsmp]"
     echo
-    echo "Where nmin, nmax describe the range of snapshots used for calculation of statistics, while mean_min, mean_max is the range of (all available) snapshots used for calculation of the mean velocity field."
+    echo "Where nmin, nmax describe the range of snapshots used for calculation of statistics, while mean_min, mean_max is the range of (all available) snapshots used for calculation of the mean velocity field. Flag -sh_mem_proc is used to set the number nsmp of shared memory processes."
     echo "Compute outputs a file named uiuj_nmin_nmax.bin in folder cm_profiles."
     echo
     echo "Command merge is used to merge multiple .bin files found in folder cm_profiles. Notice that merge must be called from the parent simulation directory (the one containing snapshots, which is the same compute is called from). Syntax is:"
@@ -42,7 +42,7 @@ then
     mean_max=$6
 
     # compute
-    $uiujexec 1 1 localhost $nmin $nmax 1 --custom_mean $mean_min $mean_max 1
+    $uiujexec 1 1 localhost $nmin $nmax 1 --custom_mean $mean_min $mean_max 1 ${@:7}
 
     # move files
     mv cm_profiles/uiuj.bin cm_profiles/uiuj_${nmin}_${nmax}.bin

@@ -1,7 +1,12 @@
 IF COMMANDLINE(1)="-h" THEN
-  WRITE "Usage: uiuj [-h] 1 1 localhost nfmin nfmax dn [--custom_mean nmin_m nmax_m dn_m]"
+  WRITE "Calculates MKE and TKE statistics on files ranging from index nfmin to nfmax with step dn. Usage:"
   WRITE ""
-  WRITE "Calculates MKE and TKE statistics on files ranging from index nfmin to nfmax with step dn. If the flag --custom_mean is passed, the mean field is calculated on fields (nmin_m nmax_m dn_m); the remaining statistics are still calculated on (nfmin nfmax dn)."
+  WRITE "   uiuj [-h] 1 1 localhost nfmin nfmax dn [--custom_mean nmin_m nmax_m dn_m] [--sh_mem_proc n_sh_mem_proc]"
+  WRITE ""
+  WRITE "If the flag --custom_mean is passed, the mean field is calculated on fields (nmin_m nmax_m dn_m); the remaining statistics are still calculated on (nfmin nfmax dn)."
+  WRITE ""
+  WRITE "Flag --sh_mem_proc is used to specify the number of shared memory processes to be used (on each machine, if this program is started in distributed memory)."
+  WRITE "By default, 4 shared memory processes are used."
   WRITE ""
   WRITE "This program is meant to be used on plane channels."
   WRITE ""
@@ -55,14 +60,22 @@ INTEGER nfmin,nfmax,dn,nftot
 nfmin=atoi(COMMANDLINE(4))
 nfmax=atoi(COMMANDLINE(5))
 dn=atoi(COMMANDLINE(6))
-IF COMMANDLINE.HI=10 THEN
-  IF COMMANDLINE(7)="--custom_mean" OR COMMANDLINE(7)="-custom_mean" THEN
+! parse arguments; NOTICE THAT sh_mem_proc IS ALWAYS PARSED BY DNSDATA
+INTEGER cntr = 7
+LOOP parse_args WHILE cntr<=COMMANDLINE.HI
+  IF COMMANDLINE(cntr)="--custom_mean" OR COMMANDLINE(cntr)="-custom_mean" THEN
+    IF cntr+3 > COMMANDLINE.HI THEN
+      WRITE "Error: not enough arguments for custom_mean."
+      STOP
+    END IF
     custom_mean = TRUE
-    nfmin=atoi(COMMANDLINE(8))
-    nfmax=atoi(COMMANDLINE(9))
-    dn=atoi(COMMANDLINE(10))
+    nfmin=atoi(COMMANDLINE(cntr+1))
+    nfmax=atoi(COMMANDLINE(cntr+2))
+    dn=atoi(COMMANDLINE(cntr+3))
+    cntr = cntr+3
   END IF
-END IF
+  cntr = cntr+1
+REPEAT parse_args
 !------------------------------
 nftot=[(nfmax-nfmin) DIV dn]+1
 
