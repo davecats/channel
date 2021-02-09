@@ -225,8 +225,8 @@ contains !----------------------------------------------------------------------
         !nbytes_etype  =         nel  * sizeof(  int)
 
         ioff0 = 0                                   ! scal
-        ioff1 = ioff0 + 2 * sizeof(int) + nbytes_scal   ! vec
-        ioff2 = ioff1 + 2 * sizeof(int) + nbytes_vec    ! xyz
+        ioff1 = ioff0 + 8 + nbytes_scal   ! vec
+        ioff2 = ioff1 + 8 + nbytes_vec    ! xyz
         !ioff3 = ioff2 + sizeof(int) + nbytes_xyz    ! ien
         !ioff4 = ioff3 + sizeof(int) + nbytes_ien    ! offset
         !ioff5 = ioff4 + sizeof(int) + nbytes_offset ! etype
@@ -240,7 +240,7 @@ contains !----------------------------------------------------------------------
         if (has_terminal) then
             open(unit=ivtk,file=fname,form='binary')
                 buffer = '<?xml version="1.0"?>'//lf                                                                                                  ; write(ivtk) trim(buffer)
-                buffer = '<VTKFile type="StructuredGrid" version="0.1" byte_order="LittleEndian">'//lf						  	                      ; write(ivtk) trim(buffer)
+                buffer = '<VTKFile type="StructuredGrid" version="0.1" byte_order="LittleEndian" header_type="UInt64">'//lf						  	                      ; write(ivtk) trim(buffer)
                 write(str1(1:16), '(i16)') 1 ! x0
                 write(str2(1:16), '(i16)') nxtot ! xn
                 write(str3(1:16), '(i16)') 1 ! y0
