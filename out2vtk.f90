@@ -201,7 +201,7 @@ contains !----------------------------------------------------------------------
 
         character(len = 40) :: fname
 
-        character :: buffer*200, lf*1, offset*8, str1*8, str2*8
+        character :: buffer*200, lf*1, offset*16, str1*16, str2*16, str3*16, str33*16, str5*16, str6*16
         integer   :: ivtk = 9, int, dotpos, i
         real*4    :: float ! this must have same type of xyz and vec and stuff
         integer(C_SIZE_T) :: nbytes_scal, nbytes_vec, nbytes_xyz, nbytes_ien, nbytes_offset, nbytes_etype
@@ -220,51 +220,56 @@ contains !----------------------------------------------------------------------
         nbytes_scal   =         nnos * sizeof(float)
         nbytes_vec    = ndim  * nnos * sizeof(float)
         nbytes_xyz    = ndim  * nnos * sizeof(float)
-        nbytes_ien    = nnoel * nel  * sizeof(  int)
-        nbytes_offset =         nel  * sizeof(  int)
-        nbytes_etype  =         nel  * sizeof(  int)
+        !nbytes_ien    = nnoel * nel  * sizeof(  int)
+        !nbytes_offset =         nel  * sizeof(  int)
+        !nbytes_etype  =         nel  * sizeof(  int)
 
         ioff0 = 0                                   ! scal
-        ioff1 = ioff0 + sizeof(int) + nbytes_scal   ! vec
-        ioff2 = ioff1 + sizeof(int) + nbytes_vec    ! xyz
-        ioff3 = ioff2 + sizeof(int) + nbytes_xyz    ! ien
-        ioff4 = ioff3 + sizeof(int) + nbytes_ien    ! offset
-        ioff5 = ioff4 + sizeof(int) + nbytes_offset ! etype
+        ioff1 = ioff0 + 2 * sizeof(int) + nbytes_scal   ! vec
+        ioff2 = ioff1 + 2 * sizeof(int) + nbytes_vec    ! xyz
+        !ioff3 = ioff2 + sizeof(int) + nbytes_xyz    ! ien
+        !ioff4 = ioff3 + sizeof(int) + nbytes_ien    ! offset
+        !ioff5 = ioff4 + sizeof(int) + nbytes_offset ! etype
 
+        print *, ioff1, ioff2-ioff1
         ! adapt filename
         dotpos = scan(trim(fname),".", BACK= .true.)
-        if ( dotpos > 0 ) fname = fname(1:dotpos)//"vtu"
+        if ( dotpos > 0 ) fname = fname(1:dotpos)//"vts"
 
         ! write xml
         if (has_terminal) then
             open(unit=ivtk,file=fname,form='binary')
                 buffer = '<?xml version="1.0"?>'//lf                                                                                                  ; write(ivtk) trim(buffer)
-                buffer = '<VTKFile type="UnstructuredGrid" version="0.1" byte_order="LittleEndian">'//lf						  	                  ; write(ivtk) trim(buffer)
-                buffer = '  <UnstructuredGrid>'//lf                                                                                                   ; write(ivtk) trim(buffer)
-                write(str1(1:8),'(i8)') nnos
-                write(str2(1:8),'(i8)') nel
-                buffer = '    <Piece NumberOfPoints="'//str1//'" NumberOfCells="'//str2//'">'//lf                                                     ; write(ivtk) trim(buffer)
+                buffer = '<VTKFile type="StructuredGrid" version="0.1" byte_order="LittleEndian">'//lf						  	                      ; write(ivtk) trim(buffer)
+                write(str1(1:16), '(i16)') 1 ! x0
+                write(str2(1:16), '(i16)') nxtot ! xn
+                write(str3(1:16), '(i16)') 1 ! y0
+                write(str33(1:16),'(i16)') nytot ! yn
+                write(str5(1:16), '(i16)') 1 ! z0
+                write(str6(1:16), '(i16)') nztot ! zn
+                buffer = '  <StructuredGrid WholeExtent="'//str1//' '//str2//' '//str3//' '//str33//' '//str5//' '//str6//'">'//lf                   ; write(ivtk) trim(buffer)
+                buffer = '    <Piece Extent="'//str1//' '//str2//' '//str3//' '//str33//' '//str5//' '//str6//'">'//lf                                ; write(ivtk) trim(buffer)
                 buffer = '      <PointData> '//lf                                                                                                     ; write(ivtk) trim(buffer)
-                write(offset(1:8),'(i8)') ioff0
+                write(offset(1:16),'(i16)') ioff0
                 buffer = '         <DataArray type="Float32" Name="scalars" format="appended" offset="'//offset//'"           />'//lf                 ; write(ivtk) trim(buffer)
-                write(offset(1:8),'(i8)') ioff1
-                buffer = '         <DataArray type="Float32" Name="Velocity" NumberOfComponents="3" format="appended" offset="'//offset//'" />'//lf    ; write(ivtk) trim(buffer)
+                write(offset(1:16),'(i16)') ioff1
+                buffer = '         <DataArray type="Float32" Name="Velocity" NumberOfComponents="3" format="appended" offset="'//offset//'" />'//lf   ; write(ivtk) trim(buffer)
                 buffer = '      </PointData>'//lf                                                                                                     ; write(ivtk) trim(buffer)
                 buffer = '      <CellData>  </CellData>'//lf                                                                                          ; write(ivtk) trim(buffer)
                 buffer = '      <Points>'//lf                                                                                                         ; write(ivtk) trim(buffer)
-                write(offset(1:8),'(i8)') ioff2
+                write(offset(1:16),'(i16)') ioff2
                 buffer = '        <DataArray type="Float32" Name="coordinates" NumberOfComponents="3" format="appended" offset="'//offset//'" />'//lf ; write(ivtk) trim(buffer)
                 buffer = '      </Points>'//lf                                                                                                        ; write(ivtk) trim(buffer)
-                buffer = '      <Cells>'//lf                                                                                                          ; write(ivtk) trim(buffer)
-                write(offset(1:8),'(i8)') ioff3
-                buffer = '        <DataArray type="Int32" Name="connectivity" format="appended" offset="'//offset//'" />'//lf                         ; write(ivtk) trim(buffer)
-                write(offset(1:8),'(i8)') ioff4
-                buffer = '        <DataArray type="Int32" Name="offsets" format="appended" offset="'//offset//'" />'//lf                              ; write(ivtk) trim(buffer)
-                write(offset(1:8),'(i8)') ioff5
-                buffer = '        <DataArray type="Int32" Name="types" format="appended" offset="'//offset//'" />'//lf                                ; write(ivtk) trim(buffer)
-                buffer = '      </Cells>'//lf                                                                                                         ; write(ivtk) trim(buffer)
+!                buffer = '      <Cells>'//lf                                                                                                          ; write(ivtk) trim(buffer)
+!                write(offset(1:8),'(i8)') ioff3
+!                buffer = '        <DataArray type="Int32" Name="connectivity" format="appended" offset="'//offset//'" />'//lf                         ; write(ivtk) trim(buffer)
+!                write(offset(1:8),'(i8)') ioff4
+!                buffer = '        <DataArray type="Int32" Name="offsets" format="appended" offset="'//offset//'" />'//lf                              ; write(ivtk) trim(buffer)
+!                write(offset(1:8),'(i8)') ioff5
+!                buffer = '        <DataArray type="Int32" Name="types" format="appended" offset="'//offset//'" />'//lf                                ; write(ivtk) trim(buffer)
+!                buffer = '      </Cells>'//lf                                                                                                         ; write(ivtk) trim(buffer)
                 buffer = '    </Piece>'//lf                                                                                                           ; write(ivtk) trim(buffer)
-                buffer = '  </UnstructuredGrid>'//lf                                                                                                  ; write(ivtk) trim(buffer)
+                buffer = '  </StructuredGrid>'//lf                                                                                                    ; write(ivtk) trim(buffer)
                 buffer = '  <AppendedData encoding="raw">'//lf                                                                                        ; write(ivtk) trim(buffer)
                 buffer = '_'                                                                                                                          ; write(ivtk) trim(buffer)
             close(ivtk)
@@ -297,6 +302,8 @@ contains !----------------------------------------------------------------------
         CALL MPI_Barrier(MPI_COMM_WORLD) ! barrier so every process retrieves the same filesize
         inquire(file=fname, size=disp) ! retrieve displacement
 
+        print *, disp
+
         CALL MPI_File_open(MPI_COMM_WORLD, TRIM(fname), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
             CALL MPI_File_set_view(fh, disp, MPI_REAL, wtype_3d, 'native', MPI_INFO_NULL)
             CALL MPI_File_write_all(fh, vec, size(vec), MPI_REAL, status)
@@ -313,6 +320,10 @@ contains !----------------------------------------------------------------------
         CALL MPI_Barrier(MPI_COMM_WORLD) ! barrier so every process retrieves the same filesize
         inquire(file=fname, size=disp) ! retrieve displacement
 
+        print *, sizeof(nbytes_xyz), sizeof(int)
+                print *, disp
+
+
         CALL MPI_File_open(MPI_COMM_WORLD, TRIM(fname), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
             CALL MPI_File_set_view(fh, disp, MPI_REAL, wtype_3d, 'native', MPI_INFO_NULL)
             CALL MPI_File_write_all(fh, xyz, size(xyz), MPI_REAL, status)
@@ -320,24 +331,24 @@ contains !----------------------------------------------------------------------
 
         ! write element connectivity
 
+!        if (has_terminal) then
+!            open(unit=ivtk,file=fname,form='binary',position='append')
+!                write(ivtk) nbytes_ien
+!            close(ivtk)
+!        end if
+!
+!        CALL MPI_Barrier(MPI_COMM_WORLD) ! barrier so every process retrieves the same filesize
+!        inquire(file=fname, size=disp) ! retrieve displacement
+!
+!        CALL MPI_File_open(MPI_COMM_WORLD, TRIM(fname), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
+!            CALL MPI_File_set_view(fh, disp, MPI_REAL, wtype_ien, 'native', MPI_INFO_NULL)
+!            CALL MPI_File_write_all(fh, ien, size(ien), MPI_REAL, status)
+!        CALL MPI_File_close(fh)
+
         if (has_terminal) then
             open(unit=ivtk,file=fname,form='binary',position='append')
-                write(ivtk) nbytes_ien
-            close(ivtk)
-        end if
-
-        CALL MPI_Barrier(MPI_COMM_WORLD) ! barrier so every process retrieves the same filesize
-        inquire(file=fname, size=disp) ! retrieve displacement
-
-        CALL MPI_File_open(MPI_COMM_WORLD, TRIM(fname), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
-            CALL MPI_File_set_view(fh, disp, MPI_REAL, wtype_ien, 'native', MPI_INFO_NULL)
-            CALL MPI_File_write_all(fh, ien, size(ien), MPI_REAL, status)
-        CALL MPI_File_close(fh)
-
-        if (has_terminal) then
-            open(unit=ivtk,file=fname,form='binary',position='append')
-                write(ivtk) nbytes_offset, (i,i=nnoel,nnoel*nel,nnoel)
-                write(ivtk) nbytes_etype , (etype,i=1,nel)
+                !write(ivtk) nbytes_offset, (i,i=nnoel,nnoel*nel,nnoel)
+                !write(ivtk) nbytes_etype , (etype,i=1,nel)
                 buffer = lf//'  </AppendedData>'//lf;           write(ivtk) trim(buffer)
                 buffer = '</VTKFile>'//lf;                      write(ivtk) trim(buffer)
             close(ivtk)
