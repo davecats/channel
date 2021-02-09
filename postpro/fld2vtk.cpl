@@ -9,7 +9,6 @@ USE convenience
 
 STRING fieldname, vtkname
 INTEGER nfmin, nfmax
-ASK nfmin, nfmax
 FILE outfile
 SINGLE tmpu, tmpv, tmpw, tmp
 ARRAY(0..nxd-1,0..nzd-1,-1..ny+1) OF VELOCITY Vdd=0
@@ -21,12 +20,15 @@ REAL aa,bb,cc,dd,ee,ff,AA,BB,CC,DD,trace
 COMPLEX lam1,lam2,lam3,Par1,Par2,Par3
 #endif
 
+nfmin=atoi(COMMANDLINE(4))
+nfmax=atoi(COMMANDLINE(5))
+
 LOOP files FOR n=nfmin TO nfmax
 
-  fieldname = WRITE('../Dati.cart.'n'.out') 
+  fieldname = WRITE('Dati.cart.'n'.out') 
   vtkname = WRITE('Field'n'.vtk')
   WRITE fieldname ' --> ' vtkname
-  read_field_fortran(fieldname,V(*,*,*,*))
+  V = read_field_fortran(fieldname)
   outfile=CREATE(vtkname)
 
   Vdd=0
