@@ -7,8 +7,6 @@
 ! one cool thing would be to parallelise the file format as well
 ! check out: https://vtk.org/wp-content/uploads/2015/04/file-formats.pdf
 
-! also, one could switch to a structured grid
-
 ! also, a better argument parsing might be nice (like, taking mutltiple fields at once)
 
 
@@ -22,19 +20,16 @@ implicit none
 character(len=32) :: cmd_in_buf ! needed to parse arguments
 
 integer :: iv, ix, iz, iy, pos, ii, ierror
-integer :: nxtot, nytot, nztot, ndim, nnos, nnoel, nel, nxloc, nyloc, nzloc, nnos_local, nel_local      
+integer :: nxtot, nytot, nztot, ndim, nnos, nxloc, nyloc, nzloc, nnos_local      
 real*4, dimension(:,:), allocatable :: xyz, vec ! watch out for this type! must be the same as 
 real*4, dimension(:), allocatable :: scal
 
-integer :: zadd=1, yadd=1
 integer, dimension(:), allocatable :: local_nnos_arr
-integer :: start_node = 0, start_elem = 0
+integer :: start_node = 0
 
-type(MPI_Datatype) :: wtype_3d, wtype_scalar, wtype_ien
+type(MPI_Datatype) :: wtype_3d, wtype_scalar
 
-integer, dimension(:,:), allocatable :: ien
 
-integer :: etype
 
     ! read arguments
     if (COMMAND_ARGUMENT_COUNT() < 1) then
@@ -60,15 +55,12 @@ integer :: etype
     !------------!
 
     ndim  = 3  ! number of spatial dimension
-    nnoel = 8  ! number of nodes per element
-    etype = 11 ! element type: VTK_VOXEL (parallelepiped)
 
     ! GLOBAL QUANTITIES, which is, overall sizes of stuff
     nxtot = 2*nxd  ! no. points
     nytot = (ny + 1)   ! no. points
     nztot = nzd      ! no. points
     nnos  = nxtot*nytot*nztot             ! number of nodes
-    nel   = (nxtot-1)*(nytot-1)*(nztot-1) ! number of elements
 
     ! things that are local to each process
     ! number of points in each direction
@@ -76,9 +68,6 @@ integer :: etype
     nyloc = min(ny,maxy)-max(0,miny)+1 ! these refer to UNIQUE data! It does not consider halo cells, nor ghost cells
     nzloc = nzB         ! these refer to UNIQUE data! It does not consider halo cells
     nnos_local = nxloc*nyloc*nzloc ! number of nodes OWNED BY PROCESS
-    if (nz0 == 0) zadd = 0 ! this fixes number of elements to consider elements across chunks of data
-    if (miny == -1) yadd = 0 ! this fixes number of elements to consider elements across chunks of data
-    nel_local = (nxloc-1)*(nyloc-1+yadd)*(nzloc-1+zadd) ! number of elements OWNED BY PROCESS
 
     !-------------------!
     ! END OF PARAMETERS !
@@ -90,8 +79,7 @@ integer :: etype
     allocate(xyz(ndim,nnos_local))    ! nodal coordinates
     allocate(vec(ndim,nnos_local))    ! vectorial field
     allocate(scal(nnos_local))        ! scalar field
-    allocate(ien(nnoel,nel_local))    ! Element conectivity
-    ien=0 ! FIXME: don't do this and actually calculate connectivity
+
 
 
     !---------------------------!
@@ -107,16 +95,6 @@ integer :: etype
     ! each process calculates its starting position in the global nodes list
     do ii=0,(iproc-1)
         start_node = start_node + local_nnos_arr(ii+1)
-    end do
-    ! same thing, but with elements
-    local_nnos_arr = 0 ! recycle local_nnos_arr
-    local_nnos_arr(iproc+1) = nel_local
-    do ii=0,(nproc-1)
-        call MPI_BCAST(local_nnos_arr(ii+1),1,MPI_INTEGER,ii,MPI_COMM_WORLD)
-    end do
-    ! each process calculates its starting position in the global nodes list
-    do ii=0,(iproc-1)
-        start_elem = start_elem + local_nnos_arr(ii+1)
     end do
     
     ! XYZ AND VEC - for writing (setting view)
@@ -136,16 +114,6 @@ integer :: etype
     CALL MPI_Type_create_subarray(1, [nnos], [nnos_local], [start_node], MPI_ORDER_FORTRAN, MPI_REAL, wtype_scalar)
     !                             0)   1)         2)             3)
     CALL MPI_Type_commit(wtype_scalar, ierror)
-
-    ! IEN - for writing (setting view)
-    ! 0) number of dimensions of array you want to write
-    ! 1) size along each dimension of the WHOLE array ON DISK
-    ! 2) size of the PORTION of array TO BE WRITTEN BY EACH PROCESS
-    ! 3) starting position of each component; !!! IT'S ZERO BASED !!!
-    CALL MPI_Type_create_subarray(2, [nnoel, nel], [nnoel, nel_local], [0, start_elem], MPI_ORDER_FORTRAN, MPI_REAL, wtype_ien)
-    !                             0)       1)             2)                 3)
-    CALL MPI_Type_commit(wtype_ien, ierror)
-    
 
     !----------------------------------!
     ! END OF MPI FILETYPES FOR WRITING !
@@ -201,15 +169,15 @@ contains !----------------------------------------------------------------------
 
 
 
-    subroutine WriteXMLFormat(fname) ! xyz, ien, scal, vec, etype, ndim, nnoel, nnos, nel
+    subroutine WriteXMLFormat(fname) 
 
         character(len = 40) :: fname
 
         character :: buffer*200, lf*1, offset*16, str1*16, str2*16, str3*16, str33*16, str5*16, str6*16
-        integer   :: ivtk = 9, int, dotpos, i
+        integer   :: ivtk = 9, dotpos
         real*4    :: float ! this must have same type of xyz and vec and stuff
-        integer(C_SIZE_T) :: nbytes_scal, nbytes_vec, nbytes_xyz, nbytes_ien, nbytes_offset, nbytes_etype
-        integer(C_SIZE_T) :: ioff0, ioff1, ioff2, ioff3, ioff4, ioff5
+        integer(C_SIZE_T) :: nbytes_scal, nbytes_vec, nbytes_xyz
+        integer(C_SIZE_T) :: ioff0, ioff1, ioff2
         integer(C_SIZE_T) :: disp
 
         type(MPI_File) :: fh
@@ -217,25 +185,14 @@ contains !----------------------------------------------------------------------
 
         lf = char(10) ! line feed character
 
-        ! Layout for the Appended Data Section
-
-        ! _ length | SCAL |      length | VEC |     lenght | XYZ |     lenght | IEN |     lenght | OFFSET |    lenght | ETYPE
-
         nbytes_scal   =         nnos * sizeof(float)
         nbytes_vec    = ndim  * nnos * sizeof(float)
         nbytes_xyz    = ndim  * nnos * sizeof(float)
-        !nbytes_ien    = nnoel * nel  * sizeof(  int)
-        !nbytes_offset =         nel  * sizeof(  int)
-        !nbytes_etype  =         nel  * sizeof(  int)
 
         ioff0 = 0                                   ! scal
-        ioff1 = ioff0 + 8 + nbytes_scal   ! vec
-        ioff2 = ioff1 + 8 + nbytes_vec    ! xyz
-        !ioff3 = ioff2 + sizeof(int) + nbytes_xyz    ! ien
-        !ioff4 = ioff3 + sizeof(int) + nbytes_ien    ! offset
-        !ioff5 = ioff4 + sizeof(int) + nbytes_offset ! etype
+        ioff1 = ioff0 + sizeof(nbytes_xyz) + nbytes_scal   ! vec
+        ioff2 = ioff1 + sizeof(nbytes_xyz) + nbytes_vec    ! xyz
 
-        print *, ioff1, ioff2-ioff1
         ! adapt filename
         dotpos = scan(trim(fname),".", BACK= .true.)
         if ( dotpos > 0 ) fname = fname(1:dotpos)//"vts"
@@ -264,14 +221,6 @@ contains !----------------------------------------------------------------------
                 write(offset(1:16),'(i16)') ioff2
                 buffer = '        <DataArray type="Float32" Name="coordinates" NumberOfComponents="3" format="appended" offset="'//offset//'" />'//lf ; write(ivtk) trim(buffer)
                 buffer = '      </Points>'//lf                                                                                                        ; write(ivtk) trim(buffer)
-!                buffer = '      <Cells>'//lf                                                                                                          ; write(ivtk) trim(buffer)
-!                write(offset(1:8),'(i8)') ioff3
-!                buffer = '        <DataArray type="Int32" Name="connectivity" format="appended" offset="'//offset//'" />'//lf                         ; write(ivtk) trim(buffer)
-!                write(offset(1:8),'(i8)') ioff4
-!                buffer = '        <DataArray type="Int32" Name="offsets" format="appended" offset="'//offset//'" />'//lf                              ; write(ivtk) trim(buffer)
-!                write(offset(1:8),'(i8)') ioff5
-!                buffer = '        <DataArray type="Int32" Name="types" format="appended" offset="'//offset//'" />'//lf                                ; write(ivtk) trim(buffer)
-!                buffer = '      </Cells>'//lf                                                                                                         ; write(ivtk) trim(buffer)
                 buffer = '    </Piece>'//lf                                                                                                           ; write(ivtk) trim(buffer)
                 buffer = '  </StructuredGrid>'//lf                                                                                                    ; write(ivtk) trim(buffer)
                 buffer = '  <AppendedData encoding="raw">'//lf                                                                                        ; write(ivtk) trim(buffer)
@@ -306,8 +255,6 @@ contains !----------------------------------------------------------------------
         CALL MPI_Barrier(MPI_COMM_WORLD) ! barrier so every process retrieves the same filesize
         inquire(file=fname, size=disp) ! retrieve displacement
 
-        print *, disp
-
         CALL MPI_File_open(MPI_COMM_WORLD, TRIM(fname), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
             CALL MPI_File_set_view(fh, disp, MPI_REAL, wtype_3d, 'native', MPI_INFO_NULL)
             CALL MPI_File_write_all(fh, vec, size(vec), MPI_REAL, status)
@@ -324,35 +271,14 @@ contains !----------------------------------------------------------------------
         CALL MPI_Barrier(MPI_COMM_WORLD) ! barrier so every process retrieves the same filesize
         inquire(file=fname, size=disp) ! retrieve displacement
 
-        print *, sizeof(nbytes_xyz), sizeof(int)
-                print *, disp
-
 
         CALL MPI_File_open(MPI_COMM_WORLD, TRIM(fname), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
             CALL MPI_File_set_view(fh, disp, MPI_REAL, wtype_3d, 'native', MPI_INFO_NULL)
             CALL MPI_File_write_all(fh, xyz, size(xyz), MPI_REAL, status)
         CALL MPI_File_close(fh)
 
-        ! write element connectivity
-
-!        if (has_terminal) then
-!            open(unit=ivtk,file=fname,form='binary',position='append')
-!                write(ivtk) nbytes_ien
-!            close(ivtk)
-!        end if
-!
-!        CALL MPI_Barrier(MPI_COMM_WORLD) ! barrier so every process retrieves the same filesize
-!        inquire(file=fname, size=disp) ! retrieve displacement
-!
-!        CALL MPI_File_open(MPI_COMM_WORLD, TRIM(fname), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
-!            CALL MPI_File_set_view(fh, disp, MPI_REAL, wtype_ien, 'native', MPI_INFO_NULL)
-!            CALL MPI_File_write_all(fh, ien, size(ien), MPI_REAL, status)
-!        CALL MPI_File_close(fh)
-
         if (has_terminal) then
             open(unit=ivtk,file=fname,form='binary',position='append')
-                !write(ivtk) nbytes_offset, (i,i=nnoel,nnoel*nel,nnoel)
-                !write(ivtk) nbytes_etype , (etype,i=1,nel)
                 buffer = lf//'  </AppendedData>'//lf;           write(ivtk) trim(buffer)
                 buffer = '</VTKFile>'//lf;                      write(ivtk) trim(buffer)
             close(ivtk)
