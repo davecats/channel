@@ -1,3 +1,7 @@
+!---------!
+! WARNING ! DOESN'T WORK WITH Y-PARALLELISATION
+!---------!
+
 ! Scalar SCAL was never assigned any value
 ! Element connectivity matrix is still empty
 ! one cool thing would be to parallelise the file format as well
@@ -174,7 +178,7 @@ integer :: etype
         ! convert velocity vector for each process
         do ix=1,2*nxd
             do iz = 1,nzB
-                pos = iz + (ix-1)*nzB + (iy-1)*nzB*2*nxd
+                pos = ix + (iy-1)*2*nxd + (iz-1)*2*nxd*(ny+1) !THIS ORDER IS IMPORTANT! x index must be varying first, then y, then z
                 vec(:,pos) = rVVdx(ix,iz,:,1)
                 xyz(1,pos) = (ix-1) * (2 * PI / alfa0)/(2*nxd-1)
                 xyz(2,pos) = y(iy)
