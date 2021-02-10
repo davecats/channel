@@ -19,15 +19,17 @@ implicit none
 
 character(len=32) :: cmd_in_buf ! needed to parse arguments
 
-integer :: iv, ix, iz, iy, pos, ii, ierror
-integer :: nxtot, nytot, nztot, ndim, nnos, nxloc, nyloc, nzloc, nnos_local      
+integer*8 :: iv, ix, iz, iy, pos
+integer :: ierror, ii
+integer :: ndim, nxtot, nytot, nztot, nxloc, nyloc, nzloc, nxchunks, nxchunks_local
+integer*8 :: nnos, nnos_local      
 real*4, dimension(:,:), allocatable :: xyz, vec ! watch out for this type! must be the same as 
 real*4, dimension(:), allocatable :: scal
 
-integer, dimension(:), allocatable :: local_nnos_arr
-integer :: start_node = 0
+integer, dimension(:), allocatable :: local_xchunk_arr
+integer :: xc_start = 0
 
-type(MPI_Datatype) :: wtype_3d, wtype_scalar
+type(MPI_Datatype) :: wtype_3d, wtype_scalar, xchunk, x3chunk
 
 
 
@@ -61,6 +63,7 @@ type(MPI_Datatype) :: wtype_3d, wtype_scalar
     nytot = (ny + 1)   ! no. points
     nztot = nzd      ! no. points
     nnos  = nxtot*nytot*nztot             ! number of nodes
+    nxchunks = nytot*nztot ! HOPEFULLY THIS DOES NOT OVERFLOW
 
     ! things that are local to each process
     ! number of points in each direction
@@ -68,6 +71,7 @@ type(MPI_Datatype) :: wtype_3d, wtype_scalar
     nyloc = min(ny,maxy)-max(0,miny)+1 ! these refer to UNIQUE data! It does not consider halo cells, nor ghost cells
     nzloc = nzB         ! these refer to UNIQUE data! It does not consider halo cells
     nnos_local = nxloc*nyloc*nzloc ! number of nodes OWNED BY PROCESS
+    nxchunks_local = nyloc*nzloc ! HOPEFULLY THIS DOES NOT OVERFLOW
 
     !-------------------!
     ! END OF PARAMETERS !
@@ -87,22 +91,29 @@ type(MPI_Datatype) :: wtype_3d, wtype_scalar
     !---------------------------!
 
     ! each process tells the others how many local nodes it has
-    allocate(local_nnos_arr(nproc))
-    local_nnos_arr(iproc+1) = nnos_local
+    allocate(local_xchunk_arr(nproc))
+    local_xchunk_arr(iproc+1) = nxchunks_local
     do ii=0,(nproc-1)
-        call MPI_BCAST(local_nnos_arr(ii+1),1,MPI_INTEGER,ii,MPI_COMM_WORLD)
+        call MPI_BCAST(local_xchunk_arr(ii+1),1,MPI_INTEGER,ii,MPI_COMM_WORLD)
     end do
     ! each process calculates its starting position in the global nodes list
     do ii=0,(iproc-1)
-        start_node = start_node + local_nnos_arr(ii+1)
+        xc_start = xc_start + local_xchunk_arr(ii+1)
     end do
+
+    ! each of these datatypes contains all the x value of a given scalar or array
+    ! at given y, z values
+    ! THIS TYPE IS NEEDED TO AVOID INTEGER OVERFLOW OF THE NUMBER OF NODES
+    ! (YOU CANNOT PASS A INT(C_SIZE_T) TO MPI)
+    call MPI_type_contiguous(nxloc,MPI_REAL,xchunk)
+    call MPI_type_contiguous(3*nxloc,MPI_REAL,x3chunk)
     
     ! XYZ AND VEC - for writing (setting view)
     ! 0) number of dimensions of array you want to write
     ! 1) size along each dimension of the WHOLE array ON DISK
     ! 2) size of the PORTION of array TO BE WRITTEN BY EACH PROCESS
     ! 3) starting position of each component; !!! IT'S ZERO BASED !!!
-    CALL MPI_Type_create_subarray(2, [3, nnos], [3, nnos_local], [0, start_node], MPI_ORDER_FORTRAN, MPI_REAL, wtype_3d)
+    CALL MPI_Type_create_subarray(1, [nxchunks], [nxchunks_local], [xc_start], MPI_ORDER_FORTRAN, x3chunk, wtype_3d)
     !                             0)    1)         2)               3)
     CALL MPI_Type_commit(wtype_3d, ierror)
 
@@ -111,8 +122,8 @@ type(MPI_Datatype) :: wtype_3d, wtype_scalar
     ! 1) size along each dimension of the WHOLE array ON DISK
     ! 2) size of the PORTION of array TO BE WRITTEN BY EACH PROCESS
     ! 3) starting position of each component; !!! IT'S ZERO BASED !!!
-    CALL MPI_Type_create_subarray(1, [nnos], [nnos_local], [start_node], MPI_ORDER_FORTRAN, MPI_REAL, wtype_scalar)
-    !                             0)   1)         2)             3)
+    CALL MPI_Type_create_subarray(1, [nxchunks], [nxchunks_local], [xc_start], MPI_ORDER_FORTRAN, xchunk, wtype_scalar)
+    !                             0)       1)         2)             3)
     CALL MPI_Type_commit(wtype_scalar, ierror)
 
     !----------------------------------!
