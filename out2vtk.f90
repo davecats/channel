@@ -21,15 +21,17 @@ character(len=32) :: cmd_in_buf ! needed to parse arguments
 
 integer*8 :: iv, ix, iz, iy, pos
 integer :: ierror, ii
-integer :: ndim, nxtot, nytot, nztot, nxloc, nyloc, nzloc, nxchunks, nxchunks_local
+integer :: ndim, nxtot, nytot, nztot, nxloc, nyloc, nzloc
 integer*8 :: nnos, nnos_local      
 real*4, dimension(:,:), allocatable :: xyz, vec ! watch out for this type! must be the same as 
 real*4, dimension(:), allocatable :: scal
 
-integer, dimension(:), allocatable :: local_xchunk_arr
-integer :: xc_start = 0
+integer, dimension(:), allocatable :: local_zsize_arr
+integer :: z_start = 0
 
-type(MPI_Datatype) :: wtype_3d, wtype_scalar, xchunk, x3chunk
+type(MPI_Datatype) :: wtype_3d, wtype_scalar, type_towrite
+
+integer(kind=MPI_count_kind) :: sz ! DEBUG
 
 
 
@@ -48,7 +50,7 @@ type(MPI_Datatype) :: wtype_3d, wtype_scalar, xchunk, x3chunk
     call read_dnsin()
     call init_MPI(nx+1,nz,ny,nxd+1,nzd)
     call init_memory(.TRUE.)
-    CALL init_fft(VVdz,VVdx,rVVdx,nxd,nxB,nzd,nzB)
+    call init_fft(VVdz,VVdx,rVVdx,nxd,nxB,nzd,nzB)
 
 
 
@@ -63,7 +65,6 @@ type(MPI_Datatype) :: wtype_3d, wtype_scalar, xchunk, x3chunk
     nytot = (ny + 1)   ! no. points
     nztot = nzd      ! no. points
     nnos  = nxtot*nytot*nztot             ! number of nodes
-    nxchunks = nytot*nztot ! HOPEFULLY THIS DOES NOT OVERFLOW
 
     ! things that are local to each process
     ! number of points in each direction
@@ -71,7 +72,6 @@ type(MPI_Datatype) :: wtype_3d, wtype_scalar, xchunk, x3chunk
     nyloc = min(ny,maxy)-max(0,miny)+1 ! these refer to UNIQUE data! It does not consider halo cells, nor ghost cells
     nzloc = nzB         ! these refer to UNIQUE data! It does not consider halo cells
     nnos_local = nxloc*nyloc*nzloc ! number of nodes OWNED BY PROCESS
-    nxchunks_local = nyloc*nzloc ! HOPEFULLY THIS DOES NOT OVERFLOW
 
     !-------------------!
     ! END OF PARAMETERS !
@@ -91,30 +91,27 @@ type(MPI_Datatype) :: wtype_3d, wtype_scalar, xchunk, x3chunk
     !---------------------------!
 
     ! each process tells the others how many local nodes it has
-    allocate(local_xchunk_arr(nproc))
-    local_xchunk_arr(iproc+1) = nxchunks_local
+    allocate(local_zsize_arr(nproc))
+    local_zsize_arr(iproc+1) = nzloc
     do ii=0,(nproc-1)
-        call MPI_BCAST(local_xchunk_arr(ii+1),1,MPI_INTEGER,ii,MPI_COMM_WORLD)
+        call MPI_BCAST(local_zsize_arr(ii+1),1,MPI_INTEGER,ii,MPI_COMM_WORLD)
     end do
     ! each process calculates its starting position in the global nodes list
     do ii=0,(iproc-1)
-        xc_start = xc_start + local_xchunk_arr(ii+1)
+        z_start = z_start + local_zsize_arr(ii+1)
     end do
 
-    ! each of these datatypes contains all the x value of a given scalar or array
-    ! at given y, z values
-    ! THIS TYPE IS NEEDED TO AVOID INTEGER OVERFLOW OF THE NUMBER OF NODES
-    ! (YOU CANNOT PASS A INT(C_SIZE_T) TO MPI)
-    call MPI_type_contiguous(nxloc,MPI_REAL,xchunk)
-    call MPI_type_contiguous(3*nxloc,MPI_REAL,x3chunk)
+    ! data owned by each process that needs to be written
+    CALL MPI_Type_create_subarray(3, [nxloc, nyloc, nzloc], [nxloc, nyloc, nzloc], [0, 0, 0], MPI_ORDER_FORTRAN, MPI_REAL, type_towrite)
+    CALL MPI_Type_commit(type_towrite, ierror)
     
     ! XYZ AND VEC - for writing (setting view)
     ! 0) number of dimensions of array you want to write
     ! 1) size along each dimension of the WHOLE array ON DISK
     ! 2) size of the PORTION of array TO BE WRITTEN BY EACH PROCESS
     ! 3) starting position of each component; !!! IT'S ZERO BASED !!!
-    CALL MPI_Type_create_subarray(1, [nxchunks], [nxchunks_local], [xc_start], MPI_ORDER_FORTRAN, x3chunk, wtype_3d)
-    !                             0)    1)         2)               3)
+    CALL MPI_Type_create_subarray(4, [3, nxtot, nytot, nztot], [3, nxloc, nyloc, nzloc], [0, 0, 0, z_start], MPI_ORDER_FORTRAN, MPI_REAL, wtype_3d)
+    !                             0)            1)                        2)                    3)
     CALL MPI_Type_commit(wtype_3d, ierror)
 
     ! SCALAR - for writing (setting view)
@@ -122,15 +119,16 @@ type(MPI_Datatype) :: wtype_3d, wtype_scalar, xchunk, x3chunk
     ! 1) size along each dimension of the WHOLE array ON DISK
     ! 2) size of the PORTION of array TO BE WRITTEN BY EACH PROCESS
     ! 3) starting position of each component; !!! IT'S ZERO BASED !!!
-    CALL MPI_Type_create_subarray(1, [nxchunks], [nxchunks_local], [xc_start], MPI_ORDER_FORTRAN, xchunk, wtype_scalar)
-    !                             0)       1)         2)             3)
+    CALL MPI_Type_create_subarray(3, [nxtot, nytot, nztot], [nxloc, nyloc, nzloc], [0, 0, z_start], MPI_ORDER_FORTRAN, MPI_REAL, wtype_scalar)
+    !                             0)         1)                     2)                 3)
     CALL MPI_Type_commit(wtype_scalar, ierror)
 
     !----------------------------------!
     ! END OF MPI FILETYPES FOR WRITING !
     !----------------------------------!
 
-
+    CALL MPI_TYPE_SIZE_X(wtype_3d, sz) ! DEBUG
+    if (has_terminal) print *, sz
 
     ! read file
     CALL read_restart_file(fname,V)
@@ -247,12 +245,17 @@ contains !----------------------------------------------------------------------
             close(ivtk)
         end if
 
+        print *, "Written xml"
+
         CALL MPI_Barrier(MPI_COMM_WORLD) ! barrier so every process retrieves the same filesize
         inquire(file=fname, size=disp) ! retrieve displacement
+        CALL MPI_Barrier(MPI_COMM_WORLD)
+
+        print *, "For scal:", disp
 
         CALL MPI_File_open(MPI_COMM_WORLD, TRIM(fname), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
             CALL MPI_File_set_view(fh, disp, MPI_REAL, wtype_scalar, 'native', MPI_INFO_NULL)
-            CALL MPI_File_write_all(fh, scal, size(scal), MPI_REAL, status)
+            CALL MPI_File_write_all(fh, scal, 1, type_towrite, status)
         CALL MPI_File_close(fh)
 
         ! write vec
@@ -262,13 +265,18 @@ contains !----------------------------------------------------------------------
                 write(ivtk) nbytes_vec
             close(ivtk)
         end if
+
+        print *, "Written scal"
         
         CALL MPI_Barrier(MPI_COMM_WORLD) ! barrier so every process retrieves the same filesize
         inquire(file=fname, size=disp) ! retrieve displacement
+        CALL MPI_Barrier(MPI_COMM_WORLD)
+
+        print *, "For vec:", disp
 
         CALL MPI_File_open(MPI_COMM_WORLD, TRIM(fname), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
             CALL MPI_File_set_view(fh, disp, MPI_REAL, wtype_3d, 'native', MPI_INFO_NULL)
-            CALL MPI_File_write_all(fh, vec, size(vec), MPI_REAL, status)
+            CALL MPI_File_write_all(fh, vec, 3, type_towrite, status)
         CALL MPI_File_close(fh)
 
         ! write xyz
@@ -279,13 +287,17 @@ contains !----------------------------------------------------------------------
             close(ivtk)
         end if
 
+        print *, "Written vec"
+
         CALL MPI_Barrier(MPI_COMM_WORLD) ! barrier so every process retrieves the same filesize
         inquire(file=fname, size=disp) ! retrieve displacement
+        CALL MPI_Barrier(MPI_COMM_WORLD)
 
+        print *, "For xyz:", disp
 
         CALL MPI_File_open(MPI_COMM_WORLD, TRIM(fname), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
             CALL MPI_File_set_view(fh, disp, MPI_REAL, wtype_3d, 'native', MPI_INFO_NULL)
-            CALL MPI_File_write_all(fh, xyz, size(xyz), MPI_REAL, status)
+            CALL MPI_File_write_all(fh, xyz, 3, type_towrite, status)
         CALL MPI_File_close(fh)
 
         if (has_terminal) then
