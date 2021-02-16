@@ -29,10 +29,7 @@ real*4, dimension(:), allocatable :: scal
 integer, dimension(:), allocatable :: local_zsize_arr
 integer :: z_start = 0
 
-type(MPI_Datatype) :: wtype_3d, wtype_scalar, type_towrite
-
-integer(kind=MPI_count_kind) :: sz ! DEBUG
-
+type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
 
 
     ! read arguments
@@ -119,16 +116,15 @@ integer(kind=MPI_count_kind) :: sz ! DEBUG
     ! 1) size along each dimension of the WHOLE array ON DISK
     ! 2) size of the PORTION of array TO BE WRITTEN BY EACH PROCESS
     ! 3) starting position of each component; !!! IT'S ZERO BASED !!!
-    CALL MPI_Type_create_subarray(3, [nxtot, nytot, nztot], [nxloc, nyloc, nzloc], [0, 0, z_start], MPI_ORDER_FORTRAN, MPI_REAL, wtype_scalar)
-    !                             0)         1)                     2)                 3)
-    CALL MPI_Type_commit(wtype_scalar, ierror)
+!   CALL MPI_Type_create_subarray(3, [nxtot, nytot, nztot], [nxloc, nyloc, nzloc], [0, 0, z_start], MPI_ORDER_FORTRAN, MPI_REAL, wtype_scalar)
+!   !                             0)         1)                     2)                 3)
+!   CALL MPI_Type_commit(wtype_scalar, ierror)
 
     !----------------------------------!
     ! END OF MPI FILETYPES FOR WRITING !
     !----------------------------------!
 
-    CALL MPI_TYPE_SIZE_X(wtype_3d, sz) ! DEBUG
-    if (has_terminal) print *, sz
+
 
     ! read file
     CALL read_restart_file(fname,V)
@@ -185,8 +181,8 @@ contains !----------------------------------------------------------------------
         character :: buffer*200, lf*1, offset*16, str1*16, str2*16, str3*16, str33*16, str5*16, str6*16
         integer   :: ivtk = 9, dotpos
         real*4    :: float ! this must have same type of xyz and vec and stuff
-        integer(C_SIZE_T) :: nbytes_scal, nbytes_vec, nbytes_xyz
-        integer(C_SIZE_T) :: ioff0, ioff1, ioff2
+        integer(C_SIZE_T) :: nbytes_vec, nbytes_xyz ! , nbytes_scal
+        integer(C_SIZE_T) :: ioff1, ioff2 ! , ioff0
         integer(C_SIZE_T) :: disp
 
         type(MPI_File) :: fh
@@ -194,13 +190,16 @@ contains !----------------------------------------------------------------------
 
         lf = char(10) ! line feed character
 
-        nbytes_scal   =         nnos * sizeof(float)
+!       nbytes_scal   =         nnos * sizeof(float)
         nbytes_vec    = ndim  * nnos * sizeof(float)
         nbytes_xyz    = ndim  * nnos * sizeof(float)
 
-        ioff0 = 0                                   ! scal
-        ioff1 = ioff0 + sizeof(nbytes_xyz) + nbytes_scal   ! vec
-        ioff2 = ioff1 + sizeof(nbytes_xyz) + nbytes_vec    ! xyz
+!       ! offset for scalar
+!       ioff0 = 0
+        ! offset for vector
+        ioff1 = 0 ! ioff0 + sizeof(nbytes_xyz) + nbytes_scal
+        ! offset for points
+        ioff2 = ioff1 + sizeof(nbytes_xyz) + nbytes_vec
 
         ! adapt filename
         dotpos = scan(trim(fname),".", BACK= .true.)
@@ -220,8 +219,8 @@ contains !----------------------------------------------------------------------
                 buffer = '  <StructuredGrid WholeExtent="'//str1//' '//str2//' '//str3//' '//str33//' '//str5//' '//str6//'">'//lf                   ; write(ivtk) trim(buffer)
                 buffer = '    <Piece Extent="'//str1//' '//str2//' '//str3//' '//str33//' '//str5//' '//str6//'">'//lf                                ; write(ivtk) trim(buffer)
                 buffer = '      <PointData> '//lf                                                                                                     ; write(ivtk) trim(buffer)
-                write(offset(1:16),'(i16)') ioff0
-                buffer = '         <DataArray type="Float32" Name="scalars" format="appended" offset="'//offset//'"           />'//lf                 ; write(ivtk) trim(buffer)
+!               write(offset(1:16),'(i16)') ioff0
+!               buffer = '         <DataArray type="Float32" Name="scalars" format="appended" offset="'//offset//'"           />'//lf                 ; write(ivtk) trim(buffer)
                 write(offset(1:16),'(i16)') ioff1
                 buffer = '         <DataArray type="Float32" Name="Velocity" NumberOfComponents="3" format="appended" offset="'//offset//'" />'//lf   ; write(ivtk) trim(buffer)
                 buffer = '      </PointData>'//lf                                                                                                     ; write(ivtk) trim(buffer)
@@ -237,26 +236,26 @@ contains !----------------------------------------------------------------------
             close(ivtk)
         end if
         
-        ! write scalar
-
-        if (has_terminal) then
-            open(unit=ivtk,file=fname,form='binary',position='append')
-                write(ivtk) nbytes_scal
-            close(ivtk)
-        end if
-
-        print *, "Written xml"
-
-        CALL MPI_Barrier(MPI_COMM_WORLD) ! barrier so every process retrieves the same filesize
-        inquire(file=fname, size=disp) ! retrieve displacement
-        CALL MPI_Barrier(MPI_COMM_WORLD)
-
-        print *, "For scal:", disp
-
-        CALL MPI_File_open(MPI_COMM_WORLD, TRIM(fname), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
-            CALL MPI_File_set_view(fh, disp, MPI_REAL, wtype_scalar, 'native', MPI_INFO_NULL)
-            CALL MPI_File_write_all(fh, scal, 1, type_towrite, status)
-        CALL MPI_File_close(fh)
+!        ! write scalar
+!
+!        if (has_terminal) then
+!            open(unit=ivtk,file=fname,form='binary',position='append')
+!                write(ivtk) nbytes_scal
+!            close(ivtk)
+!        end if
+!
+!        print *, "Written xml"
+!
+!        CALL MPI_Barrier(MPI_COMM_WORLD) ! barrier so every process retrieves the same filesize
+!        inquire(file=fname, size=disp) ! retrieve displacement
+!        CALL MPI_Barrier(MPI_COMM_WORLD)
+!
+!        print *, "Writing scalar"
+!
+!        CALL MPI_File_open(MPI_COMM_WORLD, TRIM(fname), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
+!            CALL MPI_File_set_view(fh, disp, MPI_REAL, wtype_scalar, 'native', MPI_INFO_NULL)
+!            CALL MPI_File_write_all(fh, scal, 1, type_towrite, status)
+!        CALL MPI_File_close(fh)
 
         ! write vec
 
@@ -266,13 +265,11 @@ contains !----------------------------------------------------------------------
             close(ivtk)
         end if
 
-        print *, "Written scal"
+        print *, "Writing vector field"
         
         CALL MPI_Barrier(MPI_COMM_WORLD) ! barrier so every process retrieves the same filesize
         inquire(file=fname, size=disp) ! retrieve displacement
         CALL MPI_Barrier(MPI_COMM_WORLD)
-
-        print *, "For vec:", disp
 
         CALL MPI_File_open(MPI_COMM_WORLD, TRIM(fname), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
             CALL MPI_File_set_view(fh, disp, MPI_REAL, wtype_3d, 'native', MPI_INFO_NULL)
@@ -287,13 +284,11 @@ contains !----------------------------------------------------------------------
             close(ivtk)
         end if
 
-        print *, "Written vec"
+        print *, "Writing coordinates of points"
 
         CALL MPI_Barrier(MPI_COMM_WORLD) ! barrier so every process retrieves the same filesize
         inquire(file=fname, size=disp) ! retrieve displacement
         CALL MPI_Barrier(MPI_COMM_WORLD)
-
-        print *, "For xyz:", disp
 
         CALL MPI_File_open(MPI_COMM_WORLD, TRIM(fname), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
             CALL MPI_File_set_view(fh, disp, MPI_REAL, wtype_3d, 'native', MPI_INFO_NULL)
