@@ -265,7 +265,7 @@ contains !----------------------------------------------------------------------
             close(ivtk)
         end if
 
-        print *, "Writing vector field"
+        if (has_terminal) print *, "Writing vector field"
         
         CALL MPI_Barrier(MPI_COMM_WORLD) ! barrier so every process retrieves the same filesize
         inquire(file=fname, size=disp) ! retrieve displacement
@@ -284,7 +284,7 @@ contains !----------------------------------------------------------------------
             close(ivtk)
         end if
 
-        print *, "Writing coordinates of points"
+        if (has_terminal) print *, "Writing coordinates of points"
 
         CALL MPI_Barrier(MPI_COMM_WORLD) ! barrier so every process retrieves the same filesize
         inquire(file=fname, size=disp) ! retrieve displacement
