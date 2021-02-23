@@ -1,0 +1,350 @@
+IF COMMANDLINE(1)="-h" THEN
+  WRITE "Calculates TKE budget; sharp Fourier filtering is used to decompose the fluctuation field into large and small components."
+  WRITE "Statistics are calculated on files ranging from index nfmin to nfmax with step dn. Usage:"
+  WRITE ""
+  WRITE "   uiuj_largesmall [-h] 1 1 localhost nfmin nfmax dn [--custom_mean nmin_m nmax_m dn_m] [--sh_mem_proc n_sh_mem_proc]"
+  WRITE ""
+  WRITE "If the flag --custom_mean is passed, the mean field is calculated on fields (nmin_m nmax_m dn_m); the remaining statistics are still calculated on (nfmin nfmax dn)."
+  WRITE ""
+  WRITE "Flag --sh_mem_proc is used to specify the number of shared memory processes to be used (on each machine, if this program is started in distributed memory)."
+  WRITE "By default, 4 shared memory processes are used."
+  WRITE ""
+  WRITE "This program is meant to be used on plane channels."
+  WRITE ""
+  WRITE "Results are output to uiuj.bin. Use uiuj2ascii to get the results in a human readable format."
+  WRITE ""
+  WRITE "Mean TKE budget terms are calculated as:"
+  WRITE "INST    --> dK/dt"
+  WRITE "CONV    --> Ui*dK/dxi"
+  WRITE "PROD    --> -<uiuj>dUj/dxi"
+  WRITE "DISS*   --> nu<(duj/dxi + dui/dxj)*duj/dxi>"
+  WRITE "TDIFF   --> -0.5*d/dxi<ui*uj*uj>"
+  WRITE "PDIFF   --> -d/dxi<ui*p>"
+  WRITE "VDIFF1  --> nu*d2K/dxi2"
+  WRITE "VDIFF2* --> nu*d2/dxjdxi<ui*uj>"
+  WRITE "*-terms can be summed into the PDISS=nu*<duj/dxi*duj/dxi>"
+  WRITE 
+  WRITE "which in a statistically stationary and fully-developed turbulent"
+  WRITE "channel flow with spanwise wall oscillations reduces to"
+  WRITE "PROD  --> -<uv>dU/dy-<vw>dW/dy         [this is computed after the fields loop]"
+  WRITE "PDISS --> nu*<dui/dxj*dui/dxj>"
+  WRITE "TDIFF --> -0.5*d/dy(<vuu>+<vvv>+<vww>)"
+  WRITE "PDIFF --> -d/dy<vp>"
+  WRITE "VDIFF --> nu*d2K/dy2"
+  WRITE 
+  WRITE "The MKE buget equation, in a statistically stationary"
+  WRITE "and fully-developed turbulent channel flow, reduces to"
+  WRITE "pump   --> -dP/dx*U = tau_w*U"
+  WRITE "TPROD  --> <uv>dU/dy+<vw>dW/dy         [TKE production, here a sink]"
+  WRITE "ttrsp  --> -d(<uv>U)/dy-d(<vw>W)/dy"
+  WRITE "vdiff  --> ni*d(U*Uy)/dy+d(W*Wy)/dy"
+  WRITE "dissU  --> ni*dUdy^2"
+  WRITE "dissW  --> ni*dWdy^2"
+  STOP
+END IF
+
+! END OF HELP/DOCUMENTATION
+!------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+outinterv=10
+gamma=0
+USE ../dnsdata
+USE ../dnsdirect
+!USE rtchecks
+USE ../convenience
+USE largesmall_def
+
+BOOLEAN custom_mean = FALSE
+INTEGER nftot = 0
+
+! Parameters
+! -----------------------------
+INTEGER nfmin,nfmax,dn
+nfmin=atoi(COMMANDLINE(4))
+nfmax=atoi(COMMANDLINE(5))
+dn=atoi(COMMANDLINE(6))
+! parse arguments; NOTICE THAT sh_mem_proc IS ALWAYS PARSED BY DNSDATA
+INTEGER cntr = 7
+LOOP parse_args WHILE cntr<=COMMANDLINE.HI
+  IF COMMANDLINE(cntr)="--custom_mean" OR COMMANDLINE(cntr)="-custom_mean" THEN
+    IF cntr+3 > COMMANDLINE.HI THEN
+      WRITE "Error: not enough arguments for custom_mean."
+      STOP
+    END IF
+    custom_mean = TRUE
+    nfmin=atoi(COMMANDLINE(cntr+1))
+    nfmax=atoi(COMMANDLINE(cntr+2))
+    dn=atoi(COMMANDLINE(cntr+3))
+    cntr = cntr+3
+  END IF
+  cntr = cntr+1
+REPEAT parse_args
+!------------------------------
+nftot=[(nfmax-nfmin) DIV dn]+1
+
+
+! Definitions
+! ------------------------------------
+!#define cprod(f,g,h) h.REAL=f.REAL*g.REAL; h.IMAG=f.IMAG*g.IMAG
+!#define cprod3(f,g,k,h) h.REAL=f.REAL*g.REAL*k.REAL; h.IMAG=f.IMAG*g.IMAG*k.IMAG
+MEANTERMS = STRUCTURE(REAL U,W,Uy,Wy,Uyy,Wyy,P)
+BALANCE = STRUCTURED ARRAY(var,prod,psdiss,ttrsp,tcross,vdiff,pstrain,ptrsp,PHIttrsp,PHIvdiff,PHIptrsp) OF ARRAY(1..6) OF REAL
+! the six reals in the structured array "balance" are the six components of the Reynolds stress tensor
+
+SHARED ARRAY(0..nx,-nz..nz,nyl-2..nyh+2) OF COMPLEX pressure=0
+SHARED ARRAY(0..nx,-nz..nz,nyl-2..nyh+2) OF DERIVS Vder=0
+POINTER TO STORED ARRAY(0..nx,-nz..nz,nyl-2..nyh+2) OF COMPLEX pressuredata
+
+SHARED ARRAY(0..nxd-1,0..nzd-1) OF DERIVS Vderl=0
+SHARED ARRAY(0..nxd-1,0..nzd-1) OF DERIVS Vders=0
+SHARED ARRAY(0..nxd-1,0..nzd-1) OF VELOCITY Vl=0
+SHARED ARRAY(0..nxd-1,0..nzd-1) OF VELOCITY Vs=0
+
+SHARED ARRAY(0..nxd-1,0..nzd-1) OF DERPRODSEXT VVderd=0
+SHARED ARRAY(0..nxd-1,0..nzd-1,1..4) OF COMPLEX PHIttrspd=0
+SHARED ARRAY(0..nxd-1,0..nzd-1,1..4) OF COMPLEX temp_tcross=0
+
+!SHARED ARRAY(nyl-2..nyh+2,0..nz,-nz..nz) OF STRUCTURED ARRAY(uu,vv,ww,uv) OF REAL convs=0
+SHARED ARRAY(nyl-2..nyh+2) OF MEANTERMS mean=0
+SHARED ARRAY(nyl-2..nyh+2) OF BALANCE suiujprofiles=0
+SHARED ARRAY(nyl-2..nyh+2) OF BALANCE luiujprofiles=0
+ARRAY(-nz..nz) OF INTEGER izdV=0; DO izdV(iz)=IF iz>=0 THEN iz ELSE nzd+iz FOR iz=-nz TO nz
+izd==izdV(iz)
+
+
+
+! Apply settings
+! ------------------------------------
+largesmall_setup()
+
+
+
+! Compute the average field
+! ------------------------------------
+WRITE "Computing average..."
+LOOP files FOR n=nfmin TO nfmax BY dn
+  IF NOT first THEN READ FROM prev
+  STRING field_name = WRITE('Dati.cart.'n'.out')
+  STRING pressure_name = WRITE('pField'n'.fld')
+  INTEGER sz=SIZEOF(INTEGER)*3+SIZEOF(REAL)*7
+  POINTER TO STORED STRUCTURE(
+    ARRAY(0..sz-1) OF CHAR dummy
+    ARRAY(0..2,0..nx,-nz..nz,-1..ny+1) OF COMPLEX fieldimage_fortran
+  ) diskfield_fortran
+  diskfield_fortran=OPEN(field_name); pressuredata=OPEN(pressure_name)
+  WITH diskfield_fortran,mean(*):
+    U=~+fieldimage_fortran(0,0,0,nyl-2..nyh+2).REAL
+    W=~+fieldimage_fortran(2,0,0,nyl-2..nyh+2).REAL
+    P=~+pressuredata(0,0,nyl-2..nyh+2).REAL
+  CLOSE(diskfield_fortran); CLOSE(pressuredata)
+  IF NOT last THEN WRITE TO next
+REPEAT files
+WITH mean: U=~/nftot; W=~/nftot; P=~/nftot
+WITH mean:  deriv(U, Uy);  LeftLUDivStep2(Uy,  D0mat); deriv(W, Wy);   LeftLUDivStep2(Wy, D0mat)
+WITH mean: deriv2(U, Uyy); LeftLUDivStep2(Uyy, D0mat) deriv2(W, Wyy); LeftLUDivStep2(Wyy, D0mat)
+
+! If necessary, switch back to correct fields for statistics
+IF custom_mean THEN
+  nfmin=atoi(COMMANDLINE(4))
+  nfmax=atoi(COMMANDLINE(5))
+  dn=atoi(COMMANDLINE(6))
+END IF
+nftot=[(nfmax-nfmin) DIV dn]+1
+
+! Compute the TKE budget
+! ------------------------------------
+LOOP fields FOR n=nfmin TO nfmax BY dn
+  ! Read field
+  STRING field_name = WRITE('Dati.cart.'n'.out')
+  read_field_fortran(field_name)
+  ! Pressure field
+  STRING pressure_name = WRITE('pField'n'.fld'); pressuredata=OPEN(pressure_name)
+  pressure(*,*,nyl-2..nyh+2)=pressuredata(*,*,nyl-2..nyh+2); CLOSE(pressuredata)
+  ! Compute fluctuating field
+  WITH mean(*),V(0,0,*),Vder(0,0,*): u.REAL=~-U; w.REAL=~-W; pressure(0,0,*)=~-P;
+  ! Compute derivatives
+  velocity_gradient(Vder)
+  ! Parseval theorem method for var, pstrain and PHIptrsp
+  LOOP FOR iy=nyl-2 TO nyh+2
+    LOOP FOR ALL ix,iz WITH V(ix,iz,iy),Vder(ix,iz,iy), mean(iy):
+      p == pressure(ix,iz,iy)
+      c=IF ix=0 THEN 1 ELSE 2
+      IF is_large(ix,iz) THEN WITH(luiujprofiles(iy)):
+        prod(1)= ~ - c*(u|v + v|u).REAL*Uy
+        prod(3)= ~ - c*(v|w + w|v).REAL*Wy
+        prod(4)= ~ - c*(v|v).REAL*Uy
+        var(1) = ~ + c*(u|u).REAL;                               var(2) = ~ + c*(v|v).REAL
+        var(3) = ~ + c*(w|w).REAL;                               var(4) = ~ + c*(u|v).REAL
+        var(5) = ~ + c*(v|w).REAL;                               var(6) = ~ + c*(u|w).REAL
+        PHIptrsp(2) = ~ - c*(v|p + p|v).REAL;                    PHIptrsp(4) = ~ - c*(p|u).REAL
+        pstrain(1) = ~ + c*[ux|p + p|ux].REAL;                   pstrain(2) = ~ + c*[vy|p + p|vy].REAL
+        pstrain(3) = ~ + c*[wz|p + p|wz].REAL;                   pstrain(4) = ~ + c*[vx|p + p|uy].REAL
+        psdiss(1)= ~ - 2*ni*c*[ux|ux + uy|uy + uz|uz].REAL;      psdiss(2)=~-2*ni*c*[vx|vx + vy|vy + vz|vz].REAL
+        psdiss(3)= ~ - 2*ni*c*[wx|wx + wy|wy + wz|wz].REAL;      psdiss(4)=~-2*ni*c*[ux|vx + uy|vy + uz|vz].REAL
+      ELSE WITH(suiujprofiles(iy)):
+        prod(1)= ~ - c*(u|v + v|u).REAL*Uy
+        prod(3)= ~ - c*(v|w + w|v).REAL*Wy
+        prod(4)= ~ - c*(v|v).REAL*Uy
+        var(1) = ~ + c*(u|u).REAL;                               var(2) = ~ + c*(v|v).REAL
+        var(3) = ~ + c*(w|w).REAL;                               var(4) = ~ + c*(u|v).REAL
+        var(5) = ~ + c*(v|w).REAL;                               var(6) = ~ + c*(u|w).REAL
+        PHIptrsp(2) = ~ - c*(v|p + p|v).REAL;                    PHIptrsp(4) = ~ - c*(p|u).REAL
+        pstrain(1) = ~ + c*[ux|p + p|ux].REAL;                   pstrain(2) = ~ + c*[vy|p + p|vy].REAL
+        pstrain(3) = ~ + c*[wz|p + p|wz].REAL;                   pstrain(4) = ~ + c*[vx|p + p|uy].REAL
+        psdiss(1)= ~ - 2*ni*c*[ux|ux + uy|uy + uz|uz].REAL;      psdiss(2)=~-2*ni*c*[vx|vx + vy|vy + vz|vz].REAL
+        psdiss(3)= ~ - 2*ni*c*[wx|wx + wy|wy + wz|wz].REAL;      psdiss(4)=~-2*ni*c*[ux|vx + uy|vy + uz|vz].REAL
+      END IF
+    REPEAT
+  REPEAT
+  ! ttrsp term is the only one requiring pseudospectral convolution
+  LOOP FOR iy=nyl-2 TO nyh+2
+    Vderl=0; Vders=0
+    Vl=0; Vs=0
+    ! prepare fast and slow velocity, also inverting order of index so that it suits FFT
+    LOOP FOR ix=0 TO nx AND iz=0 TO nz
+      IF is_large(ix,iz) THEN
+        Vderl(ix,iz)=Vder(ix,iz,iy);
+        Vl(ix,iz)=V(ix,iz,iy);
+      ELSE
+        Vders(ix,iz)=Vder(ix,iz,iy);
+        Vs(ix,iz)=V(ix,iz,iy);
+      END IF
+    REPEAT
+    LOOP FOR ix=0 TO nx AND iz=-nz TO -1
+      IF is_large(ix,iz) THEN
+        Vderl(ix,nzd+iz)=Vder(ix,iz,iy)
+        Vl(ix,nzd+iz)=V(ix,iz,iy)
+      ELSE
+        Vders(ix,nzd+iz)=Vder(ix,iz,iy)
+        Vs(ix,nzd+iz)=V(ix,iz,iy)
+      END IF
+    REPEAT
+    ! Fourier antitransform
+    DO
+      WITH Vderl(ix,*): INLINE LOOP FOR ii IN (ux,vx,wx,uy,vy,wy,uz,vz,wz); IFT(ii); REPEAT
+      WITH Vders(ix,*): INLINE LOOP FOR ii IN (ux,vx,wx,uy,vy,wy,uz,vz,wz); IFT(ii); REPEAT
+      WITH Vl(ix,*):    INLINE LOOP FOR i  IN (u,v,w); IFT(i); REPEAT
+      WITH Vs(ix,*):    INLINE LOOP FOR i  IN (u,v,w); IFT(i); REPEAT
+    FOR ix=0 TO nx
+    DO
+      WITH Vders(*,iz): INLINE LOOP FOR ii IN (ux,vx,wx,uy,vy,wy,uz,vz,wz); RFT(ii); REPEAT
+      WITH Vderl(*,iz): INLINE LOOP FOR ii IN (ux,vx,wx,uy,vy,wy,uz,vz,wz); RFT(ii); REPEAT
+      WITH Vl(*,iz):    INLINE LOOP FOR i  IN (u,v,w); RFT(i); REPEAT
+      WITH Vs(*,iz):    INLINE LOOP FOR i  IN (u,v,w); RFT(i); REPEAT
+    FOR iz=0 TO HI
+    ! Calculate stuff for large scales
+    PHIttrspd = 0; temp_tcross = 0;
+    DO 
+      PHIttrspd(ix,iz,1).REAL=Vl(ix,iz).u.REAL * Vl(ix,iz).u.REAL * (Vl(ix,iz).v.REAL + Vs(ix,iz).v.REAL)
+      PHIttrspd(ix,iz,1).IMAG=Vl(ix,iz).u.IMAG * Vl(ix,iz).u.IMAG * (Vl(ix,iz).v.IMAG + Vs(ix,iz).v.IMAG)
+      PHIttrspd(ix,iz,2).REAL=Vl(ix,iz).v.REAL * Vl(ix,iz).v.REAL * (Vl(ix,iz).v.REAL + Vs(ix,iz).v.REAL)
+      PHIttrspd(ix,iz,2).IMAG=Vl(ix,iz).v.IMAG * Vl(ix,iz).v.IMAG * (Vl(ix,iz).v.IMAG + Vs(ix,iz).v.IMAG)  
+      PHIttrspd(ix,iz,3).REAL=Vl(ix,iz).w.REAL * Vl(ix,iz).w.REAL * (Vl(ix,iz).v.REAL + Vs(ix,iz).v.REAL)
+      PHIttrspd(ix,iz,3).IMAG=Vl(ix,iz).w.IMAG * Vl(ix,iz).w.IMAG * (Vl(ix,iz).v.IMAG + Vs(ix,iz).v.IMAG)
+      PHIttrspd(ix,iz,4).REAL=Vl(ix,iz).u.REAL * Vl(ix,iz).v.REAL * (Vl(ix,iz).v.REAL + Vs(ix,iz).v.REAL)
+      PHIttrspd(ix,iz,4).IMAG=Vl(ix,iz).u.IMAG * Vl(ix,iz).v.IMAG * (Vl(ix,iz).v.IMAG + Vs(ix,iz).v.IMAG)
+      temp_tcross(ix,iz,1).REAL=2*(Vl(ix,iz).u.REAL * ((Vl(ix,iz).u.REAL + Vs(ix,iz).u.REAL)*Vders(ix,iz).ux.REAL + (Vl(ix,iz).v.REAL + Vs(ix,iz).v.REAL)*Vders(ix,iz).uy.REAL + (Vl(ix,iz).w.REAL + Vs(ix,iz).w.REAL)*Vders(ix,iz).uz.REAL))
+      temp_tcross(ix,iz,1).IMAG=2*(Vl(ix,iz).u.IMAG * ((Vl(ix,iz).u.IMAG + Vs(ix,iz).u.IMAG)*Vders(ix,iz).ux.IMAG + (Vl(ix,iz).v.IMAG + Vs(ix,iz).v.IMAG)*Vders(ix,iz).uy.IMAG + (Vl(ix,iz).w.IMAG + Vs(ix,iz).w.IMAG)*Vders(ix,iz).uz.IMAG))
+      temp_tcross(ix,iz,2).REAL=2*(Vl(ix,iz).v.REAL * ((Vl(ix,iz).u.REAL + Vs(ix,iz).u.REAL)*Vders(ix,iz).vx.REAL + (Vl(ix,iz).v.REAL + Vs(ix,iz).v.REAL)*Vders(ix,iz).vy.REAL + (Vl(ix,iz).w.REAL + Vs(ix,iz).w.REAL)*Vders(ix,iz).vz.REAL))
+      temp_tcross(ix,iz,2).IMAG=2*(Vl(ix,iz).v.IMAG * ((Vl(ix,iz).u.IMAG + Vs(ix,iz).u.IMAG)*Vders(ix,iz).vx.IMAG + (Vl(ix,iz).v.IMAG + Vs(ix,iz).v.IMAG)*Vders(ix,iz).vy.IMAG + (Vl(ix,iz).w.IMAG + Vs(ix,iz).w.IMAG)*Vders(ix,iz).vz.IMAG))
+      temp_tcross(ix,iz,3).REAL=2*(Vl(ix,iz).w.REAL * ((Vl(ix,iz).u.REAL + Vs(ix,iz).u.REAL)*Vders(ix,iz).wx.REAL + (Vl(ix,iz).v.REAL + Vs(ix,iz).v.REAL)*Vders(ix,iz).wy.REAL + (Vl(ix,iz).w.REAL + Vs(ix,iz).w.REAL)*Vders(ix,iz).wz.REAL))
+      temp_tcross(ix,iz,3).IMAG=2*(Vl(ix,iz).w.IMAG * ((Vl(ix,iz).u.IMAG + Vs(ix,iz).u.IMAG)*Vders(ix,iz).wx.IMAG + (Vl(ix,iz).v.IMAG + Vs(ix,iz).v.IMAG)*Vders(ix,iz).wy.IMAG + (Vl(ix,iz).w.IMAG + Vs(ix,iz).w.IMAG)*Vders(ix,iz).wz.IMAG))
+      temp_tcross(ix,iz,4).REAL=(Vl(ix,iz).u.REAL * ((Vl(ix,iz).u.REAL + Vs(ix,iz).u.REAL)*Vders(ix,iz).vx.REAL + (Vl(ix,iz).v.REAL + Vs(ix,iz).v.REAL)*Vders(ix,iz).vy.REAL + (Vl(ix,iz).w.REAL + Vs(ix,iz).w.REAL)*Vders(ix,iz).vz.REAL)) + (Vl(ix,iz).v.REAL * ((Vl(ix,iz).u.REAL + Vs(ix,iz).u.REAL)*Vders(ix,iz).ux.REAL + (Vl(ix,iz).v.REAL + Vs(ix,iz).v.REAL)*Vders(ix,iz).uy.REAL + (Vl(ix,iz).w.REAL + Vs(ix,iz).w.REAL)*Vders(ix,iz).uz.REAL))
+      temp_tcross(ix,iz,4).IMAG=(Vl(ix,iz).u.IMAG * ((Vl(ix,iz).u.IMAG + Vs(ix,iz).u.IMAG)*Vders(ix,iz).vx.IMAG + (Vl(ix,iz).v.IMAG + Vs(ix,iz).v.IMAG)*Vders(ix,iz).vy.IMAG + (Vl(ix,iz).w.IMAG + Vs(ix,iz).w.IMAG)*Vders(ix,iz).vz.IMAG)) + (Vl(ix,iz).v.IMAG * ((Vl(ix,iz).u.IMAG + Vs(ix,iz).u.IMAG)*Vders(ix,iz).ux.IMAG + (Vl(ix,iz).v.IMAG + Vs(ix,iz).v.IMAG)*Vders(ix,iz).uy.IMAG + (Vl(ix,iz).w.IMAG + Vs(ix,iz).w.IMAG)*Vders(ix,iz).uz.IMAG))
+    FOR ALL ix,iz
+    ! Fourier transform
+    DO HFT(PHIttrspd(*,iz,i)) FOR ALL i,iz; DO HFT(temp_tcross(*,iz,i)) FOR ALL i,iz
+    DO FFT(PHIttrspd(ix,*,i)) FOR ALL i AND ix=0 TO nx;  DO FFT(temp_tcross(ix,*,i)) FOR ALL i AND ix=0 TO nx
+    ! Write to luiujprofile
+    DO luiujprofiles(iy).PHIttrsp(i) = ~ - PHIttrspd(0,0,i).REAL FOR ALL i
+    DO luiujprofiles(iy).tcross(i) = ~ - temp_tcross(0,0,i).REAL FOR ALL i
+    ! Calculate stuff for small scales
+    PHIttrspd = 0; temp_tcross = 0;
+    DO
+      PHIttrspd(ix,iz,1).REAL=Vs(ix,iz).u.REAL * Vs(ix,iz).u.REAL * (Vs(ix,iz).v.REAL + Vl(ix,iz).v.REAL)
+      PHIttrspd(ix,iz,1).IMAG=Vs(ix,iz).u.IMAG * Vs(ix,iz).u.IMAG * (Vs(ix,iz).v.IMAG + Vl(ix,iz).v.IMAG)
+      PHIttrspd(ix,iz,2).REAL=Vs(ix,iz).v.REAL * Vs(ix,iz).v.REAL * (Vs(ix,iz).v.REAL + Vl(ix,iz).v.REAL)
+      PHIttrspd(ix,iz,2).IMAG=Vs(ix,iz).v.IMAG * Vs(ix,iz).v.IMAG * (Vs(ix,iz).v.IMAG + Vl(ix,iz).v.IMAG)  
+      PHIttrspd(ix,iz,3).REAL=Vs(ix,iz).w.REAL * Vs(ix,iz).w.REAL * (Vs(ix,iz).v.REAL + Vl(ix,iz).v.REAL)
+      PHIttrspd(ix,iz,3).IMAG=Vs(ix,iz).w.IMAG * Vs(ix,iz).w.IMAG * (Vs(ix,iz).v.IMAG + Vl(ix,iz).v.IMAG)
+      PHIttrspd(ix,iz,4).REAL=Vs(ix,iz).u.REAL * Vs(ix,iz).v.REAL * (Vs(ix,iz).v.REAL + Vl(ix,iz).v.REAL)
+      PHIttrspd(ix,iz,4).IMAG=Vs(ix,iz).u.IMAG * Vs(ix,iz).v.IMAG * (Vs(ix,iz).v.IMAG + Vl(ix,iz).v.IMAG)
+      temp_tcross(ix,iz,1).REAL=2*(Vs(ix,iz).u.REAL * ((Vl(ix,iz).u.REAL + Vs(ix,iz).u.REAL)*Vderl(ix,iz).ux.REAL + (Vl(ix,iz).v.REAL + Vs(ix,iz).v.REAL)*Vderl(ix,iz).uy.REAL + (Vl(ix,iz).w.REAL + Vs(ix,iz).w.REAL)*Vderl(ix,iz).uz.REAL))
+      temp_tcross(ix,iz,1).IMAG=2*(Vs(ix,iz).u.IMAG * ((Vl(ix,iz).u.IMAG + Vs(ix,iz).u.IMAG)*Vderl(ix,iz).ux.IMAG + (Vl(ix,iz).v.IMAG + Vs(ix,iz).v.IMAG)*Vderl(ix,iz).uy.IMAG + (Vl(ix,iz).w.IMAG + Vs(ix,iz).w.IMAG)*Vderl(ix,iz).uz.IMAG))
+      temp_tcross(ix,iz,2).REAL=2*(Vs(ix,iz).v.REAL * ((Vl(ix,iz).u.REAL + Vs(ix,iz).u.REAL)*Vderl(ix,iz).vx.REAL + (Vl(ix,iz).v.REAL + Vs(ix,iz).v.REAL)*Vderl(ix,iz).vy.REAL + (Vl(ix,iz).w.REAL + Vs(ix,iz).w.REAL)*Vderl(ix,iz).vz.REAL))
+      temp_tcross(ix,iz,2).IMAG=2*(Vs(ix,iz).v.IMAG * ((Vl(ix,iz).u.IMAG + Vs(ix,iz).u.IMAG)*Vderl(ix,iz).vx.IMAG + (Vl(ix,iz).v.IMAG + Vs(ix,iz).v.IMAG)*Vderl(ix,iz).vy.IMAG + (Vl(ix,iz).w.IMAG + Vs(ix,iz).w.IMAG)*Vderl(ix,iz).vz.IMAG))
+      temp_tcross(ix,iz,3).REAL=2*(Vs(ix,iz).w.REAL * ((Vl(ix,iz).u.REAL + Vs(ix,iz).u.REAL)*Vderl(ix,iz).wx.REAL + (Vl(ix,iz).v.REAL + Vs(ix,iz).v.REAL)*Vderl(ix,iz).wy.REAL + (Vl(ix,iz).w.REAL + Vs(ix,iz).w.REAL)*Vderl(ix,iz).wz.REAL))
+      temp_tcross(ix,iz,3).IMAG=2*(Vs(ix,iz).w.IMAG * ((Vl(ix,iz).u.IMAG + Vs(ix,iz).u.IMAG)*Vderl(ix,iz).wx.IMAG + (Vl(ix,iz).v.IMAG + Vs(ix,iz).v.IMAG)*Vderl(ix,iz).wy.IMAG + (Vl(ix,iz).w.IMAG + Vs(ix,iz).w.IMAG)*Vderl(ix,iz).wz.IMAG))
+      temp_tcross(ix,iz,4).REAL=(Vs(ix,iz).u.REAL * ((Vl(ix,iz).u.REAL + Vs(ix,iz).u.REAL)*Vderl(ix,iz).vx.REAL + (Vl(ix,iz).v.REAL + Vs(ix,iz).v.REAL)*Vderl(ix,iz).vy.REAL + (Vl(ix,iz).w.REAL + Vs(ix,iz).w.REAL)*Vderl(ix,iz).vz.REAL)) + (Vs(ix,iz).v.REAL * ((Vl(ix,iz).u.REAL + Vs(ix,iz).u.REAL)*Vderl(ix,iz).ux.REAL + (Vl(ix,iz).v.REAL + Vs(ix,iz).v.REAL)*Vderl(ix,iz).uy.REAL + (Vl(ix,iz).w.REAL + Vs(ix,iz).w.REAL)*Vderl(ix,iz).uz.REAL))
+      temp_tcross(ix,iz,4).IMAG=(Vs(ix,iz).u.IMAG * ((Vl(ix,iz).u.IMAG + Vs(ix,iz).u.IMAG)*Vderl(ix,iz).vx.IMAG + (Vl(ix,iz).v.IMAG + Vs(ix,iz).v.IMAG)*Vderl(ix,iz).vy.IMAG + (Vl(ix,iz).w.IMAG + Vs(ix,iz).w.IMAG)*Vderl(ix,iz).vz.IMAG)) + (Vs(ix,iz).v.IMAG * ((Vl(ix,iz).u.IMAG + Vs(ix,iz).u.IMAG)*Vderl(ix,iz).ux.IMAG + (Vl(ix,iz).v.IMAG + Vs(ix,iz).v.IMAG)*Vderl(ix,iz).uy.IMAG + (Vl(ix,iz).w.IMAG + Vs(ix,iz).w.IMAG)*Vderl(ix,iz).uz.IMAG))
+    FOR ALL ix,iz
+    ! Fourier transform
+    DO HFT(PHIttrspd(*,iz,i)) FOR ALL i,iz; DO HFT(temp_tcross(*,iz,i)) FOR ALL i,iz
+    DO FFT(PHIttrspd(ix,*,i)) FOR ALL i AND ix=0 TO nx;  DO FFT(temp_tcross(ix,*,i)) FOR ALL i AND ix=0 TO nx
+    ! Write to suiujprofiles
+    DO suiujprofiles(iy).PHIttrsp(i) = ~ - PHIttrspd(0,0,i).REAL FOR ALL i
+    DO suiujprofiles(iy).tcross(i) = ~ - temp_tcross(0,0,i).REAL FOR ALL i
+  REPEAT
+REPEAT fields
+
+
+! var,PHIttrsp,psdiss,pstrain
+DO WITH luiujprofiles(iy): var(i)=~/nftot; PHIptrsp(i)=~/nftot; PHIttrsp(i)=~/nftot; psdiss(i)=~/nftot; pstrain(i)=~/nftot; prod(i)=~/nftot; tcross(i)=~/nftot FOR ALL i,iy
+DO WITH suiujprofiles(iy): var(i)=~/nftot; PHIptrsp(i)=~/nftot; PHIttrsp(i)=~/nftot; psdiss(i)=~/nftot; pstrain(i)=~/nftot; prod(i)=~/nftot; tcross(i)=~/nftot FOR ALL i,iy
+! PHIvdiff, vdiff
+DO WITH luiujprofiles:  deriv(var(*,i),PHIvdiff(*,i)); LeftLUDivStep2(PHIvdiff(*,i),D0mat); PHIvdiff(*,i)=~*ni;     FOR ALL i;
+DO WITH luiujprofiles: deriv2(var(*,i),vdiff(*,i));    LeftLUDivStep2(vdiff(*,i),D0mat);    vdiff(*,i)=~*ni;    FOR ALL i;
+DO WITH suiujprofiles:  deriv(var(*,i),PHIvdiff(*,i)); LeftLUDivStep2(PHIvdiff(*,i),D0mat); PHIvdiff(*,i)=~*ni;     FOR ALL i;
+DO WITH suiujprofiles: deriv2(var(*,i),vdiff(*,i));    LeftLUDivStep2(vdiff(*,i),D0mat);    vdiff(*,i)=~*ni;    FOR ALL i;
+! ptrsp, ttrsp
+DO WITH luiujprofiles: deriv(PHIptrsp(*,i),ptrsp(*,i)); LeftLUDivStep2(ptrsp(*,i),D0mat); FOR ALL i;
+DO WITH luiujprofiles: deriv(PHIttrsp(*,i),ttrsp(*,i)); LeftLUDivStep2(ttrsp(*,i),D0mat); FOR ALL i;
+DO WITH suiujprofiles: deriv(PHIptrsp(*,i),ptrsp(*,i)); LeftLUDivStep2(ptrsp(*,i),D0mat); FOR ALL i;
+DO WITH suiujprofiles: deriv(PHIttrsp(*,i),ttrsp(*,i)); LeftLUDivStep2(ttrsp(*,i),D0mat); FOR ALL i;
+
+! Create output directory
+! ------------------------------------
+<*
+#include <sys/stat.h>
+#include <sys/types.h>
+*>
+
+IF NOT custom_mean THEN
+<*
+int ifold_create = mkdir("profiles", 0777);
+*>
+ELSE
+<*
+int ifold_create = mkdir("cm_largesmall", 0777);
+*>
+END IF
+
+! Write to binary file
+! ------------------------------------
+POINTER TO STORED STRUCTURE[
+        INTEGER nmin, nmax, deltan, ntot
+        ARRAY(-1..ny+1) OF MEANTERMS meandata
+        ARRAY(-1..ny+1) OF BALANCE luiujprofilesdata
+        ARRAY(-1..ny+1) OF BALANCE suiujprofilesdata
+] uiujimage
+IF NOT first THEN READ FROM prev
+  IF custom_mean THEN
+    uiujimage = OPEN("cm_largesmall/uiuj_largesmall.bin")
+  ELSE
+    uiujimage = OPEN("largesmall/uiuj_largesmall.bin")
+  END IF
+  WITH uiujimage:
+    nmin = nfmin
+    nmax = nfmax
+    deltan = dn
+    ntot = nftot
+    meandata(miny..maxy)=mean(miny..maxy)
+    luiujprofilesdata(miny..maxy)=luiujprofiles(miny..maxy)
+    suiujprofilesdata(miny..maxy)=suiujprofiles(miny..maxy)
+  CLOSE(uiujimage)
+IF NOT last THEN WRITE TO next
+
+! Be polite and say goodbye
+! ------------------------------------
+WRITE " "
+WRITE "Goodbye, man!"
