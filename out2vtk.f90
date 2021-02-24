@@ -21,15 +21,15 @@ implicit none
 
 character(len=32) :: cmd_in_buf ! needed to parse arguments
 
-integer*8 :: iv, ix, iz, iy, pos
+integer*8 :: iv, ix, iz, iy
 integer :: ierror, ii
 integer :: ndim, nxtot, nytot, nztot, nxloc, nyloc, nzloc
-integer*8 :: nnos, nnos_local      
-real*4, dimension(:,:), allocatable :: xyz, vec ! watch out for this type! must be the same as 
-real*4, dimension(:), allocatable :: scal
+integer*8 :: nnos      
+real*4, dimension(:,:,:,:), allocatable :: xyz, vec ! watch out for this type! must be the same as 
+!real*4, dimension(:,:,:), allocatable :: scal
 
 integer, dimension(:), allocatable :: local_zsize_arr
-integer :: z_start = 0
+integer :: z_start = 0, y_start = 0
 
 type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
 
@@ -70,7 +70,6 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
     nxloc = 2*nxd       ! these refer to UNIQUE data! It does not consider halo cells
     nyloc = min(ny,maxy)-max(0,miny)+1 ! these refer to UNIQUE data! It does not consider halo cells, nor ghost cells
     nzloc = nzB         ! these refer to UNIQUE data! It does not consider halo cells
-    nnos_local = nxloc*nyloc*nzloc ! number of nodes OWNED BY PROCESS
 
     !-------------------!
     ! END OF PARAMETERS !
@@ -79,9 +78,9 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
 
 
     ! allocate stuff
-    allocate(xyz(ndim,nnos_local))    ! nodal coordinates
-    allocate(vec(ndim,nnos_local))    ! vectorial field
-    allocate(scal(nnos_local))        ! scalar field
+    allocate(xyz(ndim, 1:(2*nxd), max(0,miny):min(ny,maxy), 1:nzB))    ! nodal coordinates
+    allocate(vec(ndim, 1:(2*nxd), max(0,miny):min(ny,maxy), 1:nzB))    ! vectorial field
+!   allocate(scal(1:(2*nxd), max(0,miny):min(ny,maxy), 1:nzB))        ! scalar field
 
 
 
@@ -99,6 +98,7 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
     do ii=0,(iproc-1)
         z_start = z_start + local_zsize_arr(ii+1)
     end do
+    y_start = max(0,miny)
 
     ! data owned by each process that needs to be written
     CALL MPI_Type_create_subarray(3, [nxloc, nyloc, nzloc], [nxloc, nyloc, nzloc], [0, 0, 0], MPI_ORDER_FORTRAN, MPI_REAL, type_towrite)
@@ -109,10 +109,12 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
     ! 1) size along each dimension of the WHOLE array ON DISK
     ! 2) size of the PORTION of array TO BE WRITTEN BY EACH PROCESS
     ! 3) starting position of each component; !!! IT'S ZERO BASED !!!
-    CALL MPI_Type_create_subarray(4, [3, nxtot, nytot, nztot], [3, nxloc, nyloc, nzloc], [0, 0, 0, z_start], MPI_ORDER_FORTRAN, MPI_REAL, wtype_3d)
+    print *, y_start, nyloc, nytot
+    CALL MPI_Type_create_subarray(4, [3, nxtot, nytot, nztot], [3, nxloc, nyloc, nzloc], [0, 0, y_start, z_start], MPI_ORDER_FORTRAN, MPI_REAL, wtype_3d)
     !                             0)            1)                        2)                    3)
     CALL MPI_Type_commit(wtype_3d, ierror)
 
+    STOP
     ! SCALAR - for writing (setting view)
     ! 0) number of dimensions of array you want to write
     ! 1) size along each dimension of the WHOLE array ON DISK
@@ -136,7 +138,7 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
         
         ! skip ghost cells
         if (iy < 0) cycle
-        if (iy > ny+1) cycle
+        if (iy > ny) cycle
         
         ! do fourier transform
         VVdz(1:nz+1,1:nxB,1:3,1)=V(iy,0:nz,nx0:nxN,1:3);         VVdz(nz+2:nzd-nz,1:nxB,1:3,1)=0;
@@ -151,13 +153,14 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
         ! but you only need (1:2*nxd,1:nzB,1:3,1)
 
         ! convert velocity vector for each process
-        do ix=1,2*nxd
-            do iz = 1,nzB
-                pos = ix + (iy-1)*2*nxd + (iz-1)*2*nxd*(ny+1) !THIS ORDER IS IMPORTANT! x index must be varying first, then y, then z
-                vec(:,pos) = rVVdx(ix,iz,:,1)
-                xyz(1,pos) = (ix-1) * (2 * PI / alfa0)/(2*nxd-1)
-                xyz(2,pos) = y(iy)
-                xyz(3,pos) = (iz + nz0 - 2) * (2 * PI / beta0)/(nzd-1)
+        do iz=1,nzB
+            do ix=1,(2*nxd)
+                do ii=1,3
+                    vec(ii,ix,iy,iz) = rVVdx(ix,iz,ii,1)
+                end do
+                xyz(1,ix,iy,iz) = (ix-1) * (2 * PI / alfa0)/(2*nxd-1)
+                xyz(2,ix,iy,iz) = y(iy)
+                xyz(3,ix,iy,iz) = (iz + nz0 - 2) * (2 * PI / beta0)/(nzd-1)
             end do
         end do
 
