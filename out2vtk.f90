@@ -28,8 +28,7 @@ integer*8 :: nnos
 real*4, dimension(:,:,:,:), allocatable :: xyz, vec ! watch out for this type! must be the same as 
 !real*4, dimension(:,:,:), allocatable :: scal
 
-integer, dimension(:), allocatable :: local_zsize_arr
-integer :: z_start = 0, y_start = 0
+integer :: y_start = 0
 
 type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
 
@@ -47,6 +46,13 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
     call MPI_COMM_RANK(MPI_COMM_WORLD,iproc,ierr)
     call MPI_COMM_SIZE(MPI_COMM_WORLD,nproc,ierr)
     call read_dnsin()
+
+    ! set npy to total number of processes
+    ! this effectively DEACTIVATES PARALLELISATION IN Z
+    ! and makes life easier (without significant losses in perf.)
+    npy = nproc
+    ! notice that this overrides value from dns.in
+
     call init_MPI(nx+1,nz,ny,nxd+1,nzd)
     call init_memory(.TRUE.)
     call init_fft(VVdz,VVdx,rVVdx,nxd,nxB,nzd,nzB)
@@ -60,16 +66,16 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
     ndim  = 3  ! number of spatial dimension
 
     ! GLOBAL QUANTITIES, which is, overall sizes of stuff
-    nxtot = 2*nxd  ! no. points
+    nxtot = (2*nx) + 1 ! no. points
     nytot = (ny + 1)   ! no. points
-    nztot = nzd      ! no. points
+    nztot = (2*nz + 1) ! no. points
     nnos  = nxtot*nytot*nztot             ! number of nodes
 
     ! things that are local to each process
     ! number of points in each direction
-    nxloc = 2*nxd       ! these refer to UNIQUE data! It does not consider halo cells
+    nxloc = nxtot
     nyloc = min(ny,maxy)-max(0,miny)+1 ! these refer to UNIQUE data! It does not consider halo cells, nor ghost cells
-    nzloc = nzB         ! these refer to UNIQUE data! It does not consider halo cells
+    nzloc = nztot
 
     !-------------------!
     ! END OF PARAMETERS !
@@ -78,9 +84,9 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
 
 
     ! allocate stuff
-    allocate(xyz(ndim, 1:(2*nxd), max(0,miny):min(ny,maxy), 1:nzB))    ! nodal coordinates
-    allocate(vec(ndim, 1:(2*nxd), max(0,miny):min(ny,maxy), 1:nzB))    ! vectorial field
-!   allocate(scal(1:(2*nxd), max(0,miny):min(ny,maxy), 1:nzB))        ! scalar field
+    allocate(xyz(ndim, 1:nxtot, max(0,miny):min(ny,maxy), 1:nztot))    ! nodal coordinates
+    allocate(vec(ndim, 1:nxtot, max(0,miny):min(ny,maxy), 1:nztot))    ! vectorial field
+!   allocate(scal(1:nxtot, max(0,miny):min(ny,maxy), 1:nztot))        ! scalar field
 
 
 
@@ -88,16 +94,7 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
     ! MPI FILETYPES FOR WRITING !
     !---------------------------!
 
-    ! each process tells the others how many local nodes it has
-    allocate(local_zsize_arr(nproc))
-    local_zsize_arr(iproc+1) = nzloc
-    do ii=0,(nproc-1)
-        call MPI_BCAST(local_zsize_arr(ii+1),1,MPI_INTEGER,ii,MPI_COMM_WORLD)
-    end do
-    ! each process calculates its starting position in the global nodes list
-    do ii=0,(iproc-1)
-        z_start = z_start + local_zsize_arr(ii+1)
-    end do
+    ! each process calculates where its y chunk starts (zero based: MPI needs it so)
     y_start = max(0,miny)
 
     ! data owned by each process that needs to be written
@@ -109,18 +106,16 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
     ! 1) size along each dimension of the WHOLE array ON DISK
     ! 2) size of the PORTION of array TO BE WRITTEN BY EACH PROCESS
     ! 3) starting position of each component; !!! IT'S ZERO BASED !!!
-    print *, y_start, nyloc, nytot
-    CALL MPI_Type_create_subarray(4, [3, nxtot, nytot, nztot], [3, nxloc, nyloc, nzloc], [0, 0, y_start, z_start], MPI_ORDER_FORTRAN, MPI_REAL, wtype_3d)
+    CALL MPI_Type_create_subarray(4, [3, nxtot, nytot, nztot], [3, nxloc, nyloc, nzloc], [0, 0, y_start, 0], MPI_ORDER_FORTRAN, MPI_REAL, wtype_3d)
     !                             0)            1)                        2)                    3)
     CALL MPI_Type_commit(wtype_3d, ierror)
 
-    STOP
     ! SCALAR - for writing (setting view)
     ! 0) number of dimensions of array you want to write
     ! 1) size along each dimension of the WHOLE array ON DISK
     ! 2) size of the PORTION of array TO BE WRITTEN BY EACH PROCESS
     ! 3) starting position of each component; !!! IT'S ZERO BASED !!!
-!   CALL MPI_Type_create_subarray(3, [nxtot, nytot, nztot], [nxloc, nyloc, nzloc], [0, 0, z_start], MPI_ORDER_FORTRAN, MPI_REAL, wtype_scalar)
+!   CALL MPI_Type_create_subarray(3, [nxtot, nytot, nztot], [nxloc, nyloc, nzloc], [0, y_start, 0], MPI_ORDER_FORTRAN, MPI_REAL, wtype_scalar)
 !   !                             0)         1)                     2)                 3)
 !   CALL MPI_Type_commit(wtype_scalar, ierror)
 
@@ -150,11 +145,11 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
         END DO
         ! rVVdx is now containing the antitransform
         ! it has size 2*(nxd+1),nzB,6,6
-        ! but you only need (1:2*nxd,1:nzB,1:3,1)
+        ! but you only need (1:(2*nx+1),1:(2*nz+1),1:3,1)
 
         ! convert velocity vector for each process
-        do iz=1,nzB
-            do ix=1,(2*nxd)
+        do iz=1,(2*nz+1)
+            do ix=1,(2*nx+1)
                 do ii=1,3
                     vec(ii,ix,iy,iz) = rVVdx(ix,iz,ii,1)
                 end do
