@@ -1,15 +1,9 @@
-! TODO: FIXME: only working with single process
-
-!---------!
-! WARNING ! DOESN'T WORK WITH Y-PARALLELISATION
-!---------!
-
 ! Scalar SCAL was never assigned any value
-! Element connectivity matrix is still empty
 ! one cool thing would be to parallelise the file format as well
 ! check out: https://vtk.org/wp-content/uploads/2015/04/file-formats.pdf
 
-! also, a better argument parsing might be nice (like, taking mutltiple fields at once)
+! also, it might be nice to allow for mutltiple fields at once
+
 
 
 program out2vtk
@@ -20,6 +14,8 @@ use dnsdata
 implicit none
 
 character(len=32) :: cmd_in_buf ! needed to parse arguments
+logical :: fluct_only = .FALSE.
+character(len=32) :: arg
 
 integer*8 :: iv, ix, iz, iy
 integer :: ierror, ii
@@ -33,14 +29,27 @@ integer :: y_start = 0
 type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
 
 
+
     ! read arguments
-    if (COMMAND_ARGUMENT_COUNT() < 1) then
+    if (command_argument_count() < 1) then ! handle exception: no input
         print *, 'ERROR: please provide one input file as command line argument.'
         stop
     end if
-    call get_command_argument(1, cmd_in_buf)
+    do ii = 1, command_argument_count() ! parse optional arguments
+        call get_command_argument(ii, arg)
+        select case (arg)
+            case ('-f', '--fluctuation') ! flag to only have fluctuations
+                fluct_only = .TRUE.
+            case ('-h', '--help') ! call help
+                call print_help()
+                stop
+            case default
+            call get_command_argument(ii, cmd_in_buf)
+        end select
+    end do
+    ! read the input filename
     read(cmd_in_buf, *) fname
-
+    
     ! Init MPI
     call MPI_INIT(ierr)
     call MPI_COMM_RANK(MPI_COMM_WORLD,iproc,ierr)
@@ -127,6 +136,11 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
 
     ! read file
     CALL read_restart_file(fname,V)
+
+    ! remove average if necessary
+    if (fluct_only) then
+        V(:,0,0,:) = 0
+    end if
 
     ! for each y plane
     do iy = miny,maxy ! skips halo cells: only non-duplicated data
@@ -302,6 +316,21 @@ contains !----------------------------------------------------------------------
             close(ivtk)
         end if
 
+    end subroutine
+
+
+
+!-------------------------------------------------------------------------------------------------------------------
+! less useful stuff here
+!-------------------------------------------------------------------------------------------------------------------
+
+
+
+    subroutine print_help()
+        print *, "Converts a given .out file from channel into a paraview .vts file."
+        print *, "   out2vtk [-h] [-f] file.name"
+        print *, "If flag '-f' (or '--fluctuation') is passed, the (spatial) average is"
+        print *, "subtracted from the field before converting."
     end subroutine
 
 
