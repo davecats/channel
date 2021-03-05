@@ -14,11 +14,12 @@ use dnsdata
 implicit none
 
 character(len=32) :: cmd_in_buf ! needed to parse arguments
-logical :: fluct_only = .FALSE.
+logical :: fluct_only = .FALSE., undersample = .FALSE.
+real*4 :: xcent_undersample = 1
 character(len=32) :: arg
 
-integer*8 :: iv, ix, iz, iy
-integer :: ierror, ii
+integer :: iv, ix, iz, iy
+integer :: ierror, ii=1
 integer :: ndim, nxtot, nytot, nztot, nxloc, nyloc, nzloc
 integer*8 :: nnos      
 real*4, dimension(:,:,:,:), allocatable :: xyz, vec ! watch out for this type! must be the same as 
@@ -35,7 +36,7 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
         print *, 'ERROR: please provide one input file as command line argument.'
         stop
     end if
-    do ii = 1, command_argument_count() ! parse optional arguments
+    do while (ii <= command_argument_count()) ! parse optional arguments
         call get_command_argument(ii, arg)
         select case (arg)
             case ('-f', '--fluctuation') ! flag to only have fluctuations
@@ -43,9 +44,15 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
             case ('-h', '--help') ! call help
                 call print_help()
                 stop
+            case ('-u', '--undersample') ! specify undersampling
+                undersample = .TRUE.
+                ii = ii + 1
+                call get_command_argument(ii, cmd_in_buf)
+                read(cmd_in_buf, *) xcent_undersample
             case default
-            call get_command_argument(ii, cmd_in_buf)
+                call get_command_argument(ii, cmd_in_buf)
         end select
+        ii = ii + 1
     end do
     ! read the input filename
     read(cmd_in_buf, *) fname
@@ -75,9 +82,9 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
     ndim  = 3  ! number of spatial dimension
 
     ! GLOBAL QUANTITIES, which is, overall sizes of stuff
-    nxtot = (2*nx) + 1 ! no. points
+    nxtot = nint(xcent_undersample * ((2*nx) + 1))! no. points
     nytot = (ny + 1)   ! no. points
-    nztot = (2*nz + 1) ! no. points
+    nztot = nint(xcent_undersample * (2*nz + 1)) ! no. points
     nnos  = nxtot*nytot*nztot             ! number of nodes
 
     ! things that are local to each process
@@ -162,10 +169,10 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
         ! but you only need (1:(2*nx+1),1:(2*nz+1),1:3,1)
 
         ! convert velocity vector for each process
-        do iz=1,(2*nz+1)
-            do ix=1,(2*nx+1)
+        do iz=1,nztot
+            do ix=1,nxtot
                 do ii=1,3
-                    vec(ii,ix,iy,iz) = rVVdx(ix,iz,ii,1)
+                    call xz_interpolation(ii,ix,iy,iz)
                 end do
                 xyz(1,ix,iy,iz) = (ix-1) * (2 * PI / alfa0)/(2*nxd-1)
                 xyz(2,ix,iy,iz) = y(iy)
@@ -315,6 +322,36 @@ contains !----------------------------------------------------------------------
                 buffer = '</VTKFile>'//lf;                      write(ivtk) trim(buffer)
             close(ivtk)
         end if
+
+    end subroutine
+
+
+
+    subroutine xz_interpolation(ii,xx,iy,zz) ! this interpolates the field on a smaller grid if undersampling is requested
+    integer, intent(in) :: xx, zz, iy, ii
+    real*4 :: xprj, zprj
+    integer :: xc, xf, zc, zf
+    real*4 :: u_cc, u_cf, u_fc, u_ff ! shortcuts for values; first letter of pedix refers to x, second to z
+    real*4 :: w_cc, w_cf, w_fc, w_ff ! weights for values above
+    real*4 :: w_denominator ! handy: denominator for weights
+    
+        ! first off, project indeces so that maximum range is (2*nx+1), (2*nz+1)
+        xprj = (xx + 0.0) / nxtot * (2*nx+1)
+        zprj = (zz + 0.0) / nztot * (2*nz+1)
+
+        ! find 4 nearest points
+        xc = ceiling(xprj); zc = ceiling(zprj)
+        xf = floor(xprj); zf = floor(zprj)
+
+        ! shortcuts for values and weights
+        w_denominator = abs(xc-xf) * abs(zc-zf)
+        u_cc = rVVdx(xc,zc,ii,1);   w_cc = abs(xc - xprj) * abs(zc - zprj) / w_denominator
+        u_ff = rVVdx(xf,zf,ii,1);   w_ff = abs(xf - xprj) * abs(zf - zprj) / w_denominator
+        u_cf = rVVdx(xc,zf,ii,1);   w_cf = abs(xc - xprj) * abs(zf - zprj) / w_denominator
+        u_fc = rVVdx(xf,zc,ii,1);   w_fc = abs(xf - xprj) * abs(zc - zprj) / w_denominator
+
+        ! do interpolation
+        vec(ii,ix,iy,iz) = u_cc*w_cc + u_ff*w_ff + u_fc*w_fc + u_cf*w_cf
 
     end subroutine
 
