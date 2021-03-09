@@ -60,7 +60,7 @@ def plot_premultiplied(all_spectra, component, desired_y, y, kx, kz, **kwargs):
     fig_title = r'$k_xk_z \langle \hat{'+cmp[0]+r'}^\dagger \hat{'+cmp[1]+r'} \rangle$'
     xlog = True
     ylog = True
-    save_name = cmp + '_premultiplied_y{}'.format(round(y[y_idx], 3))
+    save_name = 'spectra/' + cmp + '_premultiplied_y{}'.format(round(y[y_idx], 3))
 
     # convert component to index
     idx = get_comp_idx(component)
@@ -170,7 +170,7 @@ def plot_cumulative_zy(all_spectra, component, y, kz, **kwargs):
     fig_title = r'$k_z\sum_{k_x} \langle \hat{'+cmp[0]+r'}^\dagger\hat{'+cmp[1]+r'} \rangle$'
     xlog = True
     ylog = False
-    save_name = cmp + '_cumulative_zy'
+    save_name = 'spectra/' + cmp + '_cumulative_zy'
 
     # convert component to index
     idx = get_comp_idx(component)
@@ -249,7 +249,7 @@ def plot_cumulative_xy(all_spectra, component, y, kx, **kwargs):
     fig_title = r'$k_x\sum_{k_z} \langle \hat{'+cmp[0]+r'}^\dagger\hat{'+cmp[1]+r'} \rangle$'
     xlog = True
     ylog = False
-    save_name = cmp + '_cumulative_xy'
+    save_name = 'spectra/' + cmp + '_cumulative_xy'
         
     # convert component to index
     idx = get_comp_idx(component)
