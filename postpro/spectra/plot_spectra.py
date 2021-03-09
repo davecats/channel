@@ -380,7 +380,7 @@ def generate_tex_colormap():
     text += '''\t}
 }'''
 
-    with open('colorbar_settings.tex', 'w') as csets:
+    with open('spectra/colorbar_settings.tex', 'w') as csets:
         csets.write(text)
 
 
