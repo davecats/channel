@@ -60,7 +60,7 @@ def plot_premultiplied(all_spectra, component, desired_y, y, kx, kz, **kwargs):
     fig_title = r'$k_xk_z \langle \hat{'+cmp[0]+r'}^\dagger \hat{'+cmp[1]+r'} \rangle$'
     xlog = True
     ylog = True
-    save_name = 'spectra/' + cmp + '_premultiplied_y{}'.format(round(y[y_idx], 3))
+    save_name = cmp + '_premultiplied_y{}'.format(round(y[y_idx], 3))
 
     # convert component to index
     idx = get_comp_idx(component)
@@ -114,7 +114,7 @@ def plot_premultiplied(all_spectra, component, desired_y, y, kx, kz, **kwargs):
             ax.set_yscale("log")
         ax.pcolormesh(kx[1:], kz[1:], premultiplied[y_idx, 1:, 1:], linewidth=0, rasterized=True,shading='gouraud',cmap=inferno_wr)
         # save figure
-        savefig(save_name+'.png', format='png', bbox_inches='tight', pad_inches=0)
+        savefig('spectra/'+save_name+'.png', format='png', bbox_inches='tight', pad_inches=0)
         # save tikz code
         generate_tikz(save_name, save_size, labels, fig_title, ax.get_xlim(), ax.get_ylim(), xlog=xlog, ylog=ylog)
         # close figure, so that it does not get plotted
@@ -170,7 +170,7 @@ def plot_cumulative_zy(all_spectra, component, y, kz, **kwargs):
     fig_title = r'$k_z\sum_{k_x} \langle \hat{'+cmp[0]+r'}^\dagger\hat{'+cmp[1]+r'} \rangle$'
     xlog = True
     ylog = False
-    save_name = 'spectra/' + cmp + '_cumulative_zy'
+    save_name = cmp + '_cumulative_zy'
 
     # convert component to index
     idx = get_comp_idx(component)
@@ -223,7 +223,7 @@ def plot_cumulative_zy(all_spectra, component, y, kz, **kwargs):
         if y_symm:
             ax.set_ylim([0,1])
         # save figure
-        savefig(save_name+'.png', format='png', bbox_inches='tight', pad_inches=0)
+        savefig('spectra/'+save_name+'.png', format='png', bbox_inches='tight', pad_inches=0)
         # save tikz code
         generate_tikz(save_name, save_size, labels, fig_title, ax.get_xlim(), ax.get_ylim(), xlog=xlog, ylog=ylog)
         # close figure, so that it does not get plotted
@@ -249,7 +249,7 @@ def plot_cumulative_xy(all_spectra, component, y, kx, **kwargs):
     fig_title = r'$k_x\sum_{k_z} \langle \hat{'+cmp[0]+r'}^\dagger\hat{'+cmp[1]+r'} \rangle$'
     xlog = True
     ylog = False
-    save_name = 'spectra/' + cmp + '_cumulative_xy'
+    save_name = cmp + '_cumulative_xy'
         
     # convert component to index
     idx = get_comp_idx(component)
@@ -302,7 +302,7 @@ def plot_cumulative_xy(all_spectra, component, y, kx, **kwargs):
         if y_symm:
             ax.set_ylim([0,1])
         # save figure
-        savefig(save_name+'.png', format='png', bbox_inches='tight', pad_inches=0)
+        savefig('spectra/'+save_name+'.png', format='png', bbox_inches='tight', pad_inches=0)
         # save tikz code
         generate_tikz(save_name, save_size, labels, fig_title, ax.get_xlim(), ax.get_ylim(), xlog=xlog, ylog=ylog)
         # close figure, so that it does not get plotted
@@ -431,5 +431,5 @@ def generate_tikz(fname, size, labels, title, xlim, ylim, **kwargs):
 \end{{document}}
 '''
 
-    with open(fname+'.tikz', 'w') as f: # TODO: fixme!
+    with open('spectra/'+fname+'.tikz', 'w') as f: # TODO: fixme!
         f.write(tikz_code)
