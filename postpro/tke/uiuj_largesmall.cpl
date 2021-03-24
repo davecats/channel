@@ -52,10 +52,29 @@ USE ../dnsdata
 USE ../dnsdirect
 !USE rtchecks
 USE ../convenience
-USE largesmall_def
 
 BOOLEAN custom_mean = FALSE
 INTEGER nftot = 0
+
+
+
+! LARGE-SMALL STUFF
+! -----------------------------
+
+INTEGER z_threshold
+
+SUBROUTINE largesmall_setup()
+    FILE in_params = OPENRO("largesmall_settings.in")
+    READ BY NAME FROM in_params z_threshold
+    IF has_terminal THEN
+        WRITE BY NAME z_threshold
+    END IF
+END largesmall_setup
+
+INLINE BOOLEAN FUNCTION is_large(INTEGER ix,iz)=ABS(beta0*iz)<=z_threshold
+
+
+
 
 ! Parameters
 ! -----------------------------
