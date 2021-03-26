@@ -1,14 +1,168 @@
+! THIS IS STILL BETA
+! PROPER TESTING NEEDED
+
+
+
 gamma=0
 USE dnsdata
+!USE dnsdirect
+USE rtchecks
 USE dnsdirect
-!USE rtchecks
+
+
+
+! UTILITY SUBROUTINES
+! -------------------------------------------------------------------------------------------------------------
+
+
+
+INTEGER ny_in,nx_in,nz_in
+REAL alfa0_in,beta0_in,ymin_in,ymax_in
+SUBROUTINE read_cpl_out(STRING filename) FOLLOWS
+SUBROUTINE read_cpl_fld(STRING field_name) FOLLOWS
+
+
+
+SUBROUTINE read_cpl_out(STRING filename)
+
+    ! define header
+    POINTER TO STORED STRUCTURE(
+        ARRAY(0..1023) OF CHAR the_head
+    ) file_header
+
+    ! read header
+    file_header = OPEN(filename); WITH file_header:
+        READ BY NAME FROM the_head ny_in,nx_in,nz_in,alfa0_in,beta0_in,ymin_in,ymax_in
+    CLOSE file_header
+
+    ! define file structure
+    POINTER TO STORED STRUCTURE(
+        ARRAY(0..1023) OF CHAR header
+        ARRAY(-1..ny_in+1,0..nx_in,-nz_in..nz_in) OF VELOCITY Vimage
+    ) fullfile
+
+    ! perform some checks
+    IF ny_in # ny OR ymin_in # ymin OR ymax_in # ymax THEN
+        WRITE "WARNING: mismatches in y grid."
+    END IF
+    IF alfa0_in # alfa0 OR beta0_in # beta0 THEN
+        WRITE "WARNING: mismatches in x and/or z domain lengths."
+    END IF
+    IF nx_in # nx OR nz_in # nz THEN
+        IF (nx_in <= nx) AND (nz_in <= nz) THEN
+            WRITE "Output file has more x (or z) points than input; high wavenumbers are set to 0."
+        ELSE
+            WRITE "UNHANDLED EXCEPTION: input file has more x (or z) points than output."
+        END IF
+    END IF
+
+    ! read file on disk to memory; field in memory might be larger than the one on field,
+    ! in which case high wavenumbers are automatically 0
+    V = 0
+    fullfile = OPEN(filename); WITH fullfile:
+        LOOP FOR iz = -nz_in TO nz_in
+            LOOP FOR ix = 0 TO nx_in
+                LOOP FOR iy = nyl-2 TO nyh+2
+                    V(ix,iz,iy) = Vimage(iy,ix,iz)
+                REPEAT LOOP
+            REPEAT LOOP
+        REPEAT LOOP
+    CLOSE fullfile
+
+    DO WITH V(0,0,iy): u=~+u_conv; w=~+w_conv FOR ALL iy
+
+END read_cpl_out
+
+
+
+SUBROUTINE read_cpl_fld(STRING field_name)
+! this is parallel
+
+    IF NOT first THEN READ FROM prev
+
+    ! define header
+    POINTER TO STORED STRUCTURE(
+        INTEGER nyimage,nximage,nzimage
+        REAL timage,yminimage,ymaximage,aimage,alfa0image,beta0image,niimage
+    ) file_header
+
+    ! read header
+    file_header = OPEN(field_name); WITH file_header:
+        ny_in=nyimage; nx_in=nximage; nz_in=nzimage;
+        alfa0_in=alfa0image; beta0_in=beta0image; ymin_in=yminimage; ymax_in=ymaximage
+    CLOSE file_header
+
+    ! perform some checks
+    IF ny_in # ny OR ymin_in # ymin OR ymax_in # ymax THEN
+        WRITE "WARNING: mismatches in y grid."
+    END IF
+    IF alfa0_in # alfa0 OR beta0_in # beta0 THEN
+        WRITE "WARNING: mismatches in x and/or z domain lengths."
+    END IF
+    IF nx_in # nx OR nz_in # nz THEN
+        IF (nx_in <= nx) AND (nz_in <= nz) THEN
+            WRITE "Output file has more x (or z) points than input; high wavenumbers are set to 0."
+        ELSE
+            WRITE "UNHANDLED EXCEPTION: input file has more x (or z) points than output."
+        END IF
+    END IF
+
+    ! define full file
+    POINTER TO STORED STRUCTURE(
+        INTEGER nyimage,nximage,nzimage
+        REAL timage,yminimage,ymaximage,aimage,alfa0image,beta0image,niimage
+        ARRAY(-1..ny_in+1) OF REAL uavimage,wavimage
+        ARRAY(-1..ny_in+1,0..nx_in,-nz_in..nz_in) OF VETA fieldimage
+    ) diskfield_old
+
+    ! read file on disk to memory; field in memory might be larger than the one on field,
+    ! in which case high wavenumbers are automatically 0
+    V = 0
+    diskfield_old=OPEN(field_name); WITH diskfield_old:
+        V(0,0,*).u.REAL=uavimage(nyl-2..nyh+2)
+        V(0,0,*).w.REAL=wavimage(nyl-2..nyh+2)
+        LOOP FOR iy=nyl-2 TO nyh+2
+           DO V(ix,iz,iy).v=fieldimage(iy,ix,iz).v FOR ix = 1 TO nx_in AND iz = -nz_in TO nz_in EXCEPT iz = 0 
+           DO V(ix,iz,iy).u=fieldimage(iy,ix,iz).eta FOR ix = 1 TO nx_in AND iz = -nz_in TO nz_in EXCEPT iz = 0 
+        REPEAT LOOP
+    CLOSE diskfield_old
+
+    IF NOT last THEN WRITE TO next
+
+    ! switch to uvw representation from veta
+    ! notice that this is done by calculating the derivatives with the (possibly) large
+    ! domain in memory, and not with the domain on disk
+    ! this means that the derivatives are possibly somehow wrong? IDK
+    ! aber egal
+    vetaTOuvw
+
+    IF NOT first THEN READ FROM prev
+
+    diskfield_old=OPEN(field_name); WITH diskfield_old:
+        V(0,0,*).u.REAL=uavimage(nyl-2..nyh+2)
+        V(0,0,*).w.REAL=wavimage(nyl-2..nyh+2)
+        CLOSE diskfield_old
+    IF NOT last THEN WRITE TO next
+
+END read_cpl_fld
+
+
+
+! ACTUAL CODE
+! -------------------------------------------------------------------------------------------------------------
+
 
 
 ! Convert Channel -> Couette
 ! ------------------------------------
 !
 ! read channel
-read_restart_file()
+IF has_terminal THEN WRITE "Reading from file: ", COMMANDLINE(4)
+read_cpl_fld(COMMANDLINE(4))
+
+
+
+
 ! make mean flow symmetric
 !DO WITH V(0,0,*):
 !    v(iy)=0.5*[u(iy)+u(ny-iy)]
@@ -22,13 +176,17 @@ read_restart_file()
 ! invert u and w top part of channel
 !WITH V(*,*,ny DIV 2 + 1..ny+1): u=~*(-1); w=~*(-1) 
 ! save
-WRITE "Writing CPL field..."
+!WRITE "Writing CPL field..."
 !time = dt_save
 !outstats()
 ! save in Fortran format
+
+
+
+
 WRITE "Writing Fortran field..."
 FILE fortranfield = CREATE("Dati.cart.fort")
-WRITE BINARY TO fortranfield nx,ny,nz,alfa0,beta0,ni,a,ymin,ymax,time
-WRITE BINARY TO fortranfield V(0..nx,*,*).u, V(0..nx,*,*).v, V(0..nx,*,*).w
+    WRITE BINARY TO fortranfield nx,ny,nz,alfa0,beta0,ni,a,ymin,ymax,time
+    WRITE BINARY TO fortranfield V(0..nx,*,*).u, V(0..nx,*,*).v, V(0..nx,*,*).w
 CLOSE(fortranfield)
 
