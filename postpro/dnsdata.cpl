@@ -209,12 +209,12 @@ SHARED ARRAY(0..nxd-1,0..nzd-1,0..4) OF MOMFLUX VVd
 #endif
 
 maxtimelevels=1
-rhstype=STRUCTURE(COMPLEX eta,D2v)
+!rhstype=STRUCTURE(COMPLEX eta,D2v)
 VETA=STRUCTURE(COMPLEX v,eta)
 SHARED ARRAY(0..nx,-nz..nz,nyl-2..nyh+2) OF VELOCITY V
-SHARED ARRAY(0..nx,-nz..nz,MAX(1,nyl-2)..MIN(ny-1,nyh+2),1..maxtimelevels) OF rhstype oldrhs
-SHARED rhstype memrhs(0..nx,-nz..nz,0..2)
-INLINE FUNCTION newrhs(INTEGER ix,iz,iy)=memrhs(ix,iz,(iy+1000)MOD(3))
+!SHARED ARRAY(0..nx,-nz..nz,MAX(1,nyl-2)..MIN(ny-1,nyh+2),1..maxtimelevels) OF rhstype oldrhs
+!SHARED rhstype memrhs(0..nx,-nz..nz,0..2)
+!INLINE FUNCTION newrhs(INTEGER ix,iz,iy)=memrhs(ix,iz,(iy+1000)MOD(3))
 INLINE FUNCTION imod(INTEGER iy)=(iy+1000)MOD(5)
 REAL u1zero=0, w1zero=0, phi1zero
 
@@ -225,8 +225,8 @@ REAL u1zero=0, w1zero=0, phi1zero
 
   SHARED ARRAY(0..nx,-nz..nz,nyl-2..nyh+2) OF COMPLEX phi
   SHARED ARRAY(0..nx,-nz..nz,MAX(1,nyl-2)..MIN(ny-1,nyh+2),1..maxtimelevels) OF COMPLEX oldphirhs
-  SHARED COMPLEX memphirhs(0..nx,-nz..nz,0..2)
-  INLINE FUNCTION newphirhs(INTEGER ix,iz,iy)=memphirhs(ix,iz,(iy+1000)MOD(3))
+  !SHARED COMPLEX memphirhs(0..nx,-nz..nz,0..2)
+  !INLINE FUNCTION newphirhs(INTEGER ix,iz,iy)=memphirhs(ix,iz,(iy+1000)MOD(3))
 #endif
 
 INTEGER ismp
