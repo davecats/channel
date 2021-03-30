@@ -719,6 +719,9 @@ logical::rtd_exists ! flag to check existence of Runtimedata
     ! finally write field
     CALL MPI_File_write_all(fh, R, 1, owned2write_type, status)
 
+    ! close file
+    call MPI_File_close(fh)
+
   END SUBROUTINE save_restart_file
 
 
