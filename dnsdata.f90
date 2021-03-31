@@ -383,6 +383,36 @@ logical::rtd_exists ! flag to check existence of Runtimedata
   END SUBROUTINE COMPLEXderiv2
 
   !--------------------------------------------------------------!
+  !-----REAL----- derivative in the y-direction ----------------!
+  SUBROUTINE REALderiv(f0,f1)
+  ! TODO FIXME: this actually calls the complex routine!
+
+    real(C_DOUBLE), intent(in)  :: f0(ny0-2:nyN+2)
+    real(C_DOUBLE), intent(out) :: f1(ny0-2:nyN+2)
+    complex(C_DOUBLE_COMPLEX) :: temp_in(ny0-2:nyN+2), temp_out(ny0-2:nyN+2)
+
+    temp_in = cmplx(f0)
+    call COMPLEXderiv(temp_in, temp_out)
+    f1 = real(temp_out)
+
+  END SUBROUTINE REALderiv
+
+  !--------------------------------------------------------------!
+  !-----REAL----- second derivative in the y-direction ----------!
+  SUBROUTINE REALderiv2(f0,f1)
+  ! TODO FIXME: this actually calls the complex routine!
+
+    real(C_DOUBLE), intent(in)  :: f0(ny0-2:nyN+2)
+    real(C_DOUBLE), intent(out) :: f1(ny0-2:nyN+2)
+    complex(C_DOUBLE_COMPLEX) :: temp_in(ny0-2:nyN+2), temp_out(ny0-2:nyN+2)
+
+    temp_in = cmplx(f0)
+    call COMPLEXderiv2(temp_in, temp_out)
+    f1 = real(temp_out)
+
+  END SUBROUTINE REALderiv2
+
+  !--------------------------------------------------------------!
   !----------------- apply the boundary conditions --------------!
   PURE SUBROUTINE applybc_0(EQ,bc0,bc0m1)
     real(C_DOUBLE), intent(inout) :: EQ(ny0:nyN+2,-2:2)
