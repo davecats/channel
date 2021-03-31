@@ -40,7 +40,7 @@ MODULE dnsdata
   real(C_DOUBLE) :: dx,dz,factor
   !Derivatives
   TYPE(Di), allocatable :: der(:)
-  real(C_DOUBLE), dimension(-2:2) :: d040,d140,d14m1,d04n,d14n,d24n,d14np1
+  real(C_DOUBLE), dimension(-2:2) :: d040,d140,d240,d14m1,d24m1,d04n,d14n,d24n,d14np1,d24np1
   real(C_DOUBLE), allocatable :: D0mat(:,:), etamat(:,:,:), eta00mat(:,:), D2vmat(:,:,:)
   !Fourier-transformable arrays (allocated in ffts.f90)
   complex(C_DOUBLE_COMPLEX), pointer, dimension(:,:,:,:) :: VVdx, VVdz
@@ -234,8 +234,10 @@ logical::rtd_exists ! flag to check existence of Runtimedata
     IF (first) THEN
       FORALL (i=0:4, j=0:4) M(i,j)=(y(-1+j)-y(0))**(4.0d0-i); CALL LUdecomp(M)
       t=0; t(3)=1.0; d140(-2:2)=M.bs.t
+      t=0; t(2)=2.0; d240(-2:2)=M.bs.t
       FORALL (i=0:4, j=0:4) M(i,j)=(y(-1+j)-y(-1))**(4.0d0-i); CALL LUdecomp(M)
       t=0; t(3)=1.0; d14m1(-2:2)=M.bs.t
+      t=0; t(2)=2.0; d24m1(-2:2)=M.bs.t
       d040=0; d040(-1)=1
     END IF
     IF (last) THEN 
@@ -244,6 +246,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
       t=0; t(2)=2; d24n(-2:2)=M.bs.t
       FORALL (i=0:4, j=0:4) M(i,j)=(y(ny-3+j)-y(ny+1))**(4.0d0-i); CALL LUdecomp(M)
       t=0; t(3)=1; d14np1(-2:2)=M.bs.t
+      t=0; t(2)=2; d24np1(-2:2)=M.bs.t
       d04n=0; d04n(1)=1;
     END IF
     FORALL (iy=ny0:nyN) D0mat(iy,-2:2)=der(iy)%d0(-2:2); 
@@ -339,6 +342,45 @@ logical::rtd_exists ! flag to check existence of Runtimedata
     CALL LeftLU5divStep1(f1,D0mat,f1)
 #endif
   END SUBROUTINE COMPLEXderiv
+
+  !--------------------------------------------------------------!
+  !---COMPLEX----- second derivative in the y-direction ---------!
+#ifdef nonblockingY
+  SUBROUTINE COMPLEXderiv2(f0,f1,Rs,itag)
+#else
+  SUBROUTINE COMPLEXderiv2(f0,f1)
+#endif
+    complex(C_DOUBLE_COMPLEX), intent(in)  :: f0(ny0-2:nyN+2)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: f1(ny0-2:nyN+2)
+#ifdef nonblockingY
+    TYPE(MPI_REQUEST), intent(out) :: Rs
+    integer(C_INT), intent(in) :: itag
+#endif
+    IF (first) THEN 
+      f1(0)=sum(d240(-2:2)*f0(-1:3))
+      f1(-1)=sum(d24m1(-2:2)*f0(-1:3))
+    END IF
+    IF (last) THEN 
+      f1(ny)=sum(d24n(-2:2)*f0(ny-3:ny+1))
+      f1(ny+1)=sum(d24np1(-2:2)*f0(ny-3:ny+1))
+    END IF
+    DO CONCURRENT (iy=ny0:nyN)
+      f1(iy)=sum(der(iy)%d2(-2:2)*f0(iy-2:iy+2))
+    END DO
+    IF (first) THEN
+      f1(1)=f1(1)-(der(1)%d0(-1)*f1(0)+der(1)%d0(-2)*f1(-1))
+      f1(2)=f1(2)-der(2)%d0(-2)*f1(0)
+    END IF
+    IF (last) THEN
+      f1(ny-1)=f1(ny-1)-(der(ny-1)%d0(1)*f1(ny)+der(ny-1)%d0(2)*f1(ny+1))
+      f1(ny-2)=f1(ny-2)-der(ny-2)%d0(2)*f1(ny)
+    END IF
+#ifdef nonblockingY
+    CALL LeftLU5divStep1(f1,D0mat,f1,Rs,itag)
+#else
+    CALL LeftLU5divStep1(f1,D0mat,f1)
+#endif
+  END SUBROUTINE COMPLEXderiv2
 
   !--------------------------------------------------------------!
   !----------------- apply the boundary conditions --------------!
