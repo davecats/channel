@@ -223,6 +223,6 @@ def read_dnsin(dnsin_file):
 
 
 def rawline_dnsin(dnsin):
-    preprocessed = dnsin.readline().split("!")[0].split(" ")
+    preprocessed = dnsin.readline().split("!")[0].split()
     preprocessed = [entry for entry in preprocessed if not (entry=="" or entry=="\t")]
     return preprocessed
