@@ -18,8 +18,8 @@ logical :: custom_mean = .FALSE.
 ! counters
 
 integer :: ii ! counter initially used for parsing arguments
-integer :: ix, iy, iz, iv ! for spatial directions and components
-integer :: i, j, k, c, irs, ilasm
+integer :: ix, iy, iz, iz_fft, iv ! for spatial directions and components
+integer :: i, j, k, c, irs, ilasm, cntr
 
 ! global stuff
 
@@ -36,6 +36,7 @@ real(C_DOUBLE) :: m_grad(3,3) ! m_grad(i,j) = dUi/dxj
 ! shortcut parameters
 integer, parameter :: var = 1, prod = 2, psdiss = 3, ttrsp = 4, tcross = 5, vdiff = 6, pstrain = 7, ptrsp = 8, PHIttrsp = 9, PHIvdiff = 10, PHIptrsp = 11
 integer, parameter :: large = 1, small = 2
+integer, parameter :: i_ft = 0, j_ft = 2, res_ttrsp = 4, uk_ft = 6
 logical :: ignore
 
 ! large-small stuff
@@ -54,7 +55,10 @@ integer(MPI_OFFSET_KIND) :: offset
 ! Program begins here
 !----------------------------------------------------------------------------------------------------------------------------
 
-
+    ! Init MPI
+    call MPI_INIT(ierr)
+    call MPI_COMM_RANK(MPI_COMM_WORLD,iproc,ierr)
+    call MPI_COMM_SIZE(MPI_COMM_WORLD,nproc,ierr)
 
     ! read arguments from command line
     call parse_args()
@@ -64,10 +68,7 @@ integer(MPI_OFFSET_KIND) :: offset
     end if
     nftot = ((nfmax - nfmin) / dnf) + 1
     
-    ! Init MPI
-    call MPI_INIT(ierr)
-    call MPI_COMM_RANK(MPI_COMM_WORLD,iproc,ierr)
-    call MPI_COMM_SIZE(MPI_COMM_WORLD,nproc,ierr)
+    ! setup
     call read_dnsin()
     call largesmall_setup()
     ! set npy to total number of processes
@@ -180,44 +181,131 @@ integer(MPI_OFFSET_KIND) :: offset
                     end do
                 end do
             end do
+
+            ! calculate ttrsp and tcross
+            do irs = 1, 6
+
+                call get_indexes(irs, i, j)
+
+                ! TURBULENT TRANSPORT TTRSP
+                ! prepare Fourier transform by copying in correct order
+                VVdz(:,:,:,1) = 0 ! I only need this chunk! no need to set everything to 0
+                !   (z,x,a,b)
+                !    - x, z are obvious; notice that z is scrambled up for fft -> iz_fft is defined
+                !    - a corresponds to some quantity; 1:4 are i,j velocity for large and small fields
+                !    - a=5:6 corresponds to ui * uj for large and small fields
+                !    - b is useless (only b=1 is used)
+                do ix = nx0,nxN
+                    do iz = -nz,nz
+                        ! prepare indeces
+                        ilasm = small; if (is_large(ix,iz)) ilasm = large
+                        iz_fft = iz_to_fft(iz)
+                        ! copy arrays
+                        VVdz(iz_fft, ix-nx0+1, ilasm+i_ft, 1) = V(iy,iz,ix,i)
+                        VVdz(iz_fft, ix-nx0+1, ilasm+j_ft, 1) = V(iy,iz,ix,j)
+                    end do
+                end do
+                ! up until now you used third index = 1:4
+                ! antitransform
+                do cntr = 1,4
+                    call IFT(VVdz(1:nzd,1:nxB,cntr,1))
+                    call MPI_Alltoall(VVdz(:,:,cntr,1), 1, Mdz, VVdx(:,:,cntr,1), 1, Mdx, MPI_COMM_X) ! you could just copy without MPI since you deactivated xz parallelisation but ok
+                    VVdx(nx+2:nxd+1,1:nzB,cntr,1)=0
+                    call RFT(VVdx(1:nxd+1,1:nzB,cntr,1),rVVdx(1:2*nxd+2,1:nzB,cntr,1))
+                end do
+                ! compute product in real space
+                do ilasm = 1,2
+                    rVVdx(:,:,res_ttrsp+ilasm,1) = rVVdx(:,:, ilasm + i_ft, 1) * rVVdx(:,:, ilasm + j_ft, 1)
+                end do
+                ! now results are in third index = 5,6
+                ! transform back
+                do cntr=5,6
+                    call HFT(rVVdx(1:2*nxd+2,1:nzB,cntr,1), VVdx(1:nxd+1,1:nzB,cntr,1)); 
+                    call MPI_Alltoall(VVdx(:,:,cntr,1), 1, Mdx, VVdz(:,:,cntr,1), 1, Mdz, MPI_COMM_X) ! you could just copy without MPI since you deactivated xz parallelisation but ok
+                    call FFT(VVdz(1:nzd,1:nxB,cntr,1));
+                end do
+                ! use Parseval's theorem to calculate statistics
+                do ix = nx0, nxN
+                    c = 2; if (ix == 0) c = 1 ! multiplier for doubling points in x direction
+                    do iz = -nz,nz
+                        ! prepare indeces
+                        ilasm = small; if (is_large(ix,iz)) ilasm = large
+                        iz_fft = iz_to_fft(iz)
+                        ! compute
+                        uiuj(PHIttrsp) = uiuj(PHIttrsp) - c * cprod( VVdz(iz_fft, ix, res_ttrsp+ilasm,1), u(2) )
+                    end do
+                end do
+
+                ! INTERSCALE TRANSPORT TCROSS
+                ! rVVdx(:,:,1:4,1) already contains fourier transform of components i,j for large and small
+                ! inputs for this section are stored in (:,:,:,1); outputs in (:,:,:,2)
+                ! array structure for VVdz(z,x,a,b) in this section is:
+                ! - z, x, a=1:4 as before
+                ! - a = 6 is uk (whole velocity field, not decomposed)
+                ! - b=1 is input (before transformation), b=2 is output (products transformed back in fourier)
+                ! - for b=2, only a=1:4 are written (same convenction as before);
+                !   notice that two terms appear in tcross; for b=2, a=1:4,
+                !    the one starting with ui goes under i_fft, the one starting with uj goes under j_fft
+                do k = 1,3
+                    ! prepare Fourier transform by copying in correct order
+                    ! the only input I'm missing is velocity field
+                    VVdz(:,:,uk_ft,1) = 0 ! inputs are only copied on (:,:,:,1)
+                    ! outputs are copied on (:,:,:,2); but I think every cell gets written -> no need to set to 0
+                    do ix = nx0,nxN
+                        do iz = -nz,nz
+                            ! prepare indeces
+                            iz_fft = iz_to_fft(iz)
+                            ! copy arrays
+                            VVdz(iz_fft, ix-nx0+1, uk_ft, 1) = V(iy,iz,ix,k)
+                        end do
+                    end do
+                    ! antitransform
+                    call IFT(VVdz(1:nzd,1:nxB,uk_ft,1))
+                    call MPI_Alltoall(VVdz(:,:,uk_ft,1), 1, Mdz, VVdx(:,:,uk_ft,1), 1, Mdx, MPI_COMM_X) ! you could just copy without MPI since you deactivated xz parallelisation but ok
+                    VVdx(nx+2:nxd+1,1:nzB,uk_ft,1)=0
+                    call RFT(VVdx(1:nxd+1,1:nzB,uk_ft,1),rVVdx(1:2*nxd+2,1:nzB,uk_ft,1))
+                    ! compute products
+                    do ilasm = 1,2
+                        rVVdx(:,:,ilasm+i_ft,2) = rVVdx(:,:,ilasm+i_ft,1) * rVVdx(:,:,uk_ft,2) ! ui' * uk
+                        rVVdx(:,:,ilasm+j_ft,2) = rVVdx(:,:,ilasm+j_ft,1) * rVVdx(:,:,uk_ft,2) ! uj' * uk
+                    end do
+                    ! transform back
+                    do cntr=1,4
+                        call HFT(rVVdx(1:2*nxd+2,1:nzB,cntr,2), VVdx(1:nxd+1,1:nzB,cntr,2)); 
+                        call MPI_Alltoall(VVdx(:,:,cntr,2), 1, Mdx, VVdz(:,:,cntr,2), 1, Mdz, MPI_COMM_X) ! you could just copy without MPI since you deactivated xz parallelisation but ok
+                        call FFT(VVdz(1:nzd,1:nxB,cntr,2));
+                    end do
+                    ! use Parseval's theorem to calculate statistics
+                    do ix = nx0, nxN
+                        c = 2; if (ix == 0) c = 1 ! multiplier for doubling points in x direction
+                        do iz = -nz,nz
+                            ! prepare indeces
+                            ! PAY ATTENTION:
+                            ! here, if ix,iz is large scale, it is stored in the small section of uiuj (and viceversa):
+                            ilasm = large; if (is_large(ix,iz)) ilasm = small
+                            ! this because each of the two terms of tcross is something like, for instance in large balance:
+                            ! (ul * (ul+us)) * dus         for large balance
+                            ! term (ul * (ul+us)) was computed in the space domain and transformed back - thus it has energy
+                            ! on all Fourier modes; it is stored on VVdz
+                            ! term dus instead is small scale, and has energy only on small modes;
+                            ! hence only small modes contribute to tcross of large scale field
+                            cntr = small; if (is_large(ix,iz)) ilasm = large ! opposite of ilasm
+                            iz_fft = iz_to_fft(iz)
+                            ! compute
+                            uiuj(tcross) = uiuj(tcross) - c * cprod( VVdz(iz_fft, ix, i_ft + cntr,1), gu(j,k) ) - c * cprod( VVdz(iz_fft, ix, j_ft + cntr,1), gu(i,k) )
+                        end do
+                    end do
+
+                end do
+                
+            end do
+
         end do
-
-        ! antitransform
-
-        ! calculate ttrsp and tcross
 
     end do
 
     ! divide by nftot to obtain average
     uiujprofiles = uiujprofiles / nftot
-
-    ! derivate fluxes
-
-!    ! read file
-!    CALL read_vel(fname,V)
-!
-!    ! for each y plane
-!    do iy = miny,maxy ! skips halo cells: only non-duplicated data
-!        
-!        ! skip ghost cells
-!        if (iy < 0) cycle
-!        if (iy > ny) cycle
-!        
-!        ! do fourier transform
-!        VVdz(1:nz+1,1:nxB,1:3,1)=V(iy,0:nz,nx0:nxN,1:3);         VVdz(nz+2:nzd-nz,1:nxB,1:3,1)=0;
-!        VVdz(nzd+1-nz:nzd,1:nxB,1:3,1)=V(iy,-nz:-1,nx0:nxN,1:3); 
-!        DO iV=1,3
-!            CALL IFT(VVdz(1:nzd,1:nxB,iV,1))  
-!            CALL MPI_Alltoall(VVdz(:,:,iV,1), 1, Mdz, VVdx(:,:,iV,1), 1, Mdx, MPI_COMM_X)
-!            VVdx(nx+2:nxd+1,1:nzB,iV,1)=0;    CALL RFT(VVdx(1:nxd+1,1:nzB,iV,1),rVVdx(1:2*nxd+2,1:nzB,iV,1))
-!        END DO
-!        ! rVVdx is now containing the antitransform
-!        ! it has size 2*(nxd+1),nzB,6,6
-!        ! but you only need (1:(2*nx+1),1:(2*nz+1),1:3,1)
-!
-!        ! TODO your stuff here
-!
-!    end do
 
     !---------------------------------------------------!
     !-----------------      WRITE      -----------------!
@@ -435,6 +523,18 @@ contains !----------------------------------------------------------------------
 
 
 
+    function iz_to_fft(iz) result(iz_fft)
+    integer, intent(in) :: iz
+    integer :: iz_fft
+        if (iz < 0) then
+            iz_fft = nzd + 1 + iz
+        else
+            iz_fft = iz + 1
+        end if
+    end function iz_to_fft
+
+
+
 !----------------------------------------------------------------------------------------------------------------------------
 ! less useful stuff here
 !----------------------------------------------------------------------------------------------------------------------------
@@ -442,44 +542,38 @@ contains !----------------------------------------------------------------------
 
 
     subroutine print_help()
-        print *, "Calculates TKE budget; sharp Fourier filtering is used to decompose the fluctuation field into large and small components."
-        print *, "Statistics are calculated on files ranging from index nfmin to nfmax with step dn. Usage:"
-        print *, ""
-        print *, "   mpirun [mpi args] uiuj_largesmall [-h] nfmin nfmax dn [--custom_mean nmin_m nmax_m dn_m]"
-        print *, ""
-        print *, "If the flag --custom_mean is passed, the mean field is calculated on fields (nmin_m nmax_m dn_m); the remaining statistics are still calculated on (nfmin nfmax dn)."
-        print *, ""
-        print *, "This program is meant to be used on plane channels."
-        print *, ""
-        print *, "Results are output to uiuj.bin. Use uiuj2ascii to get the results in a human readable format."
-        print *, ""
-        print *, "Mean TKE budget terms are calculated as:"
-        print *, "INST    --> dK/dt"
-        print *, "CONV    --> Ui*dK/dxi"
-        print *, "PROD    --> -<uiuj>dUj/dxi"
-        print *, "DISS*   --> nu<(duj/dxi + dui/dxj)*duj/dxi>"
-        print *, "TDIFF   --> -0.5*d/dxi<ui*uj*uj>"
-        print *, "PDIFF   --> -d/dxi<ui*p>"
-        print *, "VDIFF1  --> nu*d2K/dxi2"
-        print *, "VDIFF2* --> nu*d2/dxjdxi<ui*uj>"
-        print *, "*-terms can be summed into the PDISS=nu*<duj/dxi*duj/dxi>"
-        print *, ""
-        print *, "which in a statistically stationary and fully-developed turbulent"
-        print *, "channel flow with spanwise wall oscillations reduces to"
-        print *, "PROD  --> -<uv>dU/dy-<vw>dW/dy         [this is computed after the fields loop]"
-        print *, "PDISS --> nu*<dui/dxj*dui/dxj>"
-        print *, "TDIFF --> -0.5*d/dy(<vuu>+<vvv>+<vww>)"
-        print *, "PDIFF --> -d/dy<vp>"
-        print *, "VDIFF --> nu*d2K/dy2"
-        print *, ""
-        print *, "The MKE buget equation, in a statistically stationary"
-        print *, "and fully-developed turbulent channel flow, reduces to"
-        print *, "pump   --> -dP/dx*U = tau_w*U"
-        print *, "TPROD  --> <uv>dU/dy+<vw>dW/dy         [TKE production, here a sink]"
-        print *, "ttrsp  --> -d(<uv>U)/dy-d(<vw>W)/dy"
-        print *, "vdiff  --> ni*d(U*Uy)/dy+d(W*Wy)/dy"
-        print *, "dissU  --> ni*dUdy^2"
-        print *, "dissW  --> ni*dWdy^2"
+        if (iproc == 0) then
+            print *, "Calculates TKE budget; sharp Fourier filtering is used to decompose the fluctuation field into large and small components."
+            print *, "Statistics are calculated on files ranging from index nfmin to nfmax with step dn. Usage:"
+            print *, ""
+            print *, "   mpirun [mpi args] uiuj_largesmall [-h] nfmin nfmax dn [--custom_mean nmin_m nmax_m dn_m]"
+            print *, ""
+            print *, "If the flag --custom_mean is passed, the mean field is calculated on fields (nmin_m nmax_m dn_m); the remaining statistics are still calculated on (nfmin nfmax dn)."
+            print *, ""
+            print *, "This program is meant to be used on plane channels."
+            print *, ""
+            print *, "Results are output to uiuj.bin. Use uiuj2ascii to get the results in a human readable format."
+            print *, ""
+            print *, "Mean TKE budget terms are calculated as:"
+            print *, "INST    --> dK/dt"
+            print *, "CONV    --> Ui*dK/dxi"
+            print *, "PROD    --> -<uiuj>dUj/dxi"
+            print *, "DISS*   --> nu<(duj/dxi + dui/dxj)*duj/dxi>"
+            print *, "TDIFF   --> -0.5*d/dxi<ui*uj*uj>"
+            print *, "PDIFF   --> -d/dxi<ui*p>"
+            print *, "VDIFF1  --> nu*d2K/dxi2"
+            print *, "VDIFF2* --> nu*d2/dxjdxi<ui*uj>"
+            print *, "*-terms can be summed into the PDISS=nu*<duj/dxi*duj/dxi>"
+            print *, ""
+            print *, "which in a statistically stationary and fully-developed turbulent"
+            print *, "channel flow with spanwise wall oscillations reduces to"
+            print *, "PROD  --> -<uv>dU/dy-<vw>dW/dy         [this is computed after the fields loop]"
+            print *, "PDISS --> nu*<dui/dxj*dui/dxj>"
+            print *, "TDIFF --> -0.5*d/dy(<vuu>+<vvv>+<vww>)"
+            print *, "PDIFF --> -d/dy<vp>"
+            print *, "VDIFF --> nu*d2K/dy2"
+        end if
+        call MPI_Finalize()
         stop
     end subroutine print_help
 
@@ -488,10 +582,6 @@ contains !----------------------------------------------------------------------
     ! read arguments
     subroutine parse_args()
         ii = 1
-        if (command_argument_count() < 3) then ! handle exception: no input
-            print *, 'ERROR: please provide one input file as command line argument.'
-            stop
-        end if
         do while (ii <= command_argument_count()) ! parse optional arguments
             call get_command_argument(ii, arg)
             select case (arg)
@@ -510,6 +600,10 @@ contains !----------------------------------------------------------------------
                     call get_command_argument(ii, cmd_in_buf)
                     read(cmd_in_buf, *) dn_cm
                 case default
+                    if (command_argument_count() < 3) then ! handle exception: no input
+                        print *, 'ERROR: please provide one input file as command line argument.'
+                        stop
+                    end if
                     call get_command_argument(ii, cmd_in_buf)
                     read(cmd_in_buf, *) nmin
                     ii = ii + 1
