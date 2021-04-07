@@ -113,10 +113,10 @@ integer(MPI_OFFSET_KIND) :: offset
     mean = mean / nftot ! divide by number of files
 
     ! derivate stuff
-    CALL REALderiv(mean(1,:), mean(3,:))  ! U --> Uy
-    CALL REALderiv2(mean(1,:), mean(5,:)) ! U --> Uyy
-    CALL REALderiv(mean(2,:), mean(4,:))  ! W --> Wy
-    CALL REALderiv2(mean(2,:), mean(6,:)) ! W --> Wyy
+    call REALderiv(mean(1,:), mean(3,:))  ! U --> Uy
+    call REALderiv2(mean(1,:), mean(5,:)) ! U --> Uyy
+    call REALderiv(mean(2,:), mean(4,:))  ! W --> Wy
+    call REALderiv2(mean(2,:), mean(6,:)) ! W --> Wyy
 
     ! revert to desired indices for calculation of tke
     nfmin = nmin; nfmax = nmax; dnf = dn
@@ -307,6 +307,29 @@ integer(MPI_OFFSET_KIND) :: offset
     ! divide by nftot to obtain average
     uiujprofiles = uiujprofiles / nftot
 
+    ! COMPUTE DERIVATIVES OF FLUX TERMS
+    !----------------------------------
+
+    do ilasm = 1,2
+        do irs = 1,6
+
+            ! var --> PHIvdiff
+            call REALderiv(uiujprofiles(irs, var, :, ilasm), uiujprofiles(irs, PHIvdiff, :, ilasm))
+            uiujprofiles(irs, PHIvdiff, :, ilasm) = uiujprofiles(irs, PHIvdiff, :, ilasm) * ni
+
+            ! var --> vdiff
+            call REALderiv2(uiujprofiles(irs, var, :, ilasm), uiujprofiles(irs, vdiff, :, ilasm))
+            uiujprofiles(irs, vdiff, :, ilasm) = uiujprofiles(irs, vdiff, :, ilasm) * ni
+
+            ! PHIptrsp --> ptrsp
+            call REALderiv(uiujprofiles(irs, PHIptrsp, :, ilasm), uiujprofiles(irs, ptrsp, :, ilasm))
+
+            ! PHIttrsp --> ttrsp
+            call REALderiv(uiujprofiles(irs, PHIttrsp, :, ilasm), uiujprofiles(irs, ttrsp, :, ilasm))
+
+        end do
+    end do
+
     !---------------------------------------------------!
     !-----------------      WRITE      -----------------!
     !---------------------------------------------------!
@@ -323,7 +346,7 @@ integer(MPI_OFFSET_KIND) :: offset
     
     ! write to disk
     if (has_terminal) print *, "Saving to disk..."
-    CALL MPI_File_open(MPI_COMM_WORLD, "uiuj_largesmall.bin", IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
+    CALL MPI_File_open(MPI_COMM_WORLD, "largesmall/uiuj_largesmall.bin", IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
         
         ! write header
         if (has_terminal) CALL MPI_file_write(fh, [nfmin, nfmax, dnf, nftot], 4, MPI_INTEGER, MPI_STATUS_IGNORE)
@@ -334,11 +357,14 @@ integer(MPI_OFFSET_KIND) :: offset
         CALL MPI_File_write_all(fh, mean, 1, mean_inmem_type, MPI_STATUS_IGNORE)
 
         ! write uiuj data
-        offset = offset + sizeof(uiujprofiles)
+        offset = offset + (ny+3)*7*sizeof(mean(1,1)) ! DON'T DO SIZEOF(mean)! Program is PARALLEL!!!
         CALL MPI_File_set_view(fh, offset, MPI_DOUBLE_PRECISION, uiuj_write_type, 'native', MPI_INFO_NULL)
         CALL MPI_File_write_all(fh, uiujprofiles, 1, uiuj_inmem_type, MPI_STATUS_IGNORE)
 
     call MPI_File_close(fh)
+
+    ! be polite and say goodbye
+    if (has_terminal) print *, "Goodbye man!"
 
     !---------------------------------------------------!
     !-----------------     FINALISE    -----------------!
@@ -397,15 +423,15 @@ contains !----------------------------------------------------------------------
         CALL MPI_Type_commit(vel_field_type, ierror)
 
         ! define type for writing mean on disk
-        CALL MPI_Type_create_subarray(2, [7, ny+1], [7, min(ny,maxy)-max(0,miny)+1], [0,max(0,miny)], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, mean_write_type, ierror)
+        CALL MPI_Type_create_subarray(2, [7, ny+3], [7, maxy-miny+1], [0,miny+1], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, mean_write_type, ierror)
         CALL MPI_Type_commit(mean_write_type, ierror)
-        CALL MPI_Type_create_subarray(2, [7, nyN-ny0+5], [7, min(ny,maxy)-max(0,miny)+1], [0,max(0,miny)-(ny0-2)], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, mean_inmem_type, ierror)
+        CALL MPI_Type_create_subarray(2, [7, nyN-ny0+5], [7, maxy-miny+1], [0,miny-(ny0-2)], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, mean_inmem_type, ierror)
         CALL MPI_Type_commit(mean_inmem_type, ierror)
 
         ! define type for writing uiujprofiles on disk
-        CALL MPI_Type_create_subarray(3, [6, 11, ny+1, 2], [6, 11, min(ny,maxy)-max(0,miny)+1, 2], [0,0,max(0,miny),0], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, uiuj_write_type, ierror)
+        CALL MPI_Type_create_subarray(4, [6, 11, ny+3, 2], [6, 11, maxy-miny+1, 2], [0,0,miny+1,0], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, uiuj_write_type, ierror)
         CALL MPI_Type_commit(uiuj_write_type, ierror)
-        CALL MPI_Type_create_subarray(3, [6, 11, nyN-ny0+5, 2], [6, 11, min(ny,maxy)-max(0,miny)+1, 2], [0,0,max(0,miny)-(ny0-2),0], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, uiuj_inmem_type, ierror)
+        CALL MPI_Type_create_subarray(4, [6, 11, nyN-ny0+5, 2], [6, 11,maxy-miny+1, 2], [0,0,miny-(ny0-2),0], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, uiuj_inmem_type, ierror)
         CALL MPI_Type_commit(uiuj_inmem_type, ierror)
 
     end subroutine
