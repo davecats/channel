@@ -398,10 +398,10 @@ logical::rtd_exists ! flag to check existence of Runtimedata
     real(C_DOUBLE), intent(out) :: f1(ny0-2:nyN+2)
     complex(C_DOUBLE_COMPLEX) :: temp_in(ny0-2:nyN+2), temp_out(ny0-2:nyN+2)
 
-    temp_in = cmplx(f0)
+    temp_in = dcmplx(f0)
     call COMPLEXderiv(temp_in, temp_out)
     call LeftLU5divStep2(D0mat, temp_out)
-    f1 = real(temp_out)
+    f1 = dreal(temp_out)
 
   END SUBROUTINE REALderiv
 
@@ -417,10 +417,10 @@ logical::rtd_exists ! flag to check existence of Runtimedata
     real(C_DOUBLE), intent(out) :: f1(ny0-2:nyN+2)
     complex(C_DOUBLE_COMPLEX) :: temp_in(ny0-2:nyN+2), temp_out(ny0-2:nyN+2)
 
-    temp_in = cmplx(f0)
+    temp_in = dcmplx(f0)
     call COMPLEXderiv2(temp_in, temp_out)
     call LeftLU5divStep2(D0mat, temp_out)
-    f1 = real(temp_out)
+    f1 = dreal(temp_out)
 
   END SUBROUTINE REALderiv2
 
