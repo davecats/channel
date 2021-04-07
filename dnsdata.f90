@@ -311,6 +311,8 @@ logical::rtd_exists ! flag to check existence of Runtimedata
 #else
   SUBROUTINE COMPLEXderiv(f0,f1)
 #endif
+  ! WARNING: TO GET THE PROPER DERIVATIVE, A CALL TO LeftLU5divStep2
+  ! IS NEEDED AFTER CALLING THIS FUNCTION!
     complex(C_DOUBLE_COMPLEX), intent(in)  :: f0(ny0-2:nyN+2)
     complex(C_DOUBLE_COMPLEX), intent(out) :: f1(ny0-2:nyN+2)
 #ifdef nonblockingY
@@ -350,6 +352,8 @@ logical::rtd_exists ! flag to check existence of Runtimedata
 #else
   SUBROUTINE COMPLEXderiv2(f0,f1)
 #endif
+  ! WARNING: TO GET THE PROPER DERIVATIVE, A CALL TO LeftLU5divStep2
+  ! IS NEEDED AFTER CALLING THIS FUNCTION!
     complex(C_DOUBLE_COMPLEX), intent(in)  :: f0(ny0-2:nyN+2)
     complex(C_DOUBLE_COMPLEX), intent(out) :: f1(ny0-2:nyN+2)
 #ifdef nonblockingY
@@ -382,9 +386,12 @@ logical::rtd_exists ! flag to check existence of Runtimedata
 #endif
   END SUBROUTINE COMPLEXderiv2
 
-  !--------------------------------------------------------------!
+  !-------------------------------------------------------------!
   !-----REAL----- derivative in the y-direction ----------------!
   SUBROUTINE REALderiv(f0,f1)
+  ! WARNING: THIS ROUTINE ALREADY INCLUDES CALL TO LeftLU5divStep2
+  ! NO NEED TO CALL IT!
+  ! --------------------------------------------------------------
   ! TODO FIXME: this actually calls the complex routine!
 
     real(C_DOUBLE), intent(in)  :: f0(ny0-2:nyN+2)
@@ -393,6 +400,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
 
     temp_in = cmplx(f0)
     call COMPLEXderiv(temp_in, temp_out)
+    call LeftLU5divStep2(D0mat, temp_out)
     f1 = real(temp_out)
 
   END SUBROUTINE REALderiv
@@ -400,6 +408,9 @@ logical::rtd_exists ! flag to check existence of Runtimedata
   !--------------------------------------------------------------!
   !-----REAL----- second derivative in the y-direction ----------!
   SUBROUTINE REALderiv2(f0,f1)
+  ! WARNING: THIS ROUTINE ALREADY INCLUDES CALL TO LeftLU5divStep2
+  ! NO NEED TO CALL IT!
+  ! --------------------------------------------------------------
   ! TODO FIXME: this actually calls the complex routine!
 
     real(C_DOUBLE), intent(in)  :: f0(ny0-2:nyN+2)
@@ -408,6 +419,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
 
     temp_in = cmplx(f0)
     call COMPLEXderiv2(temp_in, temp_out)
+    call LeftLU5divStep2(D0mat, temp_out)
     f1 = real(temp_out)
 
   END SUBROUTINE REALderiv2

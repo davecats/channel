@@ -502,6 +502,7 @@ contains !----------------------------------------------------------------------
                 do iz = -nz, nz
                     ! stuff
                     call COMPLEXderiv(R(:,iz,ix,iv), grad(:,iz,ix,iv,2))
+                    call LeftLU5divStep2(D0mat, grad(:,iz,ix,iv,2))
                     grad(:,iz,ix,iv,1) = R(:,iz,ix,iv) * alfa0 * ix
                     grad(:,iz,ix,iv,3) = R(:,iz,ix,iv) * beta0 * iz
                 end do
@@ -667,6 +668,7 @@ end program
 ! irs ----> index used for Reynolds stress
 !   uu  vv  ww  uv  vw  uw
 !   1   2   3   4   5   6
+
 
 ! uiujprofiles(irs, iterm, iy, largesmall)      where irs defined before, while iterm:
 !   var prod    psdiss      ttrsp   tcross  vdiff   pstrain     ptrsp   PHIttrsp    PHIvdiff    PHIptrsp
