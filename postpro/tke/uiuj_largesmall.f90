@@ -339,14 +339,14 @@ integer(MPI_OFFSET_KIND) :: offset
         if (custom_mean) then
             foldername = "cm_largesmall"
         else
-            foldername = "largesmall"
+            foldername = "profiles"
         end if
         ignore = makedirqq(foldername)
     end if
     
     ! write to disk
     if (has_terminal) print *, "Saving to disk..."
-    CALL MPI_File_open(MPI_COMM_WORLD, "largesmall/uiuj_largesmall.bin", IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
+    CALL MPI_File_open(MPI_COMM_WORLD, "profiles/uiuj_largesmall.bin", IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
         
         ! write header
         if (has_terminal) CALL MPI_file_write(fh, [nfmin, nfmax, dnf, nftot], 4, MPI_INTEGER, MPI_STATUS_IGNORE)

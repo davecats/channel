@@ -350,7 +350,7 @@ IF NOT first THEN READ FROM prev
   IF custom_mean THEN
     uiujimage = OPEN("cm_largesmall/uiuj_largesmall.bin")
   ELSE
-    uiujimage = OPEN("largesmall/uiuj_largesmall.bin")
+    uiujimage = OPEN("profiles/uiuj_largesmall.bin")
   END IF
   WITH uiujimage:
     nmin = nfmin
