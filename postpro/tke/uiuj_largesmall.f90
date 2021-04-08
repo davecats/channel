@@ -36,7 +36,7 @@ real(C_DOUBLE) :: m_grad(3,3) ! m_grad(i,j) = dUi/dxj
 ! shortcut parameters
 integer, parameter :: var = 1, prod = 2, psdiss = 3, ttrsp = 4, tcross = 5, vdiff = 6, pstrain = 7, ptrsp = 8, PHIttrsp = 9, PHIvdiff = 10, PHIptrsp = 11
 integer, parameter :: large = 1, small = 2
-integer, parameter :: i_ft = 0, j_ft = 2, res_ttrsp = 4, uk_ft = 6
+integer, parameter :: i_ft = 0, j_ft = 2, uk_ft = 6
 logical :: ignore
 
 ! large-small stuff
@@ -188,21 +188,16 @@ integer(MPI_OFFSET_KIND) :: offset
                 call get_indexes(irs, i, j)
 
                 ! TURBULENT TRANSPORT TTRSP
-                ! prepare Fourier transform by copying in correct order
                 VVdz(:,:,:,1) = 0 ! I only need this chunk! no need to set everything to 0
-                !   (z,x,a,b)
-                !    - x, z are obvious; notice that z is scrambled up for fft -> iz_fft is defined
-                !    - a corresponds to some quantity; 1:4 are i,j velocity for large and small fields
-                !    - a=5:6 corresponds to ui * uj for large and small fields
-                !    - b is useless (only b=1 is used)
+                ! prepare Fourier transform by copying in correct order
                 do ix = nx0,nxN
                     do iz = -nz,nz
                         ! prepare indeces
                         ilasm = small; if (is_large(ix,iz)) ilasm = large
                         iz_fft = iz_to_fft(iz)
                         ! copy arrays
-                        VVdz(iz_fft, ix-nx0+1, ilasm+i_ft, 1) = V(iy,iz,ix,i)
-                        VVdz(iz_fft, ix-nx0+1, ilasm+j_ft, 1) = V(iy,iz,ix,j)
+                        VVdz(iz_fft, ix-nx0+1, ilasm + i_ft, 1) = V(iy,iz,ix,i)
+                        VVdz(iz_fft, ix-nx0+1, ilasm + j_ft, 1) = V(iy,iz,ix,j)
                     end do
                 end do
                 ! up until now you used third index = 1:4
@@ -213,16 +208,14 @@ integer(MPI_OFFSET_KIND) :: offset
                     VVdx(nx+2:nxd+1,1:nzB,cntr,1)=0
                     call RFT(VVdx(1:nxd+1,1:nzB,cntr,1),rVVdx(1:2*nxd+2,1:nzB,cntr,1))
                 end do
-                ! compute product in real space
+                ! get product and transform back
                 do ilasm = 1,2
-                    rVVdx(:,:,res_ttrsp+ilasm,1) = rVVdx(:,:, ilasm + i_ft, 1) * rVVdx(:,:, ilasm + j_ft, 1)
-                end do
-                ! now results are in third index = 5,6
-                ! transform back
-                do cntr=5,6
-                    call HFT(rVVdx(1:2*nxd+2,1:nzB,cntr,1), VVdx(1:nxd+1,1:nzB,cntr,1)); 
-                    call MPI_Alltoall(VVdx(:,:,cntr,1), 1, Mdx, VVdz(:,:,cntr,1), 1, Mdz, MPI_COMM_X) ! you could just copy without MPI since you deactivated xz parallelisation but ok
-                    call FFT(VVdz(1:nzd,1:nxB,cntr,1));
+                    ! compute product in real space
+                    rVVdx(:,:,ilasm,2) = rVVdx(:,:, ilasm + i_ft, 1) * rVVdx(:,:, ilasm + j_ft, 1) ! ui*uj
+                    ! transform back
+                    call HFT(rVVdx(1:2*nxd+2,1:nzB,ilasm,2), VVdx(1:nxd+1,1:nzB,ilasm,2)); 
+                    call MPI_Alltoall(VVdx(:,:,ilasm,2), 1, Mdx, VVdz(:,:,ilasm,2), 1, Mdz, MPI_COMM_X) ! you could just copy without MPI since you deactivated xz parallelisation but ok
+                    call FFT(VVdz(1:nzd,1:nxB,ilasm,2));
                 end do
                 ! use Parseval's theorem to calculate statistics
                 do ix = nx0, nxN
@@ -232,20 +225,12 @@ integer(MPI_OFFSET_KIND) :: offset
                         ilasm = small; if (is_large(ix,iz)) ilasm = large
                         iz_fft = iz_to_fft(iz)
                         ! compute
-                        uiuj(PHIttrsp) = uiuj(PHIttrsp) - c * cprod( VVdz(iz_fft, ix, res_ttrsp+ilasm,1), u(2) )
+                        uiuj(PHIttrsp) = uiuj(PHIttrsp) - c * cprod( VVdz(iz_fft, ix, ilasm, 2), u(2) )
                     end do
                 end do
 
                 ! INTERSCALE TRANSPORT TCROSS
                 ! rVVdx(:,:,1:4,1) already contains fourier transform of components i,j for large and small
-                ! inputs for this section are stored in (:,:,:,1); outputs in (:,:,:,2)
-                ! array structure for VVdz(z,x,a,b) in this section is:
-                ! - z, x, a=1:4 as before
-                ! - a = 6 is uk (whole velocity field, not decomposed)
-                ! - b=1 is input (before transformation), b=2 is output (products transformed back in fourier)
-                ! - for b=2, only a=1:4 are written (same convenction as before);
-                !   notice that two terms appear in tcross; for b=2, a=1:4,
-                !    the one starting with ui goes under i_fft, the one starting with uj goes under j_fft
                 do k = 1,3
                     ! prepare Fourier transform by copying in correct order
                     ! the only input I'm missing is velocity field
@@ -503,8 +488,8 @@ contains !----------------------------------------------------------------------
                     ! stuff
                     call COMPLEXderiv(R(:,iz,ix,iv), grad(:,iz,ix,iv,2))
                     call LeftLU5divStep2(D0mat, grad(:,iz,ix,iv,2))
-                    grad(:,iz,ix,iv,1) = R(:,iz,ix,iv) * alfa0 * ix
-                    grad(:,iz,ix,iv,3) = R(:,iz,ix,iv) * beta0 * iz
+                    grad(:,iz,ix,iv,1) = R(:,iz,ix,iv) * dcmplx(0, alfa0*ix)
+                    grad(:,iz,ix,iv,3) = R(:,iz,ix,iv) * dcmplx(0, beta0*iz)
                 end do
             end do
         end do
@@ -545,7 +530,7 @@ contains !----------------------------------------------------------------------
     function cprod(a, b) result(r)
     complex(C_DOUBLE_COMPLEX), intent(in) :: a, b
     real(C_DOUBLE) :: r
-        r = real(conjg(a)*b)
+        r = dreal(dconjg(a)*b)
     end function cprod
 
 
@@ -675,3 +660,23 @@ end program
 !   1   2       3           4       5       6       7           8       9           10          11
 
 
+! *VVd*(iz_fft, ix, term, inout)
+! : WARNING :  iz index here is scrambled as required by FFT -> use iz_fft
+! - inout = 1:5
+! - term = 1:6
+! inout=1 contains "inputs" (meaning, everything that is necessary for Fourier antitransform in order to go
+! back to real domain). Products are calculated in real domain, and then transformed back to Fourier.
+! All the "outputs" (everything after the Fourier antitransform, so basically products both in real and
+! Fourier domains) are stored in inout=2.
+! As for the "inputs" (inout=1):
+! - term=1:4 are i,j velocity for large and small fields (both for ttrsp and tcross);
+!   please use placeholders i_ft, j_ft summed to ilasm=1:2
+! - term=6 is component k of the whole velocity field - not decomposed (only for tcross);
+!   use placeholder uk_ft
+! - term=5 is not used
+! As for the "outputs" (inout=2):
+! - for ttrsp, term=1:2 are large/small ui*uj product; use index ilasm
+! - for tcross, term=1:4 are ui*uk, uj*uk for large/small;
+!   please use placeholders i_ft, j_ft summed to ilasm=1:2
+!   notice that two terms appear in tcross; for b=2, a=1:4,
+!   the one starting with ui goes under i_fft, the one starting with uj goes under j_fft
