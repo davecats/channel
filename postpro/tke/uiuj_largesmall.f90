@@ -18,7 +18,7 @@ logical :: custom_mean = .FALSE.
 ! counters
 
 integer :: ii ! counter initially used for parsing arguments
-integer :: ix, iy, iz, iz_fft, iv ! for spatial directions and components
+integer :: ix, iy, iz, iv ! for spatial directions and components
 integer :: i, j, k, c, irs, ilasm, cntr
 
 ! global stuff
@@ -163,7 +163,6 @@ integer(MPI_OFFSET_KIND) :: offset
                         call get_mean_grad(iy)
                         
                         ! calculate statistics
-                        uiuj(var) = uiuj(var) + c*cprod(u(i), u(j))
                         uiuj(pstrain) = uiuj(pstrain) + c*cprod(p, gu(i,j)+gu(j,i) )
                         do k = 1,3 ! prod, psdiss need sum over k
                             uiuj(prod) = uiuj(prod) - c * ( cprod(u(i),u(k))*m_grad(j,k) + cprod(u(j),u(k))*m_grad(i,k) )
@@ -182,6 +181,8 @@ integer(MPI_OFFSET_KIND) :: offset
                 end do
             end do
 
+#define xf(a) a-nx0+1
+
             ! calculate ttrsp and tcross
             do irs = 1, 6
 
@@ -194,10 +195,9 @@ integer(MPI_OFFSET_KIND) :: offset
                     do iz = -nz,nz
                         ! prepare indeces
                         ilasm = small; if (is_large(ix,iz)) ilasm = large
-                        iz_fft = iz_to_fft(iz)
                         ! copy arrays
-                        VVdz(iz_fft, ix-nx0+1, ilasm + i_ft, 1) = V(iy,iz,ix,i)
-                        VVdz(iz_fft, ix-nx0+1, ilasm + j_ft, 1) = V(iy,iz,ix,j)
+                        VVdz(zf(iz), xf(ix), ilasm + i_ft, 1) = V(iy,iz,ix,i)
+                        VVdz(zf(iz), xf(ix), ilasm + j_ft, 1) = V(iy,iz,ix,j)
                     end do
                 end do
                 ! up until now you used third index = 1:4
@@ -216,17 +216,21 @@ integer(MPI_OFFSET_KIND) :: offset
                     call HFT(rVVdx(1:2*nxd+2,1:nzB,ilasm,2), VVdx(1:nxd+1,1:nzB,ilasm,2)); 
                     call MPI_Alltoall(VVdx(:,:,ilasm,2), 1, Mdx, VVdz(:,:,ilasm,2), 1, Mdz, MPI_COMM_X) ! you could just copy without MPI since you deactivated xz parallelisation but ok
                     call FFT(VVdz(1:nzd,1:nxB,ilasm,2));
+                    VVdz(1:nzd,1:nxB,ilasm,2) = VVdz(1:nzd,1:nxB,ilasm,2) * factor
                 end do
                 ! use Parseval's theorem to calculate statistics
                 do ix = nx0, nxN
                     c = 2; if (ix == 0) c = 1 ! multiplier for doubling points in x direction
                     do iz = -nz,nz
-                        ! prepare indeces
-                        ilasm = small; if (is_large(ix,iz)) ilasm = large
-                        iz_fft = iz_to_fft(iz)
-                        ! compute
-                        uiuj(PHIttrsp) = uiuj(PHIttrsp) - c * cprod( VVdz(iz_fft, ix, ilasm, 2), u(2) )
+                        do ilasm = 1,2
+                            uiuj(PHIttrsp) = uiuj(PHIttrsp) - c * cprod( VVdz(zf(iz), xf(ix), ilasm, 2), u(2) )
+                        end do
                     end do
+                end do
+
+                ! VARIANCE
+                do ilasm = 1,2
+                    uiuj(var) = uiuj(var) + dreal(VVdz(zf(0), xf(0), ilasm, 2))
                 end do
 
                 ! INTERSCALE TRANSPORT TCROSS
@@ -238,10 +242,8 @@ integer(MPI_OFFSET_KIND) :: offset
                     ! outputs are copied on (:,:,:,2); but I think every cell gets written -> no need to set to 0
                     do ix = nx0,nxN
                         do iz = -nz,nz
-                            ! prepare indeces
-                            iz_fft = iz_to_fft(iz)
                             ! copy arrays
-                            VVdz(iz_fft, ix-nx0+1, uk_ft, 1) = V(iy,iz,ix,k)
+                            VVdz(zf(iz), xf(ix), uk_ft, 1) = V(iy,iz,ix,k)
                         end do
                     end do
                     ! antitransform
@@ -251,14 +253,15 @@ integer(MPI_OFFSET_KIND) :: offset
                     call RFT(VVdx(1:nxd+1,1:nzB,uk_ft,1),rVVdx(1:2*nxd+2,1:nzB,uk_ft,1))
                     ! compute products
                     do ilasm = 1,2
-                        rVVdx(:,:,ilasm+i_ft,2) = rVVdx(:,:,ilasm+i_ft,1) * rVVdx(:,:,uk_ft,2) ! ui' * uk
-                        rVVdx(:,:,ilasm+j_ft,2) = rVVdx(:,:,ilasm+j_ft,1) * rVVdx(:,:,uk_ft,2) ! uj' * uk
+                        rVVdx(:,:,ilasm+i_ft,2) = rVVdx(:,:,ilasm+i_ft,1) * rVVdx(:,:,uk_ft,1) ! ui' * uk
+                        rVVdx(:,:,ilasm+j_ft,2) = rVVdx(:,:,ilasm+j_ft,1) * rVVdx(:,:,uk_ft,1) ! uj' * uk
                     end do
                     ! transform back
                     do cntr=1,4
                         call HFT(rVVdx(1:2*nxd+2,1:nzB,cntr,2), VVdx(1:nxd+1,1:nzB,cntr,2)); 
                         call MPI_Alltoall(VVdx(:,:,cntr,2), 1, Mdx, VVdz(:,:,cntr,2), 1, Mdz, MPI_COMM_X) ! you could just copy without MPI since you deactivated xz parallelisation but ok
                         call FFT(VVdz(1:nzd,1:nxB,cntr,2));
+                        VVdz(1:nzd,1:nxB,cntr,2) = VVdz(1:nzd,1:nxB,cntr,2) * factor
                     end do
                     ! use Parseval's theorem to calculate statistics
                     do ix = nx0, nxN
@@ -274,10 +277,10 @@ integer(MPI_OFFSET_KIND) :: offset
                             ! on all Fourier modes; it is stored on VVdz
                             ! term dus instead is small scale, and has energy only on small modes;
                             ! hence only small modes contribute to tcross of large scale field
-                            cntr = small; if (is_large(ix,iz)) ilasm = large ! opposite of ilasm
-                            iz_fft = iz_to_fft(iz)
+!                            cntr = small; if (is_large(ix,iz)) cntr = large ! opposite of ilasm
                             ! compute
-                            uiuj(tcross) = uiuj(tcross) - c * cprod( VVdz(iz_fft, ix, i_ft + cntr,1), gu(j,k) ) - c * cprod( VVdz(iz_fft, ix, j_ft + cntr,1), gu(i,k) )
+                            uiuj(tcross) = uiuj(tcross) - c * cprod( VVdz(zf(iz), xf(ix), i_ft + ilasm,1), gu(j,k) ) &
+                                &                       - c * cprod( VVdz(zf(iz), xf(ix), j_ft + ilasm,1), gu(i,k) )
                         end do
                     end do
 
@@ -535,7 +538,7 @@ contains !----------------------------------------------------------------------
 
 
 
-    function iz_to_fft(iz) result(iz_fft)
+    function zf(iz) result(iz_fft)
     integer, intent(in) :: iz
     integer :: iz_fft
         if (iz < 0) then
@@ -543,7 +546,7 @@ contains !----------------------------------------------------------------------
         else
             iz_fft = iz + 1
         end if
-    end function iz_to_fft
+    end function zf
 
 
 
@@ -660,8 +663,8 @@ end program
 !   1   2       3           4       5       6       7           8       9           10          11
 
 
-! *VVd*(iz_fft, ix, term, inout)
-! : WARNING :  iz index here is scrambled as required by FFT -> use iz_fft
+! *VVd*(zf(iz), xf(ix), term, inout)
+! : WARNING :  iz, ix indices here is scrambled as required by FFT -> use zf(iz), xf(ix)
 ! - inout = 1:5
 ! - term = 1:6
 ! inout=1 contains "inputs" (meaning, everything that is necessary for Fourier antitransform in order to go
