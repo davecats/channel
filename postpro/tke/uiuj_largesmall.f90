@@ -279,8 +279,8 @@ integer(MPI_OFFSET_KIND) :: offset
                             ! hence only small modes contribute to tcross of large scale field
 !                            cntr = small; if (is_large(ix,iz)) cntr = large ! opposite of ilasm
                             ! compute
-                            uiuj(tcross) = uiuj(tcross) - c * cprod( VVdz(zf(iz), xf(ix), i_ft + ilasm,1), gu(j,k) ) &
-                                &                       - c * cprod( VVdz(zf(iz), xf(ix), j_ft + ilasm,1), gu(i,k) )
+                            uiuj(tcross) = uiuj(tcross) - c * cprod( VVdz(zf(iz), xf(ix), i_ft + ilasm, 2), gu(j,k) ) &
+                                &                       - c * cprod( VVdz(zf(iz), xf(ix), j_ft + ilasm, 2), gu(i,k) )
                         end do
                     end do
 
