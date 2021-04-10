@@ -185,7 +185,7 @@ then
 
     filelist=$(find cm_largesmall -type f | grep uiuj_largesmall_ | sed -e ':a; N; $!ba; s/\n/","/g')
     filelist='"'"${filelist}"'"'
-    outfilemerge="largesmall/uiuj_largesmall.bin"
+    outfilemerge="profiles/uiuj_largesmall.bin"
 
     mkdir -p largesmall
 
