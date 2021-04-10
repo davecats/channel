@@ -65,7 +65,7 @@ then
     mean_max=$6
 
     # compute
-    $lasmexec 1 1 localhost $nmin $nmax 1 --custom_mean $mean_min $mean_max 1 ${@:7}
+    mpirun --bind-to core --map-by core -report-bindings $lasmexec 1 1 localhost $nmin $nmax 1 --custom_mean $mean_min $mean_max 1 ${@:5}
 
     # move files
     mv cm_largesmall/uiuj_largesmall.bin cm_largesmall/uiuj_largesmall_${nmin}_${nmax}.bin
