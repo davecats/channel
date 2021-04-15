@@ -321,22 +321,10 @@ integer(MPI_OFFSET_KIND) :: offset
     !---------------------------------------------------!
     !-----------------      WRITE      -----------------!
     !---------------------------------------------------!
-
-    ! create folder if not existing
-    if (has_terminal) then
-        if (custom_mean) then
-            foldername = "cm_largesmall"
-            currfname = "cm_largesmall/uiuj_largesmall.bin"
-        else
-            foldername = "profiles"
-            currfname = "profiles/uiuj_largesmall.bin"
-        end if
-        ignore = makedirqq(foldername)
-    end if
-    
-    call MPI_Barrier(MPI_COMM_WORLD)
+   
 
     ! write to disk
+    currfname = "uiuj_largesmall.bin"
     if (has_terminal) print *, "Saving to disk..."
     call MPI_File_open(MPI_COMM_WORLD, trim(currfname), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
         
@@ -354,6 +342,22 @@ integer(MPI_OFFSET_KIND) :: offset
         CALL MPI_File_write_all(fh, uiujprofiles, 1, uiuj_inmem_type, MPI_STATUS_IGNORE)
 
     call MPI_File_close(fh)
+
+    ! syncronise (if needed)
+    call MPI_Barrier(MPI_COMM_WORLD)
+
+    ! create folder if not existing
+    if (has_terminal) then
+        if (custom_mean) then
+            foldername = "cm_largesmall"
+            currfname = "mv uiuj_largesmall.bin cm_largesmall"
+        else
+            foldername = "profiles"
+            currfname = "mv uiuj_largesmall.bin profiles"
+        end if
+        ignore = makedirqq(trim(foldername))
+        call execute_command_line(trim(currfname))
+    end if
 
     ! be polite and say goodbye
     if (has_terminal) print *, "Goodbye man!"
