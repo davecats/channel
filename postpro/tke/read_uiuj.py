@@ -147,9 +147,7 @@ def get_nfield(fdir):
 
 def get_z_threshold(fdir):
 
-    dct = locals()
-
     with open(fdir + 'largesmall_settings.in', 'r') as infile:
-        exec(infile.readline(), globals(), dct)
+        line = infile.readline().split()
 
-    return dct['z_threshold']
+    return float(line[0])
