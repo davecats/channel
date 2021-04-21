@@ -69,10 +69,13 @@ IF (has_terminal) THEN
   WRITE(*,*) " "
   WRITE(*,"(A,I5,A,I5,A,I5)") "   nx =",nx,"   ny =",ny,"   nz =",nz
   WRITE(*,"(A,I5,A,I5)") "   nxd =",nxd,"  nzd =",nzd
-  WRITE(*,"(A,F6.4,A,F6.4,A,F8.6)") "   alfa0 =",alfa0,"       beta0 =",beta0,"   ni =",ni
-  WRITE(*,"(A,F6.4,A,F6.4)") "   meanpx =",meanpx,"      meanpz =",meanpz
-  WRITE(*,"(A,F6.4,A,F6.4)") "   meanflowx =",meanflowx, "   meanflowz =", meanflowz
+  WRITE(*,"(A,F11.6,A,F11.6,A,F8.6)") "   alfa0 =",alfa0,"       beta0 =",beta0,"   ni =",ni
+  WRITE(*,"(A,F11.6,A,F11.6)") "   meanpx =",meanpx,"      meanpz =",meanpz
+  WRITE(*,"(A,F11.6,A,F11.6)") "   meanflowx =",meanflowx, "   meanflowz =", meanflowz
   WRITE(*,"(A,I6,A,L1)"   ) "   nsteps =",nstep, "   time_from_restart =", time_from_restart
+#ifdef bodyforce
+  WRITE(*,"(A)") "   Using body force."
+#endif
   WRITE(*,*) " "
 END IF
 

@@ -1,3 +1,42 @@
+
+!--------------------------------------------------!
+!-----------------     LEGEND     -----------------!
+!--------------------------------------------------!
+
+! mean(iv, iy)      where iv        U   W   Uy  Wy  Uyy Wyy P
+!                                   1   2   3   4   5   6   7
+
+! irs ----> index used for Reynolds stress
+!   uu  vv  ww  uv  vw  uw
+!   1   2   3   4   5   6
+
+! uiujprofiles(irs, iterm, iy, largesmall)      where irs defined before, while iterm:
+!   var prod    psdiss      ttrsp   tcross  vdiff   pstrain     ptrsp   PHIttrsp    PHIvdiff    PHIptrsp
+!   1   2       3           4       5       6       7           8       9           10          11
+
+! *VVd*(zf(iz), xf(ix), term, inout)
+! : WARNING :  iz, ix indices here is scrambled as required by FFT -> use zf(iz), xf(ix)
+! - inout = 1:5
+! - term = 1:6
+! inout=1 contains "inputs" (meaning, everything that is necessary for Fourier antitransform in order to go
+! back to real domain). Products are calculated in real domain, and then transformed back to Fourier.
+! All the "outputs" (everything after the Fourier antitransform, so basically products both in real and
+! Fourier domains) are stored in inout=2.
+! As for the "inputs" (inout=1):
+! - term=1:4 are i,j velocity for large and small fields (both for ttrsp and tcross);
+!   please use placeholders i_ft, j_ft summed to ilasm=1:2
+! - term=6 is component k of the whole velocity field - not decomposed (only for tcross);
+!   use placeholder uk_ft
+! - term=5 is not used
+! As for the "outputs" (inout=2):
+! - for ttrsp, term=1:2 are large/small ui*uj product; use index ilasm
+! - for tcross, term=1:4 are ui*uk, uj*uk for large/small;
+!   please use placeholders i_ft, j_ft summed to ilasm=1:2
+!   notice that two terms appear in tcross; for b=2, a=1:4,
+!   the one starting with ui goes under i_fft, the one starting with uj goes under j_fft
+
+
+
 program uiuj_largesmall
 use dnsdata
 use ifport  ! this library is intel compiler specific; only used to create a directory (makedirqq)
@@ -45,7 +84,7 @@ integer :: z_threshold
 
 ! MPI stuff
 
-TYPE(MPI_Datatype) :: press_read_type, press_field_type, vel_read_type, vel_field_type
+TYPE(MPI_Datatype) :: press_read_type, press_field_type
 TYPE(MPI_Datatype) :: mean_write_type, mean_inmem_type, uiuj_write_type, uiuj_inmem_type
 TYPE(MPI_File) :: fh
 integer :: ierror
@@ -133,7 +172,7 @@ integer(MPI_OFFSET_KIND) :: offset
         ! read velocity, pressure
         write(istring,*) ii
         currfname = trim("Dati.cart."//TRIM(ADJUSTL(istring))//".out")
-        call read_vel(currfname, V)
+        call read_restart_file(currfname, V)
         currfname = trim("pField"//TRIM(ADJUSTL(istring)))//".fld"
         call read_press(currfname, pressure)
 
@@ -277,7 +316,6 @@ integer(MPI_OFFSET_KIND) :: offset
                             ! on all Fourier modes; it is stored on VVdz
                             ! term dus instead is small scale, and has energy only on small modes;
                             ! hence only small modes contribute to tcross of large scale field
-!                            cntr = small; if (is_large(ix,iz)) cntr = large ! opposite of ilasm
                             ! compute
                             uiuj(tcross) = uiuj(tcross) - c * cprod( VVdz(zf(iz), xf(ix), i_ft + ilasm, 2), gu(j,k) ) &
                                 &                       - c * cprod( VVdz(zf(iz), xf(ix), j_ft + ilasm, 2), gu(i,k) )
@@ -411,13 +449,6 @@ contains !----------------------------------------------------------------------
         CALL MPI_Type_create_subarray(3, [nyN-ny0+5, 2*nz+1, nxB], [nyN-ny0+5, 2*nz+1, nxB], [0,0,0], MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, press_field_type, ierror)
         CALL MPI_Type_commit(press_field_type, ierror)
 
-        ! define type for reading velocity from disk
-        CALL MPI_Type_create_subarray(4, [ny+3, 2*nz+1, nx+1, 3], [nyN-ny0+5, 2*nz+1, nxB, 3], [ny0-1,0,nx0,0], MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, vel_read_type, ierror)
-        CALL MPI_Type_commit(vel_read_type, ierror)
-        ! type describing velocity in memory
-        CALL MPI_Type_create_subarray(4, [nyN-ny0+5, 2*nz+1, nxB, 3], [nyN-ny0+5, 2*nz+1, nxB, 3], [0,0,0,0], MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, vel_field_type, ierror)
-        CALL MPI_Type_commit(vel_field_type, ierror)
-
         ! define type for writing mean on disk
         CALL MPI_Type_create_subarray(2, [7, ny+3], [7, maxy-miny+1], [0,miny+1], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, mean_write_type, ierror)
         CALL MPI_Type_commit(mean_write_type, ierror)
@@ -468,23 +499,6 @@ contains !----------------------------------------------------------------------
         call MPI_file_close(fh)
 
     end subroutine read_press
-
-
-
-    subroutine read_vel(filename,R)
-        complex(C_DOUBLE_COMPLEX), intent(inout) :: R(ny0-2:nyN+2,-nz:nz,nx0:nxN,3)
-        character(len=40), intent(IN) :: filename
-        INTEGER(MPI_OFFSET_KIND) :: disp = 3*C_INT + 7*C_DOUBLE
-        TYPE(MPI_File) :: fh
-
-        if (has_terminal) print *, "Reading from file "//filename
-
-        call MPI_file_open(MPI_COMM_WORLD, TRIM(filename), MPI_MODE_RDONLY, MPI_INFO_NULL, fh)
-        call MPI_file_set_view(fh, disp, MPI_DOUBLE_COMPLEX, vel_read_type, 'native', MPI_INFO_NULL)
-        call MPI_file_read_all(fh, R, 1, vel_field_type, MPI_STATUS_IGNORE)
-        call MPI_file_close(fh)
-
-    end subroutine read_vel
 
 
 
@@ -645,49 +659,3 @@ contains !----------------------------------------------------------------------
 
 
 end program
-
-
-
-!----------------------------------------------------------------------------------------------------------------------------
-
-
-
-!--------------------------------------------------!
-!-----------------     LEGEND     -----------------!
-!--------------------------------------------------!
-
-
-! mean(iv, iy)      where iv        U   W   Uy  Wy  Uyy Wyy P
-!                                   1   2   3   4   5   6   7
-
-
-! irs ----> index used for Reynolds stress
-!   uu  vv  ww  uv  vw  uw
-!   1   2   3   4   5   6
-
-
-! uiujprofiles(irs, iterm, iy, largesmall)      where irs defined before, while iterm:
-!   var prod    psdiss      ttrsp   tcross  vdiff   pstrain     ptrsp   PHIttrsp    PHIvdiff    PHIptrsp
-!   1   2       3           4       5       6       7           8       9           10          11
-
-
-! *VVd*(zf(iz), xf(ix), term, inout)
-! : WARNING :  iz, ix indices here is scrambled as required by FFT -> use zf(iz), xf(ix)
-! - inout = 1:5
-! - term = 1:6
-! inout=1 contains "inputs" (meaning, everything that is necessary for Fourier antitransform in order to go
-! back to real domain). Products are calculated in real domain, and then transformed back to Fourier.
-! All the "outputs" (everything after the Fourier antitransform, so basically products both in real and
-! Fourier domains) are stored in inout=2.
-! As for the "inputs" (inout=1):
-! - term=1:4 are i,j velocity for large and small fields (both for ttrsp and tcross);
-!   please use placeholders i_ft, j_ft summed to ilasm=1:2
-! - term=6 is component k of the whole velocity field - not decomposed (only for tcross);
-!   use placeholder uk_ft
-! - term=5 is not used
-! As for the "outputs" (inout=2):
-! - for ttrsp, term=1:2 are large/small ui*uj product; use index ilasm
-! - for tcross, term=1:4 are ui*uk, uj*uk for large/small;
-!   please use placeholders i_ft, j_ft summed to ilasm=1:2
-!   notice that two terms appear in tcross; for b=2, a=1:4,
-!   the one starting with ui goes under i_fft, the one starting with uj goes under j_fft

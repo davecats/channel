@@ -643,27 +643,22 @@ logical::rtd_exists ! flag to check existence of Runtimedata
   SUBROUTINE read_restart_file(filename,R)
     complex(C_DOUBLE_COMPLEX), intent(INOUT) :: R(ny0-2:nyN+2,-nz:nz,nx0:nxN,1:3)
     character(len=40), intent(IN) :: filename
-    integer(C_SIZE_T) :: iV,ix,iy,iz,io,nxB_t,nx_t,nz_t,ny_t,iproc_t,br=8,bc=16,b1=1,b7=7,b3=3
-    integer(C_SIZE_T) :: pos
+    integer(C_SIZE_T) :: ix,iy,iz,io
+    INTEGER(MPI_OFFSET_KIND) :: disp = 3*C_INT + 7*C_DOUBLE
+    TYPE(MPI_File) :: fh
     real(C_DOUBLE) :: rn(1:3)
+
     OPEN(UNIT=100,FILE=TRIM(filename),access="stream",status="old",action="read",iostat=io)
-    nx_t=nx+1; ny_t=ny+3; nz_t=2*nz+1; iproc_t=iproc; nxB_t=nxB
     IF (io==0) THEN
-      IF (has_terminal) WRITE(*,*) "Reading restart file..."
+      if (has_terminal) print *, "Reading from file "//filename
       READ(100,POS=1) nx,ny,nz,alfa0,beta0,ni,a,ymin,ymax,time
-      DO iV=1,3 ! XXX TODO Use MPI I/O for parallel read/write
-          DO ix=nx0,nxN
-            DO iz=-nz,nz
-              pos=b1+(br*b7+b3*SIZEOF(nx))+bc*(INT(iV,C_SIZE_T)-b1)*(ny_t*nz_t*nx_t) + & 
-                  bc*(INT(ix,C_SIZE_T))*nz_t*ny_t + & 
-                  bc*(INT(iz,C_SIZE_T)+INT(nz,C_SIZE_T))*ny_t + &
-                  bc*(INT(ny0-2,C_SIZE_T)+b1)
-              READ(100,POS=pos) R(ny0-2:nyN+2,iz,ix,iV)
-            END DO
-          END DO
-      END DO
       CLOSE(100)
+      call MPI_file_open(MPI_COMM_WORLD, TRIM(filename), MPI_MODE_RDONLY, MPI_INFO_NULL, fh)
+      call MPI_file_set_view(fh, disp, MPI_DOUBLE_COMPLEX, vel_read_type, 'native', MPI_INFO_NULL)
+      call MPI_file_read_all(fh, R, 1, vel_field_type, MPI_STATUS_IGNORE)
+      call MPI_file_close(fh)
     ELSE
+      CLOSE(100)
       R=0
       IF (has_terminal) WRITE(*,*) "Generating initial field..."
       DO iy=ny0-2,nyN+2; DO ix=nx0,nxN; DO iz=-nz,nz
