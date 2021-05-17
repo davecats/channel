@@ -111,7 +111,7 @@ def read_integrals(fdir, **kwargs):
 def readLM(fabel, **kwargs):
 
     # file directory
-    base_dir = kwargs.get('base_dir', './/')
+    base_dir = kwargs.get('base_dir', '')
     fdir = base_dir + fabel + '_'
 
     mePanda = pd.read_csv(fdir + 'mean.dat', header = 70, delim_whitespace=True, engine='python')

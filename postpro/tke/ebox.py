@@ -10,26 +10,11 @@ has_been_set = False
 local_power = 0
 
 
-def get_properties(fdir, t_cnvrg, problem):
+def get_properties(fdir, t_cnvrg, problem, uk, tau_w):
 
-    runtime, me, uv,  uu,  vv,  ww,  kk,  mk = uiuj.read(fdir, variant=None)
+    _, me, uv,  uu,  vv,  ww,  kk,  mk = uiuj.read(fdir, variant=None)
 
     dns_in = ch.read_dnsin(fdir + 'dns.in')
-
-    # get accurate value for tauwall from runtimedata
-    temp_tw_arr = (abs(runtime['Uy_bottom']) + abs(runtime['Uy_top']))/2
-    temp_series = runtime['t']
-    idx = temp_series[temp_series >= t_cnvrg].index[0]
-    temp_tw_arr = temp_tw_arr.loc[idx:]
-    tau_w = temp_tw_arr.mean() / dns_in['re'] # <--------------------
-
-    # get ubulk from runtimedata or uw from BC
-    if problem == 'cou':
-        uk = abs(me['U'].iat[0]) # <--------------------
-    elif problem == 'poi':
-        temp_ub_arr = runtime['Ub']/2 # Ub provided by runtimedata is actually flow rate; hence divide by two
-        temp_ub_arr = temp_ub_arr.loc[idx:]
-        uk = temp_ub_arr.mean() # <--------------------
 
     # calculate power input and upi
     powt = tau_w * uk # <--------------------
@@ -59,12 +44,12 @@ def get_properties(fdir, t_cnvrg, problem):
 
 
 
-def get_ebox(fdir, t_cnvrg, problem):
+def get_ebox(fdir, t_cnvrg, problem, uk, tau_w):
 
     _, _, _, _, kkint, _ = uiuj.read_integrals(fdir)
     dns_in = ch.read_dnsin(fdir + 'dns.in')
 
-    realpha, repi, alpha, beta = get_properties(fdir, t_cnvrg, problem)
+    realpha, repi, alpha, beta = get_properties(fdir, t_cnvrg, problem, uk, tau_w)
     upi = repi/dns_in['re']
     powt = upi**3
     if has_been_set:
@@ -90,7 +75,7 @@ def get_ebox(fdir, t_cnvrg, problem):
 
 
 
-def tennis(fdir, t_cnvrg, problem):
+def tennis(fdir, t_cnvrg, problem, uk, tau_w):
 
     # Calculates ebox terms with both extended Reynolds decomposition of mean field and large/small decomposition of fluctuation field.
     # Syntax:
@@ -118,7 +103,7 @@ def tennis(fdir, t_cnvrg, problem):
     dns_in = ch.read_dnsin(fdir + 'dns.in')
 
     # get properties
-    realpha, repi, alpha, beta = get_properties(fdir, t_cnvrg, problem)
+    realpha, repi, alpha, beta = get_properties(fdir, t_cnvrg, problem, uk, tau_w)
     upi = repi/dns_in['re']
     powt = upi**3
     uk_upi = repi * alpha / realpha # = uk / upi
