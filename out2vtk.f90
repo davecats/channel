@@ -365,9 +365,12 @@ contains !----------------------------------------------------------------------
 
     subroutine print_help()
         print *, "Converts a given .out file from channel into a paraview .vts file."
-        print *, "   out2vtk [-h] [-f] file.name"
+        print *, "   out2vtk [-h] [-f] [-u fraction_undersample] file.name"
         print *, "If flag '-f' (or '--fluctuation') is passed, the (spatial) average is"
         print *, "subtracted from the field before converting."
+        print *, "Flag '-u' needs to be followed by a number between 0 and 1; such number"
+        print *, "is the fraction of the total available domain points that is kept after"
+        print *, "undersampling."
     end subroutine
 
 
