@@ -75,6 +75,9 @@ IF (has_terminal) THEN
   WRITE(*,"(A,I6,A,L1)"   ) "   nsteps =",nstep, "   time_from_restart =", time_from_restart
 #ifdef bodyforce
   WRITE(*,"(A)") "   Using body force."
+#ifdef ibm
+  WRITE(*,"(A)") "   Immersed Boundary Method (IBM) active."
+#endif
 #endif
   WRITE(*,*) " "
 END IF
@@ -111,22 +114,37 @@ END IF
     END IF
     ! Increment number of steps
     istep=istep+1
-    ! Solve
+    ! Solve (RK3 - Step1)
     time=time+2.0/RK1_rai(1)*deltat
-    CALL buildrhs(RK1_rai,.FALSE. ); CALL MPI_Barrier(MPI_COMM_Y); CALL linsolve(RK1_rai(1)/deltat)
+    CALL buildrhs(RK1_rai,.FALSE. )
+#ifdef nonblockingY
+    CALL MPI_Barrier(MPI_COMM_Y)
+#endif
+    CALL linsolve(RK1_rai(1)/deltat)
 #ifdef nonblockingY
     CALL vetaTOuvw(); CALL computeflowrate(RK1_rai(1)/deltat)
 #endif
+    ! Solve (RK3 - Step2)
     time=time+2.0/RK2_rai(1)*deltat
-    CALL buildrhs(RK2_rai,.FALSE.);  CALL MPI_Barrier(MPI_COMM_Y); CALL linsolve(RK2_rai(1)/deltat)
+    CALL buildrhs(RK2_rai,.FALSE.)  
+#ifdef nonblockingY
+    CALL MPI_Barrier(MPI_COMM_Y)
+#endif
+    CALL linsolve(RK2_rai(1)/deltat)
 #ifdef nonblockingY
     CALL vetaTOuvw(); CALL computeflowrate(RK2_rai(1)/deltat)
 #endif
+    ! Solve (RK3 - Step3)
     time=time+2.0/RK3_rai(1)*deltat
-    CALL buildrhs(RK3_rai,.TRUE.);   CALL MPI_Barrier(MPI_COMM_Y); CALL linsolve(RK3_rai(1)/deltat)
+    CALL buildrhs(RK3_rai,.TRUE.)
+#ifdef nonblockingY
+    CALL MPI_Barrier(MPI_COMM_Y)
+#endif
+    CALL linsolve(RK3_rai(1)/deltat)
 #ifdef nonblockingY
     CALL vetaTOuvw(); CALL computeflowrate(RK3_rai(1)/deltat)
 #endif
+    ! Write runtime file
     CALL outstats()
 #ifdef chron
     CALL CPU_TIME(timee)
