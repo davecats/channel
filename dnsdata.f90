@@ -25,7 +25,10 @@ MODULE dnsdata
   !Simulation parameters
   real(C_DOUBLE) :: PI=3.1415926535897932384626433832795028841971
   integer(C_INT) :: nx,ny,nz,nxd,nzd
-  real(C_DOUBLE) :: alfa0,beta0,ni,a,ymin,ymax,deltat,cflmax,time,time0=0,dt_field,dt_save,t_max
+  real(C_DOUBLE) :: alfa0,beta0,ni,a,ymin,ymax,deltat,cflmax,time,time0=0,dt_field,dt_save,t_max,gamma
+  real(C_DOUBLE) :: u0,uN
+  logical :: CPI
+  integer(C_INT) :: CPI_type
   real(C_DOUBLE) :: meanpx,meanpz,meanflowx,meanflowz
   integer(C_INT), allocatable :: izd(:)
   complex(C_DOUBLE_COMPLEX), allocatable :: ialfa(:),ibeta(:)
@@ -37,8 +40,8 @@ MODULE dnsdata
   real(C_DOUBLE) :: dx,dz,factor
   !Derivatives
   TYPE(Di), allocatable :: der(:)
-  real(C_DOUBLE), dimension(-2:2) :: d040,d140,d14m1,d04n,d14n,d24n,d14np1
-  real(C_DOUBLE), allocatable :: D0mat(:,:), etamat(:,:,:), D2vmat(:,:,:)
+  real(C_DOUBLE), dimension(-2:2) :: d040,d140,d240,d14m1,d24m1,d04n,d14n,d24n,d14np1,d24np1
+  real(C_DOUBLE), allocatable :: D0mat(:,:), etamat(:,:,:), eta00mat(:,:), D2vmat(:,:,:)
   !Fourier-transformable arrays (allocated in ffts.f90)
   complex(C_DOUBLE_COMPLEX), pointer, dimension(:,:,:,:) :: VVdx, VVdz
   real(C_DOUBLE), pointer, dimension(:,:,:,:) :: rVVdx
@@ -69,6 +72,7 @@ MODULE dnsdata
   real(C_DOUBLE) :: cfl=0.0d0
   integer(C_SIZE_T) :: istep,nstep,ifield
   real(C_DOUBLE) :: fr(1:3)
+  logical :: prev_was_close = .FALSE.
   !Restart file
   character(len=40) :: fname
   !Convection velocity calculation
@@ -78,6 +82,8 @@ MODULE dnsdata
   integer(C_LONG) :: convvel_cnt=-1
   logical, save :: compute_convvel=.FALSE.
 #endif
+logical::rtd_exists ! flag to check existence of Runtimedata
+
 
   CONTAINS
 
@@ -92,10 +98,13 @@ MODULE dnsdata
     i=fftFIT(nzd); DO WHILE (.NOT. i); nzd=nzd+1; i=fftFIT(nzd); END DO
 #endif
     READ(15, *) ni; READ(15, *) a, ymin, ymax; ni=1/ni
+    READ(15, *) CPI, CPI_type, gamma
     READ(15, *) meanpx, meanpz; READ(15, *) meanflowx, meanflowz
+    READ(15, *) u0,uN
     READ(15, *) deltat, cflmax, time
     READ(15, *) dt_field, dt_save, t_max, time_from_restart
     READ(15, *) nstep
+    READ(15, *) npy
     CLOSE(15)
     dx=PI/(alfa0*nxd); dz=2.0d0*PI/(beta0*nzd);  factor=1.0d0/(2.0d0*nxd*nzd)
   END SUBROUTINE read_dnsin
@@ -120,7 +129,7 @@ MODULE dnsdata
     IF (solveNS) ALLOCATE(memrhs(0:2,-nz:nz,nx0:nxN),oldrhs(MAX(1,ny0-2):MIN(ny-1,nyN+2),-nz:nz,nx0:nxN),bc0(-nz:nz,nx0:nxN),bcn(-nz:nz,nx0:nxN))
 #define newrhs(iy,iz,ix) memrhs(MOD(iy+1000,3),iz,ix)
 #define imod(iy) MOD(iy+1000,5)
-    ALLOCATE(der(MAX(1,ny0-2):MIN(ny-1,nyN+2)),d0mat(ny0:nyN+2,-2:2),etamat(ny0:nyN+2,-2:2,-nz:nz),D2vmat(ny0:nyN+2,-2:2,-nz:nz))
+    ALLOCATE(der(MAX(1,ny0-2):MIN(ny-1,nyN+2)),d0mat(ny0:nyN+2,-2:2),etamat(ny0:nyN+2,-2:2,-nz:nz),eta00mat(ny0:nyN+2,-2:2),D2vmat(ny0:nyN+2,-2:2,-nz:nz))
     ALLOCATE(y(MAX(-1,ny0-4):MIN(ny+1,nyN+4)),dy(MAX(1,ny0-2):MIN(ny-1,nyN+2)))
     ALLOCATE(izd(-nz:nz),ialfa(nx0:nxN),ibeta(-nz:nz),k2(-nz:nz,nx0:nxN)) 
 #ifdef halfchannel
@@ -132,8 +141,67 @@ MODULE dnsdata
     izd=(/(merge(iz,nzd+iz,iz>=0),iz=-nz,nz)/);     ialfa=(/(dcmplx(0.0d0,ix*alfa0),ix=nx0,nxN)/);
     ibeta=(/(dcmplx(0.0d0,iz*beta0),iz=-nz,nz)/); 
     FORALL  (iz=-nz:nz,ix=nx0:nxN) k2(iz,ix)=(alfa0*ix)**2.0d0+(beta0*iz)**2.0d0
-    IF (has_terminal) OPEN(UNIT=101,FILE='Runtimedata',ACTION='write')
+    INQUIRE(FILE="Runtimedata", EXIST=rtd_exists)
+    IF (has_terminal) THEN
+      IF (time_from_restart .AND. rtd_exists) THEN
+        WRITE(*,*) 'Found existing Runtimedata...'
+        OPEN(UNIT=101,FILE='Runtimedata',ACTION='readwrite')
+      ELSE
+        IF (time_from_restart) THEN
+          WRITE(*,*) 'Runtimedata not found...'
+#ifdef warnings_are_fatal
+          WRITE(*,*) 'Stopping!'
+          STOP
+#endif
+          CALL wanna_continue()
+        END IF
+        WRITE(*,*) 'Creating new Runtimedata.'
+        OPEN(UNIT=101,FILE='Runtimedata',ACTION='write')
+      END IF
+    END IF
   END SUBROUTINE init_memory
+
+  !-------------------------------------------------------------------------------------!
+  !--------------- Move cursor to correct instant in time in Runtimedata ---------------!
+  SUBROUTINE get_record(threshold)
+  IMPLICIT NONE
+    REAL(C_DOUBLE), INTENT(IN) :: threshold
+    REAL(C_DOUBLE) :: selectime,a,b,c,d,e,f,g,h,i,curr_dt
+    INTEGER :: negative_if_eof = 0, cntr = 0
+    LOGICAL :: threshold_reached
+    IF (has_terminal) THEN
+      DO WHILE (.NOT. threshold_reached .AND. negative_if_eof >= 0)
+        READ(101,*,IOSTAT=negative_if_eof) selectime,a,b,c,d,e,f,g,h,i,curr_dt
+        threshold_reached = ABS(selectime - threshold) < (0.5*curr_dt)
+        cntr = cntr+1
+      END DO
+      IF (negative_if_eof >= 0) THEN
+        BACKSPACE(101)
+        PRINT *, 'In Runtimedata: starting from time', selectime
+        deltat = curr_dt ! this is only executed by machine WITH TERMINAL!
+      ELSE
+        PRINT *, ''
+        PRINT *, '###############'
+        PRINT *, '#   WARNING   #'
+        PRINT *, '###############'
+        PRINT *, 'No instant of time matching restart file has been found in Runtimedata.'
+        PRINT *, ''
+        WRITE(101,*) ''
+#ifdef warnings_are_fatal
+        WRITE(*,*) 'Stopping!'
+        STOP
+#endif
+        CALL wanna_continue()
+        PRINT *, 'Skipping one line and appending.'
+      END IF
+    END IF
+
+    ! Broadcast deltat of machine with terminal to the remaining ones.
+    ! This is not always needed, but it is if the deltat = curr_dt
+    ! instruction above has been executed.
+    CALL MPI_bcast(deltat,1,MPI_DOUBLE_PRECISION,0,MPI_COMM_WORLD) ! iproc == 0 has terminal
+
+  END SUBROUTINE get_record
 
   !--------------------------------------------------------------!
   !--------------- Deallocate memory for solution ---------------!
@@ -147,8 +215,9 @@ MODULE dnsdata
   !--------------------------------------------------------------!
   !--------------- Set-up the compact derivatives ---------------!
   SUBROUTINE setup_derivatives()
-    real(C_DOUBLE) :: M(0:4,0:4), t(0:4)
-    integer(C_INT) :: iy,i,j
+    real(C_DOUBLE)    :: M(0:4,0:4), t(0:4)
+    integer(C_INT)    :: iy,i,j
+    TYPE(MPI_REQUEST) :: Rs 
     DO iy=MAX(1,ny0-2),MIN(ny-1,nyN+2)
       FORALL (i=0:4, j=0:4) M(i,j)=(y(iy-2+j)-y(iy))**(4.0d0-i); CALL LUdecomp(M)
       t=0; t(0)=24
@@ -165,8 +234,10 @@ MODULE dnsdata
     IF (first) THEN
       FORALL (i=0:4, j=0:4) M(i,j)=(y(-1+j)-y(0))**(4.0d0-i); CALL LUdecomp(M)
       t=0; t(3)=1.0; d140(-2:2)=M.bs.t
+      t=0; t(2)=2.0; d240(-2:2)=M.bs.t
       FORALL (i=0:4, j=0:4) M(i,j)=(y(-1+j)-y(-1))**(4.0d0-i); CALL LUdecomp(M)
       t=0; t(3)=1.0; d14m1(-2:2)=M.bs.t
+      t=0; t(2)=2.0; d24m1(-2:2)=M.bs.t
       d040=0; d040(-1)=1
     END IF
     IF (last) THEN 
@@ -175,10 +246,16 @@ MODULE dnsdata
       t=0; t(2)=2; d24n(-2:2)=M.bs.t
       FORALL (i=0:4, j=0:4) M(i,j)=(y(ny-3+j)-y(ny+1))**(4.0d0-i); CALL LUdecomp(M)
       t=0; t(3)=1; d14np1(-2:2)=M.bs.t
+      t=0; t(2)=2; d24np1(-2:2)=M.bs.t
       d04n=0; d04n(1)=1;
     END IF
     FORALL (iy=ny0:nyN) D0mat(iy,-2:2)=der(iy)%d0(-2:2); 
+#ifdef nonblockingY
+    CALL LU5decompStep(D0mat,Rs,0)
+    IF ( .NOT. first ) CALL MPI_Wait(Rs,MPI_STATUS_IGNORE)
+#else
     CALL LU5decompStep(D0mat)
+#endif
   END SUBROUTINE setup_derivatives
 
   !--------------------------------------------------------------!
@@ -229,9 +306,19 @@ MODULE dnsdata
 #define D4(f,g) sum(dcmplx(der(iy)%d4(-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy)%d4(-2:2)*dimag(f(iy-2:iy+2,iz,ix,g))))
   !--------------------------------------------------------------!
   !---COMPLEX----- derivative in the y-direction ----------------!
+#ifdef nonblockingY
+  SUBROUTINE COMPLEXderiv(f0,f1,Rs,itag)
+#else
   SUBROUTINE COMPLEXderiv(f0,f1)
+#endif
+  ! WARNING: TO GET THE PROPER DERIVATIVE, A CALL TO LeftLU5divStep2
+  ! IS NEEDED AFTER CALLING THIS FUNCTION!
     complex(C_DOUBLE_COMPLEX), intent(in)  :: f0(ny0-2:nyN+2)
     complex(C_DOUBLE_COMPLEX), intent(out) :: f1(ny0-2:nyN+2)
+#ifdef nonblockingY
+    TYPE(MPI_REQUEST), intent(out) :: Rs
+    integer(C_INT), intent(in) :: itag
+#endif
     IF (first) THEN 
       f1(0)=sum(d140(-2:2)*f0(-1:3))
       f1(-1)=sum(d14m1(-2:2)*f0(-1:3))
@@ -251,8 +338,91 @@ MODULE dnsdata
       f1(ny-1)=f1(ny-1)-(der(ny-1)%d0(1)*f1(ny)+der(ny-1)%d0(2)*f1(ny+1))
       f1(ny-2)=f1(ny-2)-der(ny-2)%d0(2)*f1(ny)
     END IF
+#ifdef nonblockingY
+    CALL LeftLU5divStep1(f1,D0mat,f1,Rs,itag)
+#else
     CALL LeftLU5divStep1(f1,D0mat,f1)
+#endif
   END SUBROUTINE COMPLEXderiv
+
+  !--------------------------------------------------------------!
+  !---COMPLEX----- second derivative in the y-direction ---------!
+#ifdef nonblockingY
+  SUBROUTINE COMPLEXderiv2(f0,f1,Rs,itag)
+#else
+  SUBROUTINE COMPLEXderiv2(f0,f1)
+#endif
+  ! WARNING: TO GET THE PROPER DERIVATIVE, A CALL TO LeftLU5divStep2
+  ! IS NEEDED AFTER CALLING THIS FUNCTION!
+    complex(C_DOUBLE_COMPLEX), intent(in)  :: f0(ny0-2:nyN+2)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: f1(ny0-2:nyN+2)
+#ifdef nonblockingY
+    TYPE(MPI_REQUEST), intent(out) :: Rs
+    integer(C_INT), intent(in) :: itag
+#endif
+    IF (first) THEN 
+      f1(0)=sum(d240(-2:2)*f0(-1:3))
+      f1(-1)=sum(d24m1(-2:2)*f0(-1:3))
+    END IF
+    IF (last) THEN 
+      f1(ny)=sum(d24n(-2:2)*f0(ny-3:ny+1))
+      f1(ny+1)=sum(d24np1(-2:2)*f0(ny-3:ny+1))
+    END IF
+    DO CONCURRENT (iy=ny0:nyN)
+      f1(iy)=sum(der(iy)%d2(-2:2)*f0(iy-2:iy+2))
+    END DO
+    IF (first) THEN
+      f1(1)=f1(1)-(der(1)%d0(-1)*f1(0)+der(1)%d0(-2)*f1(-1))
+      f1(2)=f1(2)-der(2)%d0(-2)*f1(0)
+    END IF
+    IF (last) THEN
+      f1(ny-1)=f1(ny-1)-(der(ny-1)%d0(1)*f1(ny)+der(ny-1)%d0(2)*f1(ny+1))
+      f1(ny-2)=f1(ny-2)-der(ny-2)%d0(2)*f1(ny)
+    END IF
+#ifdef nonblockingY
+    CALL LeftLU5divStep1(f1,D0mat,f1,Rs,itag)
+#else
+    CALL LeftLU5divStep1(f1,D0mat,f1)
+#endif
+  END SUBROUTINE COMPLEXderiv2
+
+  !-------------------------------------------------------------!
+  !-----REAL----- derivative in the y-direction ----------------!
+  SUBROUTINE REALderiv(f0,f1)
+  ! WARNING: THIS ROUTINE ALREADY INCLUDES CALL TO LeftLU5divStep2
+  ! NO NEED TO CALL IT!
+  ! --------------------------------------------------------------
+  ! TODO FIXME: this actually calls the complex routine!
+
+    real(C_DOUBLE), intent(in)  :: f0(ny0-2:nyN+2)
+    real(C_DOUBLE), intent(out) :: f1(ny0-2:nyN+2)
+    complex(C_DOUBLE_COMPLEX) :: temp_in(ny0-2:nyN+2), temp_out(ny0-2:nyN+2)
+
+    temp_in = dcmplx(f0)
+    call COMPLEXderiv(temp_in, temp_out)
+    call LeftLU5divStep2(D0mat, temp_out)
+    f1 = dreal(temp_out)
+
+  END SUBROUTINE REALderiv
+
+  !--------------------------------------------------------------!
+  !-----REAL----- second derivative in the y-direction ----------!
+  SUBROUTINE REALderiv2(f0,f1)
+  ! WARNING: THIS ROUTINE ALREADY INCLUDES CALL TO LeftLU5divStep2
+  ! NO NEED TO CALL IT!
+  ! --------------------------------------------------------------
+  ! TODO FIXME: this actually calls the complex routine!
+
+    real(C_DOUBLE), intent(in)  :: f0(ny0-2:nyN+2)
+    real(C_DOUBLE), intent(out) :: f1(ny0-2:nyN+2)
+    complex(C_DOUBLE_COMPLEX) :: temp_in(ny0-2:nyN+2), temp_out(ny0-2:nyN+2)
+
+    temp_in = dcmplx(f0)
+    call COMPLEXderiv2(temp_in, temp_out)
+    call LeftLU5divStep2(D0mat, temp_out)
+    f1 = dreal(temp_out)
+
+  END SUBROUTINE REALderiv2
 
   !--------------------------------------------------------------!
   !----------------- apply the boundary conditions --------------!
@@ -272,105 +442,15 @@ MODULE dnsdata
     EQ(ny-2,-1:1)=EQ(ny-2,-1:1)-EQ(ny-2,2)*bcn(-2:0)/bcn(1)
   END SUBROUTINE applybc_n
 
-
-#define OS(iy,j) (ni*(der(iy)%d4(j)-2.0d0*k2(iz,ix)*der(iy)%d2(j)+k2(iz,ix)*k2(iz,ix)*der(iy)%d0(j)))
-#define SQ(iy,j) (ni*(der(iy)%d2(j)-k2(iz,ix)*der(iy)%d0(j)))
   !--------------------------------------------------------------!
   !------------------- solve the linear system  -----------------!
-  SUBROUTINE linsolve(lambda)
-    real(C_DOUBLE), intent(in) :: lambda
-    integer(C_INT) :: ix,iz,i
-    complex(C_DOUBLE_COMPLEX) :: temp(ny0-2:nyN+2)
-    complex(C_DOUBLE_COMPLEX) :: ucor(ny0-2:nyN+2)
-    real(C_DOUBLE) :: frl(1:3)
-    DO ix=nx0,nxN
-      DO iz=-nz,nz
-        DO CONCURRENT (iy=ny0:nyN)
-          D2vmat(iy,-2:2,iz)=lambda*(der(iy)%d2(-2:2)-k2(iz,ix)*der(iy)%d0(-2:2))-OS(iy,-2:2)
-          etamat(iy,-2:2,iz)=lambda*der(iy)%d0(-2:2)-SQ(iy,-2:2)
-        END DO
-        IF (first) THEN 
-          IF (ix==0 .AND. iz==0) THEN
-            bc0(iz,ix)%v=0; bc0(iz,ix)%vy=0; bc0(iz,ix)%eta=dcmplx(dreal(bc0(iz,ix)%u)-dimag(bc0(iz,ix)%w),dimag(bc0(iz,ix)%u)+dreal(bc0(iz,ix)%w))
-          ELSE
-            bc0(iz,ix)%vy=-ialfa(ix)*bc0(iz,ix)%u-ibeta(iz)*bc0(iz,ix)%w; bc0(iz,ix)%eta=ibeta(iz)*bc0(iz,ix)%u-ialfa(ix)*bc0(iz,ix)%w
-          END IF
-          bc0(iz,ix)%v=bc0(iz,ix)%v-v0bc(-2)*bc0(iz,ix)%vy/v0m1bc(-2)
-          CALL applybc_0(D2vmat(:,:,iz),v0bc,v0m1bc)
-          V(1,iz,ix,2)=V(1,iz,ix,2)-D2vmat(1,-2,iz)*bc0(iz,ix)%vy/v0m1bc(-2)-D2vmat(1,-1,iz)*bc0(iz,ix)%v/v0bc(-1)
-          V(2,iz,ix,2)=V(2,iz,ix,2)-D2vmat(2,-2,iz)*bc0(iz,ix)%v/v0bc(-1)       
-          CALL applybc_0(etamat(:,:,iz),eta0bc,eta0m1bc)
-          V(1,iz,ix,1)=V(1,iz,ix,1)-etamat(1,-1,iz)*bc0(iz,ix)%eta/eta0bc(-1)
-          V(2,iz,ix,1)=V(2,iz,ix,1)-etamat(2,-2,iz)*bc0(iz,ix)%eta/eta0bc(-1)
-        END IF
-        IF (last) THEN 
-          IF (ix==0 .AND. iz==0) THEN
-            bcn(iz,ix)%v=0; bcn(iz,ix)%vy=0; bcn(iz,ix)%eta=dcmplx(dreal(bcn(iz,ix)%u)-dimag(bcn(iz,ix)%w),dimag(bcn(iz,ix)%u)+dreal(bcn(iz,ix)%w))
-          ELSE
-            bcn(iz,ix)%vy=-ialfa(ix)*bcn(iz,ix)%u-ibeta(iz)*bcn(iz,ix)%w; bcn(iz,ix)%eta=ibeta(iz)*bcn(iz,ix)%u-ialfa(ix)*bcn(iz,ix)%w
-          END IF
-          bcn(iz,ix)%v=bcn(iz,ix)%v-vnbc(2)*bcn(iz,ix)%vy/vnp1bc(2)
-          CALL applybc_n(D2vmat(:,:,iz),vnbc,vnp1bc)
-          V(ny-1,iz,ix,2)=V(ny-1,iz,ix,2)-D2vmat(ny-1,2,iz)*bcn(iz,ix)%vy/vnp1bc(2)-D2vmat(ny-1,1,iz)*bcn(iz,ix)%v/vnbc(1)
-          V(ny-2,iz,ix,2)=V(ny-2,iz,ix,2)-D2vmat(ny-2,2,iz)*bcn(iz,ix)%v/vnbc(1)
-          CALL applybc_n(etamat(:,:,iz),etanbc,etanp1bc)
-          V(ny-1,iz,ix,1)=V(ny-1,iz,ix,1)-etamat(ny-1,1,iz)*bcn(iz,ix)%eta/etanbc(1) 
-          V(ny-2,iz,ix,1)=V(ny-2,iz,ix,1)-etamat(ny-2,2,iz)*bcn(iz,ix)%eta/etanbc(1)
-        END IF 
-        CALL LU5decompStep(D2vmat(:,:,iz)); CALL LU5decompStep(etamat(:,:,iz))
-        CALL LeftLU5divStep1(V(:,iz,ix,2),D2vmat(:,:,iz),V(:,iz,ix,2))
-        CALL LeftLU5divStep1(V(:,iz,ix,1),etamat(:,:,iz),V(:,iz,ix,1))
-      END DO    
-      DO iz=-nz,nz
-        CALL LeftLU5divStep2(D2vmat(:,:,iz),V(:,iz,ix,2))
-        CALL LeftLU5divStep2(etamat(:,:,iz),V(:,iz,ix,1))
-        IF (first) THEN
-          V(0,iz,ix,2)=(bc0(iz,ix)%v-sum(V(1:3,iz,ix,2)*v0bc(0:2)))/v0bc(-1)
-          V(-1,iz,ix,2)=(bc0(iz,ix)%vy-sum(V(0:3,iz,ix,2)*v0m1bc(-1:2)))/v0m1bc(-2)
-          V(0,iz,ix,1)=(bc0(iz,ix)%eta-sum(V(1:3,iz,ix,1)*eta0bc(0:2)))/eta0bc(-1)
-          V(-1,iz,ix,1)=-sum(V(0:3,iz,ix,1)*eta0m1bc(-1:2))/eta0m1bc(-2)
-        END IF
-        IF (last) THEN 
-          V(ny,iz,ix,2)=(bcn(iz,ix)%v-sum(V(ny-3:ny-1,iz,ix,2)*vnbc(-2:0)))/vnbc(1)
-          V(ny+1,iz,ix,2)=(bcn(iz,ix)%vy-sum(V(ny-3:ny,iz,ix,2)*vnp1bc(-2:1)))/vnp1bc(2)
-          V(ny,iz,ix,1)=(bcn(iz,ix)%eta-sum(V(ny-3:ny-1,iz,ix,1)*etanbc(-2:0)))/etanbc(1)
-          V(ny+1,iz,ix,1)=-sum(V(ny-3:ny,iz,ix,1)*etanp1bc(-2:1))/etanp1bc(2)
-        END IF
-        IF (ix==0 .AND. iz==0) THEN       
-            V(:,0,0,3) = dcmplx(dimag(V(:,0,0,1)),0.d0); 
-            V(:,0,0,1) = dcmplx(dreal(V(:,0,0,1)),0.d0);
-            ucor(ny0-2:ny0-1)=0; ucor(ny0:nyN)=1; ucor(nyN+1:nyN+2)=0
-            ! XXX TODO Make computation of ucor communication-free
-            CALL LeftLU5divStep1(ucor,etamat(:,:,iz),ucor)
-            CALL LeftLU5divStep2(etamat(:,:,iz),ucor)
-            IF (first) THEN
-              ucor(0)=-sum(ucor(1:3)*eta0bc(0:2))/eta0bc(-1)
-              ucor(-1)=-sum(ucor(0:3)*eta0m1bc(-1:2))/eta0m1bc(-2)
-            END IF
-            IF (last) THEN 
-              ucor(ny)=-sum(ucor(ny-3:ny-1)*etanbc(-2:0))/etanbc(1)
-              ucor(ny+1)=-sum(ucor(ny-3:ny)*etanp1bc(-2:1))/etanp1bc(2)  
-            END IF
-            frl(1)=yintegr(dreal(V(:,0,0,1))); frl(2)=yintegr(dreal(V(:,0,0,3))); frl(3)=yintegr(dreal(ucor))
-            CALL MPI_Allreduce(frl,fr,3,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_Y)
-            IF (abs(meanflowx)>1.0d-7) THEN
-              corrpx = (meanflowx-fr(1))/fr(3)
-              V(:,0,0,1)=dcmplx(dreal(V(:,0,0,1))+corrpx*dreal(ucor),dimag(V(:,0,0,1)))
-            END IF
-            IF (abs(meanflowz)>1.0d-7) THEN
-              corrpz = (meanflowz-fr(2))/fr(3)
-              V(:,0,0,3)=dcmplx(dreal(V(:,0,0,3))+corrpz*dreal(ucor),dimag(V(:,0,0,3)))
-            END IF
-        ELSE
-            CALL COMPLEXderiv(V(:,iz,ix,2),V(:,iz,ix,3))
-            CALL LeftLU5divStep2(D0mat,V(:,iz,ix,3))
-            temp=(ialfa(ix)*V(:,iz,ix,3)-ibeta(iz)*V(:,iz,ix,1))/k2(iz,ix)
-            V(:,iz,ix,3)=(ibeta(iz)*V(:,iz,ix,3)+ialfa(ix)*V(:,iz,ix,1))/k2(iz,ix)
-            V(:,iz,ix,1)=temp
-        END IF
-      END DO
-    END DO
-  END SUBROUTINE linsolve
+#define OS(iy,j) (ni*(der(iy)%d4(j)-2.0d0*k2(iz,ix)*der(iy)%d2(j)+k2(iz,ix)*k2(iz,ix)*der(iy)%d0(j)))
+#define SQ(iy,j) (ni*(der(iy)%d2(j)-k2(iz,ix)*der(iy)%d0(j)))
+#ifdef nonblockingY
+#include "linsolve_nonblocking.inc"
+#else
+#include "linsolve_blocking.inc"
+#endif
 
   !--------------------------------------------------------------!
   !------------------------ convolutions ------------------------!
@@ -380,6 +460,9 @@ MODULE dnsdata
      integer(C_INT), intent(in) :: iy,i
      logical, intent(in) :: compute_cfl, in_timeloop
      integer(C_INT) :: iV,ix,iz
+#ifdef nonblockingXZ
+     TYPE(MPI_REQUEST) :: Rs(1:6)
+#endif
 #ifdef ibm
      real(C_DOUBLE) :: newcoef,oldcoef
      real(C_DOUBLE) :: dU(1:3)
@@ -396,6 +479,9 @@ MODULE dnsdata
 #endif
      DO iV=1,3
        CALL IFT(VVdz(1:nzd,1:nxB,iV,i))  
+#ifdef nonblockingXZ
+       CALL MPI_IAlltoall(VVdz(:,:,iV,i), 1, Mdz, VVdx(:,:,iV,i), 1, Mdx, MPI_COMM_X, Rs(iV))
+#endif
 #ifdef convvel
        IF (compute_convvel) THEN
          IF (convvel_cnt>-1) THEN
@@ -413,9 +499,18 @@ MODULE dnsdata
          Voldz(1:nzd,1:nxB,iy,iV)=VVdz(1:nzd,1:nxB,iV,i)
        END IF
 #endif
+#ifndef nonblockingXZ
        CALL MPI_Alltoall(VVdz(:,:,iV,i), 1, Mdz, VVdx(:,:,iV,i), 1, Mdx, MPI_COMM_X)
-       VVdx(nx+2:nxd+1,1:nzB,iV,i)=0;    CALL RFT(VVdx(1:nxd+1,1:nzB,iV,i),rVVdx(1:2*nxd+2,1:nzB,iV,i));
+       VVdx(nx+2:nxd+1,1:nzB,iV,i)=0;    CALL RFT(VVdx(1:nxd+1,1:nzB,iV,i),rVVdx(1:2*nxd+2,1:nzB,iV,i))
+#endif
      END DO
+#ifdef nonblockingXZ
+     DO iV=1,3
+       CALL MPI_wait(Rs(iV),MPI_STATUS_IGNORE); 
+       VVdx(nx+2:nxd+1,1:nzB,iV,i)=0; 
+       CALL RFT(VVdx(1:nxd+1,1:nzB,iV,i),rVVdx(1:2*nxd+2,1:nzB,iV,i));
+     END DO
+#endif
 #ifdef convvel
      IF (iy==nyN+2 .AND. compute_convvel) THEN
        convvel_cnt=convvel_cnt+1
@@ -457,9 +552,19 @@ MODULE dnsdata
      rVVdx(1:2*nxd,1:nzB,1:3,i)= rVVdx(1:2*nxd,1:nzB,1:3,i)* rVVdx(1:2*nxd,1:nzB,1:3,i)*factor
      DO iV=1,6
        CALL HFT(rVVdx(1:2*nxd+2,1:nzB,iV,i),VVdx(1:nxd+1,1:nzB,iV,i)); 
+#ifndef nonblockingXZ
        CALL MPI_Alltoall(VVdx(:,:,iV,i), 1, Mdx, VVdz(:,:,iV,i), 1, Mdz, MPI_COMM_X)
        CALL FFT(VVdz(1:nzd,1:nxB,iV,i));
+#else 
+       CALL MPI_IAlltoall(VVdx(:,:,iV,i), 1, Mdx, VVdz(:,:,iV,i), 1, Mdz, MPI_COMM_X, Rs(iV))
+#endif
      END DO
+#ifdef nonblockingXZ
+     DO iV=1,6
+       CALL MPI_Wait(Rs(iV),MPI_STATUS_IGNORE)
+       CALL FFT(VVdz(1:nzd,1:nxB,iV,i));
+     END DO
+#endif
   END SUBROUTINE convolutions
 
 
@@ -538,32 +643,27 @@ MODULE dnsdata
   SUBROUTINE read_restart_file(filename,R)
     complex(C_DOUBLE_COMPLEX), intent(INOUT) :: R(ny0-2:nyN+2,-nz:nz,nx0:nxN,1:3)
     character(len=40), intent(IN) :: filename
-    integer(C_SIZE_T) :: iV,ix,iy,iz,io,nxB_t,nx_t,nz_t,ny_t,iproc_t,br=8,bc=16,b1=1,b7=7,b3=3
-    integer(C_SIZE_T) :: pos
+    integer(C_SIZE_T) :: ix,iy,iz,io
+    INTEGER(MPI_OFFSET_KIND) :: disp = 3*C_INT + 7*C_DOUBLE
+    TYPE(MPI_File) :: fh
     real(C_DOUBLE) :: rn(1:3)
+
     OPEN(UNIT=100,FILE=TRIM(filename),access="stream",status="old",action="read",iostat=io)
-    nx_t=nx+1; ny_t=ny+3; nz_t=2*nz+1; iproc_t=iproc; nxB_t=nxB
     IF (io==0) THEN
-      IF (has_terminal) WRITE(*,*) "Reading restart file..."
+      if (has_terminal) print *, "Reading from file "//filename
       READ(100,POS=1) nx,ny,nz,alfa0,beta0,ni,a,ymin,ymax,time
-      DO iV=1,3 ! XXX TODO Use MPI I/O for parallel read/write
-          DO ix=nx0,nxN
-            DO iz=-nz,nz
-              pos=b1+(br*b7+b3*SIZEOF(nx))+bc*(INT(iV,C_SIZE_T)-b1)*(ny_t*nz_t*nx_t) + & 
-                  bc*(INT(ix,C_SIZE_T))*nz_t*ny_t + & 
-                  bc*(INT(iz,C_SIZE_T)+INT(nz,C_SIZE_T))*ny_t + &
-                  bc*(INT(ny0-2,C_SIZE_T)+b1)
-              READ(100,POS=pos) R(ny0-2:nyN+2,iz,ix,iV)
-            END DO
-          END DO
-      END DO
       CLOSE(100)
+      call MPI_file_open(MPI_COMM_WORLD, TRIM(filename), MPI_MODE_RDONLY, MPI_INFO_NULL, fh)
+      call MPI_file_set_view(fh, disp, MPI_DOUBLE_COMPLEX, vel_read_type, 'native', MPI_INFO_NULL)
+      call MPI_file_read_all(fh, R, 1, vel_field_type, MPI_STATUS_IGNORE)
+      call MPI_file_close(fh)
     ELSE
+      CLOSE(100)
       R=0
       IF (has_terminal) WRITE(*,*) "Generating initial field..."
       DO iy=ny0-2,nyN+2; DO ix=nx0,nxN; DO iz=-nz,nz
           CALL RANDOM_NUMBER(rn)
-          R(iy,iz,ix,1) = 0.000*EXP(dcmplx(0,rn(1)-0.5));  R(iy,iz,ix,2) = 0.000*EXP(dcmplx(0,rn(2)-0.5));  R(iy,iz,ix,3) = 0.000*EXP(dcmplx(0,rn(3)-0.5));
+          R(iy,iz,ix,1) = 0.01*EXP(dcmplx(0,rn(1)-0.5));  R(iy,iz,ix,2) = 0.01*EXP(dcmplx(0,rn(2)-0.5));  R(iy,iz,ix,3) = 0.01*EXP(dcmplx(0,rn(3)-0.5));
       END DO;        END DO;        END DO
       IF (has_average) THEN
         DO CONCURRENT (iy=ny0-2:nyN+2)
@@ -676,29 +776,31 @@ MODULE dnsdata
   !-------------------- save_restart_file -----------------------!
   SUBROUTINE save_restart_file(filename,R)
     complex(C_DOUBLE_COMPLEX), intent(in) :: R(ny0-2:nyN+2,-nz:nz,nx0:nxN,1:3)
-    integer(C_SIZE_T) :: iV,ix,iz,nxB_t,nx_t,nz_t,ny_t,iproc_t,br=8,bc=16,b1=1,b7=7,b3=3
-    integer(C_SIZE_T) :: pos,i
-    character(len=40) :: filename
-    DO i=0,nproc-1
-      IF (i==iproc) THEN
-        OPEN(UNIT=100,FILE=TRIM(filename),access="stream",action="write")
-        nx_t=nx+1; ny_t=ny+3; nz_t=2*nz+1; iproc_t=iproc; nxB_t=nxB
-        IF (has_terminal) WRITE(UNIT=100,POS=1) nx,ny,nz,alfa0,beta0,ni,a,ymin,ymax,time
-        DO iV=1,3 ! XXX TODO Use MPI I/O for parallel read/write
-          DO ix=nx0,nxN
-            DO iz=-nz,nz
-              pos=b1+(br*b7+b3*SIZEOF(nx))+bc*(INT(iV,C_SIZE_T)-b1)*(ny_t*nz_t*nx_t) + & 
-                  bc*(INT(ix,C_SIZE_T))*nz_t*ny_t + & 
-                  bc*(INT(iz,C_SIZE_T)+INT(nz,C_SIZE_T))*ny_t + &
-                  bc*(INT(miny,C_SIZE_T)+b1)
-              WRITE(100,POS=pos) R(miny:maxy,iz,ix,iV)
-            END DO
-          END DO
-        END DO
-        CLOSE(100)
-      END IF
-      CALL MPI_Barrier(MPI_COMM_WORLD)
-    END DO
+    character(len=40), intent(in) :: filename
+    ! mpi stuff
+    TYPE(MPI_File) :: fh
+    INTEGER(MPI_OFFSET_KIND) :: disp 
+    TYPE(MPI_Status) :: status
+    
+    ! open file
+    CALL MPI_File_open(MPI_COMM_WORLD, TRIM(filename), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh) 
+
+    ! write header
+    IF (has_terminal) THEN ! only one process does this
+      CALL MPI_file_write(fh, [nx,ny,nz], 3, MPI_INTEGER, status)
+      CALL MPI_file_write(fh, [alfa0,beta0,ni,a,ymin,ymax,time], 7, MPI_DOUBLE_PRECISION, status)
+    END IF
+
+    ! set view to subarray
+    disp = 3*C_INT + 7*C_DOUBLE ! offset to skip header
+    CALL MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, writeview_type, 'native', MPI_INFO_NULL)
+
+    ! finally write field
+    CALL MPI_File_write_all(fh, R, 1, owned2write_type, status)
+
+    ! close file
+    call MPI_File_close(fh)
+
   END SUBROUTINE save_restart_file
 
 
@@ -719,42 +821,93 @@ MODULE dnsdata
        dudy(1,2)=-sum(d14n(-2:2)*dreal(V(ny-3:ny+1,0,0,1))); dudy(2,2)=-sum(d14n(-2:2)*dreal(V(ny-3:ny+1,0,0,3)))
        CALL MPI_ISend(dudy(1:2,2),2,MPI_DOUBLE_PRECISION,0,TAG_DUDY,MPI_COMM_Y,Rs)
      END IF
-     IF (ipy==0) THEN 
+     IF (ipy==0) THEN
        dudy(1,1)=sum(d140(-2:2)*dreal(V(-1:3,0,0,1)));       dudy(2,1)=sum(d140(-2:2)*dreal(V(-1:3,0,0,3)))
        CALL MPI_IRecv(dudy(1:2,2),2,MPI_DOUBLE_PRECISION,npy-1,TAG_DUDY,MPI_COMM_Y,Rr)
-       CALL MPI_Wait(Rr,S)
+       CALL MPI_Wait(Rr,S);
      END IF
+     IF (ipy==npy-1) CALL MPI_Wait(Rs,S)
    END IF
    IF (has_terminal) THEN
-     WRITE(*,"(F6.4,3X,4(F11.6,3X),4(F9.4,3X),2(F9.6,3X))") &
+     WRITE(*,"(F10.4,3X,4(F11.6,3X),4(F9.4,3X),2(F9.6,3X))") &
            time,dudy(1,1),dudy(1,2),dudy(2,1),dudy(2,2),fr(1)+corrpx*fr(3),meanpx+corrpx,fr(2)+corrpz*fr(3),meanpz+corrpz,runtime_global*deltat,deltat
      WRITE(101,*) time,dudy(1,1),dudy(1,2),dudy(2,1),dudy(2,2),fr(1)+corrpx*fr(3),meanpx+corrpx,fr(2)+corrpz*fr(3),meanpz+corrpz,runtime_global*deltat,deltat
+     FLUSH(101)
    END IF
    runtime_global=0
-   !Save Dati.cart.out
-   IF ( ((FLOOR((time+0.5*deltat)/dt_save) > FLOOR((time-0.5*deltat)/dt_save)) .AND. (istep>1)) .OR. istep==nstep ) THEN
-     IF (has_terminal) WRITE(*,*) "Writing Dati.cart.out at time ", time
-     filename="Dati.cart.out";  CALL save_restart_file(filename,V)
+   IF (dt_save > 0) THEN ! save restart file
+     IF ( ((FLOOR((time+0.5*deltat)/dt_save) > FLOOR((time-0.5*deltat)/dt_save)) .AND. (istep>1))) THEN
+       IF (has_terminal) WRITE(*,*) "Writing Dati.cart.out at time ", time
+       filename="Dati.cart.out";  CALL save_restart_file(filename,V)
+     END IF
 #ifdef ibm
-     IF (has_terminal) WRITE(*,*) "Writing dUint.cart.out at time ", time
-     filename="dUint.cart.out"; CALL save_body_file(filename,dUint(:,:,:,:,0))
-#endif 
-   END IF
-   IF ( (FLOOR((time+0.5*deltat)/dt_field) > FLOOR((time-0.5*deltat)/dt_field)) .AND. (time>time0) ) THEN
-     ifield=ifield+1; WRITE(istring,*) ifield
-     IF (has_terminal) WRITE(*,*) "Writing Dati.cart."//TRIM(ADJUSTL(istring))//".out at time ", time
-     filename="Dati.cart."//TRIM(ADJUSTL(istring))//".out"; CALL save_restart_file(filename,V)
+     IF ( ((FLOOR((time+0.5*deltat)/dt_save) > FLOOR((time-0.5*deltat)/dt_save)) .AND. (istep>1))) THEN
+       IF (has_terminal) WRITE(*,*) "Writing dUint.cart.out at time ", time
+       filename="dUint.cart.out"; CALL save_body_file(filename,dUint(:,:,:,:,0))
+     END IF
+#endif
+   END IF ! end of saving restart file
+   ! Save i-th field
+   IF ( time+deltat >= (ifield+1)*dt_field ) THEN ! fast evaluation
+     IF ( prev_was_close .OR. ((FLOOR((time+0.5*deltat)/dt_field) > FLOOR((time-0.5*deltat)/dt_field)) .AND. (time>time0)) ) THEN ! accurate evaluation
+       ifield=ifield+1; WRITE(istring,*) ifield
+       IF (has_terminal) WRITE(*,*) "Writing Dati.cart."//TRIM(ADJUSTL(istring))//".out at time ", time
+       filename="Dati.cart."//TRIM(ADJUSTL(istring))//".out"; CALL save_restart_file(filename,V)
 #ifdef bodyforce
-     IF (has_terminal) WRITE(*,*) "Writing Force.cart."//TRIM(ADJUSTL(istring))//".out at time ", time
-     filename="Force.cart."//TRIM(ADJUSTL(istring))//".out"; CALL save_restart_file(filename,F)
+       IF (has_terminal) WRITE(*,*) "Writing Force.cart."//TRIM(ADJUSTL(istring))//".out at time ", time
+       filename="Force.cart."//TRIM(ADJUSTL(istring))//".out"; CALL save_restart_file(filename,F)
 #endif
 #ifdef convvel
-     IF (has_terminal) WRITE(*,*) "Writing Convvel.cart."//TRIM(ADJUSTL(istring))//".out at time ", time
-     uconv=uconv/convvel_cnt
-     filename="Convvel.cart."//TRIM(ADJUSTL(istring))//".out"; CALL save_convvel_file(filename,uconv)
-     uconv=0; convvel_cnt=0
+       IF (has_terminal) WRITE(*,*) "Writing Convvel.cart."//TRIM(ADJUSTL(istring))//".out at time ", time
+       uconv=uconv/convvel_cnt
+       filename="Convvel.cart."//TRIM(ADJUSTL(istring))//".out"; CALL save_convvel_file(filename,uconv)
+       uconv=0; convvel_cnt=0
 #endif
+       prev_was_close = .FALSE.
+     ELSE
+       prev_was_close = .TRUE.
+     END IF
    END IF
   END SUBROUTINE outstats
+
+
+  !--------------------------------------------------------------!
+  !------------------------- filedmap ---------------------------!
+  ! access a field on disk without loading it in memory
+  function fieldmap(unit, iy_zero, iz_zero, ix_zero, ic_zero) result(element)
+        integer, intent(in) :: unit, ix_zero, iy_zero, iz_zero, ic_zero
+        integer(C_SIZE_T) :: ix, iy, iz, ic
+        complex(C_DOUBLE_COMPLEX) :: element
+        integer(C_SIZE_T) :: position, el_idx ! position
+        integer :: base = 3*C_INT + 7*C_DOUBLE ! base address
+        
+        ! calculate indices starting from 1
+        ix = ix_zero + 1
+        iz = iz_zero + nz + 1
+        iy = iy_zero + 2
+        ic = ic_zero
+
+        ! calculate position
+        el_idx = (ic-1_C_SIZE_T)*(nx+1_C_SIZE_T)*(2_C_SIZE_T*nz+1_C_SIZE_T)*(ny+3_C_SIZE_T) + (ix-1_C_SIZE_T)*(2_C_SIZE_T*nz+1_C_SIZE_T)*(ny+3_C_SIZE_T) + (iz-1_C_SIZE_T)*(ny+3_C_SIZE_T) + iy
+        position = base + 1_C_SIZE_T + (el_idx - 1) * 2*C_DOUBLE_COMPLEX
+
+        ! read element
+        read(unit,pos=position) element
+
+    end function
+
+
+!--------------------------------------------------------------!
+!---------------------- wanna_continue ------------------------!
+! asks user whether to continue or not; possibly stops execution
+    SUBROUTINE wanna_continue()
+      character :: yn 
+
+      IF (has_terminal) THEN
+        WRITE(*,"(a,$)") "Do you want to continue? (y/n) "
+        READ(*,*) yn
+        IF (yn == 'n') STOP
+      END IF
+    END SUBROUTINE
 
 END MODULE dnsdata

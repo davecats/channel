@@ -1,0 +1,38 @@
+gamma=0
+USE ../dnsdata
+USE ../dnsdirect
+!USE rtchecks
+USE ../convenience
+
+! Parameters
+! -----------------------------
+INTEGER nfmin,nfmax,dn
+nfmin=atoi(COMMANDLINE(4))
+nfmax=atoi(COMMANDLINE(5))
+dn=atoi(COMMANDLINE(6))
+!------------------------------
+
+
+
+! Definitions
+! ------------------------------------
+#define cprod(f,g,h) h.REAL=f.REAL*g.REAL; h.IMAG=f.IMAG*g.IMAG
+#define cprod3(f,g,k,h) h.REAL=f.REAL*g.REAL*k.REAL; h.IMAG=f.IMAG*g.IMAG*k.IMAG
+SHARED ARRAY(0..nx,-nz..nz,nyl-2..nyh+2) OF COMPLEX pressure=0
+SHARED ARRAY(0..nx,-nz..nz,nyl-2..nyh+2) OF DERIVS Vder=0
+POINTER TO STORED ARRAY(0..nx,-nz..nz,nyl-2..nyh+2) OF COMPLEX pressuredata
+
+USE ../poisson
+
+! Compute the pressure field
+! ------------------------------------
+LOOP files FOR n=nfmin TO nfmax BY dn
+  STRING field_name = WRITE('Dati.cart.'n'.out')
+  read_field_fortran(field_name)
+  compute_pressure(Vder,pressure)
+  STRING pfield_name = WRITE('pField'n'.fld')
+  pressuredata = CREATE(pfield_name)
+  pressuredata(*,*,*)=pressure(*,*,*)
+  CLOSE(pressuredata)
+REPEAT files
+     

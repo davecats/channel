@@ -1,0 +1,200 @@
+! 
+! This module solves the poisson Equation and computes the fluctuating pressure field 
+! in a turbulent channel flow computed with channel.cpl. 
+! 
+! WARNING! If your DNS employs strange boundary condition, such as non zero velocity 
+! at the wall, you have to check if the present implementation still works for you.
+! In particular, the calcp0 and calcpn may change and, in some cases, become time-dependent.
+! 
+! The present implementation should work for:
+!     - a canonical channel
+!     - oscillating wall 
+! 
+
+! This program is parallel with both shared and distributed memory support. 
+
+! DERIVS = STRUCTURE(COMPLEX ux,uy,uz,vx,vy,vz,wx,wy,wz)
+! SHARED ARRAY(0..nx,-nz..nz,nyl-2..nyh+2) OF REAL p
+! SHARED ARRAY(0..nx,-nz..nz,nyl-2..nyh+2) OF DERIVS gradV
+
+SUBROUTINE compute_pressure(POINTER TO ARRAY(*,*,*) OF DERIVS gradV; POINTER TO ARRAY(*,*,*) OF COMPLEX p) FOLLOWS
+
+MODULE poisson
+
+SUBROUTINE compute_pressure(POINTER TO ARRAY(*,*,*) OF DERIVS gradV; POINTER TO ARRAY(*,*,*) OF COMPLEX p)
+
+! Both input (V) and output (pressure) are ARRAY(0..nx,-nz..nz,nyl-2..nyh+2) and are defined (globally) outside this subroutine
+! Velder=grad(V) is also retained as output, since in most postprocessing this is used.
+
+p=0 ! Necessary?
+gradV=0 ! Necessary?
+
+! Build Right Hand Side 
+! -----------------------------------------------
+
+! Definitions
+SHARED ARRAY(0..nx,-nz..nz,nyl-2..nyh+2) OF COMPLEX hp=0
+SHARED ARRAY(0..nxd-1,0..nzd-1) OF DERIVS gradVd=0
+SHARED ARRAY(0..nxd-1,0..nzd-1) OF COMPLEX hpd=0
+ARRAY(-1..0,-2..2) OF REAL EQ0
+ARRAY(ny..ny+1,-2..2) OF REAL EQn
+
+! Fourier coefficients of spatial derivatives
+LOOP FOR ix=0 TO nx
+    ialfa = I*alfa0*ix
+    LOOP FOR iz=-nz TO nz WITH gradV(ix,iz,*), V(ix,iz,*)
+      ibeta = I*beta0*iz
+      ux(*)=ialfa*u(*); vx(*)=ialfa*v(*); wx(*)=ialfa*w(*)
+      uz(*)=ibeta*u(*); vz(*)=ibeta*v(*); wz(*)=ibeta*w(*)
+      deriv(u(*).REAL,uy.REAL); deriv(u(*).IMAG,uy.IMAG)
+      deriv(v(*).REAL,vy.REAL); deriv(v(*).IMAG,vy.IMAG)
+      deriv(w(*).REAL,wy.REAL); deriv(w(*).IMAG,wy.IMAG)
+      LeftLUDivStep2(uy.REAL,D0mat); LeftLUDivStep2(uy.IMAG,D0mat)
+      LeftLUDivStep2(vy.REAL,D0mat); LeftLUDivStep2(vy.IMAG,D0mat)
+      LeftLUDivStep2(wy.REAL,D0mat); LeftLUDivStep2(wy.IMAG,D0mat)
+    REPEAT
+    FlushStep2
+REPEAT
+
+! Computing nonlinear terms
+PARALLEL LOOP FOR ismp=0 TO nsmp-1
+LOOP FOR iy=nyl-2 TO nyh+2
+    LOOP FOR ix=ismp*(nx+1) DIV nsmp TO (ismp+1)*(nx+1) DIV nsmp -1
+      gradVd(ix,0..nz)=gradV(ix,0..nz,iy)
+      gradVd(ix,nz+1..nzd-nz-1)=0
+      gradVd(ix,nzd+(-nz..-1))=gradV(ix,-nz..-1,iy)
+      WITH gradVd(ix,*): INLINE LOOP FOR iii IN (ux,uy,uz,vx,vy,vz,wx,wy,wz); IFTU(iii); REPEAT
+    REPEAT LOOP
+    IF ismp=0 THEN gradVd(nx+1..nxd-1)=0
+    SYNC(ismp,nsmp)
+    DO
+      WITH gradVd(*,iz): INLINE LOOP FOR iii IN (ux,uy,uz,vx,vy,vz,wx,wy,wz); RFTU(iii); REPEAT
+      DO WITH gradVd(ix,iz):
+        hpd(ix,iz).REAL = 2*(ux.REAL*vy.REAL+vy.REAL*wz.REAL+ux.REAL*wz.REAL-vx.REAL*uy.REAL-wx.REAL*uz.REAL-wy.REAL*vz.REAL)
+        hpd(ix,iz).IMAG = 2*(ux.IMAG*vy.IMAG+vy.IMAG*wz.IMAG+ux.IMAG*wz.IMAG-vx.IMAG*uy.IMAG-wx.IMAG*uz.IMAG-wy.IMAG*vz.IMAG)
+      FOR ALL ix
+      HFTU(hpd(*,iz)) 
+    FOR iz=ismp*(HI+1) DIV nsmp TO (ismp+1)*(HI+1) DIV nsmp -1
+    SYNC(ismp,nsmp)
+    DO 
+      FFTU(hpd(ix,*));
+      hp(ix,0..nz,iy) = hpd(ix,0..nz)
+      hp(ix,-nz..-1,iy) = hpd(ix,nzd+(-nz..-1))
+    FOR ix=ismp*(nx+1) DIV nsmp TO (ismp+1)*(nx+1) DIV nsmp -1
+    SYNC(ismp,nsmp)
+REPEAT
+REPEAT
+
+! Solving for coefficient (0,0) (Neumann problem)
+! -----------------------------------------------
+
+! Definitions
+ARRAY(-nz..nz,nyl..nyh+2,-2..2) OF REAL pmat=0
+! Build linear system
+LOOP FOR iy=nyl TO nyh AND i=-2 TO 2 WITH derivatives(iy):
+      pmat(0,iy,i) =  d2(i)               
+      p(0,0,iy) = ~+d0(i)*hp(0,0,iy+i)
+REPEAT
+! Boundary conditions
+IF first THEN
+      ! dp/dy|wall=NSEv|wall
+      EQ0(-1,-2..2)=d140(-2..2); p(0,0,-1) = ni*[SUM d240(i)*V(0,0,i+1).v FOR i=-2 TO 2]
+      ! Poisson eq. at the wall
+      EQ0( 0,-2..2)=d240(-2..2); p(0,0,0)=hp(0,0,0)
+      ! EQ(0)=EQ(0)-EQ(-1)*EQ(0,-2)/EQ(-1,-2)
+      p(0,0,0)=~-p(0,0,-1)*EQ0( 0,-2)/EQ0(-1,-2);   DO  EQ0(  0,i)=~-EQ0(-1,i)*EQ0(   0,-2)/EQ0(-1,-2) FOR i=2 DOWN TO -2; EQ0(0,-2)=0       
+      ! EQ(1)=EQ(1)-EQ(-1)*EQ(1,-2)/EQ(-1,-2)
+      p(0,0,1)=~-p(0,0,-1)*pmat(0,1,-2)/EQ0(-1,-2); DO pmat(0,1,i)=~-EQ0(-1,i)*pmat(0,1,-2)/EQ0(-1,-2) FOR i=2 DOWN TO -2; pmat(0,1,-2)=0      
+      ! EQ(1)=EQ(1)-EQ(0)*EQ(1,-1)/EQ(0,-1)
+      p(0,0,1)=~-p(0,0, 0)*pmat(0,1,-1)/EQ0( 0,-1); DO pmat(0,1,i)=~-EQ0( 0,i)*pmat(0,1,-1)/EQ0( 0,-1) FOR i=2 DOWN TO -2; pmat(0,1,-1)=0        
+      ! EQ(2)=EQ(2)-EQ(0)*EQ(2,-2)/EQ(0,-1)
+      p(0,0,2)=~-p(0,0, 0)*pmat(0,2,-2)/EQ0( 0,-1); DO pmat(0,2,i)=~-EQ0( 0,i+1)*pmat(0,2,-2)/EQ0( 0,-1) FOR i=1 DOWN TO -2; pmat(0,2,-2)=0
+END IF 
+IF last THEN
+      ! p(ny)=0 
+      p(0,0,ny)=0
+      ! d4 p(ny-1)/dy4 = 0 
+      WITH derivatives(ny-1): EQn(ny+1,-2..2)=d4(-2..2); p(0,0,ny+1)=0
+      ! EQ(ny-1)=EQ(ny-1)-EQ(ny+1)*EQ(ny-1,2)/EQ(ny+1,2) 
+      DO pmat(0,ny-1,i)=~-EQn(ny+1,i)*pmat(0,ny-1,2)/EQn(ny+1,2) FOR ALL i    
+      ! EQ(ny-1)=EQ(ny-1)-EQ(ny)*EQ(ny-1,1)/EQ(ny,1)
+      p(0,0,ny-1)=~-p(0,0,ny)*pmat(0,ny-1,1); pmat(0,ny-1,1)=0
+      ! EQ(ny-2)=EQ(ny-2)-EQ(ny)*EQ(ny-2,2)/EQ(ny,1)
+      p(0,0,ny-2)=~-p(0,0,ny)*pmat(0,ny-2,2); pmat(0,ny-2,2)=0
+END IF 
+! Solve
+LUdecompStep pmat(0); LeftLUDivStep1(p(0,0,*).REAL,pmat(0),p(0,0,*).REAL); LeftLUDivStep1(p(0,0,*).IMAG,pmat(0),p(0,0,*).IMAG); FlushStep1; 
+                      LeftLUDivStep2(p(0,0,*).IMAG,pmat(0));               LeftLUDivStep2(p(0,0,*).REAL,pmat(0));               FlushStep2;
+! Recover pressure at boundaries
+IF first THEN 
+     p(0,0, 0)=[p(0,0, 0) - SUM (EQ0( 0,i)*p(0,0,i+1)) FOR i= 0 TO 2]/EQ0( 0,-1)
+     p(0,0,-1)=[p(0,0,-1) - SUM (EQ0(-1,i)*p(0,0,i+1)) FOR i=-1 TO 2]/EQ0(-1,-2) 
+END IF
+IF last THEN
+     p(0,0,ny+1)=[~ - SUM (EQn(ny+1,i)*p(0,0,ny-1+i)) FOR i=-2 TO 1 ]/EQn(ny+1,2)
+END IF
+
+! Solving for coefficient (alfa,beta) (Dirihclet problem)
+! -----------------------------------------------
+! Compute pressure at boundaries using NSEu/x+NSEw/z
+IF first THEN
+PARALLEL LOOP FOR ismp=0 TO nsmp-1
+   LOOP FOR ix=ismp*(nx+1) DIV nsmp TO (ismp+1)*(nx+1) DIV nsmp -1 AND ALL iz EXCEPT ix=0 AND iz=0
+     p(ix,iz,0)=calcp0(ix,iz); p(ix,iz,-1)=0
+   REPEAT
+REPEAT
+WITH derivatives(1): EQ0(-1,-2..2)=d4(-2..2) !bc
+END IF
+IF last THEN
+PARALLEL LOOP FOR ismp=0 TO nsmp-1
+   LOOP FOR ix=ismp*(nx+1) DIV nsmp TO (ismp+1)*(nx+1) DIV nsmp -1 AND ALL iz EXCEPT ix=0 AND iz=0
+     p(ix,iz,ny)=calcpn(ix,iz); p(ix,iz,ny+1)=0
+   REPEAT
+REPEAT
+WITH derivatives(ny-1): EQn(ny+1,-2..2)=d4(-2..2) !bc
+END IF
+! Build linear system
+LOOP FOR ix=0 TO nx
+      alfa = alfa0*ix
+      LOOP FOR ALL iz EXCEPT ix=0 AND iz=0
+          beta = beta0*iz; k2 = alfa^2 + beta^2
+          LOOP FOR iy=nyl TO nyh AND i=-2 TO 2 WITH derivatives(iy):
+              pmat(iz,iy,i) = d2(i) - k2*d0(i)
+              p(ix,iz,iy) = ~+d0(i)*hp(ix,iz,iy+i)
+          REPEAT 
+          ! Boundary condition
+          IF first THEN 
+            ! EQ(1)=EQ(1)-EQ(-1)*EQ(1,-2)/EQ(-1,-2)
+            DO pmat(iz,1,i)=~-EQ0(-1,i)*pmat(iz,1,-2)/EQ0(-1,-2) FOR i=2 DOWN TO -2     
+            ! EQ(1)=EQ(1)-EQ(0)*EQ(1,-1)/EQ(0,-1)
+            p(ix,iz,1   )=~-p(ix,iz, 0)*pmat(iz,1,-1);  pmat(iz,1,-1)=0
+            ! EQ(2)=EQ(2)-EQ(0)*EQ(2,-2)/EQ(0,-1)
+            p(ix,iz,2   )=~-p(ix,iz, 0)*pmat(iz,2,-2);  pmat(iz,2,-2)=0
+          END IF
+          IF last THEN 
+            ! EQ(ny-1)=EQ(ny-1)-EQ(ny+1)*EQ(ny-1,2)/EQ(ny+1,2) 
+            DO pmat(iz,ny-1,i)=~-EQn(ny+1,i)*pmat(iz,ny-1,2)/EQn(ny+1,2) FOR ALL i    
+            ! EQ(ny-1)=EQ(ny-1)-EQ(ny)*EQ(ny-1,1)/EQ(ny,1)
+            p(ix,iz,ny-1)=~-p(ix,iz,ny)*pmat(iz,ny-1,1); pmat(iz,ny-1,1)=0
+            ! EQ(ny-2)=EQ(ny-2)-EQ(ny)*EQ(ny-2,2)/EQ(ny,1)
+            p(ix,iz,ny-2)=~-p(ix,iz,ny)*pmat(iz,ny-2,2); pmat(iz,ny-2,2)=0
+          END IF
+          LUdecompStep pmat(iz); LeftLUDivStep1(p(ix,iz,*).REAL,pmat(iz),p(ix,iz,*).REAL); LeftLUDivStep1(p(ix,iz,*).IMAG,pmat(iz),p(ix,iz,*).IMAG)
+      REPEAT
+      FlushStep1
+      LOOP FOR ALL iz EXCEPT ix=0 AND iz=0
+          LeftLUDivStep2(p(ix,iz,*).REAL,pmat(iz)); LeftLUDivStep2(p(ix,iz,*).IMAG,pmat(iz)); 
+          ! Recover pressure at boundaries
+          IF first THEN 
+            p(ix,iz,  -1)=-[SUM EQ0(  -1,i)*p(ix,iz,i+1)    FOR i=-1 TO 2]/EQ0(-1,-2)
+          END IF
+          IF last THEN
+            p(ix,iz,ny+1)=-[SUM EQn(ny+1,i)*p(ix,iz,ny-1+i) FOR i=-2 TO 1 ]/EQn(ny+1,2)
+          END IF
+      REPEAT 
+      FlushStep2
+REPEAT
+
+END compute_pressure
+
+END poisson

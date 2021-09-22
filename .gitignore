@@ -1,3 +1,25 @@
+# Ignore all files without extension
+*
+!*.*
+!*/
+
+# Ignore Python cache
+__pycache__/
+*/__pycache__/
+*/*/__pycache__/
+*/*/*/__pycache__/
+*/*/*/*/__pycache__/
+
+# Ignore CPL cache
+.cpl/
+*/.cpl/
+*/*/.cpl/
+*/*/*/.cpl/
+*/*/*/*/.cpl/
+
+# Ignore compiled channel
+channel
+
 # Prerequisites
 *.d
 
@@ -43,6 +65,7 @@
 *.pdb
 
 # Kernel Module Compile Results
+*.pyc
 *.mod*
 *.cmd
 .tmp_versions/

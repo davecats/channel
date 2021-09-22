@@ -2,10 +2,10 @@
 
 ####
 F90 = mpifort
-FFTW_INC = /user/hi221/local/fftw-3.3.4/include/
-FFTW_LIB = /user/hi221/local/fftw-3.3.4/lib/
+FFTW_INC = /path/to/fftw-3.3.8/include/
+FFTW_LIB = /path/to/fftw-3.3.8/lib/
 # INTEL (uncomment following line for INTEL compiler)
-FLAGS = -cpp -Ofast -no-wrap-margina
+FLAGS = -cpp -Ofast -no-wrap-margin
 #FLAGS = -cpp -O0 -g -check all -fpe0 -warn -traceback -debug extended
 # GCC (uncomment following line for GCC compiler) 
 # FLAGS = -cpp -Ofast -malign-double -fall-intrinsics -ffree-line-length-none 
@@ -22,5 +22,3 @@ channel: $(OBJ) channel.o
 clean: 
 	rm *.mod *.o
 
-split: $(OBJ) split.o 
-	$(F90) $(flags) -o $@ $(OBJ) split.o $(libs)

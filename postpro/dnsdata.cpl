@@ -1,9 +1,25 @@
-!USE rtchecks
+! USE rtchecks
 USE fft
 USE rbmat
 USE parallel
 
-nsmp=4
+! parse nsmp from commandline; if not provided, defaults to 4
+INTEGER cntr = 1
+INTEGER tempnsp = 4 ! temporary value of nsmp, defaulting to 4
+LOOP parse_nsmp WHILE cntr<=COMMANDLINE.HI ! loop over arguments
+  IF COMMANDLINE(cntr)="--sh_mem_proc" OR COMMANDLINE(cntr)="-sh_mem_proc" THEN
+    IF cntr+1 > COMMANDLINE.HI THEN
+      WRITE "Error: not enough arguments for sh_mem_proc."
+      STOP
+    END IF
+    tempnsp = atoi(COMMANDLINE(cntr+1))
+    EXIT parse_nsmp
+  END IF
+  cntr = cntr+1
+REPEAT parse_nsmp
+! assign constant
+nsmp = tempnsp
+
 
 
 ! Parallel - initialization
@@ -39,12 +55,15 @@ SUBROUTINE read_initial_data
  READ FROM in_data alfa0,beta0
  READ FROM in_data ni; ni=1/ni; pr=1.0; gr=1.0 ! XXX ADD SCALAR SOONER OR LATER
  READ FROM in_data a, ymin, ymax
+ READ FROM in_data ! this ends previous line (the one of a, ymin, ymax)
+ READ FROM in_data ! this skips line of cpi
  READ FROM in_data meanpx, meanpz
  READ FROM in_data meanflowx, meanflowz
+ READ FROM in_data u0, un
  READ FROM in_data deltat, cflmax, time
  
  u_conv=0.0; w_conv=0.0
- u0=0.0; un=0.0; w0=0.0; wn=0.0; t0=0.0; tn=0.0
+ u0=-0.0; un=0.0; w0=0.0; wn=0.0; t0=0.0; tn=0.0
  t_max=100; time_from_restart=NO; dt_field=100; dt_save=100
  restart_file="Dati.cart.out"
  CLOSE in_data
@@ -190,12 +209,12 @@ SHARED ARRAY(0..nxd-1,0..nzd-1,0..4) OF MOMFLUX VVd
 #endif
 
 maxtimelevels=1
-rhstype=STRUCTURE(COMPLEX eta,D2v)
+!rhstype=STRUCTURE(COMPLEX eta,D2v)
 VETA=STRUCTURE(COMPLEX v,eta)
 SHARED ARRAY(0..nx,-nz..nz,nyl-2..nyh+2) OF VELOCITY V
-SHARED ARRAY(0..nx,-nz..nz,MAX(1,nyl-2)..MIN(ny-1,nyh+2),1..maxtimelevels) OF rhstype oldrhs
-SHARED rhstype memrhs(0..nx,-nz..nz,0..2)
-INLINE FUNCTION newrhs(INTEGER ix,iz,iy)=memrhs(ix,iz,(iy+1000)MOD(3))
+!SHARED ARRAY(0..nx,-nz..nz,MAX(1,nyl-2)..MIN(ny-1,nyh+2),1..maxtimelevels) OF rhstype oldrhs
+!SHARED rhstype memrhs(0..nx,-nz..nz,0..2)
+!INLINE FUNCTION newrhs(INTEGER ix,iz,iy)=memrhs(ix,iz,(iy+1000)MOD(3))
 INLINE FUNCTION imod(INTEGER iy)=(iy+1000)MOD(5)
 REAL u1zero=0, w1zero=0, phi1zero
 
@@ -206,8 +225,8 @@ REAL u1zero=0, w1zero=0, phi1zero
 
   SHARED ARRAY(0..nx,-nz..nz,nyl-2..nyh+2) OF COMPLEX phi
   SHARED ARRAY(0..nx,-nz..nz,MAX(1,nyl-2)..MIN(ny-1,nyh+2),1..maxtimelevels) OF COMPLEX oldphirhs
-  SHARED COMPLEX memphirhs(0..nx,-nz..nz,0..2)
-  INLINE FUNCTION newphirhs(INTEGER ix,iz,iy)=memphirhs(ix,iz,(iy+1000)MOD(3))
+  !SHARED COMPLEX memphirhs(0..nx,-nz..nz,0..2)
+  !INLINE FUNCTION newphirhs(INTEGER ix,iz,iy)=memphirhs(ix,iz,(iy+1000)MOD(3))
 #endif
 
 INTEGER ismp
@@ -239,10 +258,10 @@ POINTER TO STORED STRUCTURE(
 #endif
 
 INTEGER cont=0,outcont=1000
-FILE time_file; IF has_terminal THEN time_file=CREATE("Runtimedata")
-#ifdef scalar
- FILE scalar_file; IF has_terminal THEN scalar_file=CREATE("Scalardata")
-#endif
+!FILE time_file; IF has_terminal THEN time_file=CREATE("Runtimedata")
+!#ifdef scalar
+! FILE scalar_file; IF has_terminal THEN scalar_file=CREATE("Scalardata")
+!#endif
 INTEGER miny,maxy
 IF first THEN miny=nyl-2; maxy=nyh   ELSE miny=nyl
 IF last  THEN miny=nyl;   maxy=nyh+2 ELSE maxy=nyh
@@ -318,13 +337,13 @@ IF outcont>0 THEN
 	  WRITE time:1.9, u1zero:1.9, SUM -d14n(i)*V(0,0,ny-1+i).u.REAL FOR i=-2 TO 2 :1.9,
         	w1zero :1.9, SUM -d14n(i)*V(0,0,ny-1+i).w.REAL FOR i=-2 TO 2 :1.9,
 		flowx,px+corrpx,flowz,pz+corrpz,cflm*deltat,deltat,energy,diss
-	  WRITE TO time_file time:1.9,
-        	u1zero:1.9, SUM -d14n(i)*V(0,0,ny-1+i).u.REAL FOR i=-2 TO 2 :1.9,
-	        w1zero :1.9, SUM -d14n(i)*V(0,0,ny-1+i).w.REAL FOR i=-2 TO 2 :1.9,
-	        flowx,px+corrpx,flowz,pz+corrpz,cflm*deltat,deltat,energy,diss; FLUSH(time_file)
-#ifdef scalar
-		WRITE TO scalar_file time:1.9, phi1zero, (SUM d14n(i)*phi(0,0,ny-1+i).REAL FOR ALL i); FLUSH(scalar_file)
-#endif
+	  !WRITE TO time_file time:1.9,
+    !    	u1zero:1.9, SUM -d14n(i)*V(0,0,ny-1+i).u.REAL FOR i=-2 TO 2 :1.9,
+	  !      w1zero :1.9, SUM -d14n(i)*V(0,0,ny-1+i).w.REAL FOR i=-2 TO 2 :1.9,
+	  !      flowx,px+corrpx,flowz,pz+corrpz,cflm*deltat,deltat,energy,diss; FLUSH(time_file)
+!#ifdef scalar
+!		WRITE TO scalar_file time:1.9, phi1zero, (SUM d14n(i)*phi(0,0,ny-1+i).REAL FOR ALL i); FLUSH(scalar_file)
+!#endif
 	END IF
 END IF
 

@@ -22,10 +22,10 @@ IF last  THEN WITH derivs_standalone: d1(ny,*)=d14n;  d2(ny,*)=d24n;  d1(ny+1,*)
 
 SUBROUTINE ByteSwap(POINTER TO SINGLE xxx) FOLLOWS
 SUBROUTINE fourier2physical(ARRAY(*,*) OF COMPLEX plane; POINTER TO ARRAY(*,*) OF COMPLEX planed) FOLLOWS
-SUBROUTINE read_field_parallel(STRING field_name) FOLLOWS
-SUBROUTINE read_field_fortran(STRING field_name; POINTER TO ARRAY(*,*,*,*) OF COMPLEX R) FOLLOWS
-SUBROUTINE read_field(STRING field_name) FOLLOWS
-SUBROUTINE read_field_uvw(STRING field_name) FOLLOWS
+!SUBROUTINE read_field_parallel(STRING field_name) FOLLOWS
+SUBROUTINE read_field_fortran(STRING field_name) FOLLOWS
+!SUBROUTINE read_field(STRING field_name) FOLLOWS
+!SUBROUTINE read_field_uvw(STRING field_name) FOLLOWS
 SUBROUTINE velocity_gradient(POINTER TO ARRAY(*,*,*) OF DERIVS Vder) FOLLOWS
 SUBROUTINE deriv2(ARRAY(*) OF REAL f0,f2^) FOLLOWS
 REAL FUNCTION yintf(REAL f(*)) FOLLOWS
@@ -70,7 +70,7 @@ REAL FUNCTION yintf(REAL f(*))
   REPEAT
 END yintf
 
-SUBROUTINE read_field_fortran(STRING field_name; POINTER TO ARRAY(*,*,*,*) OF COMPLEX R)
+SUBROUTINE read_field_fortran(STRING field_name)
   IF has_terminal THEN WRITE "Reading field_file",field_name
   INTEGER sz=SIZEOF(INTEGER)*3+SIZEOF(REAL)*7
   POINTER TO STORED STRUCTURE(
@@ -81,64 +81,64 @@ SUBROUTINE read_field_fortran(STRING field_name; POINTER TO ARRAY(*,*,*,*) OF CO
   ARRAY(0..2,-nz..nz,-1..ny+1) OF COMPLEX fbuf
   DO WITH diskffield: 
     DO fbuf(i,*,*)=fieldfimage(i,ix,*,*) FOR i=0 TO 2
-    R(ix,-nz..nz,nyl-2..nyh+2,0)=fbuf(0,*,nyl-2..nyh+2)
-    R(ix,-nz..nz,nyl-2..nyh+2,1)=fbuf(1,*,nyl-2..nyh+2)
-    R(ix,-nz..nz,nyl-2..nyh+2,2)=fbuf(2,*,nyl-2..nyh+2)
+    V(ix,-nz..nz,nyl-2..nyh+2).u=fbuf(0,*,nyl-2..nyh+2)
+    V(ix,-nz..nz,nyl-2..nyh+2).v=fbuf(1,*,nyl-2..nyh+2)
+    V(ix,-nz..nz,nyl-2..nyh+2).w=fbuf(2,*,nyl-2..nyh+2)
   FOR ix=0 TO nx
 END read_field_fortran
 
-SUBROUTINE read_field_parallel(STRING field_name)
-  IF has_terminal THEN WRITE "Reading field_file",field_name
-  IF NOT first THEN READ FROM prev
-    diskfield=OPEN(field_name)
-    WITH diskfield:
-     V(0,0,*).u.REAL=uavimage(nyl-2..nyh+2)
-     V(0,0,*).w.REAL=wavimage(nyl-2..nyh+2)
-     LOOP FOR iy=nyl-2 TO nyh+2
-        DO V(ix,iz,iy).v=fieldimage(iy,ix,iz).v FOR ALL ix,iz EXCEPT ix=0 AND iz=0
-        DO V(ix,iz,iy).u=fieldimage(iy,ix,iz).eta FOR ALL ix,iz EXCEPT ix=0 AND iz=0
-     REPEAT LOOP
-     CLOSE diskfield
-  IF NOT last THEN WRITE TO next
-  vetaTOuvw
-  IF NOT first THEN READ FROM prev
-    diskfield=OPEN(field_name)
-    WITH diskfield:
-     V(0,0,*).u.REAL=uavimage(nyl-2..nyh+2)
-     V(0,0,*).w.REAL=wavimage(nyl-2..nyh+2)
-     CLOSE diskfield
-  IF NOT last THEN WRITE TO next
-END read_field_parallel
-
-SUBROUTINE read_field(STRING field_name)
-  IF has_terminal THEN WRITE "Reading field_file",field_name
-  IF NOT first THEN READ FROM prev
-    diskfield=OPEN(field_name)
-    WITH diskfield:
-     V(0,0,*).u.REAL=uavimage(nyl-2..nyh+2)
-     V(0,0,*).w.REAL=wavimage(nyl-2..nyh+2)
-     LOOP FOR iy=nyl-2 TO nyh+2
-        DO V(ix,iz,iy).v=fieldimage(iy,ix,iz).v FOR ALL ix,iz EXCEPT ix=0 AND iz=0
-        DO V(ix,iz,iy).u=fieldimage(iy,ix,iz).eta FOR ALL ix,iz EXCEPT ix=0 AND iz=0
-     REPEAT LOOP
-     CLOSE diskfield
-  IF NOT last THEN WRITE TO next
-END read_field
-
-SUBROUTINE read_field_uvw(STRING field_name)
-  WRITE "Reading field_file",field_name
-  diskfield=OPEN(field_name)
-  WITH diskfield
-    LOOP FOR iy = nyl-2 TO nyh+2
-      DO V(ix,*,iy).v=fieldimage(iy,ix,*).v; V(ix,*,iy).u=fieldimage(iy,ix,*).eta FOR ALL ix
-    REPEAT LOOP
-    V(0,0,*).u.REAL=uavimage(nyl-2..nyh+2)
-    V(0,0,*).w.REAL=wavimage(nyl-2..nyh+2)
-    vetaTOuvw
-    V(0,0,*).u.REAL=uavimage(nyl-2..nyh+2)
-    V(0,0,*).w.REAL=wavimage(nyl-2..nyh+2)
-  CLOSE diskfield
-END read_field_uvw
+!SUBROUTINE read_field_parallel(STRING field_name)
+!  IF has_terminal THEN WRITE "Reading field_file",field_name
+!  IF NOT first THEN READ FROM prev
+!    diskfield=OPEN(field_name)
+!    WITH diskfield:
+!     V(0,0,*).u.REAL=uavimage(nyl-2..nyh+2)
+!     V(0,0,*).w.REAL=wavimage(nyl-2..nyh+2)
+!     LOOP FOR iy=nyl-2 TO nyh+2
+!        DO V(ix,iz,iy).v=fieldimage(iy,ix,iz).v FOR ALL ix,iz EXCEPT ix=0 AND iz=0
+!        DO V(ix,iz,iy).u=fieldimage(iy,ix,iz).eta FOR ALL ix,iz EXCEPT ix=0 AND iz=0
+!     REPEAT LOOP
+!     CLOSE diskfield
+!  IF NOT last THEN WRITE TO next
+!  vetaTOuvw
+!  IF NOT first THEN READ FROM prev
+!    diskfield=OPEN(field_name)
+!    WITH diskfield:
+!     V(0,0,*).u.REAL=uavimage(nyl-2..nyh+2)
+!     V(0,0,*).w.REAL=wavimage(nyl-2..nyh+2)
+!     CLOSE diskfield
+!  IF NOT last THEN WRITE TO next
+!END read_field_parallel
+!
+!SUBROUTINE read_field(STRING field_name)
+!  IF has_terminal THEN WRITE "Reading field_file",field_name
+!  IF NOT first THEN READ FROM prev
+!    diskfield=OPEN(field_name)
+!    WITH diskfield:
+!     V(0,0,*).u.REAL=uavimage(nyl-2..nyh+2)
+!     V(0,0,*).w.REAL=wavimage(nyl-2..nyh+2)
+!     LOOP FOR iy=nyl-2 TO nyh+2
+!        DO V(ix,iz,iy).v=fieldimage(iy,ix,iz).v FOR ALL ix,iz EXCEPT ix=0 AND iz=0
+!        DO V(ix,iz,iy).u=fieldimage(iy,ix,iz).eta FOR ALL ix,iz EXCEPT ix=0 AND iz=0
+!     REPEAT LOOP
+!     CLOSE diskfield
+!  IF NOT last THEN WRITE TO next
+!END read_field
+!
+!SUBROUTINE read_field_uvw(STRING field_name)
+!  WRITE "Reading field_file",field_name
+!  diskfield=OPEN(field_name)
+!  WITH diskfield
+!    LOOP FOR iy = nyl-2 TO nyh+2
+!      DO V(ix,*,iy).v=fieldimage(iy,ix,*).v; V(ix,*,iy).u=fieldimage(iy,ix,*).eta FOR ALL ix
+!    REPEAT LOOP
+!    V(0,0,*).u.REAL=uavimage(nyl-2..nyh+2)
+!    V(0,0,*).w.REAL=wavimage(nyl-2..nyh+2)
+!    vetaTOuvw
+!    V(0,0,*).u.REAL=uavimage(nyl-2..nyh+2)
+!    V(0,0,*).w.REAL=wavimage(nyl-2..nyh+2)
+!  CLOSE diskfield
+!END read_field_uvw
 
 SUBROUTINE velocity_gradient(POINTER TO ARRAY(*,*,*) OF DERIVS Vder)
   LOOP FOR ix=0 TO nx
