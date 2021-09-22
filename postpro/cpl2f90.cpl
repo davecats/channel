@@ -60,13 +60,11 @@ SUBROUTINE read_cpl_out(STRING filename)
     ! in which case high wavenumbers are automatically 0
     V = 0
     fullfile = OPEN(filename); WITH fullfile:
-        LOOP FOR iz = -nz_in TO nz_in
-            LOOP FOR ix = 0 TO nx_in
-                LOOP FOR iy = nyl-2 TO nyh+2
-                    V(ix,iz,iy) = Vimage(iy,ix,iz)
-                REPEAT LOOP
-            REPEAT LOOP
-        REPEAT LOOP
+           LOOP FOR iy = nyl-2 TO nyh+2
+              ARRAY(0..nx_in,-nz_in..nz_in) OF VELOCITY readbufV
+              readbufV(*,*)=Vimage(iy,*,*)
+              DO V(ix,iz,iy)=readbufV(ix,iz) FOR ALL ix,iz
+           REPEAT LOOP
     CLOSE fullfile
 
     DO WITH V(0,0,iy): u=~+u_conv; w=~+w_conv FOR ALL iy
@@ -122,8 +120,12 @@ SUBROUTINE read_cpl_fld(STRING field_name)
         V(0,0,*).u.REAL=uavimage(nyl-2..nyh+2)
         V(0,0,*).w.REAL=wavimage(nyl-2..nyh+2)
         LOOP FOR iy=nyl-2 TO nyh+2
-           DO V(ix,iz,iy).v=fieldimage(iy,ix,iz).v FOR ix = 1 TO nx_in AND iz = -nz_in TO nz_in EXCEPT iz = 0 
-           DO V(ix,iz,iy).u=fieldimage(iy,ix,iz).eta FOR ix = 1 TO nx_in AND iz = -nz_in TO nz_in EXCEPT iz = 0 
+           ARRAY(0..nx_in,-nz_in..nz_in) OF VETA readbufVeta
+           readbufVeta(*,*) = fieldimage(iy,*,*)
+           DO 
+             V(ix,iz,iy).v = readbufVeta(ix,iz).v
+             V(ix,iz,iy).u = readbufVeta(ix,iz).eta
+           FOR ix=0 TO nx_in AND iz=-nz_in TO nz_in EXCEPT (ix=0 AND iz=0) 
         REPEAT LOOP
     CLOSE diskfield_old
 
