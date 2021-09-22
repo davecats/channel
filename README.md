@@ -8,7 +8,7 @@
 An exceptionally simple tool for Direct Numerical Simulation (DNS) of the incompressible Navier-Stokes equations 
 in cartesian geometry, adapted from the engine by [Luchini & Quadrio, J. Comp. Phys. (2006)](https://www.sciencedirect.com/science/article/pii/S0021999105002871?via%3Dihub) and designed under the "Keep It Simple, Stupid" principle.
 
-<img align="left" src="https://github.com/davecats/channel/blob/master/couette.png">
+<img align="left" src="https://github.com/davecats/channel/blob/master/cover_pic.png">
 <p> 
  <br/><br/><br/><br/><br/>
 Turbulent Couette flow <br/> at a friction Reynolds number of Reτ=500 <br/> 3 752 787 600 DoF</p>
