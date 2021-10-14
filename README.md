@@ -3,9 +3,12 @@
 > [Required dependencies](#dependencies)<br/>
 > [Download and compile](#compile)<br/>
 > [Preparing input files](#input)<br/>
-> &nbsp;&nbsp;&nbsp;&nbsp;[Important notice on restarting simulations](#notice_restart)<br/>
+> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;[Important notice on restarting simulations](#notice_restart)<br/>
 > [Parallelisation](#parallelisation)<br/>
 > [Running](#running)
+> [Output files](#output)
+> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;[Runtimedata](#notice_restart)<br/>
+> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;[Velocity fields (Dati.cart*.out)](#velocity_fields)<br/>
 
 An exceptionally simple tool for Direct Numerical Simulation (DNS) of the incompressible Navier-Stokes equations 
 in cartesian geometry, adapted from the engine by [Luchini & Quadrio, J. Comp. Phys. (2006)](https://www.sciencedirect.com/science/article/pii/S0021999105002871?via%3Dihub) and designed under the "Keep It Simple, Stupid" principle.
@@ -143,9 +146,37 @@ where *number_of_proc* is indeed the number of processes used for parallel execu
 > Hint: *nzd* is always a power of 2 multiplied by 3; no other prime factors appear.
 
  
-#### Quick note on needed input files
+<a name="output">
+ 
+## Output files
+ 
+The user starts the program channel in a generic directory; we will refer to this directory as _CWD_ (current working directory). This program stores all output files in CWD. These files are:
+- the _Runtimedata_ file
+- a series of _Dati.cart.ii.out_ files
+- additional files, depending on conditional formatting (missing doc; for instance, immersed boundaries or body-forcing terms)
+- a new version of _Dati.cart.out_ which overwrites the one used to start the simulation; keep in mind that this is actually an input file. The new _Dati.cart.out_ contains the last instant of time of the simulation, and gets written __only if maximum time (t_max) or maximum iterations (n_max) are reached__. Also read [this](#notice_restart).
 
+<a name="runtimedata">
 
+### Runtimedata
+
+_Runtimedata_ is an ASCII file that gets written at each timestep; every line corresponds to an instant of time. Every column contains instead a different physical quantity. The column can be summarised as:
+```
+ time, dudy_bottom, dudy_top, dwdy_bottom, dwdy_top, fr_x, dpdx, fr_z, dpdz, XXX, deltat
+```
+Here we separated names by commas, but values in _Runtimedata_ are actually only separated by spaces/tabs.
+- _time_ quite obviously is the simulation time; units inferred from dns.in.
+- *dudy_xxx* and *dwdy_xxx* refer to the wall-normal gradients of the stream-wise (u) or span-wise (w) velocity components respectively; top and bottom correspond to the two different walls.
+- *fr_xxx* refers to the flow rate in the stream- (x) or span-wise direction.
+- _dpdx_ and _dpdz_ are the pressure gradients in the stream- and span-wise directions respectively.
+- XXX I don't know what this is, seriously. FIXME
+- _deltat_ is the difference between the __next__ time (the time of the next line) and the current one.
+
+<a name="velocity_fields">
+
+### Velocity fields (Dati.cart*.out)
+
+_Dati.cart.out_ and all the _Dati.cart.ii.out_ files are binary. They contain a header and a velocity field.
 
 ## Contacts
 
