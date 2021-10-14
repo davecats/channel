@@ -3,8 +3,8 @@
 > [Required dependencies](#dependencies)<br/>
 > [Download and compile](#compile)<br/>
 > [Preparing input files](#input)<br/>
-> - [Important notice on restarting simulations](#notice_restart)<br/><br/>
-> [Parallelisation](#parallelisation)
+>     [Important notice on restarting simulations](#notice_restart)<br/>
+> [Parallelisation](#parallelisation)<br/>
 > [Running](#running)
 
 An exceptionally simple tool for Direct Numerical Simulation (DNS) of the incompressible Navier-Stokes equations 
@@ -64,7 +64,7 @@ We distinguish two use cases for this program. The user chooses one of these two
 1. A new simulation is started (*time_from_restart = .FALSE.*). In this case, the time of the simulation starts from zero. The initial condition is read from Dati.cart.out; if this file is absent, a initial condition is generated.
 2. An old simulation is continued (*time_from_restart = .TRUE.*). The time of this new run starts from the last time of the previous run, which is read from Dati.cart.out. Also, the last velocity field of the previous run is read from Dati.cart.out, which will be used as the first velocity field of this new run.
  
-In essence, **_Dati.cart.out_ always contains the initial field for the current run, also when an old simulation is continued**. As for *Runtimedata*, any *Runtimedata* file present in the directory where channel is called is overwritten, if *time_from_restart* is false (case 1). Otherwise (case 2, *time_from_restart = .TRUE.*), new timesteps will be appended at the end of the file if it exists; a new one will be create if it doesn't. Notice that Runtimedata is an output file containing simple statistics for each timestep; read more about it in the output section. **Please make sure to read the [notice about restarting a simulation](#notice_restart), as it contains useful information for both Dati.cart.out and Runtimedata.
+In essence, **_Dati.cart.out_ always contains the initial field for the current run, also when an old simulation is continued**. As for *Runtimedata*, any *Runtimedata* file present in the directory where channel is called is overwritten, if *time_from_restart* is false (case 1). Otherwise (case 2, *time_from_restart = .TRUE.*), new timesteps will be appended at the end of the file if it exists; a new one will be create if it doesn't. Notice that Runtimedata is an output file containing simple statistics for each timestep; read more about it in the output section. **Please make sure to read the [notice about restarting a simulation](#notice_restart), as it contains useful information for both Dati.cart.out and Runtimedata.**
  
 A file `dns.in` must be present in the directory `channel` is called from. Its structure needs to be something like this:
 
