@@ -3,7 +3,7 @@
 > [Required dependencies](#dependencies)<br/>
 > [Download and compile](#compile)<br/>
 > [Preparing input files](#input)<br/>
->     [Important notice on restarting simulations](#notice_restart)<br/>
+> &nbsp;[Important notice on restarting simulations](#notice_restart)<br/>
 > [Parallelisation](#parallelisation)<br/>
 > [Running](#running)
 
