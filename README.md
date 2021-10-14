@@ -3,6 +3,7 @@
 > [Required dependencies](#dependencies)<br/>
 > [Download and compile](#compile)<br/>
 > [Preparing input files](#input)<br/>
+>> [Important notice on restarting simulations](#notice_restart)<br/>
 > [Running](#running)
 
 An exceptionally simple tool for Direct Numerical Simulation (DNS) of the incompressible Navier-Stokes equations 
@@ -52,6 +53,18 @@ You may want to edit the *Makefile* and change the MPI/Fortran compiler, the opt
 
 ## Input files
 
+The directory in which _channel_ is called must contain the following files:
+
+- `dns.in` (always)
+- `Dati.cart.out` (contains initial conditions, always needed; if absent, initial conditions are generated)
+- `Runtimedata` (optional; this is actually an output file)
+
+We distinguish two use cases for this program. The user chooses one of these two cases with a boolean value *time_from_restart* in dns.in (see end of section).
+1. A new simulation is started (*time_from_restart = .FALSE.*). In this case, the time of the simulation starts from zero. The initial condition is read from Dati.cart.out; if this file is absent, a initial condition is generated.
+2. An old simulation is continued (*time_from_restart = .TRUE.*). The time of this new run starts from the last time of the previous run, which is read from Dati.cart.out. Also, the last velocity field of the previous run is read from Dati.cart.out, which will be used as the first velocity field of this new run.
+ 
+In essence, **_Dati.cart.out_ always contains the initial field for the current run, also when an old simulation is continued**. As for *Runtimedata*, any *Runtimedata* file present in the directory where channel is called is overwritten, if *time_from_restart* is false (case 1). Otherwise (case 2, *time_from_restart = .TRUE.*), new timesteps will be appended at the end of the file if it exists; a new one will be create if it doesn't. Notice that Runtimedata is an output file containing simple statistics for each timestep; read more about it in the output section. **Please make sure to read the [notice about restarting a simulation](#notice_restart), as it contains useful information for both Dati.cart.out and Runtimedata.
+ 
 A file `dns.in` must be present in the directory `channel` is called from. Its structure needs to be something like this:
 
 ```FORTRAN
@@ -66,6 +79,7 @@ A file `dns.in` must be present in the directory `channel` is called from. Its s
 0.00d0 1.0d0 0.0d0              ! deltat, cflmax, t0
 30.d0 30.d0 7000.d0 .TRUE.      ! dt_field, dt_save, t_max, time_from_restart
 999999                          ! nstep
+12                              ! npy
 ```
 - *nx* and *ny* are the number of modes in the statistically homogeneous x and z directions respectively. The corrisponding number of wavenumber is _2nx+1_ and _2nz+1_ (counting zero and doubling the numbers as there are both positive and negative wavenumbers); however, the actual number of x-modes stored in memory is _nx+1_ thanks to the Fourier transform of a real velocity field being Hermitian.
 - *ny* is the number of points in the wall-normal y direction; the actual number of points, including walls, will be _ny+1_. However, the number of y points stored in memory is _ny+3_ due to the presence of ghost cells.
@@ -86,32 +100,51 @@ A file `dns.in` must be present in the directory `channel` is called from. Its s
 - *dt_save* specifies after how many time units a restart file `Dati.cart.out` is generated. This __cannot__ be used to calculate statistics.
 - *time_from_restart* is a boolean flag. If false, the restart file `Dati.cart.out` is used as the initial condition for the simulation, and the value *t0* is used as the initial value of time. If true, the initial value of time is read from the restart file.
 - *tmax* and *nstep* specify respectively the final value of time and the maximum number of steps that one wants to achieve in a given run. After either of these two trhesholds is reached, execution is terminated.
+- *npy* indicates in how many chunks the domain is divided in the y direction for parallelisation. See [parallelisation](#parallelisation).
 
+<a name="notice_restart">
+ 
+### Important notice on restarting a simulation
 
+When the program reaches the maximum time or the maximum number of steps (which are specified in dns.in), execution is interrupted and the last instant of time of the simulation is written to *Dati.cart.out*. So, if the previous simulation did reach maximum time or maximum iterations, the simulation can be restarted by just changing *time_from_restart* to .TRUE. in dns.in (also possibly increasing t_max in dns.in). The user does not have to manually modify *Dati.cart.out*.
+ 
+However, if the previous run of the simulation did not reach either of the maximum time of the maximum iterations (for instance, if the simulation was stopped with CTRL+C or because of the wall-time limit on a cluster), the program will not update *Dati.cart.out* - which will remain the one of the previous simulation. 
+So, if the user does not change *Dati.cart.out*, the new run will be in fact a repetition of the previous run. To avoid this, it is suggested that the user copies the last valid *Dati.cart.xx.out* to *Dati.cart.out* (making sure that such file is not corrupted, which is, that execution wasn't stopped while such file was being written). The simulation will start then from the time of *Dati.cart.xx.out*; we will call this time *Tx*.
+ 
+Notice that the *Runtimedata* file will contain data about timesteps which come after *Tx* (because *Runtimedata* is written at each time step, and the previous run most likely performed quite some time steps after writing *Dati.cart.xx.out*). The program automatically recognises this: data at times greater than *Tx* are deleted from *Runtimedata*, and then the program simply continues to append to such file as usual.
+  
+
+ 
+<a name="parallelisation">
+
+## Parallelisation
+
+This program is parallelised with distributed memory, meaning that computations are divided among different processes which communicate one with each other; each process has access to only a limited portion of data. More specifically, the simulation domain is divided into parts, each of which is given to a different process. Partitioning of the domain can be done:
+1. in the statistically homogeneous x and z directions (both wall-parallel);
+2. in the wall-normal direction y.
+The number of subdivisions in the x/z directions is stored in variable _npxz_; the number of subdivisions in the wall-normal direction y is instead stored in _npy_. The total number of processes is thus:
+```
+number_of_proc = npxz*npy
+```
+where _npy_ is specified in _dns.in_, whereas npxz is automatically calculated from the number of processes. The number of processes is specified when the program is called. See [input files](#input) and [running](#running).
+
+ 
 <a name="running">
 
 ## Running
 
 The main program _channel_ must be run with mpi, in the following fashion:
 ```bash
-mpirun -np number_of_cores /path/to/channel
+mpirun -np number_of_proc /path/to/channel
 ```
-where *number_of_cores* is indeed the number of cores used for parallel execution; it must be chosen so that _npxz_ is a divisor of _nx+1_ and _nzd_. While _nzd_ is printed out at the beginning of execution, _npxz_ can be found from *number_of_cores* with the following formula:
-```
-number_of_cores = npxz*npy
-```
-where _npy_ is defined in the file `mpi_transpose.f90` and is thus hardcoded. In a nutshell, two types of parallelisation are possible: in the statistically homogeneous directions x, z, and in the wall normal direction y. *npxz* specifies in how many subdivisions are performed for the parallelisation in x,z, while *npy* indicates the number of subdivisions in the y direction. Thus, the product of the two is the total number of parallel processes.
+where *number_of_proc* is indeed the number of processes used for parallel execution and must be specified by the user. The user thus specifies _npy_ and *number_of_proc*; the program thus calculates _npxz_ (see [parallelisation](#parallelisation) for more on *npxz* and *npy*). The total number of processes must be chosen so that _npxz_ is a divisor of _nx+1_ and _nzd_; _nzd_ is printed out at the beginning of execution.
 
 > Hint: *nzd* is always a power of 2 multiplied by 3; no other prime factors appear.
 
+ 
 #### Quick note on needed input files
 
-The directory in which _channel_ is called usually contains the following files:
-- `dns.in` (always)
-- `Dati.cart.out` (contains initial conditions; if absent, initial conditions are generated)
-- `Runtimedata` (optional)
 
-If *time_from_restart* is false, any *Runtimedata* file present in the directory where channel is called is overwritten. Otherwise, new timesteps will be appended at the end of file if it exists; a new one will be create if it doesn't.
 
 ## Contacts
 
