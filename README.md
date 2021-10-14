@@ -5,8 +5,8 @@
 > [Preparing input files](#input)<br/>
 > &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;[Important notice on restarting simulations](#notice_restart)<br/>
 > [Parallelisation](#parallelisation)<br/>
-> [Running](#running)
-> [Output files](#output)
+> [Running](#running)<br/>
+> [Output files](#output)<br/>
 > &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;[Runtimedata](#notice_restart)<br/>
 > &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;[Velocity fields (Dati.cart*.out)](#velocity_fields)<br/>
 
