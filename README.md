@@ -3,7 +3,8 @@
 > [Required dependencies](#dependencies)<br/>
 > [Download and compile](#compile)<br/>
 > [Preparing input files](#input)<br/>
->> [Important notice on restarting simulations](#notice_restart)<br/><br/>
+> - [Important notice on restarting simulations](#notice_restart)<br/><br/>
+> [Parallelisation](#parallelisation)
 > [Running](#running)
 
 An exceptionally simple tool for Direct Numerical Simulation (DNS) of the incompressible Navier-Stokes equations 
