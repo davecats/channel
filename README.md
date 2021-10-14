@@ -177,6 +177,14 @@ Here we separated names by commas, but values in _Runtimedata_ are actually only
 ### Velocity fields (Dati.cart*.out)
 
 _Dati.cart.out_ and all the _Dati.cart.ii.out_ files are binary. They contain a header and a velocity field.
+ 
+The header consists in 3 integers (_nx_, _ny_, _nz_) and seven double-precision floating point numbers (_alfa0_, _beta0_, _ni_, _a_, _ymin_, _ymax_, _time_). All of the variables dumped in the velocity-field-file are the same as dns.in, except for _time_, which indicates the simulation time of the velocity field being saved. Double-precision floating point numbers occupy 8 bytes each on disk; as for the integers, they usually take 4 bytes each. However, the size in bytes of an integer is not standardised, so it should be verified by the user for each machine/compiler. If indeed each integer takes 4 bytes on a given machine, the total length of the header is 68 bytes.
+ 
+As for the velocity field, it is a 4-dimensional array of double-precision complex numbers. Each complex number thus occupies 16 bytes on disk. As for the indexing, it holds:
+```FORTRAN
+V(iy,iz,ix,ic) ! FORTRAN order or column-major order 
+```
+The above is meant as FORTRAN ordering of the indices, meaning that _iy_ is the index that changes the fastest in memory. __BE CAREFUL__: if you are using C, or any other language that uses row-major order of the indices, the order of indices must be reversed, namely `V(ic,ix,iz,iy)`. The _iy_ index refers to the wall-normal (y) position in physical space, ix, iz refer to the stream- (x) and span-wise (z) Fourier modes.
 
 ## Contacts
 
