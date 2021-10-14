@@ -166,7 +166,7 @@ _Runtimedata_ is an ASCII file that gets written at each timestep; every line co
 ```
 Here we separated names by commas, but values in _Runtimedata_ are actually only separated by spaces/tabs.
 - _time_ quite obviously is the simulation time; units inferred from dns.in.
-- *dudy_xxx* and *dwdy_xxx* refer to the wall-normal gradients of the stream-wise (u) or span-wise (w) velocity components respectively; top and bottom correspond to the two different walls.
+- *dudy_xxx* and *dwdy_xxx* refer to the wall-normal gradients of the stream-wise (u) or span-wise (w) velocity components respectively; top and bottom correspond to the two different walls. Notice that data at the top wall is here changed in sign (so, at the top wall, -dudy is being written on Runtimedata).
 - *fr_xxx* refers to the flow rate in the stream- (x) or span-wise direction.
 - _dpdx_ and _dpdz_ are the pressure gradients in the stream- and span-wise directions respectively.
 - XXX I don't know what this is, seriously. FIXME
