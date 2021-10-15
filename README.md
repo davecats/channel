@@ -205,7 +205,7 @@ where ymin, ymax, a are defined in [dns.in](#input).
 > Re-defining index bounds is not always possible; for instance, if you are writing a Python script (or a C program) that reads output from this program, always remember that indices start from zero. Practically speaking, if you consider index iz, index `iz=-nz` in FORTRAN will be `iz=0` in C/Python; index `iz=nz` in FORTRAN will correspond to index `iz=2*nx` in C/Python.
 
  
-<a name"note_nxp1">
+<a name="note_nxp1">
 
 ### Why do we only store positive wavenumbers in the x direction?
  
