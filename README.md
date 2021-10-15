@@ -9,9 +9,10 @@
 > [Output files](#output)<br/>
 > &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;[Runtimedata](#notice_restart)<br/>
 > &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;[Velocity fields (Dati.cart*.out)](#velocity_fields)<br/>
-> [Domain](#domain)
-> [Postprocessing](#postpro)
-> [Advanced: conditional compiler flags](#condcomp)
+> [Domain](#domain)<br/>
+> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;[Why do we only store positive wavenumbers in the x direction?](#note_nxp1)<br/>
+> [Postprocessing](#postpro)<br/>
+> [Advanced: conditional compiler flags](#condcomp)<br/>
 
 An exceptionally simple tool for Direct Numerical Simulation (DNS) of the incompressible Navier-Stokes equations 
 in cartesian geometry, adapted from the engine by [Luchini & Quadrio, J. Comp. Phys. (2006)](https://www.sciencedirect.com/science/article/pii/S0021999105002871?via%3Dihub) and designed under the "Keep It Simple, Stupid" principle.
@@ -185,7 +186,7 @@ As for the velocity field, it is a 4-dimensional array of double-precision compl
  
 ## Domain and variables
  
-This code is spectral, which means that the variables of the simulation are Fourier-transformed in the stream- (x) and span-wise (z) directions. The domain is therefore three-dimensional; however, one dimension (the y-direction, wall-normal) refers to physical space, whereas the other two (x and z) refer to a Fourier domain. Consider for instance the velocity field; this is a four-dimensional array with indices:
+The simulation domain is three-dimensional; however, one dimension (the y-direction, wall-normal) refers to physical space, whereas the other two (x and z) refer to a Fourier domain. In other words, this code is spectral, as the unknowns of the simulation are Fourier-transformed in the stream- (x) and span-wise (z) directions. Consider for instance the velocity field; this is a four-dimensional array with indices:
 ```FORTRAN
 V(iy,iz,ix,ic) ! FORTRAN order or column-major order 
 ```
@@ -199,9 +200,16 @@ y(iy) = ymin * (ymax - ymin) * (tanh(i*a/ny - 1)/tanh(a) + 1)
 ```
 where ymin, ymax, a are defined in [dns.in](#input).
 
-> Disclaimer:
-> Bounds of indeces are custom-defined in this program. This means, that indeces of arrays do not always start from 1, as it is normal in FORTRAN; sometimes, they are redefined, so that indeces start from 0 or some negative integer.
+> Disclaimer:<br>
+> Bounds of indeces are custom-defined in this program. This means, that indeces of arrays do not always start from 1, as it is normal in FORTRAN; sometimes, they are redefined, so that indeces start from 0 or some negative integer.<br>
 > Re-defining index bounds is not always possible; for instance, if you are writing a Python script (or a C program) that reads output from this program, always remember that indices start from zero. Practically speaking, if you consider index iz, index `iz=-nz` in FORTRAN will be `iz=0` in C/Python; index `iz=nz` in FORTRAN will correspond to index `iz=2*nx` in C/Python.
+
+ 
+<a name"note_nxp1">
+
+### Why do we only store positive wavenumbers in the x direction?
+ 
+TODO
 
 ---
 <a name="postpro">
