@@ -9,6 +9,9 @@
 > [Output files](#output)<br/>
 > &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;[Runtimedata](#notice_restart)<br/>
 > &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;[Velocity fields (Dati.cart*.out)](#velocity_fields)<br/>
+> [Domain](#domain)
+> [Postprocessing](#postpro)
+> [Advanced: conditional compiler flags](#condcomp)
 
 An exceptionally simple tool for Direct Numerical Simulation (DNS) of the incompressible Navier-Stokes equations 
 in cartesian geometry, adapted from the engine by [Luchini & Quadrio, J. Comp. Phys. (2006)](https://www.sciencedirect.com/science/article/pii/S0021999105002871?via%3Dihub) and designed under the "Keep It Simple, Stupid" principle.
@@ -85,15 +88,10 @@ A file `dns.in` must be present in the directory `channel` is called from. Its s
 999999                          ! nstep
 12                              ! npy
 ```
-- *nx* and *ny* are the number of modes in the statistically homogeneous x and z directions respectively. The corrisponding number of wavenumber is _2nx+1_ and _2nz+1_ (counting zero and doubling the numbers as there are both positive and negative wavenumbers); however, the actual number of x-modes stored in memory is _nx+1_ thanks to the Fourier transform of a real velocity field being Hermitian.
-- *ny* is the number of points in the wall-normal y direction; the actual number of points, including walls, will be _ny+1_. However, the number of y points stored in memory is _ny+3_ due to the presence of ghost cells.
+- *nx* and *nz* are the number of modes in the statistically homogeneous x and z directions respectively. The corrisponding number of points in physical space used for simulation is _2nx+1_ and _2nz+1_; however, this code is spectral, so x and z directions are in a spectral domain. Hence, the actual number of x-modes stored in memory is _nx+1_ thanks to the Fourier transform of a real velocity field being Hermitian. The number of z-modes is still _2nz+1_. See [domain](#domain).
+- *ny* is the number of points in the wall-normal y direction; the actual number of points, including walls, will be _ny+1_. However, the number of y points stored in memory is _ny+3_ due to the presence of ghost cells. See [domain](#domain).
 - *ni* is the scaling Reynolds number at which the simulation is performed.
-- *ymin*, *ymax* specify the y coordinates of the walls; *a* is a parameter determining how points are distributed in the domain.
-
-<p align="center">
-  <img src="https://render.githubusercontent.com/render/math?math=y_i=y_{min}+(y_{max}-y_{min})\left(\frac{tanh(a\,i/ny-1))}{tanh(a)}+1\right)" />
-</p>
-
+- *ymin*, *ymax* specify the y coordinates of the walls; *a* is a parameter determining how points are distributed in the domain. See [domain](#domain).
 - *CPI* is a flag that activates (if true) or deactivates constant-power-input-like forcing; this option has been designed for Poiseuille flows (with still walls), thus it will provide wrong results if the walls are moving (Couette flow). *CPItype* specifies the type of CPI-like forcing. _CPI = 0_ corresponds to a standard constant power input; in this case, *gamma* represents the fraction of power passed to the control, while the user should specify the desired power input by setting *ni* to be the power Reynolds number as in [here](https://www.cambridge.org/core/journals/journal-of-fluid-mechanics/article/global-energy-fluxes-in-turbulent-channels-with-flow-control/288CE28A721734161742427A0989E28D). Otherwise, _CPI = 1_ provides a constant ratio between laminar dissipation and total power input; the definition for laminar dissipation can still be found [here](https://www.cambridge.org/core/journals/journal-of-fluid-mechanics/article/global-energy-fluxes-in-turbulent-channels-with-flow-control/288CE28A721734161742427A0989E28D). In such case, the value of laminar dissipation is provided as variable *gamma*; the Reynolds number is arbitrary
 - *meanpx* and *meanpz* prescribe a pressure gradient in the x and z directions; no pressure gradient is imposed if zero.
 - *meanflowx* and *meanflowz* prescribe a flow rate in the x and z directions; no flow rate is imposed if zero.
@@ -180,12 +178,46 @@ _Dati.cart.out_ and all the _Dati.cart.ii.out_ files are binary. They contain a 
  
 The header consists in 3 integers (_nx_, _ny_, _nz_) and seven double-precision floating point numbers (_alfa0_, _beta0_, _ni_, _a_, _ymin_, _ymax_, _time_). All of the variables dumped in the velocity-field-file are the same as dns.in, except for _time_, which indicates the simulation time of the velocity field being saved. Double-precision floating point numbers occupy 8 bytes each on disk; as for the integers, they usually take 4 bytes each. However, the size in bytes of an integer is not standardised, so it should be verified by the user for each machine/compiler. If indeed each integer takes 4 bytes on a given machine, the total length of the header is 68 bytes.
  
-As for the velocity field, it is a 4-dimensional array of double-precision complex numbers. Each complex number thus occupies 16 bytes on disk. As for the indexing, it holds:
+As for the velocity field, it is a 4-dimensional array of double-precision complex numbers. Each complex number thus occupies 16 bytes on disk. Please check section [domain](#domain) for info about the velocity field.
+ 
+
+<a name="domain">
+ 
+## Domain and variables
+ 
+This code is spectral, which means that the variables of the simulation are Fourier-transformed in the stream- (x) and span-wise (z) directions. The domain is therefore three-dimensional; however, one dimension (the y-direction, wall-normal) refers to physical space, whereas the other two (x and z) refer to a Fourier domain. Consider for instance the velocity field; this is a four-dimensional array with indices:
 ```FORTRAN
 V(iy,iz,ix,ic) ! FORTRAN order or column-major order 
 ```
 The above is meant as FORTRAN ordering of the indices, meaning that _iy_ is the index that changes the fastest in memory. __BE CAREFUL__: if you are using C, or any other language that uses row-major order of the indices, the order of indices must be reversed, namely `V(ic,ix,iz,iy)`. The _iy_ index refers to the wall-normal (y) position in physical space, ix, iz refer to the stream- (x) and span-wise (z) Fourier modes.
 
+1. Index _ix_ has dimension `nx+1` and bounds (0,nx); bounds are inclusive. Let _kx_ be the wavenumber ("Fourier variable") in the x direction; then, `kx=alfa0*ix`. For _alfa0_, see the [dns.in](#input).
+2. Index _iz_ has dimension `2*nz + 1` and bounds (-nz,nz); bounds are inclusive. Let _kz_ be the wavenumber ("Fourier variable") in the z direction; then, `kz=beta0*iz`. For _beta0_, see the [dns.in](#input).
+3. Index _iy_ has dimension ny+3 and bounds (-1,ny+1); bounds are inclusive. Points `iy=-1` and `iy=ny+1` correspond to ghost cells, whereas `iy=0` and `iy=ny` are the two walls of the channel, located at positions ymin and ymax respectively. In general, if y is the wall-normal spatial coordinate, it holds:
+```FORTRAN
+y(iy) = ymin * (ymax - ymin) * (tanh(i*a/ny - 1)/tanh(a) + 1)
+```
+where ymin, ymax, a are defined in [dns.in](#input).
+
+> Disclaimer:
+> Bounds of indeces are custom-defined in this program. This means, that indeces of arrays do not always start from 1, as it is normal in FORTRAN; sometimes, they are redefined, so that indeces start from 0 or some negative integer.
+> Re-defining index bounds is not always possible; for instance, if you are writing a Python script (or a C program) that reads output from this program, always remember that indices start from zero. Practically speaking, if you consider index iz, index `iz=-nz` in FORTRAN will be `iz=0` in C/Python; index `iz=nz` in FORTRAN will correspond to index `iz=2*nx` in C/Python.
+
+---
+<a name="postpro">
+ 
+## Post-processing
+
+TODO
+
+
+<a name="condcomp">
+ 
+## Advanced: conditional compiler flags
+
+TODO
+
+ 
 ## Contacts
 
 Dr. Davide Gatti  
