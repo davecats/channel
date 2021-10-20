@@ -196,7 +196,7 @@ The above is meant as FORTRAN ordering of the indices, meaning that _iy_ is the 
 2. Index _iz_ has dimension `2*nz + 1` and bounds (-nz,nz); bounds are inclusive. Let _kz_ be the wavenumber ("Fourier variable") in the z direction; then, `kz=beta0*iz`. For _beta0_, see the [dns.in](#input).
 3. Index _iy_ has dimension ny+3 and bounds (-1,ny+1); bounds are inclusive. Points `iy=-1` and `iy=ny+1` correspond to ghost cells, whereas `iy=0` and `iy=ny` are the two walls of the channel, located at positions ymin and ymax respectively. In general, if y is the wall-normal spatial coordinate, it holds:
 ```FORTRAN
-y(iy) = ymin * (ymax - ymin) * (tanh(i*a/ny - 1)/tanh(a) + 1)
+y(iy) = ymin + 0.5*(ymax-ymin)*(tanh(a*(2*iy/ny-1)) / tanh(a) + 1)
 ```
 where ymin, ymax, a are defined in [dns.in](#input).
 
