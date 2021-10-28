@@ -1,6 +1,8 @@
 ! THIS IS STILL BETA
 ! PROPER TESTING NEEDED
 
+! I think this reads dns.in of desired FORTRAN output. Double check this pls
+
 
 
 gamma=0

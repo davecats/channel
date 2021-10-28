@@ -1,5 +1,12 @@
+from warnings import warn
 import numpy as np
-import tactical as tct
+has_tactical = False
+try:
+    import tactical as tct
+    has_tactical = True
+except:
+    noTctWarn = Warning('Tactical is not installed. RAM size will not be checked; system might start swapping memory for big files.')
+    warn(noTctWarn)
 import channel as ch
 
 
