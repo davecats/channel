@@ -1,0 +1,217 @@
+gamma=0
+
+IF COMMANDLINE(1)="-h" THEN
+  WRITE "This is help for camstar.cpl."
+  WRITE ""
+  WRITE "Calculates amplitude modulation map of channel flow."
+  WRITE "The simulation files will be looked for in the parent ('../)"
+  WRITE "of the working directory this program is called from."
+  WRITE "Usage:"
+  WRITE ""
+  WRITE "   camstar [-h] 1 1 localhost nfmin nfmax dn"
+  WRITE ""
+  WRITE "A file 'camstar.in' must also be present in the working directory"
+  WRITE "when this program is called. See the template provided with"
+  WRITE "the source code."
+  WRITE ""
+  WRITE "Output will be written in the working directory."
+  WRITE "Output consists in CAMstar.bin and CAMstarxx.bin, where xx is"
+  WRITE "a number. The former contains averages, the latter istantaneous"
+  WRITE "values used to calculate the average. Both files are binary and"
+  WRITE "correspond to an array with indeces (iy2,iy1,i_cond,i_stat)."
+  WRITE "Indeces iy2 and iy1 are the position at which the large- and"
+  WRITE "small-scale signals are evaluated, respectively. Index i_cond"
+  WRITE "refers to conditioning: as per this program, 0 is a normal average,"
+  WRITE "1 is for positive and 2 for negative large-scale events."
+  WRITE "Index i_stat is instead referring to the statistic being calculated:"
+  WRITE "1 is the proper AM map, 2 and 3 are the autocorrelation of"
+  WRITE "small and large scales respectively."
+  WRITE ""
+  WRITE "Find more info on:"
+  WRITE "https://arxiv.org/abs/2109.09486"
+  WRITE ""
+  STOP
+END IF
+
+!USE rtchecks
+dnsin_in_parent = TRUE ! needed so that dnsdata can locate dns.in
+USE ../dnsdata
+USE ../dnsdirect
+USE ../convenience
+!USE wallclock
+
+! Parameters
+! -----------------------------
+INTEGER nfmin,nfmax,dn,nftot
+nfmin=atoi(COMMANDLINE(4))
+nfmax=atoi(COMMANDLINE(5))
+dn=atoi(COMMANDLINE(6))
+nftot=[(nfmax-nfmin) DIV dn]+1
+dnCAM=dn; nftotCAM=nftot ! comment this if you want to use different values of dn when computing CAM
+
+! define bounds of domain
+REAL retau, Lc
+FILE in_data=OPEN("camstar.in")
+READ BY NAME FROM in_data retau, Lc
+SHARED ARRAY(1..2) OF INTEGER iyy=0
+iyy(1)=10; iyy(2)=81;
+Lt=retau*[2*PI/beta0]
+
+MODULE write_params
+    a0 = 2*PI/Lt; acut=2*PI/Lc; icut=FLOOR[acut/a0]
+    WRITE BY NAME Lt, Lc, icut, 2000*PI/(beta0*icut)
+    ! Echo the parameters
+    ! ------------------------------------
+    FILE echofile = CREATE("CAMstart.nfo")
+    WRITE TO echofile "This is CAMstar, version adapted for channel.f90"
+    WRITE BY NAME TO echofile nfmin, nfmax, dn, dnCAM, nftot, nftotCAM
+    WRITE BY NAME TO echofile Lt, Lc, icut, 1000*2*PI/(beta0*icut)
+    CLOSE echofile
+END write_params
+
+! Declarations
+! ------------------------------------
+SHARED ARRAY(nyl-2..nyh+2) OF STRUCTURE(REAL U,W) mean=0
+
+! Compute the average field
+! ------------------------------------
+WRITE "Computing averages..."
+LOOP files FOR n=nfmin TO nfmax BY dn
+  IF NOT first THEN READ FROM prev
+  WRITE " ", "Field ", n
+  STRING field_name = WRITE('../Dati.cart.'n'.out')
+  INTEGER sz=SIZEOF(INTEGER)*3+SIZEOF(REAL)*7
+  POINTER TO STORED STRUCTURE(
+    ARRAY(0..sz-1) OF CHAR dummy
+    ARRAY(0..2,0..nx,-nz..nz,-1..ny+1) OF COMPLEX fieldimage_fortran
+  ) diskfield_fortran
+  diskfield_fortran=OPEN(field_name) ! you're gonna have trouble with this if ure not careful!
+  WITH diskfield_fortran,mean(*):
+    U=~+fieldimage_fortran(0,0,0,nyl-2..nyh+2).REAL
+    W=~+fieldimage_fortran(2,0,0,nyl-2..nyh+2).REAL
+  CLOSE(diskfield_fortran)
+  IF NOT last THEN WRITE TO next
+REPEAT files
+WITH mean: U=~/nftot; W=~/nftot
+FILE outfile=CREATE('CAMstar_mean.bin')
+WRITE TO outfile mean
+CLOSE(outfile)
+     
+SHARED ARRAY(0..ny DIV 2,0..ny DIV 2,0..2,1..3) OF REAL CAM=0
+SHARED ARRAY(0..ny DIV 2,0..ny DIV 2,0..2,1..3) OF REAL CAMi=0
+SHARED ARRAY(0..nxd-1,0..nzd-1,0..ny) OF COMPLEX LS=0,SS=0
+SHARED ARRAY(0..ny DIV 2,0..ny DIV 2,1..2) OF REAL mean_us2=0, mean_ul=0 
+SHARED ARRAY(0..ny DIV 2,0..ny DIV 2) OF REAL totmean_us2=0
+INTEGER ica=0
+
+! Fourier filter
+! ------------------------------------
+SUBROUTINE fourierfilt(POINTER TO ARRAY(*,*) OF COMPLEX ls,ss; ARRAY(*,*) OF COMPLEX f; REAL Ltot, Lcut)
+    ! Copy and filter
+    a0 = 2*PI/Ltot; acut=2*PI/Lcut; icut=FLOOR[acut/a0]
+    ls=0; 
+    ls(0..nx,0..icut)=f(0..nx,0..icut);       
+    ls(0..nx,nzd+(-icut..-1))=f(0..nx,-icut..-1)
+    ss=0; 
+    ss(0..nx,icut+1..nz)=f(0..nx,icut+1..nz)  
+    ss(0..nx,nzd+(-nz..-icut-1))=f(0..nx,-nz..-icut-1)
+    ! Transform to physical space
+    DO IFT[ss(ix,*)]; IFT[ls(ix,*)] FOR ix=0 TO nx
+    DO RFT[ss(*,iz)]; RFT[ls(*,iz)] FOR ALL iz
+END fourierfilt
+
+
+! Compute CAM*
+! ------------------------------------
+FILE outfilei=CREATE('CAMstari.bin')
+LOOP fields FOR n=nfmin TO nfmax BY dnCAM
+  ! Measure time
+!  REAL timei = wallclock() ! TODO: maybe conditional compiler here
+  ! Read field
+  STRING field_name = WRITE('../Dati.cart.'n'.out')
+  read_field_fortran(field_name)
+  ! Compute fluctuating field
+  WITH mean(*),V(0,0,*): u.REAL=~-U; w.REAL=~-W
+  !
+  PARALLEL LOOP FOR ismp=0 TO nsmp-1
+  ! Filter velocity field
+  IF ismp=0 AND has_terminal THEN WRITE "    ... filtering velocity field"
+  LOOP FOR iy=ismp TO ny BY nsmp
+    fourierfilt(LS(*,*,iy),SS(*,*,iy),V(*,*,iy).u,Lt,Lc)
+  REPEAT
+  SYNC(ismp,nsmp)
+  ! CAM* for the i-th field 
+  IF ismp=0 AND has_terminal THEN WRITE "    ... computing velocity skewness"
+  LOOP FOR iy1=0 TO ny DIV 2 
+    LOOP FOR iy2=ismp TO ny DIV 2 BY nsmp
+      CAMi(iy2,iy1)=0
+      INTEGER cntr_p=0, cntr_m=0
+      LOOP FOR ix=0 TO 2*nxd-1 AND iz=0 TO nzd-1
+         REAL ss1dn = SS(*,iz,iy1).REALIFIED(ix)^2
+         REAL ss2dn = SS(*,iz,iy2).REALIFIED(ix)^2
+         REAL ss1up = SS(*,iz,ny-iy1).REALIFIED(ix)^2
+         REAL ss2up = SS(*,iz,ny-iy2).REALIFIED(ix)^2
+         REAL ls1dn = LS(*,iz,iy1).REALIFIED(ix)
+         REAL ls2dn = LS(*,iz,iy2).REALIFIED(ix)
+         REAL ls1up = LS(*,iz,ny-iy1).REALIFIED(ix)
+         REAL ls2up = LS(*,iz,ny-iy2).REALIFIED(ix) 
+         CAMi(iy2,iy1,0,1)= ~ + ss1dn*ls2dn + ss1up*ls2up
+         CAMi(iy2,iy1,0,2)= ~ + ss1dn*ss2dn + ss1up*ss2up
+         CAMi(iy2,iy1,0,3)= ~ + ls1dn*ls2dn + ls1up*ls2up
+         totmean_us2(iy2,iy1) = ~ + ss1dn + ss1up
+         ! Bottom wall
+         IF ls2dn>0 THEN 
+           INC cntr_p
+           CAMi(iy2,iy1,1,1)= ~ + ss1dn*ls2dn 
+           CAMi(iy2,iy1,1,2)= ~ + ss1dn*ss2dn 
+           CAMi(iy2,iy1,1,3)= ~ + ls1dn*ls2dn
+           mean_us2(iy2,iy1,1) = ~ + ss1dn
+           mean_ul(iy2,iy1,1) = ~ + ls2dn
+         ELSE 
+           INC cntr_m
+           CAMi(iy2,iy1,2,1)= ~ + ss1dn*ls2dn 
+           CAMi(iy2,iy1,2,2)= ~ + ss1dn*ss2dn 
+           CAMi(iy2,iy1,2,3)= ~ + ls1dn*ls2dn
+           mean_us2(iy2,iy1,2) = ~ + ss1dn
+           mean_ul(iy2,iy1,2) = ~ + ls2dn 
+         END IF
+         ! Top wall
+         IF ls2up>0 THEN 
+           INC cntr_p
+           CAMi(iy2,iy1,1,1)= ~ + ss1up*ls2up
+           CAMi(iy2,iy1,1,2)= ~ + ss1up*ss2up
+           CAMi(iy2,iy1,1,3)= ~ + ls1up*ls2up
+           mean_us2(iy2,iy1,1) = ~ + ss1up
+           mean_ul(iy2,iy1,1) = ~ + ls2up
+         ELSE 
+           INC cntr_m
+           CAMi(iy2,iy1,2,1)= ~ + ss1up*ls2up
+           CAMi(iy2,iy1,2,2)= ~ + ss1up*ss2up
+           CAMi(iy2,iy1,2,3)= ~ + ls1up*ls2up
+           mean_us2(iy2,iy1,2) = ~ + ss1up
+           mean_ul(iy2,iy1,2) = ~ + ls2up
+         END IF
+      REPEAT
+      CAMi(iy2,iy1,0) = ~ /(2*2*nxd*nzd)
+      CAMi(iy2,iy1,1) = ~ /(2*2*nxd*nzd)
+      CAMi(iy2,iy1,2) = ~ /(2*2*nxd*nzd)
+    REPEAT
+  REPEAT
+  REPEAT   
+  ! CAM* cumulative average
+  CAM=~+CAMi/nftotCAM
+  ! Write out the i-th
+  WRITE BINARY TO outfilei CAMi
+  ! Measure time
+!  IF has_terminal THEN WRITE "    ... took " (wallclock()-timei)/60 " minutes" ! TODO: maybe conditional compiler here
+REPEAT fields
+
+! correction: get average of conditional UL away
+mean_ul= ~ / ( (2*2*nxd*nzd) * nftotCAM )
+mean_us2= ~ / ( (2*2*nxd*nzd) * nftotCAM )
+totmean_us2= ~ / ( (2*2*nxd*nzd) * nftotCAM )
+DO CAM(iy2,iy1,ica,1) = ~ - (mean_ul(iy2,iy1,ica) * totmean_us2(iy2,iy1)) FOR ALL iy2, iy1 AND ica=1 TO 2
+
+outfile=CREATE('CAMstar.bin')
+WRITE BINARY TO outfile CAM
+CLOSE(outfile)

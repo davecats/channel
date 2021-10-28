@@ -51,6 +51,7 @@ STRING restart_file
 
 SUBROUTINE read_initial_data
  FILE in_data=OPEN("dns.in")
+ IF dnsin_in_parent THEN FILE in_data=OPEN("../dns.in") ! needed for some programs, like camstar.cpl, for which dns.in stays in the parent folder
  READ FROM in_data nx,ny,nz
  READ FROM in_data alfa0,beta0
  READ FROM in_data ni; ni=1/ni; pr=1.0; gr=1.0 ! XXX ADD SCALAR SOONER OR LATER
