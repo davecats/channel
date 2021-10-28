@@ -1,3 +1,6 @@
+# Ignore Makefile (so that local changes from user do not overwrite template in repo)
+Makefile
+
 # Ignore all files without extension
 *
 !*.*
