@@ -186,7 +186,7 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
                 end do
             end do
             
-            call RFT(VVdx(1:nx+1,1:2*nz+1,iV,1),rVVdx(1:2*nx+1,1:2*nz+1,iV,1)) ! second transform in x
+            call RFT(VVdx(:,:,iV,1),rVVdx(:,:,iV,1)) ! second transform in x
             ! TODO FIXME this might actually be rVVdx(1:2*nx+2) but idk
         end do
         ! rVVdx is now containing the antitransform
