@@ -10,12 +10,13 @@ program out2vtk
 ! convert out file to VTK (XML) format for paraview
 ! syntax:
 ! mpirun -np 1 out2vtk Dati.cart.xx.out
+
 use dnsdata
 implicit none
 
 character(len=32) :: cmd_in_buf ! needed to parse arguments
 logical :: fluct_only = .FALSE., undersample = .FALSE.
-real*4 :: xcent_undersample = 1
+real*4 :: xcent_undersample = 1, xfull_idx, zfull_idx
 character(len=32) :: arg
 
 integer :: iv, ix, iz, iy
@@ -71,7 +72,17 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
 
     call init_MPI(nx+1,nz,ny,nxd+1,nzd)
     call init_memory(.TRUE.)
-    call init_fft(VVdz,VVdx,rVVdx,nxd,nxB,nzd,nzB)
+    call init_fft(VVdz,VVdx,rVVdx,nxB,nxB,2*nz+1,2*nz+1)
+    ! Notice that in the call to init_fft the values of nxd and nzd have been replaced by nxB and 2*nz+1.
+    ! Since the parallelisation in xz is deactivated, nxB=nx+1.
+    ! Instead, nxd and nzd are the expanded number of points that are needed for dealiasing;
+    ! here, there is no problem with aliasing, so no need to increase the spatial-resolution before
+    ! antitransforming. Therefore, the arguments corresponding to the increased number of points for dealiasing
+    ! are replaced with the actual, regular number of points.
+    ! Also, since nzB is by definition the same as nzd, its value has been replaced with 2*nz+1.
+
+    ! WARNING: NEVER TRUST nz0, nzN, nzB: these are all dependend on nzd!
+    ! Instead, nx0, nxN, nxB can be used (as they are defined on nx+1).
 
 
 
@@ -157,26 +168,46 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
         if (iy > ny) cycle
         
         ! do fourier transform
-        VVdz(1:nz+1,1:nxB,1:3,1)=V(iy,0:nz,nx0:nxN,1:3);         VVdz(nz+2:nzd-nz,1:nxB,1:3,1)=0;
-        VVdz(nzd+1-nz:nzd,1:nxB,1:3,1)=V(iy,-nz:-1,nx0:nxN,1:3); 
-        DO iV=1,3
-            CALL IFT(VVdz(1:nzd,1:nxB,iV,1))  
-            CALL MPI_Alltoall(VVdz(:,:,iV,1), 1, Mdz, VVdx(:,:,iV,1), 1, Mdx, MPI_COMM_X)
-            VVdx(nx+2:nxd+1,1:nzB,iV,1)=0;    CALL RFT(VVdx(1:nxd+1,1:nzB,iV,1),rVVdx(1:2*nxd+2,1:nzB,iV,1))
-        END DO
+        ! WARNING: this differs from normal program, since there is no extension of the Fourier domain
+        ! (or, no increase of spatial resolution to avoid dealiasing)
+        ! i.e., no need to set anything zo zero in the arrays
+        VVdz(1:nz+1,1:nxB,1:3,1)=V(iy,0:nz,nx0:nxN,1:3);
+        VVdz(nz+2:2*nz+1,1:nxB,1:3,1)=V(iy,-nz:-1,nx0:nxN,1:3); 
+        do iV=1,3
+            call IFT(VVdz(1:2*nz+1,1:nxB,iV,1)) ! first transform in z
+            
+            ! Transpose for next Fourier transform
+            ! WARNING: IF YOU WANT TO USE XZ PARALLELISATION, you need to use a MPI_Alltoall
+            ! call similar to the one used in channel to do this matrix transposition.
+            ! Thing is, you need to redefine the MPI types npx and npz.
+            do ix = 1, nxB
+                do iz = 1, 2*nz + 1
+                    VVdx(ix,iz,iV,1) = VVdz(iz,ix,iV,1)
+                end do
+            end do
+            
+            call RFT(VVdx(1:nx+1,1:2*nz+1,iV,1),rVVdx(1:2*nx+1,1:2*nz+1,iV,1)) ! second transform in x
+            ! TODO FIXME this might actually be rVVdx(1:2*nx+2) but idk
+        end do
         ! rVVdx is now containing the antitransform
-        ! it has size 2*(nxd+1),nzB,6,6
-        ! but you only need (1:(2*nx+1),1:(2*nz+1),1:3,1)
+        ! it has size 2*nx+1,2*nz+1,6,6
 
         ! convert velocity vector for each process
-        do iz=1,nztot
-            do ix=1,nxtot
-                do ii=1,3
+        do ii = 1,3
+            do iz=1,nztot
+                do ix=1,nxtot
                     call xz_interpolation(ii,ix,iy,iz)
                 end do
-                xyz(1,ix,iy,iz) = (ix-1) * (2 * PI / alfa0)/(2*nxd-1)
+            end do
+        end do
+
+        ! generate nodal coordinates
+        do iz=1,nztot
+            do ix=1,nxtot
+                call undersampled_to_fullindex(ix,iz, xfull_idx,zfull_idx)
+                xyz(1,ix,iy,iz) = (xfull_idx-1) * (2 * PI / alfa0)/(2*nx)
                 xyz(2,ix,iy,iz) = y(iy)
-                xyz(3,ix,iy,iz) = (iz + nz0 - 2) * (2 * PI / beta0)/(nzd-1)
+                xyz(3,ix,iy,iz) = (zfull_idx-1) * (2 * PI / beta0)/(2*nz)
             end do
         end do
 
@@ -336,8 +367,7 @@ contains !----------------------------------------------------------------------
     real*4 :: w_denominator ! handy: denominator for weights
     
         ! first off, project indeces so that maximum range is (2*nx+1), (2*nz+1)
-        xprj = (xx + 0.0) / nxtot * (2*nx+1)
-        zprj = (zz + 0.0) / nztot * (2*nz+1)
+        call undersampled_to_fullindex(xx,zz, xprj,zprj)
 
         ! find 4 nearest points
         xc = ceiling(xprj); zc = ceiling(zprj)
@@ -354,6 +384,26 @@ contains !----------------------------------------------------------------------
         vec(ii,ix,iy,iz) = u_cc*w_cc + u_ff*w_ff + u_fc*w_fc + u_cf*w_cf
 
     end subroutine
+
+
+
+    subroutine undersampled_to_fullindex(xx,zz, xprj,zprj)
+    ! Takes indeces xx, zz from the undersampled domain and returns their index-position in the full domain.
+    ! The full domain is what is actually stored in memory (rVVdx); so, xprj and zprj *could* be indeces of
+    ! the rVVdx array, if they were integers. Instead, xx and zz are indeces of the array vec that is being
+    ! written to memory.
+    ! Notice that xx=1,nxtot and zz=1,nztot,
+    ! whereas xprj=1,2*nx+1 and zprj=1,2*nz+1.
+    ! However, xprj and zprj are REAL NUMBERS, meaning that (xx,zz) can correspond to a position that is
+    ! inbetween two points of the array rVVdx.
+
+    integer, intent(in) :: xx, zz
+    real, intent(out) :: xprj,zprj
+
+        xprj = (xx - 1.0) / (nxtot-1.0) * (2*nx) + 1
+        zprj = (zz - 1.0) / (nztot-1.0) * (2*nz) + 1
+
+    end function undersampled_to_fullindex
 
 
 
