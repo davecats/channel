@@ -403,7 +403,7 @@ contains !----------------------------------------------------------------------
         xprj = (xx - 1.0) / (nxtot-1.0) * (2*nx) + 1
         zprj = (zz - 1.0) / (nztot-1.0) * (2*nz) + 1
 
-    end function undersampled_to_fullindex
+    end subroutine undersampled_to_fullindex
 
 
 
