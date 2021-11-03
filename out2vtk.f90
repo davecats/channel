@@ -71,7 +71,7 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
     ! notice that this overrides value from dns.in
 
     call init_MPI(nx+1,nz,ny,nxd+1,nzd)
-    call init_memory(.TRUE.)
+    call init_memory(.FALSE.)
     call init_fft(VVdz,VVdx,rVVdx,nxB,nxB,2*nz+1,2*nz+1)
     ! Notice that in the call to init_fft the values of nxd and nzd have been replaced by nxB and 2*nz+1.
     ! Since the parallelisation in xz is deactivated, nxB=nx+1.
@@ -217,7 +217,7 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
 
     ! realease memory
     CALL free_fft()
-    CALL free_memory(.TRUE.) 
+    CALL free_memory(.FALSE.) 
     CALL MPI_Finalize()
 
 
