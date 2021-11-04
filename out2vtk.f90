@@ -426,8 +426,8 @@ contains !----------------------------------------------------------------------
     integer, intent(in) :: xx, zz
     real, intent(out) :: xprj,zprj
 
-        xprj = (2*nx+1)/(nxtot) * (xx - 1.0) + 1
-        zprj = (2*nz+1)/(nztot) * (zz - 1.0) + 1
+        xprj = real(2*nx+1)/real(nxtot) * (xx - 1.0) + 1
+        zprj = real(2*nz+1)/real(nztot) * (zz - 1.0) + 1
 
     end subroutine undersampled_to_fullindex
 
