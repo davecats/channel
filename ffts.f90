@@ -49,7 +49,6 @@ CONTAINS
        ! meaning that by default the logical size of the real transform is even
        if (odd_n_real==.TRUE.) rn_x=rn_x - 1
      endif
-     print *, "rn_x", rn_x
      !Allocate aligned memory
      ptrVVdz=fftw_alloc_complex(int(nxB*nzd*6*6, C_SIZE_T))
      ptrVVdx=fftw_alloc_complex(int((nxd+1)*nzB*6*6, C_SIZE_T))
