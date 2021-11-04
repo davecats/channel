@@ -30,19 +30,25 @@ MODULE ffts
 CONTAINS
 
 #ifdef ibm
-   SUBROUTINE init_fft(VVdz,VVdx,rVVdx,Fdz,Fdx,rFdx,nxd,nxB,nzd,nzB)
+   SUBROUTINE init_fft(VVdz,VVdx,rVVdx,Fdz,Fdx,rFdx,nxd,nxB,nzd,nzB,odd_n_real)
 #else
-   SUBROUTINE init_fft(VVdz,VVdx,rVVdx,nxd,nxB,nzd,nzB)
+   SUBROUTINE init_fft(VVdz,VVdx,rVVdx,nxd,nxB,nzd,nzB,odd_n_real)
 #endif
      integer(C_INT), intent(in) :: nxd,nxB,nzd,nzB
      complex(C_DOUBLE_COMPLEX), pointer, dimension(:,:,:,:), intent(out) :: VVdx, VVdz
      real(C_DOUBLE), pointer, dimension(:,:,:,:), intent(out) :: rVVdx
+     logical, optional, intent(in) :: odd_n_real
 #ifdef ibm
      complex(C_DOUBLE_COMPLEX), pointer, dimension(:,:,:,:), intent(out) :: Fdx, Fdz
      real(C_DOUBLE), pointer, dimension(:,:,:,:), intent(out) :: rFdx
 #endif
      integer(C_INT), dimension(1) :: n_z, n_x, rn_x
      n_z=[nzd]; n_x=[nxd]; rn_x=[2*nxd];
+     if (present(odd_n_real)) then
+       ! notice: odd_n_real is basically .FALSE. by default
+       ! meaning that by default the logical size of the real transform is even
+       if (odd_n_real==.TRUE.) rn_x=rn_x - 1
+     endif
      !Allocate aligned memory
      ptrVVdz=fftw_alloc_complex(int(nxB*nzd*6*6, C_SIZE_T))
      ptrVVdx=fftw_alloc_complex(int((nxd+1)*nzB*6*6, C_SIZE_T))
@@ -61,8 +67,8 @@ CONTAINS
      pFFT=fftw_plan_many_dft(1, n_z, nxB, VVdz(:,:,1,1), n_z, 1, nzd, VVdz(:,:,1,1), n_z, 1, nzd, FFTW_FORWARD,  plan_type)
      pIFT=fftw_plan_many_dft(1, n_z, nxB, VVdz(:,:,1,1), n_z, 1, nzd, VVdz(:,:,1,1), n_z, 1, nzd, FFTW_BACKWARD, plan_type)
      pRFT=fftw_plan_many_dft_c2r(1, rn_x, nzB,  VVdx(:,:,1,1),  n_x+1, 1,   (nxd+1), &
-                                               rVVdx(:,:,1,1), rn_x+2, 1, 2*(nxd+1), plan_type)
-     pHFT=fftw_plan_many_dft_r2c(1, rn_x, nzB, rVVdx(:,:,1,1), rn_x+2, 1, 2*(nxd+1), &
+                                               rVVdx(:,:,1,1), 2*(n_x+1), 1, 2*(nxd+1), plan_type)
+     pHFT=fftw_plan_many_dft_r2c(1, rn_x, nzB, rVVdx(:,:,1,1), 2*(n_x+1), 1, 2*(nxd+1), &
                                                 VVdx(:,:,1,1),  n_x+1, 1,   (nxd+1), plan_type)
    END SUBROUTINE init_fft
 

@@ -142,7 +142,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
     ibeta=(/(dcmplx(0.0d0,iz*beta0),iz=-nz,nz)/); 
     FORALL  (iz=-nz:nz,ix=nx0:nxN) k2(iz,ix)=(alfa0*ix)**2.0d0+(beta0*iz)**2.0d0
     INQUIRE(FILE="Runtimedata", EXIST=rtd_exists)
-    IF (has_terminal) THEN
+    IF (solveNS .AND. has_terminal) THEN
       IF (time_from_restart .AND. rtd_exists) THEN
         WRITE(*,*) 'Found existing Runtimedata...'
         OPEN(UNIT=101,FILE='Runtimedata',ACTION='readwrite')
@@ -207,8 +207,10 @@ logical::rtd_exists ! flag to check existence of Runtimedata
   SUBROUTINE free_memory(solveNS)
     LOGICAL, intent(IN) :: solveNS
     DEALLOCATE(V,der,d0mat,etamat,D2vmat,y,dy)
-    IF (solveNS) DEALLOCATE(memrhs,oldrhs,bc0,bcn)
-    IF (has_terminal) CLOSE(UNIT=101)
+    IF (solveNS) THEN
+      DEALLOCATE(memrhs,oldrhs,bc0,bcn)
+      IF (has_terminal) CLOSE(UNIT=101)
+    END IF
   END SUBROUTINE free_memory
 
   !--------------------------------------------------------------!
