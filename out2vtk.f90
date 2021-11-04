@@ -367,11 +367,11 @@ contains !----------------------------------------------------------------------
 
     subroutine xz_interpolation(ii,xx,iy,zz) ! this interpolates the field on a smaller grid if undersampling is requested
     integer, intent(in) :: xx, zz, iy, ii
-    real*4 :: xprj, zprj
+    real :: xprj, zprj
     integer :: xc, xf, zc, zf
-    real*4 :: u_cc, u_cf, u_fc, u_ff ! shortcuts for values; first letter of pedix refers to x, second to z
-    real*4 :: w_cc, w_cf, w_fc, w_ff ! weights for values above
-    real*4 :: w_denominator ! handy: denominator for weights
+    real :: u_cc, u_cf, u_fc, u_ff ! shortcuts for values; first letter of pedix refers to x, second to z
+    real :: w_cc, w_cf, w_fc, w_ff, w_xc, w_zc, w_xf, w_zf ! weights for values above
+    real :: w_denominator ! handy: denominator for weights
     
         ! first off, project indeces so that maximum range is (2*nx+1), (2*nz+1)
         call undersampled_to_fullindex(xx,zz, xprj,zprj)
@@ -380,12 +380,27 @@ contains !----------------------------------------------------------------------
         xc = ceiling(xprj); zc = ceiling(zprj)
         xf = floor(xprj); zf = floor(zprj)
 
+        ! find weights in x
+        if (xc == xf) then
+            w_xc = 0.5; w_xf = 0.5
+        else
+            w_xc = abs(real(xf) - xprj) / abs(xc-xf) ! the xf there is correct! the closer xprj to xc, the bigger
+            w_xf = abs(real(xc) - xprj) / abs(xc-xf) ! the xc there is correct! the closer xprj to xf, the bigger
+        end if
+
+        ! find weights in z
+        if (zc == zf) then
+            w_zc = 0.5; w_zf = 0.5
+        else
+            w_zc = abs(real(zf) - zprj) / abs(zc-zf) ! the zf there is correct! the closer zprj to zc, the bigger
+            w_zf = abs(real(zc) - zprj) / abs(zc-zf) ! the zc there is correct! the closer zprj to zf, the bigger
+        end if
+
         ! shortcuts for values and weights
-        w_denominator = abs(xc-xf) * abs(zc-zf)
-        u_cc = rVVdx(xc,zc,ii,1);   w_cc = abs(xc - xprj) * abs(zc - zprj) / w_denominator
-        u_ff = rVVdx(xf,zf,ii,1);   w_ff = abs(xf - xprj) * abs(zf - zprj) / w_denominator
-        u_cf = rVVdx(xc,zf,ii,1);   w_cf = abs(xc - xprj) * abs(zf - zprj) / w_denominator
-        u_fc = rVVdx(xf,zc,ii,1);   w_fc = abs(xf - xprj) * abs(zc - zprj) / w_denominator
+        u_cc = rVVdx(xc,zc,ii,1);   w_cc = w_xc * w_zc
+        u_ff = rVVdx(xf,zf,ii,1);   w_ff = w_xf * w_zf
+        u_cf = rVVdx(xc,zf,ii,1);   w_cf = w_xc * w_zf
+        u_fc = rVVdx(xf,zc,ii,1);   w_fc = w_xf * w_zc
 
         ! do interpolation
         vec(ii,ix,iy,iz) = u_cc*w_cc + u_ff*w_ff + u_fc*w_fc + u_cf*w_cf
