@@ -16,7 +16,8 @@ implicit none
 
 character(len=32) :: cmd_in_buf ! needed to parse arguments
 logical :: fluct_only = .FALSE., undersample = .FALSE.
-real*4 :: xcent_undersample = 1, xfull_idx, zfull_idx
+real*4 :: xcent_undersample = 1
+real*8 :: xfull_idx, zfull_idx
 character(len=32) :: arg
 
 integer :: iv, ix, iz, iy
@@ -367,11 +368,10 @@ contains !----------------------------------------------------------------------
 
     subroutine xz_interpolation(ii,xx,iy,zz) ! this interpolates the field on a smaller grid if undersampling is requested
     integer, intent(in) :: xx, zz, iy, ii
-    real :: xprj, zprj
+    real*8 :: xprj, zprj
     integer :: xc, xf, zc, zf
-    real :: u_cc, u_cf, u_fc, u_ff ! shortcuts for values; first letter of pedix refers to x, second to z
-    real :: w_cc, w_cf, w_fc, w_ff, w_xc, w_zc, w_xf, w_zf ! weights for values above
-    real :: w_denominator ! handy: denominator for weights
+    real*8 :: u_cc, u_cf, u_fc, u_ff ! shortcuts for values; first letter of pedix refers to x, second to z
+    real*8 :: w_cc, w_cf, w_fc, w_ff, w_xc, w_zc, w_xf, w_zf ! weights for values above
     
         ! first off, project indeces so that maximum range is (2*nx+1), (2*nz+1)
         call undersampled_to_fullindex(xx,zz, xprj,zprj)
@@ -424,7 +424,7 @@ contains !----------------------------------------------------------------------
     ! Same applies for z.
 
     integer, intent(in) :: xx, zz
-    real, intent(out) :: xprj,zprj
+    real*8, intent(out) :: xprj,zprj
 
         xprj = real(2*nx+1)/real(nxtot) * (xx - 1.0) + 1
         zprj = real(2*nz+1)/real(nztot) * (zz - 1.0) + 1
