@@ -1,15 +1,38 @@
 .NOTPARALLEL: 
 
 ####
+define CNFGSTRNG
+# COMPILER
+##########
+# Fortran + MPI
 F90 = mpifort
+
+
+# IMPORTANT: PATH OF FFTW
+#########################
+# This might not be needed, if your fortran compiler can locate FFTW on its own
 FFTW_INC = /path/to/fftw-3.3.8/include/
 FFTW_LIB = /path/to/fftw-3.3.8/lib/
+
+
+
+# COMPILER FLAGS
+################
+
 # INTEL (uncomment following line for INTEL compiler)
 FLAGS = -cpp -Ofast -no-wrap-margin
+
+# INTEL, DEBUG (uncomment following line for INTEL compiler)
 #FLAGS = -cpp -O0 -g -check all -fpe0 -warn -traceback -debug extended
+
 # GCC (uncomment following line for GCC compiler) 
-# FLAGS = -cpp -Ofast -malign-double -fall-intrinsics -ffree-line-length-none 
+# FLAGS = -cpp -Ofast -malign-double -fall-intrinsics -ffree-line-length-none
+endef
+export CNFGSTRNG
 #### 
+
+config_file = compiler.settings
+-include ${config_file}
 
 OBJ = typedef.o rbmat.o mpi_transpose.o ffts.o dnsdata.o
 flags = -I$(FFTW_INC) -L$(FFTW_LIB) $(FLAGS)
@@ -27,4 +50,5 @@ postpro/tke/uiuj_largesmall: $(OBJ) postpro/tke/uiuj_largesmall.o
 	$(F90) $(flags) -c  $<
 clean: 
 	rm *.mod *.o
-
+configure:
+	if [ -e ${config_file} ]; then echo "Configuration file already exists."; else echo "$$CNFGSTRNG" > ${config_file}; fi

@@ -1,5 +1,5 @@
-# Ignore Makefile (so that local changes from user do not overwrite template in repo)
-Makefile
+# Ignore changes to config file of Makefile (so that local changes from user do not overwrite template in repo)
+compiler.settings
 
 # Ignore all files without extension
 *

@@ -54,11 +54,15 @@ Once you have all required dependencies listed above, acquire the source code by
 
     git clone https://github.com/davecats/channel.git
 
-Then compiling the code is as easy as hitting
+Then, generate the `compiler.settings` file with the command:
+
+    make configure
+
+After adjusting this file as desired (e.g. with your compiler of choice and, where needed, the position of the FFTW library), compiling the code is as easy as hitting
 
     make
     
-You may want to edit the *Makefile* and change the MPI/Fortran compiler, the optimization flag and the location of the *FFTW* library and headers.
+You can edit the *compiler.settings* also to use custom compiler flags. A preset of flags for debugging is also provided.
 
 
 <a name="input">
