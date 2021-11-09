@@ -40,6 +40,10 @@ The code has been explicitly designed for shortness, compactness and simplicity,
 * **MPI**: version 3.1 or above with exposed mpi_f08 Fortran interface
 * **FFTW**: version 3.x or above
 * **FORTRAN**: any fortran f08 compliant compiler
+* _Postprocessing only:_ the Python utilities included in this repository require the _channel_ python package ([andyandreolli/channel_pytools](https://github.com/andyandreolli/channel_pytools)). This can be installed with:
+ ```bash
+ pip install git+https://github.com/andyandreolli/channel_pytools#egg=channel
+ ```
 
 
 <a name="compile">
