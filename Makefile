@@ -47,7 +47,7 @@ out2bin: $(OBJ) out_exporter/out2bin.o
 postpro/tke/uiuj_largesmall: $(OBJ) postpro/tke/uiuj_largesmall.o
 	$(F90) $(flags) -o $@ $(OBJ) postpro/tke/uiuj_largesmall.o $(libs)
 %.o : %.f90
-	$(F90) $(flags) -c  $<
+	$(F90) $(flags) -o $@ -c  $<
 clean: 
 	rm *.mod *.o
 configure:
