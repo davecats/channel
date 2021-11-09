@@ -1,10 +1,15 @@
-# Ignore changes to config file of Makefile (so that local changes from user do not overwrite template in repo)
-compiler.settings
-
 # Ignore all files without extension
 *
 !*.*
 !*/
+#######################################
+# DO NOT INSERT CHANGES ABOVE THIS LINE
+# They will be most likely ineffective
+# due to the line !*.*
+#######################################
+
+# Ignore changes to config file of Makefile (so that local changes from user do not overwrite template in repo)
+compiler.settings
 
 # Ignore Python cache
 __pycache__/
