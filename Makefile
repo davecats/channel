@@ -17,6 +17,12 @@ libs = -lfftw3
 
 channel: $(OBJ) channel.o
 	$(F90) $(flags) -o  $@ $(OBJ) channel.o $(libs)
+out2vtk: $(OBJ) out_exporter/out2vtk.o
+	$(F90) $(flags) -o  out_exporter/$@ $(OBJ) out_exporter/out2vtk.o $(libs)
+out2bin: $(OBJ) out_exporter/out2bin.o
+	$(F90) $(flags) -o  out_exporter/$@ $(OBJ) out_exporter/out2bin.o $(libs)
+postpro/tke/uiuj_largesmall: $(OBJ) postpro/tke/uiuj_largesmall.o
+	$(F90) $(flags) -o $@ $(OBJ) postpro/tke/uiuj_largesmall.o $(libs)
 %.o : %.f90
 	$(F90) $(flags) -c  $<
 clean: 
