@@ -1,7 +1,7 @@
 import channel as ch
 
 # get mesh info
-dnsin = ch.read_dnsin('')
+dnsin = ch.read_dnsin('dns.in')
 mesh = ch.mesh(dnsin)
 
 retau = input('Please enter extimate of friction Re number:   ')

@@ -46,9 +46,12 @@ out2bin: $(OBJ) out_exporter/out2bin.o
 	$(F90) $(flags) -o  out_exporter/$@ $(OBJ) out_exporter/out2bin.o $(libs)
 postpro/tke/uiuj_largesmall: $(OBJ) postpro/tke/uiuj_largesmall.o
 	$(F90) $(flags) -o $@ $(OBJ) postpro/tke/uiuj_largesmall.o $(libs)
+postpro/am/camstar: $(OBJ) postpro/am/camstar.o
+	$(F90) $(flags) -o $@ $(OBJ) postpro/am/camstar.o $(libs)
 %.o : %.f90
 	$(F90) $(flags) -o $@ -c  $<
-clean: 
-	rm *.mod *.o
+clean:
+	find . -type f -name '*.o' | xargs -t rm
+	rm *.mod
 configure:
 	if [ -e ${config_file} ]; then echo "Configuration file already exists."; else echo "$$CNFGSTRNG" > ${config_file}; fi

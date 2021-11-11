@@ -89,9 +89,18 @@ logical::rtd_exists ! flag to check existence of Runtimedata
 
   !--------------------------------------------------------------!
   !---------------------- Read input files ----------------------!
-  SUBROUTINE read_dnsin()
+  SUBROUTINE read_dnsin(in_in_parent)
+    logical, optional, intent(in) :: in_in_parent
     logical :: i
-    OPEN(15, file='dns.in')
+    if (present(in_in_parent)) then
+      if (in_in_parent) then
+        OPEN(15, file='../dns.in')
+      else
+        OPEN(15, file='dns.in')
+      end if
+    else
+      OPEN(15, file='dns.in')
+    end if
     READ(15, *) nx, ny, nz; READ(15, *) alfa0, beta0; nxd=3*(nx+1)/2;nzd=3*nz
 #ifdef useFFTfit
     i=fftFIT(nxd); DO WHILE (.NOT. i); nxd=nxd+1; i=fftFIT(nxd); END DO

@@ -94,7 +94,7 @@ LOOP files FOR n=nfmin TO nfmax BY dn
 REPEAT files
 WITH mean: U=~/nftot; W=~/nftot
 FILE outfile=CREATE('CAMstar_mean.bin')
-WRITE TO outfile mean
+WRITE BINARY TO outfile mean
 CLOSE(outfile)
      
 SHARED ARRAY(0..ny DIV 2,0..ny DIV 2,0..2,1..3) OF REAL CAM=0
