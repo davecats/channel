@@ -52,6 +52,6 @@ postpro/am/camstar: $(OBJ) postpro/am/camstar.o
 	$(F90) $(flags) -o $@ -c  $<
 clean:
 	find . -type f -name '*.o' | xargs -t rm
-	rm *.mod
+	find . -type f -name '*.mod' |xargs -t rm
 configure:
 	if [ -e ${config_file} ]; then echo "Configuration file already exists."; else echo "$$CNFGSTRNG" > ${config_file}; fi

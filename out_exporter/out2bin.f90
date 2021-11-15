@@ -71,7 +71,7 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
 
     call init_MPI(nx+1,nz,ny,nxd+1,nzd)
     call init_memory(.FALSE.)
-    call init_fft(VVdz,VVdx,rVVdx,nxB,nxB,2*nz+1,2*nz+1,.TRUE.)
+    call init_fft(VVdz,VVdx,rVVdx,nxB,nxB,2*nz+1,2*nz+1,.TRUE.,[3,1])
     ! LAST FLAG OF init_fft (.TRUE.) SPECIFIES THAT REAL FFT TRANSFORM HAS AN ODD LOGICAL SIZE
     ! Notice that in the call to init_fft the values of nxd and nzd have been replaced by nxB and 2*nz+1.
     ! Since the parallelisation in xz is deactivated, nxB=nx+1.
