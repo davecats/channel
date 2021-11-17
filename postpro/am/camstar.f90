@@ -152,7 +152,7 @@ integer :: ierror
                         CAMi(1,0,iy1,iy2) = CAMi(1,0,iy1,iy2) + (rVVdx(ix,iz,d1,small)**2)*rVVdx(ix,iz,d2,large) + (rVVdx(ix,iz,u1,small)**2)*rVVdx(ix,iz,u2,large)
                         CAMi(2,0,iy1,iy2) = CAMi(2,0,iy1,iy2) + (rVVdx(ix,iz,d1,small)**2)*(rVVdx(ix,iz,d2,small)**2) + (rVVdx(ix,iz,u1,small)**2)*(rVVdx(ix,iz,u2,small)**2)
                         CAMi(3,0,iy1,iy2) = CAMi(3,0,iy1,iy2) + rVVdx(ix,iz,d1,large)*rVVdx(ix,iz,d2,large) + rVVdx(ix,iz,u1,large)*rVVdx(ix,iz,u2,large)
-                        totmean_us2(iy1,iy2) = totmean_us2(iy1,iy2) + rVVdx(ix,iz,d1,small) + rVVdx(ix,iz,u1,small)
+                        totmean_us2(iy1,iy2) = totmean_us2(iy1,iy2) + (rVVdx(ix,iz,d1,small)**2) + (rVVdx(ix,iz,u1,small)**2)
                         
                         ! bottom wall, conditional
                         if (rVVdx(ix,iz,d2,large) > 0) then 
@@ -184,16 +184,10 @@ integer :: ierror
             end do
         end do
 
-        ! sum results of all processes into process 0
+        ! sum results of all processes into process 0 - CAMi only
         call MPI_REDUCE(CAMi, CAM0, 9*(nyh+1)*(nyh+1), MPI_DOUBLE_PRECISION, MPI_SUM, 0, MPI_COMM_WORLD, ierror)
-        call MPI_REDUCE(mean_us2, mean_30, 2*(nyh+1)*(nyh+1), MPI_DOUBLE_PRECISION, MPI_SUM, 0, MPI_COMM_WORLD, ierror)
-        call MPI_REDUCE(mean_ul, mean_30, 2*(nyh+1)*(nyh+1), MPI_DOUBLE_PRECISION, MPI_SUM, 0, MPI_COMM_WORLD, ierror)
-        call MPI_REDUCE(totmean_us2, totmean_us2_0, (nyh+1)*(nyh+1), MPI_DOUBLE_PRECISION, MPI_SUM, 0, MPI_COMM_WORLD, ierror)
 
         if (has_terminal) then
-
-            mean_us2 = mean_30
-            mean_ul = mean_30
 
             ! divide by number of points in x and z (* 2 due to both half channels)
             CAM0 = CAM0 / (2*(2*nxd)*nzd)
@@ -211,13 +205,22 @@ integer :: ierror
     ! close file where CAMi was written
     if (has_terminal) close(100)
 
-    ! apply correction for conditional averages
-    mean_ul = mean_ul / ( (2*2*nxd*nzd) * nftot )
-    mean_us2 = mean_us2 / ( (2*2*nxd*nzd) * nftot )
-    totmean_us2_0 = totmean_us2_0 / ( (2*2*nxd*nzd) * nftot )
-    do ii=1,2
-        CAM(1,ii,:,:) = CAM(1,ii,:,:) - (mean_ul(ii,:,:) * totmean_us2_0(:,:))
-    end do
+    ! sum results of all processes into process 0 - correction for conditional averages
+    call MPI_REDUCE(mean_us2, mean_30, 2*(nyh+1)*(nyh+1), MPI_DOUBLE_PRECISION, MPI_SUM, 0, MPI_COMM_WORLD, ierror)
+    if (has_terminal) mean_us2 = mean_30
+    call MPI_REDUCE(mean_ul, mean_30, 2*(nyh+1)*(nyh+1), MPI_DOUBLE_PRECISION, MPI_SUM, 0, MPI_COMM_WORLD, ierror)
+    if (has_terminal) mean_ul = mean_30
+    call MPI_REDUCE(totmean_us2, totmean_us2_0, (nyh+1)*(nyh+1), MPI_DOUBLE_PRECISION, MPI_SUM, 0, MPI_COMM_WORLD, ierror)
+
+    if (has_terminal) then
+        ! apply correction for conditional averages
+        mean_ul = mean_ul / ( (2*2*nxd*nzd) * nftot )
+        mean_us2 = mean_us2 / ( (2*2*nxd*nzd) * nftot )
+        totmean_us2_0 = totmean_us2_0 / ( (2*2*nxd*nzd) * nftot )
+        do ii=1,2
+            CAM(1,ii,:,:) = CAM(1,ii,:,:) - (mean_ul(ii,:,:) * totmean_us2_0(:,:))
+        end do
+    end if
 
     !---------------------------------------------------!
     !-----------------      WRITE      -----------------!
