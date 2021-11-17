@@ -22,6 +22,7 @@ integer :: ix, iy, iz, iv, iy1, iy2 ! for spatial directions and components
 
 integer, parameter :: file_vel = 883
 character(len=40) :: istring, currfname
+integer :: stat
 
 integer :: nyh
 
@@ -117,6 +118,16 @@ integer :: ierror
     totmean_us2 = 0
     mean_us2 = 0
     mean_ul = 0
+
+    ! remove old CAMstari.bin
+    currfname = "CAMstari.bin"
+    open(unit=100, iostat=stat, file=trim(currfname), status='old')
+    if (stat == 0) then
+        close(100, status='delete')
+    else
+        close(100)
+    end if
+
    
     do ii = nfmin, nfmax, dnf ! loop over files
 
@@ -188,7 +199,7 @@ integer :: ierror
 
             ! write camstari
             currfname = "CAMstari.bin"
-            open(unit=100,file=TRIM(currfname),access="stream",action="write",position="append")
+            open(unit=100,file=trim(currfname),access="stream",action="write",position="append")
                 write(100) CAM0
             close(100)
 
