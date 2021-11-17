@@ -185,14 +185,15 @@ integer :: ierror
         end do
 
         ! sum results of all processes into process 0
-        ! call MPI_REDUCE(CAMi, CAM0, 9*(nyh+1)*(nyh+1), MPI_DOUBLE_PRECISION, MPI_SUM, 0, MPI_COMM_WORLD, ierror)
-        ! call MPI_REDUCE(mean_us2, mean_30, 3*(nyh+1)*(nyh+1), MPI_DOUBLE_PRECISION, MPI_SUM, 0, MPI_COMM_WORLD, ierror)
-        ! if (has_terminal) mean_us2 = mean_30
-        ! call MPI_REDUCE(mean_ul, mean_30, 3*(nyh+1)*(nyh+1), MPI_DOUBLE_PRECISION, MPI_SUM, 0, MPI_COMM_WORLD, ierror)
-        ! if (has_terminal) mean_ul = mean_30
-        ! call MPI_REDUCE(totmean_us2, totmean_us2_0, (nyh+1)*(nyh+1), MPI_DOUBLE_PRECISION, MPI_SUM, 0, MPI_COMM_WORLD, ierror)
+        call MPI_REDUCE(CAMi, CAM0, 9*(nyh+1)*(nyh+1), MPI_DOUBLE_PRECISION, MPI_SUM, 0, MPI_COMM_WORLD, ierror)
+        call MPI_REDUCE(mean_us2, mean_30, 2*(nyh+1)*(nyh+1), MPI_DOUBLE_PRECISION, MPI_SUM, 0, MPI_COMM_WORLD, ierror)
+        call MPI_REDUCE(mean_ul, mean_30, 2*(nyh+1)*(nyh+1), MPI_DOUBLE_PRECISION, MPI_SUM, 0, MPI_COMM_WORLD, ierror)
+        call MPI_REDUCE(totmean_us2, totmean_us2_0, (nyh+1)*(nyh+1), MPI_DOUBLE_PRECISION, MPI_SUM, 0, MPI_COMM_WORLD, ierror)
 
         if (has_terminal) then
+
+            mean_us2 = mean_30
+            mean_ul = mean_30
 
             ! divide by number of points in x and z (* 2 due to both half channels)
             CAM0 = CAM0 / (2*(2*nxd)*nzd)
@@ -233,7 +234,7 @@ integer :: ierror
 
     ! write CAMstar
     if (has_terminal) then
-        currfname = "CAMstari.bin"
+        currfname = "CAMstar.bin"
         open(unit=100,file=TRIM(currfname),access="stream",action="write")
             write(100) CAM
         close(100)
@@ -320,7 +321,7 @@ contains !----------------------------------------------------------------------
             do iV=1,4
                 call IFT(VVdz(:,:,iV,icnt)) ! first transform in z
                 call MPI_Alltoall(VVdz(:,:,iv,icnt), 1, Mdz, VVdx(:,:,iv,icnt), 1, Mdx, MPI_COMM_X)
-                VVdx(nx+2:nxd+1,1:nzB,icnt,iV)=0
+                VVdx(nx+2:nxd+1,1:nzB,iV,icnt)=0
                 call RFT(VVdx(:,:,iV,icnt),rVVdx(:,:,iV,icnt)) ! second transform in x
             end do
         end do
