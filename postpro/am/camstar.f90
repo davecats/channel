@@ -117,13 +117,7 @@ integer :: ierror
     totmean_us2 = 0
     mean_us2 = 0
     mean_ul = 0
-
-    ! open file for writing CAMi
-    if (has_terminal) then
-        currfname = "CAMstari.bin"
-        open(unit=100,file=TRIM(currfname),access="stream",action="write")
-    end if
-    
+   
     do ii = nfmin, nfmax, dnf ! loop over files
 
         ! read velocity
@@ -193,7 +187,10 @@ integer :: ierror
             CAM0 = CAM0 / (2*(2*nxd)*nzd)
 
             ! write camstari
-            write(100) CAM0
+            currfname = "CAMstari.bin"
+            open(unit=100,file=TRIM(currfname),access="stream",action="write",position="append")
+                write(100) CAM0
+            close(100)
 
             ! cumulate CAM0 in CAM
             CAM = CAM + CAM0/nftot
@@ -201,9 +198,6 @@ integer :: ierror
         end if 
 
     end do
-
-    ! close file where CAMi was written
-    if (has_terminal) close(100)
 
     ! sum results of all processes into process 0 - correction for conditional averages
     call MPI_REDUCE(mean_us2, mean_30, 2*(nyh+1)*(nyh+1), MPI_DOUBLE_PRECISION, MPI_SUM, 0, MPI_COMM_WORLD, ierror)
