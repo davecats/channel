@@ -6,7 +6,6 @@ implicit none
 integer :: ii=1, imin, imax, io
 character(len=32) :: arg
 character(len=40) :: fname
-integer*1, dimension(68) :: header
 
 
 ! old files
@@ -16,6 +15,9 @@ integer :: old_x, old_y, old_z
 ! new files
 complex(C_DOUBLE_COMPLEX), dimension(:,:,:,:), allocatable :: v
 integer :: nx, ny, nz
+real(C_DOUBLE) :: alfa0,beta0,ni,a,ymin,ymax,deltat,cflmax,time,dt_field,dt_save,t_max,gamma,meanpx,meanpz,meanflowx,meanflowz,u0,uN
+logical :: time_from_restart, CPI
+integer :: CPI_type, nstep, npy
 
 ! looping
 integer :: ub_x, ub_z
@@ -60,7 +62,9 @@ integer :: ic, ix, iz, iy
         ! write new file
         fname = trim(fname)//'.new'
         open(unit=100,file=trim(fname),access="stream",action="write",iostat=io)
-            write(100) header, v
+            write(100) nx,ny,nz
+            write(100) alfa0,beta0,ni,a,ymin,ymax,time
+            write(100) v
         close(100)
 
     end do
@@ -111,12 +115,7 @@ character(len=40) :: filename
     open(unit=100,file=trim(filename),access="stream",status="old",action="read",iostat=io)
         read(100) old_x, old_y, old_z
     close(100)
-
-    ! read header
-    open(unit=100,file=trim(filename),access="stream",status="old",action="read",iostat=io)
-        read(100) header
-    close(100)
-    
+   
     allocate(old_v(-1:(old_y+1),(-old_z):old_z,0:old_x,1:3))
 
 end subroutine
@@ -137,7 +136,18 @@ end subroutine
 subroutine get_new_size()
 character(len=40), parameter :: filename = 'dns.in'
     open(100, file=trim(filename))
-        read(100, *) nx, ny, nz;
+        read(100, *) nx, ny, nz
+        read(100, *) alfa0, beta0
+        read(100, *) ni
+        read(100, *) a, ymin, ymax
+        read(100, *) CPI, CPI_type, gamma
+        read(100, *) meanpx, meanpz
+        read(100, *) meanflowx, meanflowz
+        read(100, *) u0,uN
+        read(100, *) deltat, cflmax, time
+        read(100, *) dt_field, dt_save, t_max, time_from_restart
+        read(100, *) nstep
+        read(100, *) npy
     close(100)
 
     allocate(v(-1:(ny+1), (-nz):nz, 0:nx, 1:3))
