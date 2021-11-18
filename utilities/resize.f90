@@ -58,7 +58,7 @@ integer :: ic, ix, iz, iy
         end do
 
         ! write new file
-        print *, fname
+        fname = trim(fname)//'.new'
         open(unit=100,file=trim(fname),access="stream",action="write",iostat=io)
             write(100) header, v
         close(100)
