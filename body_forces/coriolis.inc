@@ -1,4 +1,8 @@
-subroutine set_coriolis_READ_WALZ()
+! From the Bachelor's thesis of Mohit Karnvir Singh
+! This bodyforce is the Coriolis force associated to a rotation omega in the spanwise direction (z, or 3)
+! 2*omega is hardcoded in omega2
+
+subroutine set_body_force()
 integer :: c, r, g, t, pc, zeichen
 real, parameter :: omega2 = -0.06
     do c=1,2
