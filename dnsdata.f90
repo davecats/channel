@@ -177,7 +177,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
     REAL(C_DOUBLE), INTENT(IN) :: threshold
     REAL(C_DOUBLE) :: selectime,a,b,c,d,e,f,g,h,i,curr_dt
     INTEGER :: negative_if_eof = 0 
-    LOGICAL :: threshold_reached
+    LOGICAL :: threshold_reached=.FALSE.
     IF (has_terminal) THEN
       DO WHILE (.NOT. threshold_reached .AND. negative_if_eof >= 0)
         READ(101,*,IOSTAT=negative_if_eof) selectime,a,b,c,d,e,f,g,h,i,curr_dt
@@ -235,6 +235,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
   SUBROUTINE setup_derivatives()
     real(C_DOUBLE)    :: M(0:4,0:4), t(0:4)
     integer(C_INT)    :: iy,i,j
+    TYPE(C_PTR) :: ptrBUFlinSolve
     TYPE(MPI_REQUEST) :: Rs 
     DO iy=MAX(1,ny0-2),MIN(ny-1,nyN+2)
       FORALL (i=0:4, j=0:4) M(i,j)=(y(iy-2+j)-y(iy))**(4.0d0-i); CALL LUdecomp(M)
@@ -269,8 +270,10 @@ logical::rtd_exists ! flag to check existence of Runtimedata
     END IF
     FORALL (iy=ny0:nyN) D0mat(iy,-2:2)=der(iy)%d0(-2:2); 
 #ifdef nonblockingY
+    CALL MPI_Buffer_Attach(BUFlinSolve, szBUFlinSolve)
     CALL LU5decompStep(D0mat,Rs,0)
-    IF ( .NOT. first ) CALL MPI_Wait(Rs,MPI_STATUS_IGNORE)
+    CALL MPI_Buffer_Detach(ptrBUFlinSolve,szBUFlinSolve)
+    !IF ( .NOT. first ) CALL MPI_Wait(Rs,MPI_STATUS_IGNORE)
 #else
     CALL LU5decompStep(D0mat)
 #endif
