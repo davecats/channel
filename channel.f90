@@ -75,6 +75,7 @@ IF (has_terminal) THEN
   WRITE(*,"(A,I6,A,L1)"   ) "   nsteps =",nstep, "   time_from_restart =", time_from_restart
 #ifdef bodyforce
   WRITE(*,"(A)") "   Using body force."
+  CALL set_body_force(); 
 #ifdef ibm
   WRITE(*,"(A)") "   Immersed Boundary Method (IBM) active."
 #endif
@@ -116,6 +117,9 @@ END IF
     istep=istep+1
     ! Solve (RK3 - Step1)
     time=time+2.0/RK1_rai(1)*deltat
+#ifdef bodyforce
+    CALL set_body_force(); 
+#endif
     CALL buildrhs(RK1_rai,.FALSE. )
 #ifdef nonblockingY
     CALL MPI_Barrier(MPI_COMM_Y)
@@ -126,6 +130,9 @@ END IF
 #endif
     ! Solve (RK3 - Step2)
     time=time+2.0/RK2_rai(1)*deltat
+#ifdef bodyforce
+    CALL set_body_force(); 
+#endif
     CALL buildrhs(RK2_rai,.FALSE.)  
 #ifdef nonblockingY
     CALL MPI_Barrier(MPI_COMM_Y)
@@ -136,6 +143,9 @@ END IF
 #endif
     ! Solve (RK3 - Step3)
     time=time+2.0/RK3_rai(1)*deltat
+#ifdef bodyforce
+    CALL set_body_force(); 
+#endif
     CALL buildrhs(RK3_rai,.TRUE.)
 #ifdef nonblockingY
     CALL MPI_Barrier(MPI_COMM_Y)

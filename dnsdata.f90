@@ -223,6 +223,14 @@ logical::rtd_exists ! flag to check existence of Runtimedata
   END SUBROUTINE free_memory
 
   !--------------------------------------------------------------!
+  !---------------------- Define body force ---------------------!
+#ifdef bodyforce
+#include "body_forces/coriolis.inc"
+! select your bodyforce here from folder body_forces
+! notice that you also need to uncomment the flag in header.h
+#endif
+
+  !--------------------------------------------------------------!
   !--------------- Set-up the compact derivatives ---------------!
   SUBROUTINE setup_derivatives()
     real(C_DOUBLE)    :: M(0:4,0:4), t(0:4)
