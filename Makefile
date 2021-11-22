@@ -27,6 +27,9 @@ FLAGS = -cpp -Ofast -no-wrap-margin
 
 # GCC (uncomment following line for GCC compiler) 
 # FLAGS = -cpp -Ofast -malign-double -fall-intrinsics -ffree-line-length-none
+
+# GCC, DEBUG (uncomment following line for GCC compiler)
+# FLAGS = -cpp -O0 -malign-double -fall-intrinsics -ffree-line-length-none -fbacktrace -g  -fcheck=all
 endef
 export CNFGSTRNG
 #### 

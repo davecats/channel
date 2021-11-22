@@ -396,6 +396,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
 #endif
   END SUBROUTINE COMPLEXderiv2
 
+#ifndef nonblockingY
   !-------------------------------------------------------------!
   !-----REAL----- derivative in the y-direction ----------------!
   SUBROUTINE REALderiv(f0,f1)
@@ -433,6 +434,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
     f1 = dreal(temp_out)
 
   END SUBROUTINE REALderiv2
+#endif
 
   !--------------------------------------------------------------!
   !----------------- apply the boundary conditions --------------!
@@ -673,7 +675,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
       IF (has_terminal) WRITE(*,*) "Generating initial field..."
       DO iy=ny0-2,nyN+2; DO ix=nx0,nxN; DO iz=-nz,nz
           CALL RANDOM_NUMBER(rn)
-          R(iy,iz,ix,1) = 0.01*EXP(dcmplx(0,rn(1)-0.5));  R(iy,iz,ix,2) = 0.01*EXP(dcmplx(0,rn(2)-0.5));  R(iy,iz,ix,3) = 0.01*EXP(dcmplx(0,rn(3)-0.5));
+          R(iy,iz,ix,1) = 0.00*EXP(dcmplx(0,rn(1)-0.5));  R(iy,iz,ix,2) = 0.00*EXP(dcmplx(0,rn(2)-0.5));  R(iy,iz,ix,3) = 0.00*EXP(dcmplx(0,rn(3)-0.5));
       END DO;        END DO;        END DO
       IF (has_average) THEN
         DO CONCURRENT (iy=ny0-2:nyN+2)

@@ -4,7 +4,9 @@
   SUBROUTINE linsolve(lambda)
     real(C_DOUBLE), intent(in) :: lambda
     integer(C_INT) :: ix,iz,i
+    type(C_PTR) :: ptrBUFlinSolve
     DO ix=nx0,nxN
+      CALL MPI_Buffer_attach(BUFlinSolve, szBUFlinSolve)
       DO iz=-nz,nz
         DO CONCURRENT (iy=ny0:nyN)
           D2vmat(iy,-2:2,iz)=lambda*(der(iy)%d2(-2:2)-k2(iz,ix)*der(iy)%d0(-2:2))-OS(iy,-2:2)
@@ -41,8 +43,11 @@
         CALL LU5decompStep(D2vmat(:,:,iz),req(ReqLinSolve,iz,0),iz+nz); CALL LU5decompStep(etamat(:,:,iz),req(ReqLinSolve,iz,1),iz+nz)
         CALL LeftLU5divStep1(V(:,iz,ix,2),D2vmat(:,:,iz),V(:,iz,ix,2),req(ReqLinSolve,iz,2),iz+nz)
         CALL LeftLU5divStep1(V(:,iz,ix,1),etamat(:,:,iz),V(:,iz,ix,1),req(ReqLinSolve,iz,3),iz+nz)
-      END DO    
-      IF (.NOT. first) CALL MPI_Waitall((2*nz+1)*4,ReqLinSolve,MPI_STATUSES_IGNORE)
+      END DO   
+      CALL MPI_Buffer_Detach(ptrBUFlinSolve,szBUFlinSolve)
+      CALL MPI_Buffer_Attach(BUFlinSolve, szBUFlinSolve)
+      !IF (.NOT. first) CALL MPI_Waitall((2*nz+1)*4,ReqLinSolve,MPI_STATUSES_IGNORE)
+      !IF (.NOT. first) CALL MPI_Waitall((2*nz+1)*4,ReqLinSolve,MPI_STATUSES_IGNORE)
       IF (ix==0) eta00mat=etamat(:,:,0)
       DO iz=-nz,nz
         CALL LeftLU5divStep2(D2vmat(:,:,iz),V(:,iz,ix,2),req(ReqLinSolve,iz,0),iz+nz)
@@ -60,7 +65,8 @@
           V(ny+1,iz,ix,1)=-sum(V(ny-3:ny,iz,ix,1)*etanp1bc(-2:1))/etanp1bc(2)
         END IF
       END DO
-      IF (.NOT. last) CALL MPI_Waitall((2*nz+1)*2,ReqLinSolve,MPI_STATUSES_IGNORE)
+      CALL MPI_Buffer_Detach(ptrBUFlinSolve,szBUFlinSolve)
+      !IF (.NOT. last) CALL MPI_Waitall((2*nz+1)*2,ReqLinSolve,MPI_STATUSES_IGNORE)
     END DO
   END SUBROUTINE linsolve
 
@@ -71,13 +77,18 @@
     complex(C_DOUBLE_COMPLEX) :: ucor(ny0-2:nyN+2)
     real(C_DOUBLE) :: frl(1:3)
     TYPE(MPI_REQUEST) :: Rs
+    type(C_PTR) :: ptrBUFlinSolve
     IF (has_average) THEN
+         CALL MPI_Buffer_attach(BUFlinSolve, szBUFlinSolve)
          ucor(ny0-2:ny0-1)=0; ucor(ny0:nyN)=1; ucor(nyN+1:nyN+2)=0
          ! XXX TODO Make computation of ucor communication-free
          CALL LeftLU5divStep1(ucor,eta00mat(:,:),ucor,Rs,0)
-         IF (.NOT. first) CALL MPI_WAIT(Rs,MPI_STATUS_IGNORE)
+         !IF (.NOT. first) CALL MPI_WAIT(Rs,MPI_STATUS_IGNORE)
+         CALL MPI_Buffer_Detach(ptrBUFlinSolve,szBUFlinSolve)
+         CALL MPI_Buffer_Attach(BUFlinSolve, szBUFlinSolve)
          CALL LeftLU5divStep2(eta00mat(:,:),ucor,Rs,0)
-         IF (.NOT. last)  CALL MPI_WAIT(Rs,MPI_STATUS_IGNORE)
+         CALL MPI_Buffer_Detach(ptrBUFlinSolve,szBUFlinSolve)
+         !IF (.NOT. last)  CALL MPI_WAIT(Rs,MPI_STATUS_IGNORE)
          IF (first) THEN
            ucor(0)=-sum(ucor(1:3)*eta0bc(0:2))/eta0bc(-1)
            ucor(-1)=-sum(ucor(0:3)*eta0m1bc(-1:2))/eta0m1bc(-2)
@@ -115,11 +126,13 @@
   SUBROUTINE vetaTOuvw()
     complex(C_DOUBLE_COMPLEX) :: temp(ny0-2:nyN+2)
     integer(C_INT) :: ix,iz,cnt_req
+    type(C_PTR) :: ptrBUFveta
     IF (has_average) THEN
       V(:,0,0,3) = dcmplx(dimag(V(:,0,0,1)),0.d0); 
       V(:,0,0,1) = dcmplx(dreal(V(:,0,0,1)),0.d0);
     END IF
     cnt_req=1
+    CALL MPI_Buffer_Attach(BUFveta, szBUFveta)
     DO ix=nx0,nxN
       DO iz=-nz,nz
           IF ( .NOT. (ix==0 .AND. iz==0) )  THEN
@@ -127,7 +140,9 @@
           END IF
       END DO
     END DO
-    IF (.NOT. first) CALL MPI_Waitall(cnt_req-1,REQvetaTOuvw,MPI_STATUSES_IGNORE); 
+    CALL MPI_Buffer_Detach(ptrBUFveta,szBUFveta)
+    CALL MPI_Buffer_Attach(BUFveta, szBUFveta)
+    !IF (.NOT. first) CALL MPI_Waitall(cnt_req-1,REQvetaTOuvw,MPI_STATUSES_IGNORE); 
     cnt_req=1
     DO ix=nx0,nxN
       DO iz=-nz,nz
@@ -139,6 +154,7 @@
           END IF
       END DO
     END DO
-    IF (.NOT. last) CALL MPI_Waitall(cnt_req-1,REQvetaTOuvw,MPI_STATUSES_IGNORE)
+    CALL MPI_Buffer_Detach(ptrBUFveta,szBUFveta)
+    !IF (.NOT. last) CALL MPI_Waitall(cnt_req-1,REQvetaTOuvw,MPI_STATUSES_IGNORE)
   END SUBROUTINE vetaTOuvw
 
