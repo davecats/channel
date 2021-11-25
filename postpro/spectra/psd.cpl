@@ -30,6 +30,7 @@
 
 gamma=0
 outinterv=0
+dnsin_in_parent = FALSE
 USE ../dnsdata
 USE ../dnsdirect
 !USE rtchecks
