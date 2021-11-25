@@ -1,0 +1,236 @@
+! This program computes the spectral budget equation for the 
+! Reynolds stresses (1,1), (2,2), (3,3), (1,2) 
+! 
+! Only spanwise wavenumbers allowed
+! 
+! The turbulent transport is divided into its constitutive components
+
+IF COMMANDLINE(1)="-h" THEN
+  WRITE "This program computes the spectral budget equation for the Reynolds stresses (1,1), (2,2), (3,3), (1,2)"
+  WRITE ""
+  WRITE "   uiuj_spectra [-h] 1 1 localhost nfmin nfmax dn [--sh_mem_proc n_sh_mem_proc]"
+  WRITE ""
+  WRITE "Flag --sh_mem_proc is used to specify the number of shared memory processes to be used (on each machine, if this program is started in distributed memory)."
+  WRITE "By default, 4 shared memory processes are used."
+  WRITE ""
+  WRITE "The documentation (help) of the standard uiuj might be a useful reference."
+  STOP
+END IF
+
+outinterv=10
+gamma=0
+dnsin_in_parent = FALSE 
+USE ../dnsdata
+USE ../dnsdirect
+!USE rtchecks
+USE ../convenience
+
+! Parameters
+! -----------------------------
+INTEGER nfmin,nfmax,dn,nftot
+nfmin=atoi(COMMANDLINE(4))
+nfmax=atoi(COMMANDLINE(5))
+dn=atoi(COMMANDLINE(6))
+! NOTICE THAT sh_mem_proc IS ALWAYS PARSED BY DNSDATA
+!------------------------------
+nftot=[(nfmax-nfmin) DIV dn]+1
+
+! Definitions
+! ------------------------------------
+#define cprod(f,g,h) h.REAL=f.REAL*g.REAL; h.IMAG=f.IMAG*g.IMAG
+#define cprod3(f,g,k,h) h.REAL=f.REAL*g.REAL*k.REAL; h.IMAG=f.IMAG*g.IMAG*k.IMAG
+MEANTERMS = STRUCTURE(REAL U,W,Uy,Wy,Uyy,Wyy,P)
+BALANCE = STRUCTURED ARRAY(var,prod,psdiss,ttrsp,vdiff,pstrain,ptrsp,PHIttrsp,PHIvdiff,PHIptrsp) OF ARRAY(1..6) OF REAL ! XXX 
+
+SHARED ARRAY(0..nx,-nz..nz,nyl-2..nyh+2) OF COMPLEX pressure=0
+SHARED ARRAY(0..nx,-nz..nz,nyl-2..nyh+2) OF DERIVS Vder=0
+POINTER TO STORED ARRAY(0..nx,-nz..nz,-1..ny+1) OF COMPLEX pressuredata
+
+SHARED ARRAY(0..nxd-1,0..nzd-1) OF DERIVS Vderd=0
+SHARED ARRAY(0..nxd-1,0..nzd-1) OF DERPRODSEXT VVderd=0
+SHARED ARRAY(0..nxd-1,0..nzd-1,1..3) OF COMPLEX PHIttrspd=0
+
+SHARED ARRAY(nyl-2..nyh+2,0..nz,-nz..nz) OF STRUCTURED ARRAY(uu,vv,ww,uv) OF REAL convs=0 
+SHARED ARRAY(nyl-2..nyh+2) OF MEANTERMS mean=0
+SHARED ARRAY(nyl-2..nyh+2,-nz..nz) OF BALANCE uiuj=0
+SHARED ARRAY(nyl-2..nyh+2) OF BALANCE uiujprofiles=0
+ARRAY(-nz..nz) OF INTEGER izdV=0; DO izdV(iz)=IF iz>=0 THEN iz ELSE nzd+iz FOR iz=-nz TO nz
+izd==izdV(iz)
+
+! Compute the average field
+! ------------------------------------
+LOOP files FOR n=nfmin TO nfmax BY dn
+  IF NOT first THEN READ FROM prev
+  STRING field_name = WRITE('Dati.cart.'n'.out')
+  STRING pressure_name = WRITE('pField'n'.fld')
+  INTEGER sz=SIZEOF(INTEGER)*3+SIZEOF(REAL)*7
+  POINTER TO STORED STRUCTURE(
+    ARRAY(0..sz-1) OF CHAR dummy
+    ARRAY(0..2,0..nx,-nz..nz,-1..ny+1) OF COMPLEX fieldimage_fortran
+  ) diskfield_fortran
+  diskfield_fortran=OPEN(field_name); pressuredata=OPEN(pressure_name)
+  diskfield_fortran=OPEN(field_name); pressuredata=OPEN(pressure_name)
+  WITH diskfield_fortran,mean(*):
+    U=~+fieldimage_fortran(0,0,0,nyl-2..nyh+2).REAL
+    W=~+fieldimage_fortran(2,0,0,nyl-2..nyh+2).REAL
+    P=~+pressuredata(0,0,nyl-2..nyh+2).REAL
+  CLOSE(diskfield_fortran); CLOSE(pressuredata)
+  IF NOT last THEN WRITE TO next
+REPEAT files
+WITH mean: U=~/nftot; W=~/nftot; P=~/nftot
+WITH mean:  deriv(U, Uy);  LeftLUDivStep2(Uy,  D0mat); deriv(W, Wy);   LeftLUDivStep2(Wy, D0mat)
+WITH mean: deriv2(U, Uyy); LeftLUDivStep2(Uyy, D0mat) deriv2(W, Wyy); LeftLUDivStep2(Wyy, D0mat)
+     
+
+! Compute the TKE budget
+! ------------------------------------
+LOOP fields FOR n=nfmin TO nfmax BY dn
+  ! Read field
+  STRING field_name = WRITE('Dati.cart.'n'.out')
+  read_field_fortran(field_name)
+  ! Pressure field
+  STRING pressure_name = WRITE('pField'n'.fld'); pressuredata=OPEN(pressure_name)
+  pressure(*,*,nyl-2..nyh+2)=pressuredata(*,*,nyl-2..nyh+2); CLOSE(pressuredata)
+  ! Compute fluctuating field
+  WITH mean(*),V(0,0,*),Vder(0,0,*): u.REAL=~-U; w.REAL=~-W; pressure(0,0,*)=~-P;
+  ! Compute derivatives
+  velocity_gradient(Vder)
+  ! Parseval theorem method for var, pstrain and PHIptrsp
+  LOOP FOR iy=nyl-2 TO nyh+2
+    LOOP FOR ALL ix,iz WITH V(ix,iz,iy),Vder(ix,iz,iy), uiuj(iy,iz),mean(iy):
+      p == pressure(ix,iz,iy)
+      c=IF ix=0 THEN 1 ELSE 2
+      var(1) = ~ + 2*c*(u|u).REAL;     var(2) = ~ + 2*c*(v|v).REAL
+      var(3) = ~ + 2*c*(w|w).REAL;     var(4) = ~ + c*(u|v + v|u).REAL
+      var(5) = ~ + c*(v|w + w|v).REAL; var(6) = ~ + c*(u|w + w|u).REAL
+      prod(1)=~ - c*(u|v + v|u).REAL*Uy 
+      prod(3)=~ - c*(v|w + w|v).REAL*Wy
+      prod(4)=~ - c*(v|v).REAL*Uy
+      PHIptrsp(2) = ~ - c*(v|p + p|v).REAL;  PHIptrsp(4) = ~ - c*(p|u).REAL
+      pstrain(1) = ~ + c*[ux|p + p|ux].REAL; pstrain(2) = ~ + c*[vy|p + p|vy].REAL
+      pstrain(3) = ~ + c*[wz|p + p|wz].REAL; pstrain(4) = ~ + c*[vx|p + p|uy].REAL
+      psdiss(1)=~-2*ni*c*[ux|ux + uy|uy + uz|uz].REAL; psdiss(2)=~-2*ni*c*[vx|vx + vy|vy + vz|vz].REAL
+      psdiss(3)=~-2*ni*c*[wx|wx + wy|wy + wz|wz].REAL; psdiss(4)=~-2*ni*c*[ux|vx + uy|vy + uz|vz].REAL 
+    REPEAT
+  REPEAT
+  ! ttrsp term is the only one requiring pseudospectral convolution
+  LOOP FOR iy=nyl-2 TO nyh+2
+    Vderd=0; Vderd(0..nx,0..nz)=Vder(*,0..nz,iy); Vderd(0..nx,nzd+(-nz..-1))=Vder(*,-nz..-1,iy)
+    Vd=0;    Vd(0..nx,0..nz)=V(*,0..nz,iy);       Vd(0..nx,nzd+(-nz..-1))=V(*,-nz..-1,iy)   
+    DO  
+      WITH Vderd(ix,*): INLINE LOOP FOR ii IN (ux,vx,wx,uy,vy,wy,uz,vz,wz); IFT(ii); REPEAT
+      WITH Vd(ix,*):    INLINE LOOP FOR i  IN (u,v,w); IFT(i); REPEAT
+    FOR ix=0 TO nx
+    DO
+      WITH Vderd(*,iz): INLINE LOOP FOR ii IN (ux,vx,wx,uy,vy,wy,uz,vz,wz); RFT(ii); REPEAT
+      WITH Vd(*,iz):    INLINE LOOP FOR i  IN (u,v,w); RFT(i); REPEAT
+    FOR iz=0 TO HI
+    DO WITH Vderd(ix,iz), Vd(ix,iz):
+           PHIttrspd(ix,iz,1).REAL=[u.REAL*ux.REAL + v.REAL*uy.REAL + w.REAL*uz.REAL + u.REAL*ux.REAL + u.REAL*vy.REAL + u.REAL*wz.REAL]  
+           PHIttrspd(ix,iz,1).IMAG=[u.IMAG*ux.IMAG + v.IMAG*uy.IMAG + w.IMAG*uz.IMAG + u.IMAG*ux.IMAG + u.IMAG*vy.IMAG + u.IMAG*wz.IMAG]  
+           PHIttrspd(ix,iz,2).REAL=[u.REAL*vx.REAL + v.REAL*vy.REAL + w.REAL*vz.REAL + v.REAL*ux.REAL + v.REAL*vy.REAL + v.REAL*wz.REAL]  
+           PHIttrspd(ix,iz,2).IMAG=[u.IMAG*vx.IMAG + v.IMAG*vy.IMAG + w.IMAG*vz.IMAG + v.IMAG*ux.IMAG + v.IMAG*vy.IMAG + v.IMAG*wz.IMAG]  
+           PHIttrspd(ix,iz,3).REAL=[u.REAL*wx.REAL + v.REAL*wy.REAL + w.REAL*wz.REAL + w.REAL*ux.REAL + w.REAL*vy.REAL + w.REAL*wz.REAL]  
+           PHIttrspd(ix,iz,3).IMAG=[u.IMAG*wx.IMAG + v.IMAG*wy.IMAG + w.IMAG*wz.IMAG + w.IMAG*ux.IMAG + w.IMAG*vy.IMAG + w.IMAG*wz.IMAG]  
+    FOR ALL ix,iz
+    DO HFT(PHIttrspd(*,iz,i)) FOR ALL i,iz
+    DO FFT(PHIttrspd(ix,*,i)); FOR ALL i AND ix=0 TO nx
+    DO WITH uiuj(iy,iz),V(ix,iz,iy):
+        c=IF ix=0 THEN 1 ELSE 2
+        ttrsp(1)=~-c*[u|PHIttrspd(ix,izd,1) + PHIttrspd(ix,izd,1)|u].REAL; ttrsp(2)=~-c*[v|PHIttrspd(ix,izd,2) + PHIttrspd(ix,izd,2)|v].REAL
+        ttrsp(3)=~-c*[w|PHIttrspd(ix,izd,3) + PHIttrspd(ix,izd,3)|w].REAL; ttrsp(4)=~-c*[u|PHIttrspd(ix,izd,2) + v|PHIttrspd(ix,izd,1)].REAL
+    FOR ix=0 TO nx AND iz=-nz TO nz 
+    ! Convolutions 
+    ARRAY(0..2*nxd-1,0..nzd-1) OF VELOCITY VD
+    ARRAY(0..2*nxd-1,0..nzd-1) OF DERIVS VderD
+    DO WITH Vd(*,iz), Vderd(*,iz): 
+      VD(ix,iz).u=u.REALIFIED(ix); VD(ix,iz).v=v.REALIFIED(ix); VD(ix,iz).w=w.REALIFIED(ix)
+      VderD(ix,iz).ux=ux.REALIFIED(ix); VderD(ix,iz).uy=uy.REALIFIED(ix); VderD(ix,iz).uz=uz.REALIFIED(ix)
+      VderD(ix,iz).vx=vx.REALIFIED(ix); VderD(ix,iz).vy=vy.REALIFIED(ix); VderD(ix,iz).vz=vz.REALIFIED(ix)
+      VderD(ix,iz).wx=wx.REALIFIED(ix); VderD(ix,iz).wy=wy.REALIFIED(ix); VderD(ix,iz).wz=wz.REALIFIED(ix)
+    FOR ix=0 TO 2*nxd-1 AND iz=0 TO nzd-1
+    DO  
+      WITH VderD(ix,*): INLINE LOOP FOR ii IN (ux,vx,wx,uy,vy,wy,uz,vz,wz); FFT(ii); REPEAT
+      WITH VD(ix,*):    INLINE LOOP FOR i  IN (u,v,w); FFT(i); REPEAT
+    FOR ALL ix
+    ARRAY(-nz..nz) OF DERIVS Vdertmp
+    ARRAY(-nz..nz) OF VELOCITY Vtmp
+#define triad(a,b,q,d) convolution(c*CONJG(a),b,q,d); convolution(c*a,CONJG(b),CONJG(q),d);
+#ifdef convolutions
+    DO WITH Vtmp(*), Vdertmp(*), convs(iy,*,*):
+          Vtmp(0..nz)=VD(ix,0..nz); Vtmp(-nz..-1)=VD(ix,nzd+(-nz..-1))
+          Vdertmp(0..nz)=VderD(ix,0..nz); Vdertmp(-nz..-1)=VderD(ix,nzd+(-nz..-1))
+          c=0.5/nxd
+          ! uu 
+          triad(u,ux,u,uu); triad(u,vy,u,uu); triad(u,wz,u,uu);
+          triad(u,u,ux,uu); triad(u,v,uy,uu); triad(u,w,uz,uu);
+          ! vv
+          triad(v,ux,v,vv); triad(v,vy,v,vv); triad(v,wz,v,vv);
+          triad(v,vx,u,vv); triad(v,vy,v,vv); triad(v,vz,w,vv);
+          ! ww 
+          triad(w,ux,w,ww); triad(w,vy,w,ww); triad(w,wz,w,ww);
+          triad(w,wx,u,ww); triad(w,wy,v,ww); triad(w,wz,w,ww);
+          ! uv
+          convolution(c*CONJG(v),ux,u,uv); convolution(c*CONJG(v),vy,u,uv); convolution(c*CONJG(v),wz,u,uv)
+          convolution(c*CONJG(v),ux,u,uv); convolution(c*CONJG(v),uy,v,uv); convolution(c*CONJG(v),uz,w,uv)
+          convolution(c*u,CONJG(ux),CONJG(v),uv); convolution(c*u,CONJG(vy),CONJG(v),uv); convolution(c*u,CONJG(wz),CONJG(v),uv)
+          convolution(c*u,CONJG(vx),CONJG(u),uv); convolution(c*u,CONJG(vy),CONJG(v),uv); convolution(c*u,CONJG(vz),CONJG(w),uv)
+    FOR ALL ix
+#endif
+  REPEAT
+REPEAT fields
+
+
+! var,PHIttrsp,psdiss,pstrain
+DO WITH uiuj(iy,iz): var(i)=~/nftot; PHIptrsp(i)=~/nftot; ttrsp(i)=~/nftot; psdiss(i)=~/nftot; pstrain(i)=~/nftot; prod(i)=~/nftot FOR ALL i,iy,iz
+convs(*)=-~/nftot; 
+! PHIvdiff, vdiff
+DO WITH uiuj:  deriv(var(*,iz,i),PHIvdiff(*,iz,i)); LeftLUDivStep2(PHIvdiff(*,iz,i),D0mat); PHIvdiff(*,iz,i)=~*ni*0.5; FOR ALL i,iz;
+DO WITH uiuj: deriv2(var(*,iz,i),vdiff(*,iz,i));    LeftLUDivStep2(vdiff(*,iz,i),D0mat);    vdiff(*,iz,i)=~*ni*0.5;    FOR ALL i,iz;
+! ptrsp
+DO WITH uiuj: deriv(PHIptrsp(*,iz,i),ptrsp(*,iz,i)); LeftLUDivStep2(ptrsp(*,iz,i),D0mat); FOR ALL i,iz;
+! profiles
+DO uiujprofiles(iy,i)=[SUM uiuj(iy,iz,i) FOR ALL iz] FOR ALL i AND iy=miny TO maxy
+
+WRITE "Saving to disk..."
+
+! Create output directory
+! ------------------------------------
+<*
+#include <sys/stat.h>
+#include <sys/types.h>
+*>
+
+<*
+int ifold_create = mkdir("profiles", 0777);
+*>
+
+! Write metadata
+! ------------------------------------
+FILE echofile = CREATE("profiles/uiuj_spectra.nfo")
+    WRITE TO echofile "This is uiuj_spectra, version adapted for channel.f90"
+    WRITE BY NAME TO echofile nfmin, nfmax, dn
+CLOSE echofile
+
+! Write to binary file
+! ------------------------------------
+POINTER TO STORED STRUCTURE[
+        ARRAY(-1..ny+1) OF MEANTERMS meandata
+        ARRAY(-1..ny+1,-nz..nz) OF BALANCE uiujdata
+        ARRAY(-1..ny+1) OF BALANCE uiujprofilesdata
+        ARRAY(-1..ny+1,0..nz,-nz..nz) OF STRUCTURED ARRAY(uu,vv,ww,uv) OF REAL convsdata
+] uiujimage
+IF NOT first THEN READ FROM prev
+  uiujimage = OPEN("profiles/uiuj_spectra.bin")
+  WITH uiujimage:
+    meandata(miny..maxy)=mean(miny..maxy)
+    uiujdata(miny..maxy)=uiuj(miny..maxy)
+    uiujprofilesdata(miny..maxy)=uiujprofiles(miny..maxy)
+    convsdata(miny..maxy)=convs(miny..maxy)
+  CLOSE(uiujimage)
+IF NOT last THEN WRITE TO next
+
+! Be polite and say goodbye
+! ------------------------------------
+WRITE " "
+WRITE "Goodbye, man!"
