@@ -11,7 +11,7 @@
 ! Date  : 15/Apr/2019
 ! 
 
-#include 'header.h'
+#include "header.h"
 
 MODULE mpi_transpose
   
@@ -29,6 +29,11 @@ MODULE mpi_transpose
 #ifdef nonblockingY
   ! Array of requests for nonblocking communication in linsolve
   TYPE(MPI_REQUEST), allocatable :: REQlinSolve(:), REQvetaTOuvw(:)
+  ! Buffer arrays for manually buffered communication
+  real(C_DOUBLE), allocatable       :: BUFlinSolve(:)
+  real(C_DOUBLE), allocatable       :: BUFveta(:)
+  integer(C_INT)                 :: szBUFlinSolve, elBUFlinSolve
+  integer(C_INT)                 :: szBUFveta, elBUFveta
 #endif
 
 CONTAINS
@@ -106,6 +111,14 @@ CONTAINS
     CALL MPI_Type_create_subarray(ndims, array_of_sizes, array_of_subsizes, array_of_starts, MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, owned2write_type, ierror)
     CALL MPI_Type_commit(owned2write_type, ierror)
 #ifdef nonblockingY
+    ! Allocate memory for send buffers [2*LU5Decomp (20 Doubles)  + 2*LeftLU5DivStep1 (4 Complex)]
+    szBUFlinSolve = int(20*8+4*16+MPI_BSEND_OVERHEAD,C_SIZE_T)*int(2*nz+1,C_SIZE_T)
+    elBUFlinSolve = szBUFlinSolve/8 + MERGE(1,0,MODULO(szBUFlinSolve,8)>0)
+    ALLOCATE(BUFlinSolve(0:elBUFlinSolve-1))
+    ! Allocate memory for send buffers [LeftLU5DivStep1 (2 Complex)]
+    szBUFveta = int(2*16+MPI_BSEND_OVERHEAD,C_SIZE_T)*int(2*nz+1,C_SIZE_T)*int(nxN-nx0+1,C_SIZE_T)
+    elBUFveta = szBUFveta/8 + MERGE(1,0,MODULO(szBUFveta,8)>0)
+    ALLOCATE(BUFveta(0:elBUFveta-1))
     ! Allocate memory for requests
     ALLOCATE(REQlinSolve(1:(2*nz+1)*4), REQvetaTOuvw(1:(nxB+1)*(2*nz+1)))
 #endif

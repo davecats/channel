@@ -177,7 +177,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
     REAL(C_DOUBLE), INTENT(IN) :: threshold
     REAL(C_DOUBLE) :: selectime,a,b,c,d,e,f,g,h,i,curr_dt
     INTEGER :: negative_if_eof = 0 
-    LOGICAL :: threshold_reached
+    LOGICAL :: threshold_reached=.FALSE.
     IF (has_terminal) THEN
       DO WHILE (.NOT. threshold_reached .AND. negative_if_eof >= 0)
         READ(101,*,IOSTAT=negative_if_eof) selectime,a,b,c,d,e,f,g,h,i,curr_dt
@@ -223,10 +223,19 @@ logical::rtd_exists ! flag to check existence of Runtimedata
   END SUBROUTINE free_memory
 
   !--------------------------------------------------------------!
+  !---------------------- Define body force ---------------------!
+#ifdef bodyforce
+#include "body_forces/coriolis.inc"
+! select your bodyforce here from folder body_forces
+! notice that you also need to uncomment the flag in header.h
+#endif
+
+  !--------------------------------------------------------------!
   !--------------- Set-up the compact derivatives ---------------!
   SUBROUTINE setup_derivatives()
     real(C_DOUBLE)    :: M(0:4,0:4), t(0:4)
     integer(C_INT)    :: iy,i,j
+    TYPE(C_PTR) :: ptrBUFlinSolve
     TYPE(MPI_REQUEST) :: Rs 
     DO iy=MAX(1,ny0-2),MIN(ny-1,nyN+2)
       FORALL (i=0:4, j=0:4) M(i,j)=(y(iy-2+j)-y(iy))**(4.0d0-i); CALL LUdecomp(M)
@@ -261,8 +270,10 @@ logical::rtd_exists ! flag to check existence of Runtimedata
     END IF
     FORALL (iy=ny0:nyN) D0mat(iy,-2:2)=der(iy)%d0(-2:2); 
 #ifdef nonblockingY
+    CALL MPI_Buffer_Attach(BUFlinSolve, szBUFlinSolve)
     CALL LU5decompStep(D0mat,Rs,0)
-    IF ( .NOT. first ) CALL MPI_Wait(Rs,MPI_STATUS_IGNORE)
+    CALL MPI_Buffer_Detach(ptrBUFlinSolve,szBUFlinSolve)
+    !IF ( .NOT. first ) CALL MPI_Wait(Rs,MPI_STATUS_IGNORE)
 #else
     CALL LU5decompStep(D0mat)
 #endif
@@ -396,6 +407,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
 #endif
   END SUBROUTINE COMPLEXderiv2
 
+#ifndef nonblockingY
   !-------------------------------------------------------------!
   !-----REAL----- derivative in the y-direction ----------------!
   SUBROUTINE REALderiv(f0,f1)
@@ -433,6 +445,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
     f1 = dreal(temp_out)
 
   END SUBROUTINE REALderiv2
+#endif
 
   !--------------------------------------------------------------!
   !----------------- apply the boundary conditions --------------!
@@ -673,7 +686,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
       IF (has_terminal) WRITE(*,*) "Generating initial field..."
       DO iy=ny0-2,nyN+2; DO ix=nx0,nxN; DO iz=-nz,nz
           CALL RANDOM_NUMBER(rn)
-          R(iy,iz,ix,1) = 0.01*EXP(dcmplx(0,rn(1)-0.5));  R(iy,iz,ix,2) = 0.01*EXP(dcmplx(0,rn(2)-0.5));  R(iy,iz,ix,3) = 0.01*EXP(dcmplx(0,rn(3)-0.5));
+          R(iy,iz,ix,1) = 0.00*EXP(dcmplx(0,rn(1)-0.5));  R(iy,iz,ix,2) = 0.00*EXP(dcmplx(0,rn(2)-0.5));  R(iy,iz,ix,3) = 0.00*EXP(dcmplx(0,rn(3)-0.5));
       END DO;        END DO;        END DO
       IF (has_average) THEN
         DO CONCURRENT (iy=ny0-2:nyN+2)

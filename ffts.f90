@@ -11,7 +11,7 @@
 ! Date  : 28/Jul/2015
 !
 
-#include 'header.h'
+#include "header.h"
 
 MODULE ffts
 
@@ -49,7 +49,7 @@ CONTAINS
      if (present(odd_n_real)) then
        ! notice: odd_n_real is basically .FALSE. by default
        ! meaning that by default the logical size of the real transform is even
-       if (odd_n_real==.TRUE.) rn_x=rn_x - 1
+       if (odd_n_real .eqv. .TRUE.) rn_x=rn_x - 1
      endif
      if (present(s)) sn = s
      !Allocate aligned memory
