@@ -17,11 +17,12 @@ END IF
 ! END OF HELP/DOCUMENTATION
 !------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+dnsin_in_parent=FALSE
 gamma=0
 outinterv=10
 USE ../dnsdata
 USE ../dnsdirect
-!USE rtchecks
+! USE rtchecks
 USE ../convenience
 
 ! Unpack input
@@ -37,7 +38,7 @@ END IF
 
 ! Definitions
 ! ------------------------------------
-#define sumint(g) [SUM yintf(g(*,i)) FOR i=1 TO 3]
+INLINE FUNCTION sumint(ARRAY(*,*) OF REAL g)=[SUM yintf(g(*,i)) FOR i=1 TO 3]
 ARRAY(1..6) OF STRING terms, intterms
 terms(1)="profiles/uu.dat"; terms(2)="profiles/vv.dat"; terms(3)="profiles/ww.dat"; terms(4)="profiles/uv.dat"; terms(5)="profiles/uw.dat"; terms(6)="profiles/vw.dat"
 intterms(1)="profiles/uuintegrals.dat"; intterms(2)="profiles/vvintegrals.dat"; intterms(3)="profiles/wwintegrals.dat";
