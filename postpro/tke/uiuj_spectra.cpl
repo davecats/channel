@@ -155,7 +155,7 @@ LOOP fields FOR n=nfmin TO nfmax BY dn
     FOR ALL ix
     ARRAY(-nz..nz) OF DERIVS Vdertmp
     ARRAY(-nz..nz) OF VELOCITY Vtmp
-INLINE FUNCTION triad(COMPLEX a,b,q,d)=[convolution(c*CONJG(a),b,q,d); convolution(c*a,CONJG(b),CONJG(q),d);]
+INLINE FUNCTION triad(COMPLEX gni,b,q,d)=[convolution(c*CONJG(gni),b,q,d); convolution(c*gni,CONJG(b),CONJG(q),d);]
 #ifdef convolutions
     DO WITH Vtmp(*), Vdertmp(*), convs(iy,*,*):
           Vtmp(0..nz)=VD(ix,0..nz); Vtmp(-nz..-1)=VD(ix,nzd+(-nz..-1))
