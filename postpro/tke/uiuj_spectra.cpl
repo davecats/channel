@@ -37,8 +37,8 @@ nftot=[(nfmax-nfmin) DIV dn]+1
 
 ! Definitions
 ! ------------------------------------
-INLINE FUNCTION cprod(COMPLEX f,g,h)=[h.REAL=f.REAL*g.REAL;h.IMAG=f.IMAG*g.IMAG]
-INLINE FUNCTION cprod3(COMPLEX f,g,k,h)=[h.REAL=f.REAL*g.REAL*k.REAL;h.IMAG=f.IMAG*g.IMAG*k.IMAG]
+#define cprod(f,g,h) h.REAL=f.REAL*g.REAL; h.IMAG=f.IMAG*g.IMAG
+#define cprod3(f,g,k,h) h.REAL=f.REAL*g.REAL*k.REAL; h.IMAG=f.IMAG*g.IMAG*k.IMAG
 MEANTERMS = STRUCTURE(REAL U,W,Uy,Wy,Uyy,Wyy,P)
 BALANCE = STRUCTURED ARRAY(var,prod,psdiss,ttrsp,vdiff,pstrain,ptrsp,PHIttrsp,PHIvdiff,PHIptrsp) OF ARRAY(1..6) OF REAL ! XXX 
 
@@ -155,7 +155,7 @@ LOOP fields FOR n=nfmin TO nfmax BY dn
     FOR ALL ix
     ARRAY(-nz..nz) OF DERIVS Vdertmp
     ARRAY(-nz..nz) OF VELOCITY Vtmp
-INLINE FUNCTION triad(COMPLEX a,b,q,d)=[convolution(c*CONJG(a),b,q,d); convolution(c*a,CONJG(b),CONJG(q),d);]
+#define triad(a,b,q,d) convolution(c*CONJG(a),b,q,d); convolution(c*a,CONJG(b),CONJG(q),d);
 #ifdef convolutions
     DO WITH Vtmp(*), Vdertmp(*), convs(iy,*,*):
           Vtmp(0..nz)=VD(ix,0..nz); Vtmp(-nz..-1)=VD(ix,nzd+(-nz..-1))
