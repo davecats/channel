@@ -2,6 +2,10 @@
 ! This bodyforce is the Coriolis force associated to a rotation omega in the spanwise direction (z, or 3)
 ! 2*omega is hardcoded in omega2
 
+subroutine config_body_force()
+    call set_body_force()
+end subroutine
+
 subroutine set_body_force()
 integer :: c, r, g, t, pc, zeichen
 real, parameter :: omega2 = -0.06

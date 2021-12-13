@@ -75,7 +75,7 @@ IF (has_terminal) THEN
   WRITE(*,"(A,I6,A,L1)"   ) "   nsteps =",nstep, "   time_from_restart =", time_from_restart
 #ifdef bodyforce
   WRITE(*,"(A)") "   Using body force."
-  CALL set_body_force(); 
+  CALL config_body_force(); 
 #ifdef ibm
   WRITE(*,"(A)") "   Immersed Boundary Method (IBM) active."
 #endif
