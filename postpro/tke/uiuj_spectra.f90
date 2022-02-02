@@ -10,30 +10,24 @@
 !   uu  vv  ww  uv  vw  uw
 !   1   2   3   4   5   6
 
-! uiujprofiles(irs, iterm, iy, largesmall)      where irs defined before, while iterm:
+! uiujspectra(irs, iterm, iz, iy)      where irs defined before, while iterm:
 !   var prod    psdiss      ttrsp   tcross  vdiff   pstrain     ptrsp   PHIttrsp    PHIvdiff    PHIptrsp
 !   1   2       3           4       5       6       7           8       9           10          11
 
-! *VVd*(zf(iz), xf(ix), term, inout)
+! *VVd*(zf(iz), xf(ix), term, 1)
 ! : WARNING :  iz, ix indices here is scrambled as required by FFT -> use zf(iz), xf(ix)
-! - inout = 1:5
-! - term = 1:6
-! inout=1 contains "inputs" (meaning, everything that is necessary for Fourier antitransform in order to go
-! back to real domain). Products are calculated in real domain, and then transformed back to Fourier.
-! All the "outputs" (everything after the Fourier antitransform, so basically products both in real and
-! Fourier domains) are stored in inout=2.
-! As for the "inputs" (inout=1):
-! - term=1:4 are i,j velocity for large and small fields (both for ttrsp and tcross);
-!   please use placeholders i_ft, j_ft summed to ilasm=1:2
-! - term=6 is component k of the whole velocity field - not decomposed (only for tcross);
-!   use placeholder uk_ft
-! - term=5 is not used
-! As for the "outputs" (inout=2):
-! - for ttrsp, term=1:2 are large/small ui*uj product; use index ilasm
-! - for tcross, term=1:4 are ui*uk, uj*uk for large/small;
-!   please use placeholders i_ft, j_ft summed to ilasm=1:2
-!   notice that two terms appear in tcross; for b=2, a=1:4,
-!   the one starting with ui goes under i_fft, the one starting with uj goes under j_fft
+! Index term has 3 possible values = 1:3
+! - term=1 -> ui
+! - term=2 -> uj
+! - term=3 -> uiuj
+! See parameters i_ft, j_ft, ij_ft
+
+! : WARNING : triadic interactions are still not implemented
+! Array for triadic interactions: convs
+! convs(itri,-nz:nz,0:nz,iy)
+! itri = 1,4
+!   uu  vv  ww  uv
+!   1   2   3   4
 
 
 
@@ -58,7 +52,7 @@ logical :: custom_mean = .FALSE.
 
 integer :: ii ! counter initially used for parsing arguments
 integer :: ix, iy, iz, iv ! for spatial directions and components
-integer :: i, j, k, c, irs, ilasm, cntr
+integer :: i, j, k, c, irs, cntr
 
 ! global stuff
 
@@ -69,18 +63,14 @@ complex(C_DOUBLE_COMPLEX), allocatable :: Vgrad(:,:,:,:,:)
 integer, parameter :: file_vel = 883, file_press = 884
 character(len=40) :: istring, foldername, currfname
 
-real(C_DOUBLE), allocatable :: mean(:,:), uiujprofiles(:,:,:,:)
+real(C_DOUBLE), allocatable :: mean(:,:), uiujspectra(:,:,:,:), uiujprofiles(:,:,:), convs(:,:,:,:)
 real(C_DOUBLE) :: m_grad(3,3) ! m_grad(i,j) = dUi/dxj
 
 ! shortcut parameters
+
 integer, parameter :: var = 1, prod = 2, psdiss = 3, ttrsp = 4, tcross = 5, vdiff = 6, pstrain = 7, ptrsp = 8, PHIttrsp = 9, PHIvdiff = 10, PHIptrsp = 11
-integer, parameter :: large = 1, small = 2
-integer, parameter :: i_ft = 0, j_ft = 2, uk_ft = 6
+integer, parameter :: i_ft = 1, j_ft = 2, ij_ft = 3
 logical :: ignore
-
-! large-small stuff
-
-integer :: z_threshold
 
 ! MPI stuff
 
@@ -109,7 +99,6 @@ integer(MPI_OFFSET_KIND) :: offset
     
     ! setup
     call read_dnsin()
-    call largesmall_setup()
     ! set npy to total number of processes
     ! this effectively DEACTIVATES PARALLELISATION IN X/Z
     ! and makes life easier (without significant losses in perf.)
@@ -117,7 +106,8 @@ integer(MPI_OFFSET_KIND) :: offset
     ! notice that this overrides value from dns.in
     call init_MPI(nx+1,nz,ny,nxd+1,nzd)
     call init_memory(.FALSE.) ! false flag avoids allocation of RHS related stuff!
-    call init_fft(VVdz,VVdx,rVVdx,nxd,nxB,nzd,nzB)
+    call init_fft(VVdz,VVdx,rVVdx,nxd,nxB,nzd,nzB,.FALSE.,[3,1]) ! size of fft array is specified with optional flag
+
     call setup_derivatives()
 
     ! allocate stuff
@@ -127,7 +117,9 @@ integer(MPI_OFFSET_KIND) :: offset
     allocate(dertemp_in(ny0-2:nyN+2))
     allocate(dertemp_out(ny0-2:nyN+2))
     allocate(mean(1:7, ny0-2:nyN+2))
-    allocate(uiujprofiles(1:6, 1:11, ny0-2:nyN+2, 1:2))
+    allocate(uiujspectra(1:6, 1:11, -nz:nz, ny0-2:nyN+2))
+    allocate(uiujprofiles(1:6, 1:11, ny0-2:nyN+2))
+    allocate(convs(1:4,-nz:nz,0:nz,ny0-2:nyN+2)); convs=0
 
     !---------------------------------------------------!
     !----------------- COMPUTE AVERAGE -----------------!
@@ -165,7 +157,7 @@ integer(MPI_OFFSET_KIND) :: offset
     !--------------- COMPUTE TKE BUDGET ----------------!
     !---------------------------------------------------!
 
-    uiujprofiles = 0;
+    uiujspectra = 0;
 
     do ii = nfmin, nfmax, dnf ! loop over files
 
@@ -186,7 +178,7 @@ integer(MPI_OFFSET_KIND) :: offset
 
 #define u(cmp) V(iy,iz,ix,cmp)
 #define gu(cmp,dd) Vgrad(iy,iz,ix,cmp,dd)
-#define uiuj(trm) uiujprofiles(irs,trm,iy,ilasm)
+#define uiuj(trm) uiujspectra(irs,trm,iz,iy)
 #define p pressure(iy,iz,ix)
 
         ! parseval theorem method for var, prod, pstrain, psdiss, PHIptrsp
@@ -194,7 +186,6 @@ integer(MPI_OFFSET_KIND) :: offset
             do ix = nx0, nxN
                 c = 2; if (ix == 0) c = 1 ! multiplier for doubling points in x direction
                 do iz = -nz, nz
-                    ilasm = small; if (is_large(ix,iz)) ilasm = large ! determine if mode is large or small
                     do irs = 1, 6
                         
                         ! prepare stuff
@@ -202,6 +193,7 @@ integer(MPI_OFFSET_KIND) :: offset
                         call get_mean_grad(iy)
                         
                         ! calculate statistics
+                        uiuj(var) = uiuj(var) + c*cprod( u(i), u(j) )
                         uiuj(pstrain) = uiuj(pstrain) + c*cprod(p, gu(i,j)+gu(j,i) )
                         do k = 1,3 ! prod, psdiss need sum over k
                             uiuj(prod) = uiuj(prod) - c * ( cprod(u(i),u(k))*m_grad(j,k) + cprod(u(j),u(k))*m_grad(i,k) )
@@ -228,100 +220,35 @@ integer(MPI_OFFSET_KIND) :: offset
                 call get_indexes(irs, i, j)
 
                 ! TURBULENT TRANSPORT TTRSP
-                VVdz(:,:,:,1) = 0 ! I only need this chunk! no need to set everything to 0
+                VVdz(:,:,i_ft:j_ft,1) = 0 ! I only need this chunk! no need to set everything to 0
                 ! prepare Fourier transform by copying in correct order
                 do ix = nx0,nxN
                     do iz = -nz,nz
-                        ! prepare indeces
-                        ilasm = small; if (is_large(ix,iz)) ilasm = large
                         ! copy arrays
-                        VVdz(zf(iz), xf(ix), ilasm + i_ft, 1) = V(iy,iz,ix,i)
-                        VVdz(zf(iz), xf(ix), ilasm + j_ft, 1) = V(iy,iz,ix,j)
+                        VVdz(zf(iz), xf(ix), i_ft, 1) = V(iy,iz,ix,i)
+                        VVdz(zf(iz), xf(ix), j_ft, 1) = V(iy,iz,ix,j)
                     end do
                 end do
-                ! up until now you used third index = 1:4
                 ! antitransform
-                do cntr = 1,4
+                do cntr = 1,2
                     call IFT(VVdz(1:nzd,1:nxB,cntr,1))
                     call MPI_Alltoall(VVdz(:,:,cntr,1), 1, Mdz, VVdx(:,:,cntr,1), 1, Mdx, MPI_COMM_X) ! you could just copy without MPI since you deactivated xz parallelisation but ok
                     VVdx(nx+2:nxd+1,1:nzB,cntr,1)=0
                     call RFT(VVdx(1:nxd+1,1:nzB,cntr,1),rVVdx(1:2*nxd+2,1:nzB,cntr,1))
                 end do
-                ! get product and transform back
-                do ilasm = 1,2
-                    ! compute product in real space
-                    rVVdx(:,:,ilasm,2) = rVVdx(:,:, ilasm + i_ft, 1) * rVVdx(:,:, ilasm + j_ft, 1) ! ui*uj
-                    ! transform back
-                    call HFT(rVVdx(1:2*nxd+2,1:nzB,ilasm,2), VVdx(1:nxd+1,1:nzB,ilasm,2)); 
-                    call MPI_Alltoall(VVdx(:,:,ilasm,2), 1, Mdx, VVdz(:,:,ilasm,2), 1, Mdz, MPI_COMM_X) ! you could just copy without MPI since you deactivated xz parallelisation but ok
-                    call FFT(VVdz(1:nzd,1:nxB,ilasm,2));
-                    VVdz(1:nzd,1:nxB,ilasm,2) = VVdz(1:nzd,1:nxB,ilasm,2) * factor
-                end do
+                ! compute product in real space
+                rVVdx(:,:,ij_ft,1) = rVVdx(:,:, i_ft, 1) * rVVdx(:,:, j_ft, 1) ! ui*uj
+                ! transform back
+                call HFT(rVVdx(1:2*nxd+2,1:nzB,ij_ft,1), VVdx(1:nxd+1,1:nzB,ij_ft,1)); 
+                call MPI_Alltoall(VVdx(:,:,ij_ft,1), 1, Mdx, VVdz(:,:,ij_ft,1), 1, Mdz, MPI_COMM_X) ! you could just copy without MPI since you deactivated xz parallelisation but ok
+                call FFT(VVdz(1:nzd,1:nxB,ij_ft,1));
+                VVdz(1:nzd,1:nxB,ij_ft,1) = VVdz(1:nzd,1:nxB,ij_ft,1) * factor
                 ! use Parseval's theorem to calculate statistics
                 do ix = nx0, nxN
                     c = 2; if (ix == 0) c = 1 ! multiplier for doubling points in x direction
                     do iz = -nz,nz
-                        do ilasm = 1,2
-                            uiuj(PHIttrsp) = uiuj(PHIttrsp) - c * cprod( VVdz(zf(iz), xf(ix), ilasm, 2), u(2) )
-                        end do
+                        uiuj(PHIttrsp) = uiuj(PHIttrsp) - c * cprod( VVdz(zf(iz), xf(ix), ij_ft, 1), u(2) )
                     end do
-                end do
-
-                ! VARIANCE
-                do ilasm = 1,2
-                    uiuj(var) = uiuj(var) + dreal(VVdz(zf(0), xf(0), ilasm, 2))
-                end do
-
-                ! INTERSCALE TRANSPORT TCROSS
-                ! rVVdx(:,:,1:4,1) already contains fourier transform of components i,j for large and small
-                do k = 1,3
-                    ! prepare Fourier transform by copying in correct order
-                    ! the only input I'm missing is velocity field
-                    VVdz(:,:,uk_ft,1) = 0 ! inputs are only copied on (:,:,:,1)
-                    ! outputs are copied on (:,:,:,2); but I think every cell gets written -> no need to set to 0
-                    do ix = nx0,nxN
-                        do iz = -nz,nz
-                            ! copy arrays
-                            VVdz(zf(iz), xf(ix), uk_ft, 1) = V(iy,iz,ix,k)
-                        end do
-                    end do
-                    ! antitransform
-                    call IFT(VVdz(1:nzd,1:nxB,uk_ft,1))
-                    call MPI_Alltoall(VVdz(:,:,uk_ft,1), 1, Mdz, VVdx(:,:,uk_ft,1), 1, Mdx, MPI_COMM_X) ! you could just copy without MPI since you deactivated xz parallelisation but ok
-                    VVdx(nx+2:nxd+1,1:nzB,uk_ft,1)=0
-                    call RFT(VVdx(1:nxd+1,1:nzB,uk_ft,1),rVVdx(1:2*nxd+2,1:nzB,uk_ft,1))
-                    ! compute products
-                    do ilasm = 1,2
-                        rVVdx(:,:,ilasm+i_ft,2) = rVVdx(:,:,ilasm+i_ft,1) * rVVdx(:,:,uk_ft,1) ! ui' * uk
-                        rVVdx(:,:,ilasm+j_ft,2) = rVVdx(:,:,ilasm+j_ft,1) * rVVdx(:,:,uk_ft,1) ! uj' * uk
-                    end do
-                    ! transform back
-                    do cntr=1,4
-                        call HFT(rVVdx(1:2*nxd+2,1:nzB,cntr,2), VVdx(1:nxd+1,1:nzB,cntr,2)); 
-                        call MPI_Alltoall(VVdx(:,:,cntr,2), 1, Mdx, VVdz(:,:,cntr,2), 1, Mdz, MPI_COMM_X) ! you could just copy without MPI since you deactivated xz parallelisation but ok
-                        call FFT(VVdz(1:nzd,1:nxB,cntr,2));
-                        VVdz(1:nzd,1:nxB,cntr,2) = VVdz(1:nzd,1:nxB,cntr,2) * factor
-                    end do
-                    ! use Parseval's theorem to calculate statistics
-                    do ix = nx0, nxN
-                        c = 2; if (ix == 0) c = 1 ! multiplier for doubling points in x direction
-                        do iz = -nz,nz
-                            ! prepare indeces
-                            ! PAY ATTENTION:
-                            ! here, if ix,iz is large scale, it is stored in the small section of uiuj (and viceversa):
-                            ilasm = large; if (is_large(ix,iz)) ilasm = small
-                            ! this because each of the two terms of tcross is something like, for instance in large balance:
-                            ! (ul * (ul+us)) * dus         for large balance
-                            ! term (ul * (ul+us)) was computed in the space domain and transformed back - thus it has energy
-                            ! on all Fourier modes; it is stored on VVdz
-                            ! term dus instead is small scale, and has energy only on small modes;
-                            ! hence only small modes contribute to tcross of large scale field
-                            ! compute
-                            uiuj(tcross) = uiuj(tcross) - c * cprod( VVdz(zf(iz), xf(ix), i_ft + ilasm, 2), gu(j,k) ) &
-                                &                       - c * cprod( VVdz(zf(iz), xf(ix), j_ft + ilasm, 2), gu(i,k) )
-                        end do
-                    end do
-
                 end do
                 
             end do
@@ -331,39 +258,64 @@ integer(MPI_OFFSET_KIND) :: offset
     end do
 
     ! divide by nftot to obtain average
-    uiujprofiles = uiujprofiles / nftot
+    uiujspectra = uiujspectra / nftot
 
     ! COMPUTE DERIVATIVES OF FLUX TERMS
     !----------------------------------
 
-    do ilasm = 1,2
-        do irs = 1,6
+    do irs = 1,6
 
-            ! var --> PHIvdiff
-            call REALderiv(uiujprofiles(irs, var, :, ilasm), uiujprofiles(irs, PHIvdiff, :, ilasm))
-            uiujprofiles(irs, PHIvdiff, :, ilasm) = uiujprofiles(irs, PHIvdiff, :, ilasm) * ni
+        ! var --> PHIvdiff
+        call REALderiv(uiujspectra(irs, var, :, :), uiujspectra(irs, PHIvdiff, :, :))
+        uiujspectra(irs, PHIvdiff, :, :) = uiujspectra(irs, PHIvdiff, :, :) * ni
 
-            ! var --> vdiff
-            call REALderiv2(uiujprofiles(irs, var, :, ilasm), uiujprofiles(irs, vdiff, :, ilasm))
-            uiujprofiles(irs, vdiff, :, ilasm) = uiujprofiles(irs, vdiff, :, ilasm) * ni
+        ! var --> vdiff
+        call REALderiv2(uiujspectra(irs, var, :, :), uiujspectra(irs, vdiff, :, :))
+        uiujspectra(irs, vdiff, :, :) = uiujspectra(irs, vdiff, :, :) * ni
 
-            ! PHIptrsp --> ptrsp
-            call REALderiv(uiujprofiles(irs, PHIptrsp, :, ilasm), uiujprofiles(irs, ptrsp, :, ilasm))
+        ! PHIptrsp --> ptrsp
+        call REALderiv(uiujspectra(irs, PHIptrsp, :, :), uiujspectra(irs, ptrsp, :, :))
 
-            ! PHIttrsp --> ttrsp
-            call REALderiv(uiujprofiles(irs, PHIttrsp, :, ilasm), uiujprofiles(irs, ttrsp, :, ilasm))
+        ! PHIttrsp --> ttrsp
+        call REALderiv(uiujspectra(irs, PHIttrsp, :, :), uiujspectra(irs, ttrsp, :, :))
 
-        end do
+    end do
+
+    ! COMPUTE PROFILES FROM SPECTRA
+    !------------------------------
+
+    uiujprofiles = 0
+    do iz = -nz,nz
+        uiujprofiles(:,:,:) = uiujprofiles(:,:,:) + uiujspectra(:,:,iz,:)
     end do
 
     !---------------------------------------------------!
     !-----------------      WRITE      -----------------!
     !---------------------------------------------------!
-   
+
+    if (has_terminal) print *, "Saving to disk..."
+
+    ! write metadata
+    currfname = "uiuj_spectra.nfo"
+    if (has_terminal) then
+        open(15, file=currfname)
+            write(15,*) "This is uiuj_spectra.f90."
+            write(15,*) ""
+            write(15,*) "nmin", nmin 
+            write(15,*) "nmax", nmax
+            write(15,*) "dn", dn
+            write(15,*) "nftot", nftot
+            write(15,*) ""
+            write(15,*) "nmin_cm", nmin_cm
+            write(15,*) "nmax_cm", nmax_cm
+            write(15,*) "dn_cm", dn_cm
+        close(15)
+    end if
+
+    ! FIN QUI
 
     ! write to disk
     currfname = "uiuj_largesmall.bin"
-    if (has_terminal) print *, "Saving to disk..."
     call MPI_File_open(MPI_COMM_WORLD, trim(currfname), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
         
         ! write header
@@ -377,7 +329,7 @@ integer(MPI_OFFSET_KIND) :: offset
         ! write uiuj data
         offset = offset + (ny+3)*7*sizeof(mean(1,1)) ! DON'T DO SIZEOF(mean)! Program is PARALLEL!!!
         CALL MPI_File_set_view(fh, offset, MPI_DOUBLE_PRECISION, uiuj_write_type, 'native', MPI_INFO_NULL)
-        CALL MPI_File_write_all(fh, uiujprofiles, 1, uiuj_inmem_type, MPI_STATUS_IGNORE)
+        CALL MPI_File_write_all(fh, uiujspectra, 1, uiuj_inmem_type, MPI_STATUS_IGNORE)
 
     call MPI_File_close(fh)
 
@@ -415,30 +367,6 @@ contains !----------------------------------------------------------------------
 
 
 
-    ! initialise largesmall stuff
-    subroutine largesmall_setup()
-        open(15, file='largesmall_settings.in')
-            read(15, *) z_threshold
-        close(15)
-        if (has_terminal) then
-            write(*,"(A,I5)") "   z_threshold =", z_threshold
-        end if
-    end subroutine largesmall_setup
-
-
-
-    ! returns true if a given mode is part of large scale field
-    function is_large(xx,zz) result(islarge)
-    integer, intent(in) :: xx, zz
-    logical :: islarge 
-        islarge = .FALSE.
-        if (abs(beta0*zz) <= z_threshold) then
-            islarge = .TRUE.
-        end if
-    end function is_large
-
-
-
     ! define and commit MPI filetypes
     subroutine init_uiuj_mpitypes()
 
@@ -455,7 +383,7 @@ contains !----------------------------------------------------------------------
         CALL MPI_Type_create_subarray(2, [7, nyN-ny0+5], [7, maxy-miny+1], [0,miny-(ny0-2)], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, mean_inmem_type, ierror)
         CALL MPI_Type_commit(mean_inmem_type, ierror)
 
-        ! define type for writing uiujprofiles on disk
+        ! define type for writing uiujspectra on disk
         CALL MPI_Type_create_subarray(4, [6, 11, ny+3, 2], [6, 11, maxy-miny+1, 2], [0,0,miny+1,0], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, uiuj_write_type, ierror)
         CALL MPI_Type_commit(uiuj_write_type, ierror)
         CALL MPI_Type_create_subarray(4, [6, 11, nyN-ny0+5, 2], [6, 11,maxy-miny+1, 2], [0,0,miny-(ny0-2),0], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, uiuj_inmem_type, ierror)
