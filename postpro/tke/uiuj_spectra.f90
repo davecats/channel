@@ -75,7 +75,7 @@ logical :: ignore
 ! MPI stuff
 
 TYPE(MPI_Datatype) :: press_read_type, press_field_type
-TYPE(MPI_Datatype) :: mean_write_type, mean_inmem_type, uiuj_write_type, uiuj_inmem_type
+TYPE(MPI_Datatype) :: mean_write_type, mean_inmem_type, spectra_write_type, spectra_inmem_type, profiles_write_type, profiles_inmem_type, convs_write_type, convs_inmem_type
 TYPE(MPI_File) :: fh
 integer :: ierror
 integer(MPI_OFFSET_KIND) :: offset
@@ -315,21 +315,28 @@ integer(MPI_OFFSET_KIND) :: offset
     ! FIN QUI
 
     ! write to disk
-    currfname = "uiuj_largesmall.bin"
+    currfname = "uiuj_spectra.bin"
     call MPI_File_open(MPI_COMM_WORLD, trim(currfname), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
         
-        ! write header
-        if (has_terminal) CALL MPI_file_write(fh, [nfmin, nfmax, dnf, nftot], 4, MPI_INTEGER, MPI_STATUS_IGNORE)
-
         ! write mean data
         offset = 4 * sizeof(nfmin)
         CALL MPI_File_set_view(fh, offset, MPI_DOUBLE_PRECISION, mean_write_type, 'native', MPI_INFO_NULL)
         CALL MPI_File_write_all(fh, mean, 1, mean_inmem_type, MPI_STATUS_IGNORE)
 
-        ! write uiuj data
+        ! write uiuj spectral data
         offset = offset + (ny+3)*7*sizeof(mean(1,1)) ! DON'T DO SIZEOF(mean)! Program is PARALLEL!!!
-        CALL MPI_File_set_view(fh, offset, MPI_DOUBLE_PRECISION, uiuj_write_type, 'native', MPI_INFO_NULL)
-        CALL MPI_File_write_all(fh, uiujspectra, 1, uiuj_inmem_type, MPI_STATUS_IGNORE)
+        CALL MPI_File_set_view(fh, offset, MPI_DOUBLE_PRECISION, spectra_write_type, 'native', MPI_INFO_NULL)
+        CALL MPI_File_write_all(fh, uiujspectra, 1, spectra_inmem_type, MPI_STATUS_IGNORE)
+
+        ! write uiuj profiles data
+        offset = offset + ( int(ny+3,MPI_OFFSET_KIND) * int((2*nz)+1,MPI_OFFSET_KIND) * 66_MPI_OFFSET_KIND * sizeof(uiujspectra(1,1,1,1)) ) ! DON'T DO SIZEOF(uiujspectra)! Program is PARALLEL!!!
+        CALL MPI_File_set_view(fh, offset, MPI_DOUBLE_PRECISION, profiles_write_type, 'native', MPI_INFO_NULL)
+        CALL MPI_File_write_all(fh, uiujprofiles, 1, profiles_inmem_type, MPI_STATUS_IGNORE)
+
+        ! write convs data
+        offset = offset + ( int(ny+3,MPI_OFFSET_KIND) * 66_MPI_OFFSET_KIND * sizeof(uiujprofiles(1,1,1)) ) ! DON'T DO SIZEOF(uiujprofiles)! Program is PARALLEL!!!
+        CALL MPI_File_set_view(fh, offset, MPI_DOUBLE_PRECISION, convs_write_type, 'native', MPI_INFO_NULL)
+        CALL MPI_File_write_all(fh, convs, 1, convs_inmem_type, MPI_STATUS_IGNORE)
 
     call MPI_File_close(fh)
 
@@ -339,11 +346,11 @@ integer(MPI_OFFSET_KIND) :: offset
     ! create folder if not existing
     if (has_terminal) then
         if (custom_mean) then
-            foldername = "cm_largesmall"
-            currfname = "mv uiuj_largesmall.bin cm_largesmall"
+            foldername = "cm_spectra"
+            currfname = "mv uiuj_spectra.bin cm_spectra"
         else
-            foldername = "profiles"
-            currfname = "mv uiuj_largesmall.bin profiles"
+            foldername = "uiuj_spectra"
+            currfname = "mv uiuj_spectra.bin uiuj_spectra"
         end if
         ignore = makedirqq(trim(foldername))
         call execute_command_line(trim(currfname))
@@ -384,10 +391,22 @@ contains !----------------------------------------------------------------------
         CALL MPI_Type_commit(mean_inmem_type, ierror)
 
         ! define type for writing uiujspectra on disk
-        CALL MPI_Type_create_subarray(4, [6, 11, ny+3, 2], [6, 11, maxy-miny+1, 2], [0,0,miny+1,0], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, uiuj_write_type, ierror)
-        CALL MPI_Type_commit(uiuj_write_type, ierror)
-        CALL MPI_Type_create_subarray(4, [6, 11, nyN-ny0+5, 2], [6, 11,maxy-miny+1, 2], [0,0,miny-(ny0-2),0], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, uiuj_inmem_type, ierror)
-        CALL MPI_Type_commit(uiuj_inmem_type, ierror)
+        CALL MPI_Type_create_subarray(4, [6, 11, (2*nz)+1, ny+3], [6, 11, (2*nz)+1, maxy-miny+1], [0,0,0,miny+1], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, spectra_write_type, ierror)
+        CALL MPI_Type_commit(spectra_write_type, ierror)
+        CALL MPI_Type_create_subarray(4, [6, 11, (2*nz)+1, nyN-ny0+5], [6, 11, (2*nz)+1, maxy-miny+1], [0,0,0,miny-(ny0-2)], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, spectra_inmem_type, ierror)
+        CALL MPI_Type_commit(spectra_inmem_type, ierror)
+
+        ! define type for writing uiujprofiles on disk
+        CALL MPI_Type_create_subarray(3, [6, 11, ny+3], [6, 11, maxy-miny+1], [0,0,miny+1], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, profiles_write_type, ierror)
+        CALL MPI_Type_commit(profiles_write_type, ierror)
+        CALL MPI_Type_create_subarray(3, [6, 11, nyN-ny0+5], [6, 11,maxy-miny+1], [0,0,miny-(ny0-2)], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, profiles_inmem_type, ierror)
+        CALL MPI_Type_commit(profiles_inmem_type, ierror)
+
+        ! define type for writing convs on disk
+        CALL MPI_Type_create_subarray(4, [4, (2*nz)+1, nz+1, ny+3], [4, (2*nz)+1, nz+1, maxy-miny+1], [0,0,0,miny+1], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, convs_write_type, ierror)
+        CALL MPI_Type_commit(convs_write_type, ierror)
+        CALL MPI_Type_create_subarray(4, [4, (2*nz)+1, nz+1, nyN-ny0+5], [4, (2*nz)+1, nz+1, maxy-miny+1], [0,0,0,miny-(ny0-2)], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, convs_inmem_type, ierror)
+        CALL MPI_Type_commit(convs_inmem_type, ierror)
 
     end subroutine
 
@@ -508,16 +527,16 @@ contains !----------------------------------------------------------------------
 
     subroutine print_help()
         if (iproc == 0) then
-            print *, "Calculates TKE budget; sharp Fourier filtering is used to decompose the fluctuation field into large and small components."
+            print *, "Calculates spectral TKE budget along the spanwise direction."
             print *, "Statistics are calculated on files ranging from index nfmin to nfmax with step dn. Usage:"
             print *, ""
-            print *, "   mpirun [mpi args] uiuj_largesmall [-h] nfmin nfmax dn [--custom_mean nmin_m nmax_m dn_m]"
+            print *, "   mpirun [mpi args] uiuj_spectra [-h] nfmin nfmax dn [--custom_mean nmin_m nmax_m dn_m]"
             print *, ""
             print *, "If the flag --custom_mean is passed, the mean field is calculated on fields (nmin_m nmax_m dn_m); the remaining statistics are still calculated on (nfmin nfmax dn)."
             print *, ""
             print *, "This program is meant to be used on plane channels."
             print *, ""
-            print *, "Results are output to uiuj.bin. Use uiuj2ascii to get the results in a human readable format."
+            print *, "Results are output to uiuj_spectra/uiuj_spectra.bin."
             print *, ""
             print *, "Mean TKE budget terms are calculated as:"
             print *, "INST    --> dK/dt"
