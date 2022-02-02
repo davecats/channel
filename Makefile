@@ -47,16 +47,22 @@ postpro/tke/uiuj_spectra: flags += -DforceblockingY
 
 channel: $(OBJ) channel.o
 	$(F90) $(flags) -o  $@ $(OBJ) channel.o $(libs)
+	make clean
 out_exporter/out2vtk: $(OBJ) out_exporter/out2vtk.o
 	$(F90) $(flags) -o  $@ $(OBJ) out_exporter/out2vtk.o $(libs)
+	make clean
 out_exporter/out2bin: $(OBJ) out_exporter/out2bin.o
 	$(F90) $(flags) -o  $@ $(OBJ) out_exporter/out2bin.o $(libs)
+	make clean
 postpro/tke/uiuj_largesmall: $(OBJ) postpro/tke/uiuj_largesmall.o
 	$(F90) $(flags) -o $@ $(OBJ) postpro/tke/uiuj_largesmall.o $(libs)
+	make clean
 postpro/tke/uiuj_spectra: $(OBJ) postpro/tke/uiuj_spectra.o
 	$(F90) $(flags) -o $@ $(OBJ) postpro/tke/uiuj_spectra.o $(libs)
+	make clean
 postpro/am/camstar: $(OBJ) postpro/am/camstar.o
 	$(F90) $(flags) -o $@ $(OBJ) postpro/am/camstar.o $(libs)
+	make clean
 %.o : %.f90
 	$(F90) $(flags) -o $@ -c  $<
 .PHONY: clean configure
