@@ -9,7 +9,7 @@
 ! Use nonblocking communication in Y direction
 ! only if the program is NOT uiuj_*
 ! (uiuj does not support nonblocking comm in Y)
-#ifndef uiuj
+#ifndef forceblockingY
 #define nonblockingY
 #endif
 ! Force (nxd,nzd) to be at most the product of a

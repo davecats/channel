@@ -42,15 +42,15 @@ flags = -I$(FFTW_INC) -L$(FFTW_LIB) $(FLAGS)
 libs = -lfftw3
 
 # Target-specific assignments
-postpro/tke/uiuj_largesmall: flags += -Duiuj
-postpro/tke/uiuj_spectra: flags += -Duiuj
+postpro/tke/uiuj_largesmall: flags += -DforceblockingY
+postpro/tke/uiuj_spectra: flags += -DforceblockingY
 
 channel: $(OBJ) channel.o
 	$(F90) $(flags) -o  $@ $(OBJ) channel.o $(libs)
-out2vtk: $(OBJ) out_exporter/out2vtk.o
-	$(F90) $(flags) -o  out_exporter/$@ $(OBJ) out_exporter/out2vtk.o $(libs)
-out2bin: $(OBJ) out_exporter/out2bin.o
-	$(F90) $(flags) -o  out_exporter/$@ $(OBJ) out_exporter/out2bin.o $(libs)
+out_exporter/out2vtk: $(OBJ) out_exporter/out2vtk.o
+	$(F90) $(flags) -o  $@ $(OBJ) out_exporter/out2vtk.o $(libs)
+out_exporter/out2bin: $(OBJ) out_exporter/out2bin.o
+	$(F90) $(flags) -o  $@ $(OBJ) out_exporter/out2bin.o $(libs)
 postpro/tke/uiuj_largesmall: $(OBJ) postpro/tke/uiuj_largesmall.o
 	$(F90) $(flags) -o $@ $(OBJ) postpro/tke/uiuj_largesmall.o $(libs)
 postpro/tke/uiuj_spectra: $(OBJ) postpro/tke/uiuj_spectra.o
