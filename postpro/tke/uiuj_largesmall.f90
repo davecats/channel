@@ -37,8 +37,6 @@
 
 
 
-#include "header.h"
-
 program uiuj_largesmall
 use dnsdata
 use ifport  ! this library is intel compiler specific; only used to create a directory (makedirqq)
@@ -91,12 +89,6 @@ TYPE(MPI_Datatype) :: mean_write_type, mean_inmem_type, uiuj_write_type, uiuj_in
 TYPE(MPI_File) :: fh
 integer :: ierror
 integer(MPI_OFFSET_KIND) :: offset
-
-#ifdef nonblockingY
-TYPE(MPI_REQUEST) :: Rs
-integer(C_INT) :: itag
-#endif
-
 
 ! Program begins here
 !----------------------------------------------------------------------------------------------------------------------------
@@ -517,13 +509,8 @@ contains !----------------------------------------------------------------------
         do iv = 1,3
             do ix = nx0, nxN
                 do iz = -nz, nz
-#ifdef nonblockingY
-                    call COMPLEXderiv(R(:,iz,ix,iv), grad(:,iz,ix,iv,2), Rs, itag)
-                    call LeftLU5divStep2(D0mat, grad(:,iz,ix,iv,2), Rs, itag)
-#else
                     call COMPLEXderiv(R(:,iz,ix,iv), grad(:,iz,ix,iv,2))
                     call LeftLU5divStep2(D0mat, grad(:,iz,ix,iv,2))
-#endif
                     grad(:,iz,ix,iv,1) = R(:,iz,ix,iv) * dcmplx(0, alfa0*ix)
                     grad(:,iz,ix,iv,3) = R(:,iz,ix,iv) * dcmplx(0, beta0*iz)
                 end do

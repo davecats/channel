@@ -48,8 +48,10 @@ out2vtk: $(OBJ) out_exporter/out2vtk.o
 out2bin: $(OBJ) out_exporter/out2bin.o
 	$(F90) $(flags) -o  out_exporter/$@ $(OBJ) out_exporter/out2bin.o $(libs)
 postpro/tke/uiuj_largesmall: $(OBJ) postpro/tke/uiuj_largesmall.o
+	flags = $(flags) -Duiuj
 	$(F90) $(flags) -o $@ $(OBJ) postpro/tke/uiuj_largesmall.o $(libs)
 postpro/tke/uiuj_spectra: $(OBJ) postpro/tke/uiuj_spectra.o
+	flags = $(flags) -Duiuj
 	$(F90) $(flags) -o $@ $(OBJ) postpro/tke/uiuj_spectra.o $(libs)
 postpro/am/camstar: $(OBJ) postpro/am/camstar.o
 	$(F90) $(flags) -o $@ $(OBJ) postpro/am/camstar.o $(libs)
