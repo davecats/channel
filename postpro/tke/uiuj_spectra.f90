@@ -64,6 +64,8 @@ complex(C_DOUBLE_COMPLEX), allocatable :: Vgrad(:,:,:,:,:)
 
 integer, parameter :: file_vel = 883, file_press = 884
 character(len=40) :: istring, foldername, currfname
+character(len=100) :: currcmd
+
 
 real(C_DOUBLE), allocatable :: mean(:,:), uiujspectra(:,:,:,:), uiujprofiles(:,:,:), convs(:,:,:,:)
 real(C_DOUBLE) :: m_grad(3,3) ! m_grad(i,j) = dUi/dxj
@@ -351,13 +353,13 @@ integer(MPI_OFFSET_KIND) :: offset
     if (has_terminal) then
         if (custom_mean) then
             foldername = "cm_spectra"
-            currfname = "mv uiuj_spectra.bin cm_spectra; mv uiuj_spectra.nfo cm_spectra"
+            currcmd = "mv uiuj_spectra.bin cm_spectra; mv uiuj_spectra.nfo cm_spectra"
         else
             foldername = "uiuj_spectra"
-            currfname = "mv uiuj_spectra.bin uiuj_spectra; mv uiuj_spectra.nfo uiuj_spectra"
+            currcmd = "mv uiuj_spectra.bin uiuj_spectra; mv uiuj_spectra.nfo uiuj_spectra"
         end if
         ignore = makedirqq(trim(foldername))
-        call execute_command_line(trim(currfname))
+        call execute_command_line(trim(currcmd))
     end if
 
     ! be polite and say goodbye
