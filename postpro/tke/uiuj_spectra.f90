@@ -285,6 +285,9 @@ integer(MPI_OFFSET_KIND) :: offset
     ! COMPUTE PROFILES FROM SPECTRA
     !------------------------------
 
+    ! if requested in input, multiply spectral budget times two
+    if (timestwo) uiujspectra = uiujspectra * 2
+
     uiujprofiles = 0
     do iz = -nz,nz
         uiujprofiles(:,:,:) = uiujprofiles(:,:,:) + uiujspectra(:,:,iz,:)
