@@ -325,7 +325,7 @@ integer(MPI_OFFSET_KIND) :: offset
     call MPI_File_open(MPI_COMM_WORLD, trim(currfname), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
         
         ! write mean data
-        offset = 4 * sizeof(nfmin)
+        offset = 0
         CALL MPI_File_set_view(fh, offset, MPI_DOUBLE_PRECISION, mean_write_type, 'native', MPI_INFO_NULL)
         CALL MPI_File_write_all(fh, mean, 1, mean_inmem_type, MPI_STATUS_IGNORE)
 
