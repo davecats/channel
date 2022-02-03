@@ -11,8 +11,8 @@
 !   1   2   3   4   5   6
 
 ! uiujspectra(irs, iterm, iz, iy)      where irs defined before, while iterm:
-!   var prod    psdiss      ttrsp   tcross  vdiff   pstrain     ptrsp   PHIttrsp    PHIvdiff    PHIptrsp
-!   1   2       3           4       5       6       7           8       9           10          11
+!   var prod    psdiss      ttrsp   vdiff   pstrain     ptrsp   PHIttrsp    PHIvdiff    PHIptrsp
+!   1   2       3           4       5       6           7       8           9           10      
 
 ! *VVd*(zf(iz), xf(ix), term, 1)
 ! : WARNING :  iz, ix indices here is scrambled as required by FFT -> use zf(iz), xf(ix)
@@ -72,7 +72,7 @@ real(C_DOUBLE) :: m_grad(3,3) ! m_grad(i,j) = dUi/dxj
 
 ! shortcut parameters
 
-integer, parameter :: var = 1, prod = 2, psdiss = 3, ttrsp = 4, tcross = 5, vdiff = 6, pstrain = 7, ptrsp = 8, PHIttrsp = 9, PHIvdiff = 10, PHIptrsp = 11
+integer, parameter :: var = 1, prod = 2, psdiss = 3, ttrsp = 4, vdiff = 5, pstrain = 6, ptrsp = 7, PHIttrsp = 8, PHIvdiff = 9, PHIptrsp = 10
 integer, parameter :: i_ft = 1, j_ft = 2, ij_ft = 3
 logical :: ignore
 
@@ -120,8 +120,8 @@ integer(MPI_OFFSET_KIND) :: offset
     allocate(dertemp_in(ny0-2:nyN+2))
     allocate(dertemp_out(ny0-2:nyN+2))
     allocate(mean(1:7, ny0-2:nyN+2))
-    allocate(uiujspectra(1:6, 1:11, -nz:nz, ny0-2:nyN+2))
-    allocate(uiujprofiles(1:6, 1:11, ny0-2:nyN+2))
+    allocate(uiujspectra(1:6, 1:10, -nz:nz, ny0-2:nyN+2))
+    allocate(uiujprofiles(1:6, 1:10, ny0-2:nyN+2))
     allocate(convs(1:4,-nz:nz,0:nz,ny0-2:nyN+2)); convs=0
 
     !---------------------------------------------------!
@@ -335,12 +335,12 @@ integer(MPI_OFFSET_KIND) :: offset
         CALL MPI_File_write_all(fh, uiujspectra, 1, spectra_inmem_type, MPI_STATUS_IGNORE)
 
         ! write uiuj profiles data
-        offset = offset + ( int(ny+3,MPI_OFFSET_KIND) * int((2*nz)+1,MPI_OFFSET_KIND) * 66_MPI_OFFSET_KIND * sizeof(uiujspectra(1,1,1,1)) ) ! DON'T DO SIZEOF(uiujspectra)! Program is PARALLEL!!!
+        offset = offset + ( int(ny+3,MPI_OFFSET_KIND) * int((2*nz)+1,MPI_OFFSET_KIND) * 60_MPI_OFFSET_KIND * sizeof(uiujspectra(1,1,1,1)) ) ! DON'T DO SIZEOF(uiujspectra)! Program is PARALLEL!!!
         CALL MPI_File_set_view(fh, offset, MPI_DOUBLE_PRECISION, profiles_write_type, 'native', MPI_INFO_NULL)
         CALL MPI_File_write_all(fh, uiujprofiles, 1, profiles_inmem_type, MPI_STATUS_IGNORE)
 
         ! write convs data
-        offset = offset + ( int(ny+3,MPI_OFFSET_KIND) * 66_MPI_OFFSET_KIND * sizeof(uiujprofiles(1,1,1)) ) ! DON'T DO SIZEOF(uiujprofiles)! Program is PARALLEL!!!
+        offset = offset + ( int(ny+3,MPI_OFFSET_KIND) * 60_MPI_OFFSET_KIND * sizeof(uiujprofiles(1,1,1)) ) ! DON'T DO SIZEOF(uiujprofiles)! Program is PARALLEL!!!
         CALL MPI_File_set_view(fh, offset, MPI_DOUBLE_PRECISION, convs_write_type, 'native', MPI_INFO_NULL)
         CALL MPI_File_write_all(fh, convs, 1, convs_inmem_type, MPI_STATUS_IGNORE)
 
@@ -397,15 +397,15 @@ contains !----------------------------------------------------------------------
         CALL MPI_Type_commit(mean_inmem_type, ierror)
 
         ! define type for writing uiujspectra on disk
-        CALL MPI_Type_create_subarray(4, [6, 11, (2*nz)+1, ny+3], [6, 11, (2*nz)+1, maxy-miny+1], [0,0,0,miny+1], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, spectra_write_type, ierror)
+        CALL MPI_Type_create_subarray(4, [6, 10, (2*nz)+1, ny+3], [6, 10, (2*nz)+1, maxy-miny+1], [0,0,0,miny+1], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, spectra_write_type, ierror)
         CALL MPI_Type_commit(spectra_write_type, ierror)
-        CALL MPI_Type_create_subarray(4, [6, 11, (2*nz)+1, nyN-ny0+5], [6, 11, (2*nz)+1, maxy-miny+1], [0,0,0,miny-(ny0-2)], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, spectra_inmem_type, ierror)
+        CALL MPI_Type_create_subarray(4, [6, 10, (2*nz)+1, nyN-ny0+5], [6, 10, (2*nz)+1, maxy-miny+1], [0,0,0,miny-(ny0-2)], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, spectra_inmem_type, ierror)
         CALL MPI_Type_commit(spectra_inmem_type, ierror)
 
         ! define type for writing uiujprofiles on disk
-        CALL MPI_Type_create_subarray(3, [6, 11, ny+3], [6, 11, maxy-miny+1], [0,0,miny+1], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, profiles_write_type, ierror)
+        CALL MPI_Type_create_subarray(3, [6, 10, ny+3], [6, 10, maxy-miny+1], [0,0,miny+1], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, profiles_write_type, ierror)
         CALL MPI_Type_commit(profiles_write_type, ierror)
-        CALL MPI_Type_create_subarray(3, [6, 11, nyN-ny0+5], [6, 11,maxy-miny+1], [0,0,miny-(ny0-2)], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, profiles_inmem_type, ierror)
+        CALL MPI_Type_create_subarray(3, [6, 10, nyN-ny0+5], [6, 10,maxy-miny+1], [0,0,miny-(ny0-2)], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, profiles_inmem_type, ierror)
         CALL MPI_Type_commit(profiles_inmem_type, ierror)
 
         ! define type for writing convs on disk
