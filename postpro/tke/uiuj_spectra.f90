@@ -48,7 +48,7 @@ integer(C_INT) :: nfmin,nfmax,dnf,nftot
 integer :: nmin,nmax,dn
 integer :: nmin_cm = 0, nmax_cm = 0, dn_cm = 0
 
-logical :: custom_mean = .FALSE.
+logical :: custom_mean = .FALSE., timestwo = .FALSE.
 
 ! counters
 
@@ -348,10 +348,10 @@ integer(MPI_OFFSET_KIND) :: offset
     if (has_terminal) then
         if (custom_mean) then
             foldername = "cm_spectra"
-            currfname = "mv uiuj_spectra.bin cm_spectra"
+            currfname = "mv uiuj_spectra.bin cm_spectra; mv uiuj_spectra.nfo cm_spectra"
         else
             foldername = "uiuj_spectra"
-            currfname = "mv uiuj_spectra.bin uiuj_spectra"
+            currfname = "mv uiuj_spectra.bin uiuj_spectra; mv uiuj_spectra.nfo uiuj_spectra"
         end if
         ignore = makedirqq(trim(foldername))
         call execute_command_line(trim(currfname))
@@ -583,6 +583,9 @@ contains !----------------------------------------------------------------------
                     ii = ii + 1
                     call get_command_argument(ii, cmd_in_buf)
                     read(cmd_in_buf, *) dn_cm
+                case ('-two', '--timestwo') ! multiply uiuj budget by two
+                ! to match output of old version
+                    timestwo = .TRUE.
                 case default
                     if (command_argument_count() < 3) then ! handle exception: no input
                         print *, 'ERROR: please provide one input file as command line argument.'
