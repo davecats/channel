@@ -266,22 +266,24 @@ integer(MPI_OFFSET_KIND) :: offset
     ! COMPUTE DERIVATIVES OF FLUX TERMS
     !----------------------------------
 
-    do irs = 1,6
+    do iz = -nz,nz
+        do irs = 1,6
 
-        ! var --> PHIvdiff
-        call REALderiv(uiujspectra(irs, var, :, :), uiujspectra(irs, PHIvdiff, :, :))
-        uiujspectra(irs, PHIvdiff, :, :) = uiujspectra(irs, PHIvdiff, :, :) * ni
+            ! var --> PHIvdiff
+            call REALderiv(uiujspectra(irs, var, iz, :), uiujspectra(irs, PHIvdiff, iz, :))
+            uiujspectra(irs, PHIvdiff, iz, :) = uiujspectra(irs, PHIvdiff, iz, :) * ni
 
-        ! var --> vdiff
-        call REALderiv2(uiujspectra(irs, var, :, :), uiujspectra(irs, vdiff, :, :))
-        uiujspectra(irs, vdiff, :, :) = uiujspectra(irs, vdiff, :, :) * ni
+            ! var --> vdiff
+            call REALderiv2(uiujspectra(irs, var, iz, :), uiujspectra(irs, vdiff, iz, :))
+            uiujspectra(irs, vdiff, iz, :) = uiujspectra(irs, vdiff, iz, :) * ni
 
-        ! PHIptrsp --> ptrsp
-        call REALderiv(uiujspectra(irs, PHIptrsp, :, :), uiujspectra(irs, ptrsp, :, :))
+            ! PHIptrsp --> ptrsp
+            call REALderiv(uiujspectra(irs, PHIptrsp, iz, :), uiujspectra(irs, ptrsp, iz, :))
 
-        ! PHIttrsp --> ttrsp
-        call REALderiv(uiujspectra(irs, PHIttrsp, :, :), uiujspectra(irs, ttrsp, :, :))
+            ! PHIttrsp --> ttrsp
+            call REALderiv(uiujspectra(irs, PHIttrsp, iz, :), uiujspectra(irs, ttrsp, iz, :))
 
+        end do
     end do
 
     ! COMPUTE PROFILES FROM SPECTRA
