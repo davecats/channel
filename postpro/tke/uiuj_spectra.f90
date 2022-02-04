@@ -288,7 +288,7 @@ integer(MPI_OFFSET_KIND) :: offset
     !------------------------------
 
     ! if requested in input, multiply spectral budget times two
-    if (timestwo) uiujspectra = uiujspectra * 2
+    if (timestwo) uiujspectra(:,var,:,:) = uiujspectra(:,var,:,:) * 2
 
     uiujprofiles = 0
     do iz = -nz,nz
@@ -306,15 +306,18 @@ integer(MPI_OFFSET_KIND) :: offset
     if (has_terminal) then
         open(15, file=currfname)
             write(15,*) "This is uiuj_spectra.f90."
+            if (timestwo) write(15,*) "Correcting results by factor 2, to match older versions."
             write(15,*) ""
             write(15,*) "nmin", nmin 
             write(15,*) "nmax", nmax
             write(15,*) "dn", dn
             write(15,*) "nftot", nftot
             write(15,*) ""
-            write(15,*) "nmin_cm", nmin_cm
-            write(15,*) "nmax_cm", nmax_cm
-            write(15,*) "dn_cm", dn_cm
+            if (custom_mean) then
+                write(15,*) "nmin_cm", nmin_cm
+                write(15,*) "nmax_cm", nmax_cm
+                write(15,*) "dn_cm", dn_cm
+            end if
         close(15)
     end if
 
