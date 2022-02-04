@@ -14,31 +14,47 @@ field1 = settings.fields[0]
 field2 = settings.fields[1]
 
 # read whole binary file as an array of realss
-realz_first = np.fromfile(field1, count=-1, dtype=np.float64, offset=0)
-realz_secnd = np.fromfile(field2, count=-1, dtype=np.float64, offset=0)
+one = np.fromfile(field1, count=-1, dtype=np.float64, offset=0)
+two = np.fromfile(field2, count=-1, dtype=np.float64, offset=0)
 
-# get difference
-diff = abs(realz_first - realz_secnd)
+def diff_analysis(refarr,arr):
 
-# prepare field to normalise
-nrmlstr = abs(realz_first)
-nozero = np.nonzero(nrmlstr)
+    # get difference
+    diff = abs(refarr - arr)
 
-# compare fields
-maxdiff = np.amax(diff)
-if not maxdiff == 0:
-    print()
-    print('Absolute difference')
-    print('Average difference:', np.mean(diff) )
-    print('Median difference:', np.median(diff) )
-    print('Maximum difference:',maxdiff)
-    print()
-    # TODO: remove zeroes here!
-    print('Relative difference (excluding zeroes)')
-    print('Reference file is the first one: ', field1)
-    print('Average rel difference:', np.mean(diff[nozero]/nrmlstr[nozero]) )
-    print('Median relative difference:', np.median(diff[nozero]/nrmlstr[nozero]) )
-    print('Maximum rel difference:', np.amax(diff[nozero]/nrmlstr[nozero]) )
-    print()
-else:
-    print('No difference detected in velocity field.')
+    # prepare field to normalise
+    nrmlstr = abs(refarr)
+    nozero = np.nonzero(nrmlstr)
+    if len(nozero[0])==0:
+        print('')
+        print('Reference array is zero everywhere.')
+        print('')
+        return
+    reldiff = diff[nozero]/nrmlstr[nozero]
+    arr_1 = reldiff[np.greater(reldiff,0.01)]
+    arr_10 = reldiff[np.greater(reldiff,0.1)]
+
+    # compare fields
+    maxdiff = np.amax(diff)
+    if not maxdiff == 0:
+        print()
+        print('Absolute difference')
+        print('Average difference:', np.mean(diff) )
+        print('Median difference:', np.median(diff) )
+        print('Maximum difference:',maxdiff)
+        print()
+        print('Relative difference (excluding zeroes)')
+        print('Reference file is the first one: ', field1)
+        print('Number of points used:', len(reldiff))
+        print('Average rel difference:', np.mean(reldiff) )
+        print('Median relative difference:', np.median(reldiff) )
+        print('Maximum rel difference:', np.amax(reldiff) )
+        print('Number of pts with more than 1% difference:',len(arr_1),'out of',len(reldiff),'-',len(arr_1)/len(reldiff)*100,'% of total')
+        print('Number of pts with more than 10% difference:',len(arr_10),'out of',len(reldiff),'-',len(arr_10)/len(reldiff)*100,'% of total')
+        print()
+    else:
+        print()
+        print('No difference detected.')
+        print()
+
+diff_analysis(one,two)
