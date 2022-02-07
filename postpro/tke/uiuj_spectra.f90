@@ -262,7 +262,7 @@ integer(MPI_OFFSET_KIND) :: offset
                     do ix = nx0, nxN
                         c = 2; if (ix == 0) c = 1 ! multiplier for doubling points in x direction
                         do iz = -nz,nz
-                            uiuj(PHIttrsp) = uiuj(PHIttrsp) - c * cprod( VVdz(zf(iz), xf(ix), ik_ft, 1), u(j) ) - c * cprod( VVdz(zf(iz), xf(ix), jk_ft, 1), u(i) )
+                            uiuj(ttrsp) = uiuj(ttrsp) - c * cprod( VVdz(zf(iz), xf(ix), ik_ft, 1), u(j) ) - c * cprod( VVdz(zf(iz), xf(ix), jk_ft, 1), u(i) )
                         end do
                     end do
 
@@ -293,9 +293,6 @@ integer(MPI_OFFSET_KIND) :: offset
 
             ! PHIptrsp --> ptrsp
             call REALderiv(uiujspectra(irs, PHIptrsp, iz, :), uiujspectra(irs, ptrsp, iz, :))
-
-            ! PHIttrsp --> ttrsp
-            call REALderiv(uiujspectra(irs, PHIttrsp, iz, :), uiujspectra(irs, ttrsp, iz, :))
 
         end do
     end do
