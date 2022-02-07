@@ -17,10 +17,12 @@
 ! *VVd*(zf(iz), xf(ix), term, 1)
 ! : WARNING :  iz, ix indices here is scrambled as required by FFT -> use zf(iz), xf(ix)
 ! Index term has 3 possible values = 1:3
-! - term=1 -> ui
-! - term=2 -> uj
-! - term=3 -> uiuj
-! See parameters i_ft, j_ft, ij_ft
+! - term=1 -> dui / dxk
+! - term=2 -> duj / dxk
+! - term=3 -> uk
+! - term=4 -> uk * ( dui / dxk )
+! - term=5 -> uk * ( duj / dxk )
+! See parameters i_ft, j_ft, k_ft, ik_ft, jk_ft
 
 ! : WARNING : triadic interactions are still not implemented
 ! Array for triadic interactions: convs
@@ -73,7 +75,7 @@ real(C_DOUBLE) :: m_grad(3,3) ! m_grad(i,j) = dUi/dxj
 ! shortcut parameters
 
 integer, parameter :: var = 1, prod = 2, psdiss = 3, ttrsp = 4, vdiff = 5, pstrain = 6, ptrsp = 7, PHIttrsp = 8, PHIvdiff = 9, PHIptrsp = 10
-integer, parameter :: i_ft = 1, j_ft = 2, ij_ft = 3
+integer, parameter :: i_ft = 1, j_ft = 2, k_ft = 3, ik_ft = 4, jk_ft = 5
 logical :: ignore
 
 ! MPI stuff
@@ -109,7 +111,7 @@ integer(MPI_OFFSET_KIND) :: offset
     ! notice that this overrides value from dns.in
     call init_MPI(nx+1,nz,ny,nxd+1,nzd)
     call init_memory(.FALSE.) ! false flag avoids allocation of RHS related stuff!
-    call init_fft(VVdz,VVdx,rVVdx,nxd,nxB,nzd,nzB,.FALSE.,[3,1]) ! size of fft array is specified with optional flag
+    call init_fft(VVdz,VVdx,rVVdx,nxd,nxB,nzd,nzB,.FALSE.,[5,1]) ! size of fft array is specified with optional flag
 
     call setup_derivatives()
 
@@ -217,41 +219,53 @@ integer(MPI_OFFSET_KIND) :: offset
 
 #define xf(a) a-nx0+1
 
-            ! calculate ttrsp and tcross
+            ! calculate ttrsp
             do irs = 1, 6
 
                 call get_indexes(irs, i, j)
 
-                ! TURBULENT TRANSPORT TTRSP
-                VVdz(:,:,i_ft:j_ft,1) = 0 ! I only need this chunk! no need to set everything to 0
-                ! prepare Fourier transform by copying in correct order
-                do ix = nx0,nxN
-                    do iz = -nz,nz
-                        ! copy arrays
-                        VVdz(zf(iz), xf(ix), i_ft, 1) = V(iy,iz,ix,i)
-                        VVdz(zf(iz), xf(ix), j_ft, 1) = V(iy,iz,ix,j)
+                ! loop over k
+                do k = 1,3
+                    
+                    ! first compute transofrm of ui, uj
+                    VVdz(:,:,i_ft:k_ft,1) = 0
+                    ! prepare Fourier transform by copying in correct order
+                    do ix = nx0,nxN
+                        do iz = -nz,nz
+                            ! copy arrays
+                            VVdz(zf(iz), xf(ix), i_ft, 1) = gu(i,k)
+                            VVdz(zf(iz), xf(ix), j_ft, 1) = gu(j,k)
+                            VVdz(zf(iz), xf(ix), k_ft, 1) = u(k)
+                        end do
                     end do
-                end do
-                ! antitransform
-                do cntr = 1,2
-                    call IFT(VVdz(1:nzd,1:nxB,cntr,1))
-                    call MPI_Alltoall(VVdz(:,:,cntr,1), 1, Mdz, VVdx(:,:,cntr,1), 1, Mdx, MPI_COMM_X) ! you could just copy without MPI since you deactivated xz parallelisation but ok
-                    VVdx(nx+2:nxd+1,1:nzB,cntr,1)=0
-                    call RFT(VVdx(1:nxd+1,1:nzB,cntr,1),rVVdx(1:2*nxd+2,1:nzB,cntr,1))
-                end do
-                ! compute product in real space
-                rVVdx(:,:,ij_ft,1) = rVVdx(:,:, i_ft, 1) * rVVdx(:,:, j_ft, 1) ! ui*uj
-                ! transform back
-                call HFT(rVVdx(1:2*nxd+2,1:nzB,ij_ft,1), VVdx(1:nxd+1,1:nzB,ij_ft,1)); 
-                call MPI_Alltoall(VVdx(:,:,ij_ft,1), 1, Mdx, VVdz(:,:,ij_ft,1), 1, Mdz, MPI_COMM_X) ! you could just copy without MPI since you deactivated xz parallelisation but ok
-                call FFT(VVdz(1:nzd,1:nxB,ij_ft,1));
-                VVdz(1:nzd,1:nxB,ij_ft,1) = VVdz(1:nzd,1:nxB,ij_ft,1) * factor
-                ! use Parseval's theorem to calculate statistics
-                do ix = nx0, nxN
-                    c = 2; if (ix == 0) c = 1 ! multiplier for doubling points in x direction
-                    do iz = -nz,nz
-                        uiuj(PHIttrsp) = uiuj(PHIttrsp) - c * cprod( VVdz(zf(iz), xf(ix), ij_ft, 1), u(2) )
+                    ! antitransform
+                    do cntr = i_ft,k_ft
+                        call IFT(VVdz(1:nzd,1:nxB,cntr,1))
+                        call MPI_Alltoall(VVdz(:,:,cntr,1), 1, Mdz, VVdx(:,:,cntr,1), 1, Mdx, MPI_COMM_X) ! you could just copy without MPI since you deactivated xz parallelisation but ok
+                        VVdx(nx+2:nxd+1,1:nzB,cntr,1)=0
+                        call RFT(VVdx(1:nxd+1,1:nzB,cntr,1),rVVdx(1:2*nxd+2,1:nzB,cntr,1))
                     end do
+
+                    ! compute product in real space
+                    rVVdx(:,:,ik_ft,1) = rVVdx(:,:, i_ft, 1) * rVVdx(:,:, k_ft, 1) ! uk*( dui / dxk )
+                    rVVdx(:,:,jk_ft,1) = rVVdx(:,:, j_ft, 1) * rVVdx(:,:, k_ft, 1) ! uk*( dui / dxk )
+
+                    ! transform back
+                    do cntr = ik_ft, jk_ft
+                        call HFT(rVVdx(1:2*nxd+2,1:nzB,cntr,1), VVdx(1:nxd+1,1:nzB,cntr,1)); 
+                        call MPI_Alltoall(VVdx(:,:,cntr,1), 1, Mdx, VVdz(:,:,cntr,1), 1, Mdz, MPI_COMM_X) ! you could just copy without MPI since you deactivated xz parallelisation but ok
+                        call FFT(VVdz(1:nzd,1:nxB,cntr,1));
+                        VVdz(1:nzd,1:nxB,cntr,1) = VVdz(1:nzd,1:nxB,cntr,1) * factor
+                    end do
+
+                    ! use Parseval's theorem to calculate statistics
+                    do ix = nx0, nxN
+                        c = 2; if (ix == 0) c = 1 ! multiplier for doubling points in x direction
+                        do iz = -nz,nz
+                            uiuj(PHIttrsp) = uiuj(PHIttrsp) - c * cprod( VVdz(zf(iz), xf(ix), ik_ft, 1), u(j) ) - c * cprod( VVdz(zf(iz), xf(ix), jk_ft, 1), u(i) )
+                        end do
+                    end do
+
                 end do
                 
             end do
