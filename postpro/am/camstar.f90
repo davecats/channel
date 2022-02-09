@@ -22,7 +22,7 @@ integer :: ix, iy, iz, iv, iy1, iy2 ! for spatial directions and components
 
 integer, parameter :: file_vel = 883
 character(len=40) :: istring, currfname
-integer :: stat
+logical :: file_exists
 
 integer :: nyh
 
@@ -121,11 +121,10 @@ integer :: ierror
 
     ! remove old CAMstari.bin
     currfname = "CAMstari.bin"
-    open(unit=100, iostat=stat, file=trim(currfname), status='old')
-    if (stat == 0) then
+    inquire(file=trim(currfname), EXIST=file_exists)
+    if (file_exists) then
+        open(unit=100, file=trim(currfname), status='old')
         close(100, status='delete')
-    else
-        close(100)
     end if
 
    
