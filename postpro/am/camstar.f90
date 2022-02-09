@@ -11,7 +11,7 @@ integer(C_INT) :: nfmin,nfmax,dnf,nftot
 integer :: nmin,nmax,dn
 integer :: nmin_cm = 0, nmax_cm = 0, dn_cm = 0
 
-logical :: custom_mean = .FALSE.
+logical :: custom_mean = .FALSE., spatial_average = .FALSE.
 
 ! counters
 
@@ -138,8 +138,12 @@ integer :: ierror
 
         ! remove mean
         if (has_average) then
-            V(:,0,0,1) = V(:,0,0,1) - cmplx(mean(1,:))
-            V(:,0,0,3) = V(:,0,0,3) - cmplx(mean(2,:))
+            if (spatial_average) then
+                V(:,0,0,:) = 0
+            else 
+                V(:,0,0,1) = V(:,0,0,1) - cmplx(mean(1,:))
+                V(:,0,0,3) = V(:,0,0,3) - cmplx(mean(2,:))
+            end if
         end if
 
         CAMi = 0
@@ -420,7 +424,7 @@ contains !----------------------------------------------------------------------
             print *, "of the working directory this program is called from."
             print *, "Usage:"
             print *, ""
-            print *, "   mpirun -np no_proc camstar [-h] nfmin nfmax dn [-c --custom_mean] nmin_cm nmax_cm dn_cm"
+            print *, "   mpirun -np no_proc camstar [-h -s] nfmin nfmax dn [-c nmin_cm nmax_cm dn_cm]"
             print *, ""
             print *, "A file 'camstar.in' must also be present in the working directory"
             print *, "when this program is called. See the template provided with"
@@ -438,6 +442,15 @@ contains !----------------------------------------------------------------------
             print *, "Index i_stat is instead referring to the statistic being calculated:"
             print *, "1 is the proper AM map, 2 and 3 are the autocorrelation of"
             print *, "small and large scales respectively."
+            print *, ""
+            print *, "OPTIONAL ARGUMENTS:"
+            print *, ""
+            print *, "   -s --spatial: sets mode 0,0 to 0 for fluctuations;"
+            print *, "                 in other words, spatial average is removed"
+            print *, "                 instead of spatial-temporal one."
+            print *, "   -c --custom_mean: calculates mean on a different set of fields;"
+            print *, "                     the fields on which mean is calculated are"
+            print *, "                     indicated after the flag."
             print *, ""
             print *, "Find more info on:"
             print *, "https://arxiv.org/abs/2109.09486"
@@ -470,6 +483,8 @@ contains !----------------------------------------------------------------------
                     ii = ii + 1
                     call get_command_argument(ii, cmd_in_buf)
                     read(cmd_in_buf, *) dn_cm
+                case ('-s', '--spatial')
+                    spatial_average = .TRUE.
                 case default
                     if (command_argument_count() < 3) then ! handle exception: no input
                         print *, 'ERROR: please provide one input file as command line argument.'
