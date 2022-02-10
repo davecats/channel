@@ -36,6 +36,8 @@ integer :: icut
 integer :: pm
 integer, parameter :: d1=1, u1=2, d2=3, u2=4, large=1, small=2
 
+character(40), parameter :: nfofile = 'CAMstart.nfo'
+
 ! MPI stuff
 
 TYPE(MPI_Datatype) :: mean_write_type, mean_inmem_type
@@ -53,6 +55,7 @@ integer :: ierror
 
     ! read arguments from command line
     call parse_args()
+    call check_in_files()
     if (custom_mean) then
         ! apply settings
         nfmin = nmin_cm; nfmax = nmax_cm; dnf = dn_cm
@@ -127,7 +130,6 @@ integer :: ierror
         close(100, status='delete')
     end if
 
-   
     do ii = nfmin, nfmax, dnf ! loop over files
 
         ! read velocity
@@ -251,6 +253,9 @@ integer :: ierror
         close(100)
     end if
 
+    ! write on nfo that execution has ended
+    if (has_terminal) call watermark()
+
     ! be polite and say goodbye
     if (has_terminal) print *, "Goodbye man!"
 
@@ -282,8 +287,16 @@ contains !----------------------------------------------------------------------
 
         ! write CAMstart.nfo
         if (iproc==0) then
-            open(15, file='CAMstart.nfo')
+            open(15, file=nfofile)
                 write(15,*) "This is camstar.f90."
+                write(15,*) ""
+                if (spatial_average) then
+                    write(15,*) "spatial_average = .TRUE."
+                    write(15,*) "Removing spatial average to get fluctuation fields."
+                    write(15,*) "That is, mode 0,0 of fluctuations is set to 0."
+                else
+                    write(15,*) "spatial_average = .FALSE."
+                end if
                 write(15,*) ""
                 write(15,*) "nmin", nmin 
                 write(15,*) "nmax", nmax
@@ -503,6 +516,83 @@ contains !----------------------------------------------------------------------
             ii = ii + 1
         end do
     end subroutine parse_args
+
+
+
+    subroutine check_in_files()
+    logical :: inputs_missing = .FALSE.
+
+        if (iproc == 0) then
+
+            print *
+            print *, "Checking input files..."
+
+            currfname = "../dns.in"
+            call check_da_file(inputs_missing)
+
+            currfname = "camstar.in"
+            call check_da_file(inputs_missing)
+
+            ! check fields
+            if (.NOT. custom_mean) then
+                do ii = nfmin, nfmax, dnf ! loop over files
+                    ! check velocity
+                    write(istring,*) ii; currfname = trim("../Dati.cart."//TRIM(ADJUSTL(istring))//".out")
+                    call check_da_file(inputs_missing)
+                end do
+            else ! if custom mean is used
+                do ii = min(nmin,nmin_cm), max(nmax, nmax_cm), min(dn, dn_cm) ! loop over files
+                    ! check velocity
+                    write(istring,*) ii; currfname = trim("../Dati.cart."//TRIM(ADJUSTL(istring))//".out")
+                    call check_da_file(inputs_missing)
+                end do
+            end if
+
+            ! return error if anything is missing
+            if (inputs_missing) then
+                print *
+                print *, "ERROR: SOME INPUT FILES ARE MISSING"
+                print *
+                call MPI_Abort(MPI_COMM_WORLD, 0, ierr)
+            end if
+
+        end if
+
+        call MPI_BARRIER(MPI_COMM_WORLD)
+
+    end subroutine
+    
+
+
+    subroutine check_da_file(inputs_missing)
+    logical, intent(inout) :: inputs_missing
+    ! name of file to check needs to be written to currfname
+        inquire(file=trim(currfname), EXIST=file_exists)
+        if (.NOT. file_exists) then
+            print *, "Missing ", trim(currfname)
+            inputs_missing = .TRUE.
+        end if
+    end subroutine
+
+
+
+    subroutine watermark()
+    integer :: datetime(8)
+    character(40) :: daystring, monthstring, yearstring, hstr, mstr, sstr
+
+        call date_and_time(values=datetime)
+        write(daystring,'(I0.2)') datetime(3)
+        write(monthstring,'(I0.2)') datetime(2)
+        write(yearstring,'(I0.4)') datetime(1)
+        write(hstr,'(I0.2)') datetime(5)
+        write(mstr,'(I0.2)') datetime(6)
+        write(sstr,'(I0.2)') datetime(7)
+        open(15, file=nfofile,access='append')
+            write(15,*)
+            write(15,*) "EXECUTION COMPLETED ON ", trim(daystring), "/", trim(monthstring), "/", trim(yearstring), " at ", trim(hstr), ":", trim(mstr), ":", trim(sstr) 
+        close(15)
+
+    end subroutine
 
 
 

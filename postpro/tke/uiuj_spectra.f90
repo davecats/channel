@@ -65,18 +65,17 @@ complex(C_DOUBLE_COMPLEX), allocatable :: dertemp_in(:), dertemp_out(:)
 complex(C_DOUBLE_COMPLEX), allocatable :: Vgrad(:,:,:,:,:)
 
 integer, parameter :: file_vel = 883, file_press = 884
-character(len=40) :: istring, foldername, currfname
-character(len=100) :: currcmd
-
+character(len=40) :: istring, currfname
 
 real(C_DOUBLE), allocatable :: mean(:,:), uiujspectra(:,:,:,:), uiujprofiles(:,:,:), convs(:,:,:,:)
 real(C_DOUBLE) :: m_grad(3,3) ! m_grad(i,j) = dUi/dxj
+
+character(40), parameter :: nfofile="uiuj_spectra.nfo" 
 
 ! shortcut parameters
 
 integer, parameter :: var = 1, prod = 2, psdiss = 3, ttrsp = 4, vdiff = 5, pstrain = 6, ptrsp = 7, PHIttrsp = 8, PHIvdiff = 9, PHIptrsp = 10
 integer, parameter :: i_ft = 1, j_ft = 2, k_ft = 3, ik_ft = 4, jk_ft = 5
-logical :: ignore
 
 ! MPI stuff
 
@@ -96,6 +95,7 @@ integer(MPI_OFFSET_KIND) :: offset
 
     ! read arguments from command line
     call parse_args()
+    call check_in_files()
     if (custom_mean) then
         ! apply settings
         nfmin = nmin_cm; nfmax = nmax_cm; dnf = dn_cm
@@ -103,7 +103,7 @@ integer(MPI_OFFSET_KIND) :: offset
     nftot = ((nfmax - nfmin) / dnf) + 1
     
     ! setup
-    call read_dnsin()
+    call read_dnsin(.TRUE.) ! passing .TRUE. cause dns.in is in parent folder wrt cwd
     ! set npy to total number of processes
     ! this effectively DEACTIVATES PARALLELISATION IN X/Z
     ! and makes life easier (without significant losses in perf.)
@@ -135,8 +135,8 @@ integer(MPI_OFFSET_KIND) :: offset
     mean = 0
     do ii = nfmin, nfmax, dnf ! loop over files
         write(istring,*) ii
-        open(file="Dati.cart."//TRIM(ADJUSTL(istring))//".out", unit=file_vel, status="old", access="stream", action="read")
-        open(file="pField"//TRIM(ADJUSTL(istring))//".fld", unit=file_press, status="old", access="stream", action="read")
+        open(file="../Dati.cart."//TRIM(ADJUSTL(istring))//".out", unit=file_vel, status="old", access="stream", action="read")
+        open(file="../pField"//TRIM(ADJUSTL(istring))//".fld", unit=file_press, status="old", access="stream", action="read")
             do iy = ny0-2, nyN+2
                 ! cumulate mean data
                 mean(1,iy) = mean(1,iy) + real(fieldmap(file_vel, iy, 0, 0, 1)) ! U
@@ -168,9 +168,9 @@ integer(MPI_OFFSET_KIND) :: offset
 
         ! read velocity, pressure
         write(istring,*) ii
-        currfname = trim("Dati.cart."//TRIM(ADJUSTL(istring))//".out")
+        currfname = trim("../Dati.cart."//TRIM(ADJUSTL(istring))//".out")
         call read_restart_file(currfname, V)
-        currfname = trim("pField"//TRIM(ADJUSTL(istring)))//".fld"
+        currfname = trim("../pField"//TRIM(ADJUSTL(istring)))//".fld"
         call read_press(currfname, pressure)
 
         ! remove average
@@ -315,7 +315,7 @@ integer(MPI_OFFSET_KIND) :: offset
     if (has_terminal) print *, "Saving to disk..."
 
     ! write metadata
-    currfname = "uiuj_spectra.nfo"
+    currfname = nfofile
     if (has_terminal) then
         open(15, file=currfname)
             write(15,*) "This is uiuj_spectra.f90."
@@ -362,21 +362,7 @@ integer(MPI_OFFSET_KIND) :: offset
 
     call MPI_File_close(fh)
 
-    ! syncronise (if needed)
-    call MPI_Barrier(MPI_COMM_WORLD)
-
-    ! create folder if not existing
-    if (has_terminal) then
-        if (custom_mean) then
-            foldername = "cm_spectra"
-            currcmd = "mv uiuj_spectra.bin cm_spectra; mv uiuj_spectra.nfo cm_spectra"
-        else
-            foldername = "uiuj_spectra"
-            currcmd = "mv uiuj_spectra.bin uiuj_spectra; mv uiuj_spectra.nfo uiuj_spectra"
-        end if
-        ignore = makedirqq(trim(foldername))
-        call execute_command_line(trim(currcmd))
-    end if
+    if (has_terminal) call watermark()
 
     ! be polite and say goodbye
     if (has_terminal) print *, "Goodbye man!"
@@ -626,6 +612,85 @@ contains !----------------------------------------------------------------------
             ii = ii + 1
         end do
     end subroutine parse_args
+
+
+
+    subroutine check_in_files()
+    logical :: inputs_missing = .FALSE.
+
+        if (iproc == 0) then
+
+            print *
+            print *, "Checking input files..."
+
+            currfname = "../dns.in"
+            call check_da_file(inputs_missing)
+
+            ! check fields
+            if (.NOT. custom_mean) then
+                do ii = nfmin, nfmax, dnf ! loop over files
+                    ! check velocity
+                    write(istring,*) ii; currfname = trim("../Dati.cart."//TRIM(ADJUSTL(istring))//".out")
+                    call check_da_file(inputs_missing)
+                    currfname = trim("../pField"//TRIM(ADJUSTL(istring))//".fld")
+                    call check_da_file(inputs_missing)
+                end do
+            else ! if custom mean is used
+                do ii = min(nmin,nmin_cm), max(nmax, nmax_cm), min(dn, dn_cm) ! loop over files
+                    ! check velocity
+                    write(istring,*) ii; currfname = trim("../Dati.cart."//TRIM(ADJUSTL(istring))//".out")
+                    call check_da_file(inputs_missing)
+                    currfname = trim("../pField"//TRIM(ADJUSTL(istring))//".fld")
+                    call check_da_file(inputs_missing)
+                end do
+            end if
+
+            ! return error if anything is missing
+            if (inputs_missing) then
+                print *
+                print *, "ERROR: SOME INPUT FILES ARE MISSING"
+                print *
+                call MPI_Abort(MPI_COMM_WORLD, 0, ierr)
+            end if
+
+        end if
+
+        call MPI_BARRIER(MPI_COMM_WORLD)
+
+    end subroutine
+    
+
+
+    subroutine check_da_file(inputs_missing)
+    logical, intent(inout) :: inputs_missing
+    logical :: file_exists
+    ! name of file to check needs to be written to currfname
+        inquire(file=trim(currfname), EXIST=file_exists)
+        if (.NOT. file_exists) then
+            print *, "Missing ", trim(currfname)
+            inputs_missing = .TRUE.
+        end if
+    end subroutine
+
+
+
+    subroutine watermark()
+    integer :: datetime(8)
+    character(40) :: daystring, monthstring, yearstring, hstr, mstr, sstr
+
+        call date_and_time(values=datetime)
+        write(daystring,'(I0.2)') datetime(3)
+        write(monthstring,'(I0.2)') datetime(2)
+        write(yearstring,'(I0.4)') datetime(1)
+        write(hstr,'(I0.2)') datetime(5)
+        write(mstr,'(I0.2)') datetime(6)
+        write(sstr,'(I0.2)') datetime(7)
+        open(15, file=nfofile,access='append')
+            write(15,*)
+            write(15,*) "EXECUTION COMPLETED ON ", trim(daystring), "/", trim(monthstring), "/", trim(yearstring), " at ", trim(hstr), ":", trim(mstr), ":", trim(sstr) 
+        close(15)
+
+    end subroutine
 
 
 
