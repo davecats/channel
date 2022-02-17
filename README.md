@@ -12,6 +12,7 @@
 > [Domain](#domain)<br/>
 > &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;[Why do we only store positive wavenumbers in the x direction?](#note_nxp1)<br/>
 > [Postprocessing](#postpro)<br/>
+> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;[Guidelines for usage/development](#standard_postprocessing)<br/>
 > [Advanced: conditional compiler flags](#condcomp)<br/>
 
 An exceptionally simple tool for Direct Numerical Simulation (DNS) of the incompressible Navier-Stokes equations 
@@ -224,8 +225,18 @@ TODO
  
 ## Post-processing
 
-TODO
+<a name="standard_postprocessing">
 
+### General guidelines for usage/development
+ 
+The following rules/guidelines apply to all postprocessing tools (at least, the ones written in FORTRAN).
+- When running the postprocessing tool, the current working directory (CWD) should be a subfolder of the directory containing the simulation. That is, the parent folder of CWD needs to contain the `dns.in`, the `Dati.cart.*.out` files and `Runtimedata`.
+- The above mentioned sub-folder contains output and inputs that are specific to the postprocessing executable (eg., a settings file that is only used by the postprocessing executable).
+- Instructions on how to run the executable can be accessed by running it with a flag `-h`.
+- All inputs and arguments must be written to a `.nfo` file.
+- At the end of execution, a string "EXECUTION COMPLETED ON ..." is appended to the `.nfo` file.
+- The executable should check presence of input file, and abort if some is missing.
+- The executable can be compiled from the Makefile in the root `channel` folder.
 
 <a name="condcomp">
  
