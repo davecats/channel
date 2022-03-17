@@ -25,7 +25,7 @@ FLAGS = -cpp -Ofast -no-wrap-margin
 # INTEL, DEBUG (uncomment following line for INTEL compiler)
 #FLAGS = -cpp -O0 -g -check all -fpe0 -warn -traceback -debug extended
 
-# GCC (uncomment following line for GCC compiler) 
+# CC = GCC (uncomment following line for GCC compiler) 
 # FLAGS = -cpp -Ofast -malign-double -fall-intrinsics -ffree-line-length-none
 
 # GCC, DEBUG (uncomment following line for GCC compiler)
@@ -44,6 +44,8 @@ libs = -lfftw3
 # Target-specific assignments
 postpro/tke/uiuj_largesmall: flags += -DforceblockingY
 postpro/tke/uiuj_spectra: flags += -DforceblockingY
+postpro/conditional/Velocity_cut: flags += -DforceblockingY
+postpro/conditional/zero_crossings: flags += -DforceblockingY
 
 channel: $(OBJ) channel.o
 	$(F90) $(flags) -o  $@ $(OBJ) channel.o $(libs)
@@ -59,6 +61,12 @@ postpro/tke/uiuj_largesmall: $(OBJ) postpro/tke/uiuj_largesmall.o
 	make clean
 postpro/tke/uiuj_spectra: $(OBJ) postpro/tke/uiuj_spectra.o
 	$(F90) $(flags) -o $@ $(OBJ) postpro/tke/uiuj_spectra.o $(libs)
+	make clean
+postpro/conditional/Velocity_cut: $(OBJ) postpro/conditional/Velocity_cut.o
+	$(CC) $(flags) -o $@ $(OBJ) postpro/conditional/Velocity_cut.o $(libs)
+	make clean
+postpro/conditional/zero_crossings: $(OBJ) postpro/conditional/zero_crossings.o
+	$(CC) $(flags) -o $@ $(OBJ) postpro/conditional/zero_crossings.o $(libs)
 	make clean
 postpro/am/camstar: $(OBJ) postpro/am/camstar.o
 	$(F90) $(flags) -o $@ $(OBJ) postpro/am/camstar.o $(libs)
