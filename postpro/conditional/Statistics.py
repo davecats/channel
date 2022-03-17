@@ -2,13 +2,13 @@
 """
 Created on Wed Mar 16 14:23:31 2022
 
-@author: Test
+@author: Kayode
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
 
-
+#function reads binary file and writes to an array
 def read_file(filename):
 
     dtype_a = np.dtype(np.intc)
@@ -22,19 +22,19 @@ def read_file(filename):
         return data
 
 
-# writes the zero-crossing positions for both positive to negative and vice-versa
-array_pos = np.zeros([], dtype=np.intc)
 
+array_pos = np.zeros([], dtype=np.intc)
 array_neg = np.zeros([], dtype=np.intc)
 
+# writes the zero-crossing positions for both positive to negative and vice-versa
 array_pos = read_file("pos_neg.out")
-
 array_neg = read_file("neg_pos.out")
 
+#For the combined array
 array = np.zeros([], dtype=np.intc)
-
 array = np.append(array_pos, array_neg)
 
+#sort from lowest to largest
 array = np.sort(array, axis=None)
 
 
@@ -44,6 +44,7 @@ print('Kindly find the combined zero-crossing positions below: \n')
 print(array)
 print('\n')
 
+#array to take in the intervals between successive zero_crossing positions
 diff_array = np.zeros([len(array)-1], dtype=np.intc)
 
 i = 1
@@ -77,17 +78,4 @@ print('The 3rd quartile of the intervals is ' + str(Third_quartile_diff) + '\n')
 Int_Range_diff = Third_quartile_diff - First_quartile_diff
 
 print('The interquartile range of the intervals is ' + str(Int_Range_diff) + '\n')
-
-
-
-
-
-
-
-
-
-
-
-
-
     
