@@ -3,6 +3,8 @@
 #include <vector> 
 #include <array>
 #include <algorithm>
+#include <string>
+#include <stdio.h>
 
 // This program writes out the positions of zero-crossings in a large-scale velocity signal 
 
@@ -19,6 +21,17 @@ int main()
 
 	std::vector<double> ul(P / sizeof(double));
 	infile_a.read(reinterpret_cast<char*>(ul.data()), static_cast<std::streamsize>(ul.size()) * sizeof(double));
+
+
+	//This reads in the time signals from a binary file and write it into an array
+	std::ifstream infile_t("time_file.out", std::ifstream::binary);
+
+	infile_t.seekg(0, infile_a.end);
+	int T = infile_t.tellg();
+	infile_t.seekg(0, infile_t.beg);
+
+	std::vector<double> t(T / sizeof(double));
+	infile_t.read(reinterpret_cast<char*>(t.data()), static_cast<std::streamsize>(t.size()) * sizeof(double));
 
 
 	int i = 1; // to avoid the first "zero-crossing at time = 0"
@@ -51,7 +64,85 @@ int main()
 		j++;
 	}
 
-	//After this while loop, we have all the zero-crossings for negative to positive written in "array_neg"
+	// To define the method for the zero-crossing
+	//1 -> Use all zero-crossings
+	//2 -> implement a threshold system ( use some zero-crossings)
+
+	int method; // the method you wish to use
+
+
+	std::ifstream infile_txt("selection.txt"); // read in the method assigned
+
+	infile_txt >> method;
+
+	//If "2" is chosen, the threshold is also read in from a file 
+	double threshold;
+	std::ifstream infil_txt("criterion.txt");
+	infil_txt >> threshold;
+
+
+	switch (method)
+	{
+
+	case 1:
+
+		break;
+
+	case 2:
+
+		std::vector<int> array_neg_;
+		std::vector<int> array_pos_;
+
+		array_pos_ = array_pos;
+		array_neg_ = array_neg;
+
+		array_pos.clear();
+		array_neg.clear();
+
+		for (int i = 1; i < (array_pos_.size()-1); i++)
+		{
+
+			double precedent_gap = t[array_pos_.at(i)] - t[array_pos_.at(i - 1)];
+			double successive_gap = (t[array_pos_.at(i + 1)] - t[array_pos_.at(i)]);
+
+			if ( ( precedent_gap > (threshold *1.0)) &&  ( successive_gap > (threshold * 1.0)) )
+			
+			{
+				array_pos.push_back(array_pos_.at(i));
+
+			 }
+
+
+		}
+
+		for (int j = 1; j < (array_neg_.size() -1); j++)
+		{
+			double precedent_gap = t[array_neg_.at(j)] - t[array_neg_.at(j - 1)];
+			double successive_gap = (t[array_neg_.at(j + 1)] - t[array_neg_.at(j)]);
+
+			if ((precedent_gap > (threshold * 1.0)) && (successive_gap > (threshold * 1.0)))
+			{
+				array_neg.push_back(array_neg_.at(j));
+
+			}
+
+		}
+		
+	}
+	
+	for (int i = 0; i < array_pos.size(); i++)
+	{
+
+		std::cout << array_pos.at(i) << std::endl;
+	}
+
+	for (int i = 0; i < array_neg.size(); i++)
+	{
+
+		std::cout << array_neg.at(i) << std::endl;
+	}
+
+
 
 	// This writes array_pos to a binary file
 	std::ofstream out_pos;
@@ -74,7 +165,6 @@ int main()
 		out_neg.close();
 
 	}
-
 
 	return 0;
 
