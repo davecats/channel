@@ -35,6 +35,12 @@
 ! exactly with different parallelisations. Useful for 
 ! testing.
 !#define no_optimising_code
+! File for runtime calculation and disk dump of statistics
+#define HEADER_RUNTIME "runtime/instabudget/header.inc"
+#define RUNTIME_SETUP_SUBROUTINE "runtime/instabudget/setup.inc"
+#define RUNTIME_FINALISE_SUBROUTINE "runtime/instabudget/finalise.inc"
+#define RUNTIME_SAVE_SUBROUTINE "runtime/instabudget/save.inc"
+#define RUNTIME_AUXILIARY_SUBROUTINES "runtime/instabudget/aux.inc"
 
 
 ! ==============================================
