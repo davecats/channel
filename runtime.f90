@@ -18,6 +18,7 @@ module runtime
     integer :: iys, iyl ! indexes of nearest y positions to the requested ones
     integer :: iv ! a counter
     integer, parameter :: fil=777, fis=778
+    logical :: has_ys = .FALSE., has_yl = .FALSE.
 #ifdef nonblockingXZ
      TYPE(MPI_REQUEST) :: req_rt(1:6)
 #endif
@@ -38,27 +39,31 @@ contains
 
         ! process input
         llz=FLOOR(2*PI/lc/beta0)
-        call get_nearest_idx(ys, y, iys)
-        call get_nearest_idx(yl, y, iyl)
+        call get_nearest_iy(ys, iys, has_ys)
+        call get_nearest_iy(yl, iyl, has_yl)
 
         ! write out settings
         if (has_terminal) then
+            print *
             print *, "CALCULATION OF STATISTICS AT RUNTIME"
             print *, "INSTANTANEOUS LES BUDGET FOR SMALL SCALES (AM LIKE)"
             print *
             write(*,"(A,I5)") "   requested ys:", ys
             write(*,"(A,I5)") "   requested yl:", yl
             print *
-            write(*,"(A,I5)") "   actual ys:", y(iys)
-            write(*,"(A,I5)") "   actual yl:", y(iyl)
+        end if
+        if (has_ys .AND. has_average) write(*,"(A,I5)") "   actual ys:", y(iys)
+        if (has_yl .AND. has_average) write(*,"(A,I5)") "   actual yl:", y(iyl)
+        if (has_terminal) then
             print *
             write(*,"(A,I5)") "   requested cutoff spanwise wavelength:", lc
             write(*,"(A,I5)") "   cutoff spanwise index:", llz
+            print *
         end if
 
         ! open file streams for output
-        open(unit=fil,file="ul.out",access="stream",action="write")
-        open(unit=fis,file="us.out",access="stream",action="write")
+        if (has_ys .AND. has_terminal) open(unit=fis,file="us.out",access="stream",action="write")
+        if (has_yl .AND. has_terminal) open(unit=fil,file="ul.out",access="stream",action="write")
 
     end subroutine
 
@@ -69,8 +74,8 @@ contains
     ! the filename is contained in the macro RUNTIME_FINALISE_SUBROUTINE
     ! such macro is set in header.h
 #include RUNTIME_FINALISE_SUBROUTINE
-        close(fil)
-        close(fis)
+        if (has_ys .AND. has_terminal) close(fis)
+        if (has_yl .AND. has_terminal) close(fil)
     end subroutine
 
 
@@ -82,37 +87,62 @@ contains
 #include RUNTIME_SAVE_SUBROUTINE
     integer, parameter :: comp = 1
 
-    ! begin by transforming velocity
-    VVdz(:,:,1:2,1) = 0 ! clean up VVdz first
-    ! large scale
-    VVdz(1:(llz+1),1:nxB,1,1)=V(iyl,0:llz,nx0:nxN,comp);
-    VVdz((nzd+1-llz):nzd,1:nxB,1,1)=V(iyl,(-llz):(-1),nx0:nxN,comp);
-    ! small scale
-    VVdz((llz+2):(nz+1),1:nxB,2,1)=V(iys,(llz+1):nz,nx0:nxN,comp);
-    VVdz((nzd+1-nz):(nzd-llz),1:nxB,2,1)=V(iys,(-nz):(-llz-1),nx0:nxN,comp);
+    ! large scales
+    if (has_yl) then
 
-    ! do the transform
-    DO iV=1,2
-       CALL IFT(VVdz(1:nzd,1:nxB,iV,1))  
+        VVdz(:,:,1,1) = 0 ! clean up VVdz first
+        ! copy velocity to FFTW array
+        VVdz(1:(llz+1),1:nxB,1,1)=V(iyl,0:llz,nx0:nxN,comp);
+        VVdz((nzd+1-llz):nzd,1:nxB,1,1)=V(iyl,(-llz):(-1),nx0:nxN,comp);
+
+        ! do the transform
+        call IFT(VVdz(1:nzd,1:nxB,1,1))  
 #ifdef nonblockingXZ
-       CALL MPI_IAlltoall(VVdz(:,:,iV,1), 1, Mdz, VVdx(:,:,iV,1), 1, Mdx, MPI_COMM_X, req_rt(iV))
+        call MPI_IAlltoall(VVdz(:,:,1,1), 1, Mdz, VVdx(:,:,1,1), 1, Mdx, MPI_COMM_X, req_rt(1))
 #endif
 #ifndef nonblockingXZ
-       CALL MPI_Alltoall(VVdz(:,:,iV,1), 1, Mdz, VVdx(:,:,iV,1), 1, Mdx, MPI_COMM_X)
-       VVdx(nx+2:nxd+1,1:nzB,iV,1)=0;    CALL RFT(VVdx(1:nxd+1,1:nzB,iV,1),rVVdx(1:2*nxd+2,1:nzB,iV,1))
+        call MPI_Alltoall(VVdz(:,:,1,1), 1, Mdz, VVdx(:,:,1,1), 1, Mdx, MPI_COMM_X)
+        VVdx(nx+2:nxd+1,1:nzB,1,1)=0;    call RFT(VVdx(1:nxd+1,1:nzB,1,1),rVVdx(1:2*nxd+2,1:nzB,1,1))
 #endif
-     END DO
 #ifdef nonblockingXZ
-     DO iV=1,3
-       CALL MPI_wait(req_rt(iV),MPI_STATUS_IGNORE); 
-       VVdx(nx+2:nxd+1,1:nzB,iV,1)=0; 
-       CALL RFT(VVdx(1:nxd+1,1:nzB,iV,1),rVVdx(1:2*nxd+2,1:nzB,iV,1));
-     END DO
+        call MPI_wait(req_rt(1),MPI_STATUS_IGNORE); 
+        VVdx(nx+2:nxd+1,1:nzB,1,1)=0; 
+        call RFT(VVdx(1:nxd+1,1:nzB,1,1),rVVdx(1:2*nxd+2,1:nzB,1,1));
 #endif
 
-    write(fil) rVVdx(1,1,1,1)
-    write(fis) rVVdx(1,1,2,1)
+        ! save to disk
+        if (has_average) write(fil) rVVdx(1,1,1,1)
 
+    end if
+
+        ! small scales
+        if (has_ys) then
+
+            VVdz(:,:,2,1) = 0 ! clean up VVdz first
+            ! copy velocity
+            VVdz((llz+2):(nz+1),1:nxB,2,1)=V(iys,(llz+1):nz,nx0:nxN,comp);
+            VVdz((nzd+1-nz):(nzd-llz),1:nxB,2,1)=V(iys,(-nz):(-llz-1),nx0:nxN,comp);
+
+            ! do the transform
+            call IFT(VVdz(1:nzd,1:nxB,2,1))  
+#ifdef nonblockingXZ
+            call MPI_IAlltoall(VVdz(:,:,2,1), 1, Mdz, VVdx(:,:,2,1), 1, Mdx, MPI_COMM_X, req_rt(2))
+#endif
+#ifndef nonblockingXZ
+            call MPI_Alltoall(VVdz(:,:,2,1), 1, Mdz, VVdx(:,:,2,1), 1, Mdx, MPI_COMM_X)
+            VVdx(nx+2:nxd+1,1:nzB,2,1)=0;    CALL RFT(VVdx(1:nxd+1,1:nzB,2,1),rVVdx(1:2*nxd+2,1:nzB,2,1))
+#endif
+#ifdef nonblockingXZ
+            call MPI_wait(req_rt(2),MPI_STATUS_IGNORE); 
+            VVdx(nx+2:nxd+1,1:nzB,2,1)=0; 
+            call RFT(VVdx(1:nxd+1,1:nzB,2,1),rVVdx(1:2*nxd+2,1:nzB,2,1));
+#endif
+
+            ! save to disk
+            if (has_average) write(fis) rVVdx(1,1,2,1)*rVVdx(1,1,2,1)
+
+        end if
+    
     end subroutine
 
 
@@ -121,29 +151,24 @@ contains
 
 
 
-    subroutine get_nearest_idx(val, arr, idx)
-    integer, intent(out) :: idx
-    real(C_DOUBLE), intent(in) :: val, arr(*)
-    real(C_DOUBLE), allocatable :: diff(:)
-    real(C_DOUBLE) :: cv
-    integer :: hi, lo, ii 
+    subroutine get_nearest_iy(reqy, iyy, has_yy)
+    integer, intent(out) :: iyy
+    logical, intent(out) :: has_yy
+    real(C_DOUBLE), intent(in) :: reqy
+    real(C_DOUBLE) :: cdiff
+    integer :: ii
 
-        ! retrieve upper and lower bounds for array
-        hi = ubound(arr, 1)
-        lo = lbound(arr, 1)
-
-        ! allocate diff and calculate its values
-        allocate(diff(lo:hi))
-        diff = abs(arr - val)
-
-        ! scan for minimum
-        idx=lo; cv=diff(lo) 
-        do ii = (lo+1), hi
-            if (diff(ii) < cv) then
-                idx = ii
-                cv = diff(ii)
+        iyy = ny0-2; cdiff = abs(reqy - y(iyy))
+        do ii = ny0-2, nyN+2
+            if (abs(reqy - y(ii)) < cdiff) then
+                iyy = ii
+                cdiff = abs(reqy - y(iyy))
             end if
         end do
+
+        if ( (iyy >= miny) .AND. (iyy <= maxy) ) then
+            has_yy = .TRUE.
+        end if
         
     end subroutine
 

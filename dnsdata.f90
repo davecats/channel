@@ -51,7 +51,7 @@ MODULE dnsdata
 #ifdef bodyforce
   complex(C_DOUBLE_COMPLEX), allocatable :: F(:,:,:,:)
   ! next line: compiler flag for including additional definitions, which depend on body force
-#include "body_forces/am_pardec.inc"
+#include BODYFORCE_HEADER
 #ifdef ibm
   real(C_DOUBLE) :: ibmp=5000, ibmi=10000
   real(C_DOUBLE), allocatable :: dUint(:,:,:,:,:) 
@@ -227,7 +227,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
   !--------------------------------------------------------------!
   !---------------------- Define body force ---------------------!
 #ifdef bodyforce
-#include "body_forces/am_f1.inc"
+#include BODYFORCE_MODULES
 ! select your bodyforce here from folder body_forces
 ! notice that you also need to uncomment the flag in header.h
 #endif
