@@ -1,8 +1,4 @@
-! problem
-! need to take into account that processes do not have all y
-! this is relevant in searching for iys/iyl, calculating transforms, writing out
-! maybe put barrier at the end
-
+! TODO: write into files as append + flag to remove average or 0 mode
 
 #include "header.h"
 
@@ -15,6 +11,8 @@ module runtime
     integer :: llz ! largest z index (iz) belonging to large scales -> large scales are -llz:llz
     real(C_DOUBLE) :: lc ! threshold wavelength for filter
     real(C_DOUBLE) :: ys, yl ! requested y positions for large and small scale signals
+    logical :: remove_spatial_average ! flag to remove spatial or actual average from ul
+    real(C_DOUBLE) :: ubar_yl ! value of average flow in x direction at yl
     integer :: iys, iyl ! indexes of nearest y positions to the requested ones
     integer :: iv ! a counter
     integer, parameter :: fil=777, fis=778
@@ -35,6 +33,7 @@ contains
         open(15, file='instabudget.in')
             read(15, *) lc
             read(15, *) ys, yl
+            read(15, *) remove_spatial_average, ubar_yl
         close(15)
 
         ! process input
@@ -48,15 +47,15 @@ contains
             print *, "CALCULATION OF STATISTICS AT RUNTIME"
             print *, "INSTANTANEOUS LES BUDGET FOR SMALL SCALES (AM LIKE)"
             print *
-            write(*,"(A,I5)") "   requested ys:", ys
-            write(*,"(A,I5)") "   requested yl:", yl
+            write(*,"(A,F11.6)") "   requested ys:", ys
+            write(*,"(A,F11.6)") "   requested yl:", yl
             print *
         end if
-        if (has_ys .AND. has_average) write(*,"(A,I5)") "   actual ys:", y(iys)
-        if (has_yl .AND. has_average) write(*,"(A,I5)") "   actual yl:", y(iyl)
+        if (has_ys .AND. has_average) write(*,"(A,F11.6)") "   actual ys:", y(iys)
+        if (has_yl .AND. has_average) write(*,"(A,F11.6)") "   actual yl:", y(iyl)
         if (has_terminal) then
             print *
-            write(*,"(A,I5)") "   requested cutoff spanwise wavelength:", lc
+            write(*,"(A,F11.6)") "   requested cutoff spanwise wavelength:", lc
             write(*,"(A,I5)") "   cutoff spanwise index:", llz
             print *
         end if
@@ -94,6 +93,7 @@ contains
         ! copy velocity to FFTW array
         VVdz(1:(llz+1),1:nxB,1,1)=V(iyl,0:llz,nx0:nxN,comp);
         VVdz((nzd+1-llz):nzd,1:nxB,1,1)=V(iyl,(-llz):(-1),nx0:nxN,comp);
+        if (remove_spatial_average .AND. has_average) VVdz(1,1,1,1) = 0
 
         ! do the transform
         call IFT(VVdz(1:nzd,1:nxB,1,1))  
@@ -142,6 +142,9 @@ contains
             if (has_average) write(fis) rVVdx(1,1,2,1)*rVVdx(1,1,2,1)
 
         end if
+
+        ! synchronise
+        call MPI_Barrier(MPI_COMM_WORLD)
     
     end subroutine
 
