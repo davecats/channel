@@ -51,18 +51,23 @@ contains
             write(*,"(A,F11.6)") "   requested yl:", yl
             print *
         end if
-        if (has_ys .AND. has_average) write(*,"(A,I6,A,F11.6)") "From process", iproc, " - actual ys:", y(iys)
-        if (has_yl .AND. has_average) write(*,"(A,I6,A,F11.6)") "From process", iproc, " - actual yl:", y(iyl)
+        if (has_ys .AND. has_average) then
+            write(*,"(A,I6,A,F11.6)") "From process", iproc, " - actual ys:", y(iys)
+            open(unit=fis,file="us.out",access="stream",action="write")
+        end if
+        if (has_yl .AND. has_average) then 
+            write(*,"(A,I6,A,F11.6)") "From process", iproc, " - actual yl:", y(iyl)
+            open(unit=fil,file="ul.out",access="stream",action="write")
+        end if
+
+        call MPI_Barrier(MPI_COMM_WORLD)
+        
         if (has_terminal) then
             print *
             write(*,"(A,F11.6)") "   requested cutoff spanwise wavelength:", lc
             write(*,"(A,I5)") "   cutoff spanwise index:", llz
             print *
         end if
-
-        ! open file streams for output
-        if (has_ys .AND. has_terminal) open(unit=fis,file="us.out",access="stream",action="write")
-        if (has_yl .AND. has_terminal) open(unit=fil,file="ul.out",access="stream",action="write")
 
     end subroutine
 
