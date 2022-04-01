@@ -51,8 +51,8 @@ contains
             write(*,"(A,F11.6)") "   requested yl:", yl
             print *
         end if
-        if (has_ys .AND. has_average) write(*,"(A,F11.6)") "   actual ys:", y(iys)
-        if (has_yl .AND. has_average) write(*,"(A,F11.6)") "   actual yl:", y(iyl)
+        if (has_ys .AND. has_average) write(*,"(A,I6,A,F11.6)") "From process", iproc, " - actual ys:", y(iys)
+        if (has_yl .AND. has_average) write(*,"(A,I6,A,F11.6)") "From process", iproc, " - actual yl:", y(iyl)
         if (has_terminal) then
             print *
             write(*,"(A,F11.6)") "   requested cutoff spanwise wavelength:", lc
@@ -93,6 +93,8 @@ contains
         ! copy velocity to FFTW array
         VVdz(1:(llz+1),1:nxB,1,1)=V(iyl,0:llz,nx0:nxN,comp);
         VVdz((nzd+1-llz):nzd,1:nxB,1,1)=V(iyl,(-llz):(-1),nx0:nxN,comp);
+
+        ! remove average
         if (remove_spatial_average .AND. has_average) VVdz(1,1,1,1) = 0
 
         ! do the transform
