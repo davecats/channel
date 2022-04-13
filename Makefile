@@ -25,7 +25,7 @@ FLAGS = -cpp -Ofast -no-wrap-margin
 # INTEL, DEBUG (uncomment following line for INTEL compiler)
 #FLAGS = -cpp -O0 -g -check all -fpe0 -warn -traceback -debug extended
 
-# GCC (uncomment following line for GCC compiler) 
+# CC = GCC (uncomment following line for GCC compiler) 
 # FLAGS = -cpp -Ofast -malign-double -fall-intrinsics -ffree-line-length-none
 
 # GCC, DEBUG (uncomment following line for GCC compiler)
@@ -37,15 +37,30 @@ export CNFGSTRNG
 config_file = compiler.settings
 -include ${config_file}
 
-OBJ = typedef.o rbmat.o mpi_transpose.o ffts.o dnsdata.o
+OBJ = typedef.o rbmat.o mpi_transpose.o ffts.o dnsdata.o runtime.o
 flags = -I$(FFTW_INC) -L$(FFTW_LIB) $(FLAGS)
 libs = -lfftw3
 
 # Target-specific assignments
+#############################
+
+# for uiuj (various versions)
 postpro/tke/uiuj_largesmall: flags += -DforceblockingY
 postpro/tke/uiuj_spectra: flags += -DforceblockingY
 
+# for runtime statistics
+runtime: flags += -Druntimestats
+
+postpro/conditional/Velocity_cut: flags += -DforceblockingY
+postpro/conditional/zero_crossings: flags += -DforceblockingY
+
+# Actual recipes
+################
+
 channel: $(OBJ) channel.o
+	$(F90) $(flags) -o  $@ $(OBJ) channel.o $(libs)
+	make clean
+runtime: $(OBJ) channel.o
 	$(F90) $(flags) -o  $@ $(OBJ) channel.o $(libs)
 	make clean
 out_exporter/out2vtk: $(OBJ) out_exporter/out2vtk.o
@@ -59,6 +74,12 @@ postpro/tke/uiuj_largesmall: $(OBJ) postpro/tke/uiuj_largesmall.o
 	make clean
 postpro/tke/uiuj_spectra: $(OBJ) postpro/tke/uiuj_spectra.o
 	$(F90) $(flags) -o $@ $(OBJ) postpro/tke/uiuj_spectra.o $(libs)
+	make clean
+postpro/conditional/Velocity_cut: $(OBJ) postpro/conditional/Velocity_cut.o
+	$(CC) $(flags) -o $@ $(OBJ) postpro/conditional/Velocity_cut.o $(libs)
+	make clean
+postpro/conditional/zero_crossings: $(OBJ) postpro/conditional/zero_crossings.o
+	$(CC) $(flags) -o $@ $(OBJ) postpro/conditional/zero_crossings.o $(libs)
 	make clean
 postpro/am/camstar: $(OBJ) postpro/am/camstar.o
 	$(F90) $(flags) -o $@ $(OBJ) postpro/am/camstar.o $(libs)

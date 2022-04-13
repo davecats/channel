@@ -16,6 +16,9 @@
 PROGRAM channel
 
   USE dnsdata
+#ifdef runtimestats
+  USE runtime
+#endif
 #ifdef crhon
   REAL timei,timee
 #endif
@@ -82,6 +85,9 @@ IF (has_terminal) THEN
 #endif
   WRITE(*,*) " "
 END IF
+#ifdef runtimestats
+  call runtime_setup()
+#endif
 
   ! Compute CFL
   DO iy=ny0,nyN
@@ -156,6 +162,9 @@ END IF
 #endif
     ! Write runtime file
     CALL outstats()
+#ifdef runtimestats
+    call runtime_save()
+#endif
 #ifdef chron
     CALL CPU_TIME(timee)
     IF (has_terminal) WRITE(*,*) timee-timei
@@ -169,6 +178,9 @@ END IF
 #endif
   IF (has_terminal) CLOSE(102)
   ! Realease memory
+#ifdef runtimestats
+  call runtime_finalise()
+#endif
   CALL free_fft()
   CALL free_memory(.TRUE.) 
   CALL MPI_Finalize()

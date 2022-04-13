@@ -18,7 +18,9 @@
 ! half or full channel
 !#define halfchannel
 ! Add a bodyforce 
-!#define bodyforce
+#define bodyforce
+#define BODYFORCE_HEADER "body_forces/am_pardec.inc"
+#define BODYFORCE_MODULES "body_forces/am_f1.inc"
 ! define a bodyforce in space (ibm)
 !#define ibm
 ! Measure per timestep execution time
@@ -35,6 +37,12 @@
 ! exactly with different parallelisations. Useful for 
 ! testing.
 !#define no_optimising_code
+! File for runtime calculation and disk dump of statistics
+#define HEADER_RUNTIME "runtime_plugin/instabudget/header.inc"
+#define RUNTIME_SETUP_SUBROUTINE "runtime_plugin/instabudget/setup.inc"
+#define RUNTIME_FINALISE_SUBROUTINE "runtime_plugin/instabudget/finalise.inc"
+#define RUNTIME_SAVE_SUBROUTINE "runtime_plugin/instabudget/save.inc"
+#define RUNTIME_AUXILIARY_SUBROUTINES "runtime_plugin/instabudget/aux.inc"
 
 
 ! ==============================================
