@@ -112,7 +112,6 @@ contains
                 do while (fsize/C_DOUBLE - no_reads > 0 .AND. targtime < time)
                     read(ft) targtime
                     no_reads = no_reads + 1
-                    print *, targtime, time
                 end do
                 if (.NOT. targtime == time) then
                     print *, "Time of restart file not found. Exiting."
