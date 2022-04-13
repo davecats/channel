@@ -156,7 +156,10 @@ contains
     ! the filename is contained in the macro RUNTIME_FINALISE_SUBROUTINE
     ! such macro is set in header.h
 #include RUNTIME_FINALISE_SUBROUTINE
-        if (has_terminal) close(ft)
+        if (has_terminal) then
+            endfile(ft) ! truncate file
+            close(ft)
+        end if
         if (has_yl) then
             call MPI_FILE_SET_SIZE(fh_l, disp) ! truncate file
             call MPI_File_close(fh_l)
