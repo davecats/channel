@@ -19,7 +19,6 @@ module runtime
     logical :: has_ys = .FALSE., has_yl = .FALSE.
     integer(MPI_OFFSET_KIND) :: no_reads = 0, fsize, disp
     real(C_DOUBLE) :: targtime
-    integer :: negative_if_eof
 
     type(MPI_COMM) :: MPI_COMM_L, MPI_COMM_S
     logical, allocatable :: gather_yl(:), gather_ys(:)
@@ -106,14 +105,12 @@ contains
             open(unit=ft,file="time.out",access="stream",action="readwrite",position="rewind")
             if (time_from_restart) then
                 inquire(ft, size=fsize)
-                if (fsize > 0) then
-                    read(ft,*,iostat=negative_if_eof) targtime
+                if (fsize/C_DOUBLE > 0) then
+                    read(ft,*) targtime
                     no_reads = no_reads + 1
-                else
-                    negative_if_eof = -4
                 end if
-                do while (negative_if_eof >= 0 .AND. targtime <= time)
-                    read(ft,*,iostat=negative_if_eof) targtime
+                do while (fsize/C_DOUBLE - no_reads >= 0 .AND. targtime <= time)
+                    read(ft,*) targtime
                     no_reads = no_reads + 1
                 end do
                 if (targtime > time) then
@@ -250,7 +247,7 @@ contains
         call MPI_Barrier(MPI_COMM_WORLD)
 
         ! update displacement
-        disp = disp + no_reads*nzd*8_MPI_OFFSET_KIND
+        disp = disp + nzd*8_MPI_OFFSET_KIND
 
     end subroutine
 
