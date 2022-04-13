@@ -113,11 +113,12 @@ contains
                     read(ft) targtime
                     no_reads = no_reads + 1
                 end do
-                if (.NOT. targtime == time) then
+                if (targtime == time) then
+                    print *, "Runtime channel: restarting from time", time
+                else
                     print *, "Time of restart file not found. Exiting."
                     stop
                 end if
-                ! remaining case would be targtime = time, which is desired and does not require handling
             end if
         end if
         ! broadcast no_reads
