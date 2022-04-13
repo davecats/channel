@@ -116,7 +116,7 @@ contains
                 if (targtime == time) then
                     print *, "Runtime channel: restarting from time", time
                 else
-                    print *, "Time of restart file not found. Exiting."
+                    print *, "ERROR / RUNTIME CHANNEL, in runtime.f90 - Time of restart file not found. Exiting."
                     stop
                 end if
             end if
