@@ -106,20 +106,19 @@ contains
             if (time_from_restart) then
                 inquire(ft, size=fsize)
                 if (fsize/C_DOUBLE > 0) then
-                    read(ft,*) targtime
+                    read(ft) targtime
                     no_reads = no_reads + 1
                 end if
-                do while (fsize/C_DOUBLE - no_reads >= 0 .AND. targtime <= time)
-                    read(ft,*) targtime
+                do while (fsize/C_DOUBLE - no_reads > 0 .AND. targtime < time)
+                    read(ft) targtime
                     no_reads = no_reads + 1
+                    print *, targtime, time
                 end do
-                if (targtime > time) then
-                    backspace(ft)
-                    no_reads = no_reads - 1
-                else
+                if (.NOT. targtime == time) then
                     print *, "Time of restart file not found. Exiting."
                     stop
                 end if
+                ! remaining case would be targtime = time, which is desired and does not require handling
             end if
         end if
         ! broadcast no_reads
