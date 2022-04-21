@@ -6,7 +6,7 @@ implicit none
 integer(C_INT) :: nx, ny, nz, intemp
 real(C_DOUBLE) :: a, ymin, ymax, dywall
 real(C_DOUBLE) :: temp, dudy ! alfa0, beta0, ni, a, ymin, ymax, deltat, cflmax, time, dt_field, dt_save, t_max, gamma, u0, uN, meanpx, meanpz, meanflowx, meanflowz
-character(len=32) :: cmd_in_buf
+character(len=32) :: cmd_in_buf, arg
 ! velocity field, average
 complex(C_DOUBLE_COMPLEX), allocatable :: vel(:,:,:,:), cplxavg(:,:) ! iy, iz, ix, ic
 real(C_DOUBLE), allocatable :: average(:,:), var(:,:), instantaneous(:,:), instant_history(:,:,:), var_history(:,:,:), factor
@@ -18,12 +18,8 @@ logical :: ex
     ! first off: read dns.in
     call read_dnsin()
 
-    ! fetch number of fields
-    call get_command_argument(1, cmd_in_buf)
-    read(cmd_in_buf, *) fstart
-    call get_command_argument(2, cmd_in_buf)
-    read(cmd_in_buf, *) fend
-    noflds = fend - fstart + 1 ! calculate total number of fields
+    ! parse args
+    call parse_args()
 
     ! allocate fields
     allocate(vel(-1:ny+1,-nz:nz,0:nx,1:3))
@@ -167,6 +163,31 @@ contains
         read(unit,pos=position) element
 
     end function
+
+
+
+    ! read arguments
+    subroutine parse_args()
+        integer :: ii
+        ii = 1
+        do while (ii <= command_argument_count()) ! parse optional arguments
+            call get_command_argument(ii, arg)
+            select case (arg)
+                case default
+                    if (command_argument_count() < 2) then ! handle exception: no input
+                        print *, 'ERROR: please provide one input file as command line argument.'
+                        stop
+                    end if
+                    call get_command_argument(ii, cmd_in_buf)
+                    read(cmd_in_buf, *) fstart
+                    ii = ii + 1
+                    call get_command_argument(ii, cmd_in_buf)
+                    read(cmd_in_buf, *) fend
+                    noflds = fend - fstart + 1 ! calculate total number of fields
+            end select
+            ii = ii + 1
+        end do
+    end subroutine parse_args
 
 
 

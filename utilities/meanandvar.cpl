@@ -1,0 +1,109 @@
+! compile with -Dmainprog for freestanding version
+! USE rtchecks
+TEST=NO
+BOOLEAN autots=YES
+
+MEANANDVAR=STRUCTURE[REAL mean, bm(0..1), bt(0..1)
+INTEGER nt, bs, ts]
+
+SUBROUTINE mvinit(MEANANDVAR mvp^) WITH mvp
+  mean=0; bm=0; bt=0
+  nt=0; bs=0; ts=1
+END mvinit
+
+SUBROUTINE meanandvar(REAL xx; MEANANDVAR mvp^) WITH mvp
+  bm(0)=xx-mean+~
+  INC bs
+  IF bs>=ts !(OR EOF(stdin)!) THEN
+    nt=~+bs
+    mean=~+bm(0)/nt
+    bt(1)=~+bm(0)*bm(1)
+    bm(1)=bm(0)*(1-bs/nt)
+    bt(0)=~+bm(0)*bm(1)
+    IF bt(1)>0.5*bt(0) AND autots AND nt>bs THEN ts=CEILING(1.05*ts)
+    bs=0
+    bm(0)=0
+  END IF
+END meanandvar
+
+REAL FUNCTION var(MEANANDVAR mvp^) WITH mvp
+    IF nt-3*ts<=0 THEN RETURN 0
+    RESULT=[bt(0)+2*bt(1)]/nt/(nt-3*ts)
+    IF bt(1)>0 THEN RESULT=~*(1+0.234*[2*bt(1)/bt(0)]^3.17)
+END var
+
+REAL FUNCTION rms(MEANANDVAR mvp^)=SQRT(mvp.var)
+REAL FUNCTION sum(MEANANDVAR mvp^)=mvp.mean*mvp.nt
+REAL FUNCTION sumvar(MEANANDVAR mvp^)=mvp.var*mvp.nt^2
+REAL FUNCTION sumrms(MEANANDVAR mvp^)=mvp.rms*mvp.nt
+
+#ifdef mainprog
+
+INTEGER startcolumn=1, numcolumn=1
+IF COMMANDLINE.HI>=1 THEN
+  IF COMMANDLINE(1)="-h" THEN
+    WRITE <<helpends
+    
+Usage: meanandvar [-h] [col[-tocol]] [skip] [bsize]
+
+Estimates the mean and the standard deviation of the estimate of the mean from
+finite time series extracted from a stationary stochastic process. The process
+correlation function is assumed to be stationary and integrable but otherwise
+unspecified. The estimate of the standard deviation is obtained by an unbiased
+method of batch means with internally calculated adaptive batch size.
+
+Input is accepted from stdin in a multicolumn format, possibly prefixed by
+comment lines starting with "#". Each column is assumed to be a separate time
+series. The first commandline parameter, if present, specifies the column, or
+range of columns, to be operated on (default: 1). The second parameter, if
+present, is a number of lines to be skipped at the beginning of the file
+(default: 0). The third parameter, if present, is a fixed batch size to be used
+(default: adaptive).
+
+Output is the mean and standard deviation of its estimate for each selected
+column, one per line. A final line contains the total number of samples received
+and the automatic batch size (roughly proportional to correlation time).
+
+23 Jan 2015 Paolo Luchini <luchini@unisa.it>
+helpends
+
+    STOP
+  END IF
+  startcolumn=atoi(COMMANDLINE(1))
+  mpos=strchr(COMMANDLINE(1),"-")
+  IF mpos#NULL THEN
+    numcolumn=atoi(mpos(1))-startcolumn+1
+  END IF
+END IF
+skip=IF COMMANDLINE.HI>=2 THEN atoi(COMMANDLINE(2)) ELSE 0
+MEANANDVAR mv(1..numcolumn)=0
+DO mvinit(mv(i)) FOR ALL i
+IF COMMANDLINE.HI>=3 THEN mv(1).ts=atoi(COMMANDLINE(3)); autots=NO
+REAL xx
+LOOP WHILE ungetc(getc(stdin),stdin)="#": READ
+LOOP FOR i=1 TO skip: READ
+LOOP WHILE READ xx
+  LOOP FOR i=2 TO startcolumn: READ xx
+  LOOP FOR col=1 TO numcolumn
+    meanandvar(xx, mv(col))
+    IF col<numcolumn THEN READ xx
+  REPEAT
+  READ
+  IF mv(1).bs=0 THEN
+    WITH mv(1)
+    IF TEST AND nt-3*ts>0 THEN
+      sigma=var
+      sigma10=[bt(0)+bt(1)]/nt/(nt-2*ts)
+      sigma0=bt(0)/nt/(nt-ts)
+      WRITE nt,mean,sigma*nt,sigma10*nt,sigma0*nt,ts, IF sigma>0 THEN SQRT(sigma) ELSE 0, IF sigma10>0 THEN SQRT(sigma10) ELSE 0, IF bt(0)>0 THEN bt(1)/bt(0) ELSE 0
+    END IF
+  END IF
+REPEAT
+IF NOT TEST THEN
+  LOOP FOR ALL col
+    sigma=mv(col).var
+    WRITE mv(col).mean, IF sigma>0 THEN SQRT(sigma) ELSE sigma
+  REPEAT
+  WRITE TO stderr mv(1).nt,mv(1).ts
+END IF
+#endif
