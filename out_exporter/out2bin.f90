@@ -6,7 +6,7 @@
 
 
 
-program out2vtk
+program out2bin
 ! convert out file to VTK (XML) format for paraview
 ! syntax:
 ! mpirun -np 1 out2vtk Dati.cart.xx.out
@@ -15,12 +15,13 @@ use dnsdata
 implicit none
 
 character(len=32) :: cmd_in_buf ! needed to parse arguments
-logical :: fluct_only = .FALSE.
+logical :: fluct_only = .FALSE., get_large = .FALSE., get_small = .FALSE.
 character(len=32) :: arg
 
 integer :: iv, ix, iz, iy
 integer :: ierror, ii=1, imin, imax
-integer :: ndim, nxtot, nytot, nztot, nxloc, nyloc, nzloc
+integer :: ndim, nxtot, nytot, nztot, nxloc, nyloc, nzloc, z_threshold
+integer, parameter :: large = 1, small = 2, default = 0
 integer*8 :: nnos      
 real*8, dimension(:,:,:,:), allocatable :: vec ! watch out for this type! must be the same as 
 
@@ -28,28 +29,7 @@ integer :: y_start = 0
 
 type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
 
-
-
-    ! read arguments
-    imin=command_argument_count(); imax=0
-    if (command_argument_count() < 1) then ! handle exception: no input
-        print *, 'ERROR: please provide one input file as command line argument.'
-        stop
-    end if
-    do while (ii <= command_argument_count()) ! parse optional arguments
-        call get_command_argument(ii, arg)
-        select case (arg)
-            case ('-f', '--fluctuation') ! flag to only have fluctuations
-                fluct_only = .TRUE.
-            case ('-h', '--help') ! call help
-                call print_help()
-                stop
-            case default
-                if (ii < imin) imin=ii
-                if (ii > imax) imax=ii
-        end select
-        ii = ii + 1
-    end do
+    call parse_args()
     
     ! Init MPI
     call MPI_INIT(ierr)
@@ -141,6 +121,25 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
 
     ! loop over files
     do ii=imin,imax
+        call convert_outfile(default)
+        if (get_large) call convert_outfile(large)
+        if (get_small) call convert_outfile(small)
+    end do
+
+    ! realease memory
+    CALL free_fft()
+    CALL free_memory(.FALSE.)
+    CALL MPI_Finalize()
+
+
+
+contains !-------------------------------------------------------------------------------------------------------------------
+
+
+
+    subroutine convert_outfile(ls)
+
+        integer, intent(in) :: ls
 
         ! read file
         call get_command_argument(ii, cmd_in_buf)
@@ -151,6 +150,9 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
         if (fluct_only) then
             V(:,0,0,:) = 0
         end if
+
+        ! filter (if necessary)
+        if (.NOT. ls == default) call filter_vfield(ls)
 
         ! for each y plane
         do iy = miny,maxy ! skips halo cells: only non-duplicated data
@@ -195,25 +197,18 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
 
         end do
 
-        call write_brutal_bin(fname)
+        call write_brutal_bin(fname,ls)
 
-    end do
-
-    ! realease memory
-    CALL free_fft()
-    CALL free_memory(.FALSE.) 
-    CALL MPI_Finalize()
+    end subroutine
 
 
 
-contains !-------------------------------------------------------------------------------------------------------------------
-
-
-
-    subroutine write_brutal_bin(fname) 
+    subroutine write_brutal_bin(fname,ls) 
 
         character(len = 40) :: fname
         integer(C_SIZE_T), parameter :: disp = 0
+        integer, intent(in) :: ls
+        character(len = 40) :: interstring = ""
 
         integer   :: dotpos
 
@@ -222,9 +217,11 @@ contains !----------------------------------------------------------------------
 
         ! adapt filename
         dotpos = scan(trim(fname),".", BACK= .true.)
-        if ( dotpos > 0 ) fname = fname(1:dotpos)//"bin"
+        if (ls == large) interstring = "large."
+        if (ls == small) interstring = "small."
+        if ( dotpos > 0 ) fname = fname(1:dotpos)//TRIM(interstring)//"bin"
 
-        if (has_terminal) print *, "Writing vector field"
+        if (has_terminal) print *, "Writing "//TRIM(fname)
 
         CALL MPI_File_open(MPI_COMM_WORLD, TRIM(fname), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
             CALL MPI_File_set_view(fh, disp, MPI_DOUBLE_PRECISION, wtype_3d, 'native', MPI_INFO_NULL)
@@ -232,6 +229,32 @@ contains !----------------------------------------------------------------------
         CALL MPI_File_close(fh)
 
     end subroutine
+
+
+
+    subroutine largesmall_setup()
+        open(15, file='largesmall_settings.in')
+            read(15, *) z_threshold
+        close(15)
+        if (has_terminal) then
+            write(*,"(A,I5)") "   z_threshold =", z_threshold
+        end if
+    end subroutine largesmall_setup
+
+
+
+    subroutine filter_vfield(ls)
+    integer, intent(in) :: ls
+
+        do iz = -nz,nz
+            if ( (abs(beta0*iz) <= z_threshold .AND. ls == small) .OR. (abs(beta0*iz) > z_threshold .AND. ls == large ) ) then
+                V(:,iz,:,:) = 0
+            end if
+        end do
+
+    end subroutine
+    
+
 
 
 
@@ -249,6 +272,43 @@ contains !----------------------------------------------------------------------
         print *, "   out2bin [-h] [-f] [-u fraction_undersample] file.name"
         print *, "If flag '-f' (or '--fluctuation') is passed, the (spatial) average is"
         print *, "subtracted from the field before converting."
+    end subroutine
+
+
+
+    subroutine parse_args()
+        
+        ! read arguments
+        imin=command_argument_count(); imax=0
+        if (command_argument_count() < 1) then ! handle exception: no input
+            print *, 'ERROR: please provide one input file as command line argument.'
+            stop
+        end if
+        do while (ii <= command_argument_count()) ! parse optional arguments
+            call get_command_argument(ii, arg)
+            select case (arg)
+                case ('-f', '--fluctuation') ! flag to only have fluctuations
+                    fluct_only = .TRUE.
+                case ('-l', '--large')
+                    get_large = .TRUE.
+                    call largesmall_setup()
+                case ('-s', '--small')
+                    get_small = .TRUE.
+                    call largesmall_setup()
+                case ('-ls', '-sl', '--largesmall', '--smalllarge')
+                    get_small = .TRUE.
+                    get_large = .TRUE.
+                    call largesmall_setup()
+                case ('-h', '--help') ! call help
+                    call print_help()
+                    stop
+                case default
+                    if (ii < imin) imin=ii
+                    if (ii > imax) imax=ii
+            end select
+            ii = ii + 1
+        end do
+
     end subroutine
 
 
