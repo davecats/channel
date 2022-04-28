@@ -9,8 +9,9 @@ character(len=40) :: fname
 
 
 ! old files
-complex(C_DOUBLE_COMPLEX), dimension(:,:,:,:), allocatable :: old_v
-integer :: old_x, old_y, old_z
+complex(C_DOUBLE_COMPLEX), dimension(:,:,:,:), allocatable :: read_old_v, old_v
+integer :: old_x, old_y, old_z, nxzp, nzzp
+real(C_DOUBLE) :: old_alfa0, old_beta0
 
 ! new files
 complex(C_DOUBLE_COMPLEX), dimension(:,:,:,:), allocatable :: v
@@ -22,6 +23,8 @@ integer :: CPI_type, nstep, npy
 ! looping
 integer :: ub_x, ub_z
 integer :: ic, ix, iz, iy
+integer :: ixr, ixl, izt, izb
+real(C_DOUBLE) :: wr, wl, wt, wb
 
 
     call parse_args()
@@ -37,7 +40,13 @@ integer :: ic, ix, iz, iy
         print *, "Required y dimension:", ny
         stop
     end if
-    ub_x = MIN(nx,old_x); ub_z = min(nz, old_z)
+
+    ! allocate a zero-padded array for the old field, so that domain length in Fourier matches new domain length
+    call get_weights(nz, beta0, old_beta0, izb, nzzp, wb, wt)
+    call get_weights(nx, alfa0, old_alfa0, ixl, nxzp, wl, wr)
+    allocate(old_v(-1:(ny+1), (-nzzp):(nzzp), 0:nxzp, 1:3))
+    old_v = 0
+    ub_x = min(nxzp,old_x); ub_z = min(nzzp, old_z)
 
     ! loop over files
     do ii=imin,imax
@@ -46,14 +55,16 @@ integer :: ic, ix, iz, iy
         call get_command_argument(ii, arg)
         read(arg, *) fname
         call read_old_field(fname)
+        old_v(:,-ub_z:ub_z,0:ub_x,:) = read_old_v(:,-ub_z:ub_z,0:ub_x,:)
 
         ! copy into new array
-        v = 0
         do ic = 1,3
-            do ix = 0,ub_x
-                do iz = (-ub_z),ub_z
+            do ix = 0,nx
+                call get_weights(ix, alfa0, old_alfa0, ixl, ixr, wl, wr)
+                do iz = (-nz),nz
+                    call get_weights(iz, beta0, old_beta0, izb, izt, wb, wt)
                     do iy = (-1), ny+1
-                        v(iy,iz,ix,ic) = old_v(iy,iz,ix,ic)
+                        v(iy,iz,ix,ic) = wb*wl*old_v(iy,izb,ixl,ic) + wb*wr*old_v(iy,izb,ixr,ic) + wt*wl*old_v(iy,izt,ixl,ic) + wt*wr*old_v(iy,izt,ixr,ic)
                     end do
                 end do
             end do
@@ -77,12 +88,12 @@ subroutine print_help()
     print *
     print *, "resize [-h] file_1 [file_2 ... file_n]"
     print *
-    print *, "Resizes input file to desired dimensions, which are read from dns.in."
+    print *, "Interpolates the velocity fiel of the input file(s) to a new x-z mesh;"
+    print *, "properties of the new mesh are read from dns.in, while properties of the "
+    print *, "old mesh are read from the input binary file. New and old ny must match."
     print *, 'If input is "file.name", output is "file.name.resized".'
     print *, 'If the desired dimensions are larger than the old ones, the field is'
     print *, 'zero-padded on high wavenumbers. Otherwise, high wavenumbers are truncated.'
-    print *, 'IMPORTANT: the desired number of points in y has to be the same as the old one.'
-    print *, 'No interpolation is done. In no direction.'
 end subroutine
 
 
@@ -114,9 +125,10 @@ character(len=40) :: filename
 
     open(unit=100,file=trim(filename),access="stream",status="old",action="read",iostat=io)
         read(100) old_x, old_y, old_z
+        read(100) old_alfa0, old_beta0
     close(100)
    
-    allocate(old_v(-1:(old_y+1),(-old_z):old_z,0:old_x,1:3))
+    allocate(read_old_v(-1:(old_y+1),(-old_z):old_z,0:old_x,1:3))
 
 end subroutine
 
@@ -126,7 +138,7 @@ subroutine read_old_field(filename)
 character(len=40) :: filename
 
     open(unit=100,file=trim(filename),access="stream",status="old",action="read",iostat=io)
-        read(100, pos=69), old_v
+        read(100, pos=69), read_old_v
     close(100)
 
 end subroutine
@@ -153,6 +165,29 @@ character(len=40), parameter :: filename = 'dns.in'
     allocate(v(-1:(ny+1), (-nz):nz, 0:nx, 1:3))
 
 end subroutine
+
+
+
+subroutine get_weights(ii, lett, old_lett, im, ip, wm, wp)
+integer, intent(in) :: ii
+real(C_DOUBLE), intent(in) :: lett, old_lett
+integer, intent(out) :: im, ip
+real(C_DOUBLE), intent(out) :: wm, wp
+real(C_DOUBLE) :: i_prj
+
+    i_prj = ii * (lett/old_lett)
+    im = floor(abs(i_prj)); ip = im + 1
+
+    if (i_prj < 0) then
+        ip = - im
+        im = ip - 1
+    end if
+
+    wm = ((old_lett*ip)-(lett*ii))/old_lett
+    wp = 1 - wm
+
+end subroutine
+
 
 
 end program
