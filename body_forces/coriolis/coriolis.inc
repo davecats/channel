@@ -4,6 +4,7 @@
 
 subroutine config_body_force()
     if (has_terminal) print *, "Using bodyforce, Coriolis force"
+    if (has_terminal) print *, ""
     call set_body_force()
 end subroutine
 

@@ -3,6 +3,7 @@
 
 subroutine config_body_force()
     if (has_terminal) print *, "Using bodyforce, am_f1 (suppression of superposition)"
+    if (has_terminal) print *, ""
     iz_f = NINT((2.d0*PI/lambdaz_f)/(beta0/1000.d0))
     call set_body_force()
 end subroutine
