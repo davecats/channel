@@ -3,6 +3,7 @@
 ! 2*omega is hardcoded in omega2
 
 subroutine config_body_force()
+    if (has_terminal) print *, "Using bodyforce, Coriolis force"
     call set_body_force()
 end subroutine
 

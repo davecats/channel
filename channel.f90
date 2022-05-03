@@ -76,17 +76,16 @@ IF (has_terminal) THEN
   WRITE(*,"(A,F11.6,A,F11.6)") "   meanpx =",meanpx,"      meanpz =",meanpz
   WRITE(*,"(A,F11.6,A,F11.6)") "   meanflowx =",meanflowx, "   meanflowz =", meanflowz
   WRITE(*,"(A,I6,A,L1)"   ) "   nsteps =",nstep, "   time_from_restart =", time_from_restart
-#ifdef bodyforce
-  WRITE(*,"(A)") "   Using body force."
-  CALL config_body_force(); 
 #ifdef ibm
   WRITE(*,"(A)") "   Immersed Boundary Method (IBM) active."
-#endif
 #endif
   WRITE(*,*) " "
 END IF
 #ifdef runtimestats
   call runtime_setup()
+#endif
+#ifdef bodyforce
+  call config_body_force()
 #endif
 
   ! Compute CFL

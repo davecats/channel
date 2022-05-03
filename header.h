@@ -18,9 +18,9 @@
 ! half or full channel
 !#define halfchannel
 ! Add a bodyforce 
-#define bodyforce
-#define BODYFORCE_HEADER "body_forces/am_pardec.inc"
-#define BODYFORCE_MODULES "body_forces/am_f1.inc"
+!#define bodyforce
+#define BODYFORCE_HEADER "body_forces/am_f1/am_pardec.inc"
+#define BODYFORCE_MODULES "body_forces/am_f1/am_f1.inc"
 ! define a bodyforce in space (ibm)
 !#define ibm
 ! Measure per timestep execution time
