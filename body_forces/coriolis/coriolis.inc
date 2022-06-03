@@ -4,7 +4,6 @@
 subroutine config_body_force()
     if (has_terminal) print *, "Using bodyforce, Coriolis force"
     if (has_terminal) print *, "Reading Ro from coriolis.in"
-    if (has_terminal) print *, ""
     ! read coriolis.in
     open(15, file='camstar.in')
         read(15, *) omega2
@@ -14,6 +13,12 @@ subroutine config_body_force()
     ! process info from coriolis.in
     y_threshold_top = ymax - y_threshold_bot
     iz_thr = min(nz,floor(kz_cutoff/beta0))
+    ! print out parameters
+    if (has_terminal) print *, "Ro(tation number)", omega2/2
+    if (has_terminal) print *, "kz_cutoff, iz_cutoff", kz_cutoff, iz_thr
+    if (has_terminal) print *, "y_threshold_bottom", y_threshold_bot
+    if (has_terminal) print *, ""
+    ! sync and set body force
     call MPI_Barrier(MPI_COMM_WORLD)
     call set_body_force()
 end subroutine
