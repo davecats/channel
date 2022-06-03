@@ -5,7 +5,7 @@ subroutine config_body_force()
     if (has_terminal) print *, "Using bodyforce, Coriolis force"
     if (has_terminal) print *, "Reading Ro from coriolis.in"
     ! read coriolis.in
-    open(15, file='camstar.in')
+    open(15, file='coriolis.in')
         read(15, *) omega2
         read(15, *) kz_cutoff
         read(15, *) y_threshold_bot
