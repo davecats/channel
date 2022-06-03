@@ -1,0 +1,1 @@
+real(C_DOUBLE) :: omega2 ! 2 * rotation number
