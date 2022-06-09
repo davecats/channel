@@ -875,6 +875,10 @@ logical::rtd_exists ! flag to check existence of Runtimedata
    ! Save i-th field
    IF ( time+deltat >= (ifield+1)*dt_field ) THEN ! fast evaluation
      IF ( prev_was_close .OR. ((FLOOR((time+0.5*deltat)/dt_field) > FLOOR((time-0.5*deltat)/dt_field)) .AND. (time>time0)) ) THEN ! accurate evaluation
+#ifdef runtimestats
+       call runtime_save()
+#endif
+#ifndef runtimestats
        ifield=ifield+1; WRITE(istring,*) ifield
        IF (has_terminal) WRITE(*,*) "Writing Dati.cart."//TRIM(ADJUSTL(istring))//".out at time ", time
        filename="Dati.cart."//TRIM(ADJUSTL(istring))//".out"; CALL save_restart_file(filename,V)
@@ -887,6 +891,7 @@ logical::rtd_exists ! flag to check existence of Runtimedata
        uconv=uconv/convvel_cnt
        filename="Convvel.cart."//TRIM(ADJUSTL(istring))//".out"; CALL save_convvel_file(filename,uconv)
        uconv=0; convvel_cnt=0
+#endif
 #endif
        prev_was_close = .FALSE.
      ELSE

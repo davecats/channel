@@ -502,6 +502,10 @@ contains !----------------------------------------------------------------------
 
 
     subroutine get_gradient_33(R, grad)
+    ! TODO: this can be done smarter. Gradient vector grad should not have dimension 3 on last index.
+    ! The only gradient that needs to be in memory is in the y direction - grad(:,:,:,:,2)
+    ! Let's call this grad_in_mem; grad_in_mem has same size of R (which is, V)
+    ! A subroutine or a macro can then recover the remaining gradients (1-x and 3-z directions)
         complex(C_DOUBLE_COMPLEX), intent(in) :: R(ny0-2:nyN+2,-nz:nz,nx0:nxN,3)
         complex(C_DOUBLE_COMPLEX), intent(out) :: grad(ny0-2:nyN+2,-nz:nz,nx0:nxN,3,3)
 
