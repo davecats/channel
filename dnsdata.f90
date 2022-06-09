@@ -75,6 +75,9 @@ MODULE dnsdata
   integer(C_SIZE_T) :: istep,nstep,ifield
   real(C_DOUBLE) :: fr(1:3)
   logical :: prev_was_close = .FALSE.
+#ifdef runtimestats
+  integer :: rtstats_savenow = .FALSE.
+#endif
   !Restart file
   character(len=40) :: fname
   !Convection velocity calculation
@@ -84,7 +87,8 @@ MODULE dnsdata
   integer(C_LONG) :: convvel_cnt=-1
   logical, save :: compute_convvel=.FALSE.
 #endif
-logical::rtd_exists ! flag to check existence of Runtimedata
+  logical::rtd_exists ! flag to check existence of Runtimedata
+
 
 
   CONTAINS
@@ -876,9 +880,9 @@ logical::rtd_exists ! flag to check existence of Runtimedata
    IF ( time+deltat >= (ifield+1)*dt_field ) THEN ! fast evaluation
      IF ( prev_was_close .OR. ((FLOOR((time+0.5*deltat)/dt_field) > FLOOR((time-0.5*deltat)/dt_field)) .AND. (time>time0)) ) THEN ! accurate evaluation
 #ifdef runtimestats
-       call runtime_save()
+       rtstats_savenow = .TRUE.
 #endif
-#ifndef runtimestats
+#ifndef runtime_avoid_savefld
        ifield=ifield+1; WRITE(istring,*) ifield
        IF (has_terminal) WRITE(*,*) "Writing Dati.cart."//TRIM(ADJUSTL(istring))//".out at time ", time
        filename="Dati.cart."//TRIM(ADJUSTL(istring))//".out"; CALL save_restart_file(filename,V)

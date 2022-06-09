@@ -161,6 +161,12 @@ END IF
 #endif
     ! Write runtime file
     CALL outstats()
+#ifdef runtimestats
+    IF (rtstats_savenow) THEN
+      CALL runtime_save()
+      rtstats_savenow = .FALSE.
+    END IF
+#endif
 #ifdef chron
     CALL CPU_TIME(timee)
     IF (has_terminal) WRITE(*,*) timee-timei
