@@ -163,6 +163,7 @@ END IF
     CALL outstats()
 #ifdef runtimestats
     IF (rtstats_savenow) THEN
+      IF (has_terminal) print *, "Saving runtime stats at time", time
       CALL runtime_save()
       rtstats_savenow = .FALSE.
     END IF
