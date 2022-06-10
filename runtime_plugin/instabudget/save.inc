@@ -34,6 +34,33 @@
 
         end if
 
+        ! get velocity gradient
+#ifdef nonblockingY
+        cnt_req = 1
+        call MPI_Buffer_Attach(BUFveta, szBUFveta)
+#endif
+        do ix = nx0, nxN
+            do iz = -nz, nz
+#ifdef nonblockingY
+                call COMPLEXderiv(V(:,iz,ix,1), dVdy(:,iz,ix),REQvetaTOuvw(cnt_req),iz+nz); cnt_req=cnt_req+1
+#else
+                call COMPLEXderiv(V(:,iz,ix,1), dVdy(:,iz,ix))
+                call LeftLU5divStep2(D0mat, dVdy(:,iz,ix))
+#endif
+            end do
+        end do
+#ifdef nonblockingY
+        CALL MPI_Buffer_Detach(ptrBUFveta,szBUFveta)
+        cnt_req = 1
+        call MPI_Buffer_Attach(BUFveta, szBUFveta)
+        do ix = nx0, nxN
+            do iz = -nz, nz
+                call LeftLU5divStep2(D0mat,dVdy(:,iz,ix),REQvetaTOuvw(cnt_req),iz+nz); cnt_req=cnt_req+1
+            end do
+        end do
+        CALL MPI_Buffer_Detach(ptrBUFveta,szBUFveta)
+#endif
+
         ! small scales
         if (has_ys) then
 
@@ -44,33 +71,6 @@
                 VVdz((llz+2):(nz+1),1:nxB,2,comp)=V(iys,(llz+1):nz,nx0:nxN,comp);
                 VVdz((nzd+1-nz):(nzd-llz),1:nxB,2,comp)=V(iys,(-nz):(-llz-1),nx0:nxN,comp);
             end do
-
-            ! get velocity gradient
-#ifdef nonblockingY
-            cnt_req = 1
-            call MPI_Buffer_Attach(BUFveta, szBUFveta)
-#endif
-            do ix = nx0, nxN
-                do iz = -nz, nz
-#ifdef nonblockingY
-                    call COMPLEXderiv(V(:,iz,ix,2),V(:,iz,ix,3),REQvetaTOuvw(cnt_req),iz+nz); cnt_req=cnt_req+1
-#else
-                    call COMPLEXderiv(V(:,iz,ix,1), dVdy(:,iz,ix))
-                    call LeftLU5divStep2(D0mat, dVdy(:,iz,ix))
-#endif
-                end do
-            end do
-#ifdef nonblockingY
-            CALL MPI_Buffer_Detach(ptrBUFveta,szBUFveta)
-            cnt_req = 1
-            call MPI_Buffer_Attach(BUFveta, szBUFveta)
-            do ix = nx0, nxN
-                do iz = -nz, nz
-                    call LeftLU5divStep2(D0mat,V(:,iz,ix,3),REQvetaTOuvw(cnt_req),iz+nz); cnt_req=cnt_req+1
-                end do
-            end do
-            CALL MPI_Buffer_Detach(ptrBUFveta,szBUFveta)
-#endif
 
             ! copy the velocity gradient
             VVdz((llz+2):(nz+1),1:nxB,2,4)=dVdy(iys,(llz+1):nz,nx0:nxN);
