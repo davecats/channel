@@ -882,8 +882,8 @@ MODULE dnsdata
 #ifdef runtimestats
        rtstats_savenow = .TRUE.
 #endif
-#ifndef runtime_avoid_savefld
        ifield=ifield+1; WRITE(istring,*) ifield
+#ifndef runtime_avoid_savefld
        IF (has_terminal) WRITE(*,*) "Writing Dati.cart."//TRIM(ADJUSTL(istring))//".out at time ", time
        filename="Dati.cart."//TRIM(ADJUSTL(istring))//".out"; CALL save_restart_file(filename,V)
 #ifdef bodyforce
