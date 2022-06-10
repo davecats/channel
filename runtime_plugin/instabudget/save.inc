@@ -11,7 +11,11 @@
             VVdz((nzd+1-llz):nzd,1:nxB,1,1)=V(iyl,(-llz):(-1),nx0:nxN,comp);
 
             ! remove average
-            if (remove_spatial_average .AND. has_average) VVdz(1,1,1,1) = 0
+            if (remove_spatial_average .AND. has_average) then
+                VVdz(1,1,1,1) = 0
+            else if (has_average) then
+                VVdz(1,1,1,1) = VVdz(1,1,1,1) - ubar_yl
+            end if
 
             ! do the transform
             call IFT(VVdz(1:nzd,1:nxB,1,1))
@@ -76,20 +80,28 @@
             VVdz((llz+2):(nz+1),1:nxB,2,4)=dVdy(iys,(llz+1):nz,nx0:nxN);
             VVdz((nzd+1-nz):(nzd-llz),1:nxB,2,4)=dVdy(iys,(-nz):(-llz-1),nx0:nxN);
 
+            ! remove average
+            if (remove_spatial_average .AND. has_average) then
+                VVdz(1,1,2,1:4) = 0 ! remove mode 0,0 from all vel comp and from vel grad!
+            else if (has_average) then
+                ! from mode 
+                VVdz(1,1,2,1) = VVdz(1,1,2,1) - ubar_yl ! subtract estimate of mean vel from streamwise (1-x) vel comp
+            end if
+
             ! do the transform
             do comp = 1,4
-                call IFT(VVdz(1:nzd,1:nxB,2,1))  
+                call IFT(VVdz(1:nzd,1:nxB,2,comp))  
 #ifdef nonblockingXZ
-                call MPI_IAlltoall(VVdz(:,:,2,1), 1, Mdz, VVdx(:,:,2,1), 1, Mdx, MPI_COMM_X, req_rt(2))
+                call MPI_IAlltoall(VVdz(:,:,2,comp), 1, Mdz, VVdx(:,:,2,comp), 1, Mdx, MPI_COMM_X, req_rt(2))
 #endif
 #ifndef nonblockingXZ
-                call MPI_Alltoall(VVdz(:,:,2,1), 1, Mdz, VVdx(:,:,2,1), 1, Mdx, MPI_COMM_X)
-                VVdx(nx+2:nxd+1,1:nzB,2,1)=0;    CALL RFT(VVdx(1:nxd+1,1:nzB,2,1),rVVdx(1:2*nxd+2,1:nzB,2,1))
+                call MPI_Alltoall(VVdz(:,:,2,comp), 1, Mdz, VVdx(:,:,2,comp), 1, Mdx, MPI_COMM_X)
+                VVdx(nx+2:nxd+1,1:nzB,2,comp)=0;    CALL RFT(VVdx(1:nxd+1,1:nzB,2,comp),rVVdx(1:2*nxd+2,1:nzB,2,comp))
 #endif
 #ifdef nonblockingXZ
                 call MPI_wait(req_rt(2),MPI_STATUS_IGNORE); 
-                VVdx(nx+2:nxd+1,1:nzB,2,1)=0; 
-                call RFT(VVdx(1:nxd+1,1:nzB,2,1),rVVdx(1:2*nxd+2,1:nzB,2,1));
+                VVdx(nx+2:nxd+1,1:nzB,2,comp)=0; 
+                call RFT(VVdx(1:nxd+1,1:nzB,2,comp),rVVdx(1:2*nxd+2,1:nzB,2,comp));
 #endif
             end do
 
