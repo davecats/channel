@@ -2,7 +2,6 @@
     real(C_DOUBLE) :: lc ! threshold wavelength for filter
     real(C_DOUBLE) :: ys, yl ! requested y positions for large and small scale signals
     logical :: remove_spatial_average ! flag to remove spatial or actual average from ul
-    real(C_DOUBLE) :: ubar_yl ! value of average flow in x direction at yl
     integer :: iys, iyl ! indexes of nearest y positions to the requested ones
     integer :: iv, ix, iz, is=1, il=1 ! a counter
     integer, parameter :: ft=777

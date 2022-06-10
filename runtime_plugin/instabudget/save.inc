@@ -1,43 +1,5 @@
     integer :: comp
 
-        ! large scales
-        if (has_yl) then
-
-            comp = 1
-
-            VVdz(:,:,1,1) = 0 ! clean up VVdz first
-            ! copy velocity to FFTW array
-            VVdz(1:(llz+1),1:nxB,1,1)=V(iyl,0:llz,nx0:nxN,comp);
-            VVdz((nzd+1-llz):nzd,1:nxB,1,1)=V(iyl,(-llz):(-1),nx0:nxN,comp);
-
-            ! remove average
-            if (remove_spatial_average .AND. has_average) then
-                VVdz(1,1,1,1) = 0
-            else if (has_average) then
-                VVdz(1,1,1,1) = VVdz(1,1,1,1) - ubar_yl
-            end if
-
-            ! do the transform
-            call IFT(VVdz(1:nzd,1:nxB,1,1))
-#ifdef nonblockingXZ
-            call MPI_IAlltoall(VVdz(:,:,1,1), 1, Mdz, VVdx(:,:,1,1), 1, Mdx, MPI_COMM_X, req_rt(1))
-#endif
-#ifndef nonblockingXZ
-            call MPI_Alltoall(VVdz(:,:,1,1), 1, Mdz, VVdx(:,:,1,1), 1, Mdx, MPI_COMM_X)
-            VVdx(nx+2:nxd+1,1:nzB,1,1)=0;    call RFT(VVdx(1:nxd+1,1:nzB,1,1),rVVdx(1:2*nxd+2,1:nzB,1,1))
-#endif
-#ifdef nonblockingXZ
-            call MPI_wait(req_rt(1),MPI_STATUS_IGNORE);  
-            VVdx(nx+2:nxd+1,1:nzB,1,1)=0;
-            call RFT(VVdx(1:nxd+1,1:nzB,1,1),rVVdx(1:2*nxd+2,1:nzB,1,1));
-#endif
-
-            ! save to disk
-            call MPI_file_set_view(fh_l, disp, MPI_DOUBLE_PRECISION, yconst_plane_type, 'native', MPI_INFO_NULL)
-            call MPI_File_write_all(fh_l, rVVdx(1,:,1,1), nzB, MPI_DOUBLE_PRECISION, status)
-
-        end if
-
         ! get velocity gradient
 #ifdef nonblockingY
         cnt_req = 1
@@ -65,6 +27,41 @@
         CALL MPI_Buffer_Detach(ptrBUFveta,szBUFveta)
 #endif
 
+        ! large scales
+        if (has_yl) then
+
+            comp = 1
+
+            VVdz(:,:,1,1) = 0 ! clean up VVdz first
+            ! copy velocity to FFTW array
+            call copy2vvdz_large(1,1,V(iyl,:,:,comp))
+
+            ! remove average
+            if (remove_spatial_average .AND. has_average) then
+                VVdz(1,1,1,1) = 0
+            end if
+
+            ! do the transform
+            call IFT(VVdz(1:nzd,1:nxB,1,1))
+#ifdef nonblockingXZ
+            call MPI_IAlltoall(VVdz(:,:,1,1), 1, Mdz, VVdx(:,:,1,1), 1, Mdx, MPI_COMM_X, req_rt(1))
+#endif
+#ifndef nonblockingXZ
+            call MPI_Alltoall(VVdz(:,:,1,1), 1, Mdz, VVdx(:,:,1,1), 1, Mdx, MPI_COMM_X)
+            VVdx(nx+2:nxd+1,1:nzB,1,1)=0;    call RFT(VVdx(1:nxd+1,1:nzB,1,1),rVVdx(1:2*nxd+2,1:nzB,1,1))
+#endif
+#ifdef nonblockingXZ
+            call MPI_wait(req_rt(1),MPI_STATUS_IGNORE);  
+            VVdx(nx+2:nxd+1,1:nzB,1,1)=0;
+            call RFT(VVdx(1:nxd+1,1:nzB,1,1),rVVdx(1:2*nxd+2,1:nzB,1,1));
+#endif
+
+            ! save to disk
+            call MPI_file_set_view(fh_l, disp, MPI_DOUBLE_PRECISION, yconst_plane_type, 'native', MPI_INFO_NULL)
+            call MPI_File_write_all(fh_l, rVVdx(1,:,1,1), nzB, MPI_DOUBLE_PRECISION, status)
+
+        end if
+
         ! small scales
         if (has_ys) then
 
@@ -72,20 +69,16 @@
             
             ! copy velocity
             do comp = 1,3 ! three components
-                VVdz((llz+2):(nz+1),1:nxB,2,comp)=V(iys,(llz+1):nz,nx0:nxN,comp);
-                VVdz((nzd+1-nz):(nzd-llz),1:nxB,2,comp)=V(iys,(-nz):(-llz-1),nx0:nxN,comp);
+                call copy2vvdz_small(2,comp,V(iys,:,:,comp))
             end do
 
             ! copy the velocity gradient
-            VVdz((llz+2):(nz+1),1:nxB,2,4)=dVdy(iys,(llz+1):nz,nx0:nxN);
-            VVdz((nzd+1-nz):(nzd-llz),1:nxB,2,4)=dVdy(iys,(-nz):(-llz-1),nx0:nxN);
-
+            ! ATTENTION: THIS IS LARGE SCALE GRADIENT AT YS
+            call copy2vvdz_large(2,4,dVdy(iys,:,:))
+    
             ! remove average
             if (remove_spatial_average .AND. has_average) then
                 VVdz(1,1,2,1:4) = 0 ! remove mode 0,0 from all vel comp and from vel grad!
-            else if (has_average) then
-                ! from mode 
-                VVdz(1,1,2,1) = VVdz(1,1,2,1) - ubar_yl ! subtract estimate of mean vel from streamwise (1-x) vel comp
             end if
 
             ! do the transform

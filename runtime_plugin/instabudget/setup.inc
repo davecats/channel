@@ -3,7 +3,7 @@
         open(15, file='instabudget.in')
             read(15, *) lc
             read(15, *) ys, yl
-            read(15, *) remove_spatial_average, ubar_yl
+            read(15, *) remove_spatial_average
         close(15)
 
         ! process input

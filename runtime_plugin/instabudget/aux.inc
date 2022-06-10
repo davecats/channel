@@ -18,3 +18,21 @@
         end if
         
     end subroutine
+
+
+
+    subroutine copy2vvdz_large(ivvdz1, ivvdz2, R)
+    complex(C_DOUBLE_COMPLEX), intent(IN) :: R(-nz:nz,nx0:nxN)
+    integer(C_INT), intent(IN) :: ivvdz1,ivvdz2
+        VVdz(1:(llz+1),1:nxB,ivvdz1,ivvdz2)=R(0:llz,nx0:nxN);
+        VVdz((nzd+1-llz):nzd,1:nxB,ivvdz1,ivvdz2)=R((-llz):(-1),nx0:nxN);
+    end subroutine
+
+
+
+    subroutine copy2vvdz_small(ivvdz1,ivvdz2, R)
+    complex(C_DOUBLE_COMPLEX), intent(IN) :: R(-nz:nz,nx0:nxN)
+    integer(C_INT), intent(IN) :: ivvdz1,ivvdz2
+        VVdz((llz+2):(nz+1),1:nxB,ivvdz1,ivvdz2)=R((llz+1):nz,nx0:nxN);
+        VVdz((nzd+1-nz):(nzd-llz),1:nxB,ivvdz1,ivvdz2)=R((-nz):(-llz-1),nx0:nxN);
+    end subroutine
