@@ -75,14 +75,17 @@
             ! copy the velocity gradient
             ! ATTENTION: THIS IS LARGE SCALE GRADIENT AT YS
             call copy2vvdz_large(2,4,dVdy(iys,:,:))
+
+            ! copy large scales at ys
+            call copy2vvdz_large(2,5,V(iys,:,:,1))
     
             ! remove average
             if (remove_spatial_average .AND. has_average) then
-                VVdz(1,1,2,1:4) = 0 ! remove mode 0,0 from all vel comp and from vel grad!
+                VVdz(1,1,2,1:5) = 0 ! remove mode 0,0 from all vel comp and from vel grad!
             end if
 
             ! do the transform
-            do comp = 1,4
+            do comp = 1,5
                 call IFT(VVdz(1:nzd,1:nxB,2,comp))  
 #ifdef nonblockingXZ
                 call MPI_IAlltoall(VVdz(:,:,2,comp), 1, Mdz, VVdx(:,:,2,comp), 1, Mdx, MPI_COMM_X, req_rt(2))
@@ -99,7 +102,7 @@
             end do
 
             ! calculate stuff to save to disk
-            rVVdx(1,:,2,5) = rVVdx(1,:,2,1)*rVVdx(1,:,2,2) ! us*vs --- MUST BE FIRST
+            rVVdx(1,:,2,6) = rVVdx(1,:,2,1)*rVVdx(1,:,2,2) ! us*vs --- MUST BE FIRST
             do comp = 1,3
                 rVVdx(1,:,2,comp) = rVVdx(1,:,2,comp)*rVVdx(1,:,2,comp) ! uis*uis
             end do
@@ -111,12 +114,14 @@
             call MPI_file_set_view(fh_ws,    disp, MPI_DOUBLE_PRECISION, yconst_plane_type, 'native', MPI_INFO_NULL)
             call MPI_file_set_view(fh_uvs,   disp, MPI_DOUBLE_PRECISION, yconst_plane_type, 'native', MPI_INFO_NULL)
             call MPI_file_set_view(fh_duldy, disp, MPI_DOUBLE_PRECISION, yconst_plane_type, 'native', MPI_INFO_NULL)
+            call MPI_file_set_view(fh_ul_at_ys, disp, MPI_DOUBLE_PRECISION, yconst_plane_type, 'native', MPI_INFO_NULL)
             ! write
             call MPI_File_write_all(fh_us,    rVVdx(1,:,2,1), nzB, MPI_DOUBLE_PRECISION, status)
             call MPI_File_write_all(fh_vs,    rVVdx(1,:,2,2), nzB, MPI_DOUBLE_PRECISION, status)
             call MPI_File_write_all(fh_ws,    rVVdx(1,:,2,3), nzB, MPI_DOUBLE_PRECISION, status)
-            call MPI_File_write_all(fh_uvs,   rVVdx(1,:,2,5), nzB, MPI_DOUBLE_PRECISION, status)
+            call MPI_File_write_all(fh_uvs,   rVVdx(1,:,2,6), nzB, MPI_DOUBLE_PRECISION, status)
             call MPI_File_write_all(fh_duldy, rVVdx(1,:,2,4), nzB, MPI_DOUBLE_PRECISION, status)
+            call MPI_File_write_all(fh_ul_at_ys, rVVdx(1,:,2,5), nzB, MPI_DOUBLE_PRECISION, status)
         end if
 
         if (has_terminal) then

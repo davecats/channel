@@ -42,7 +42,14 @@ PROGRAM channel
 #endif
   CALL setup_derivatives()
   CALL setup_boundary_conditions()
-  fname="Dati.cart.out";       CALL read_restart_file(fname,V)
+#ifdef runtimestats
+  call runtime_setup()
+#endif
+  fname="Dati.cart.out"
+#ifdef runtimestats
+  if (runtime_read_field_from_idx) fname="Dati.cart."//TRIM(ADJUSTL(rt_tgt_istr))//".out"
+#endif
+  CALL read_restart_file(fname,V)
   ! move cursor to desired record
   IF (time_from_restart .AND. rtd_exists) THEN
     CALL get_record(time)
@@ -81,9 +88,6 @@ IF (has_terminal) THEN
 #endif
   WRITE(*,*) " "
 END IF
-#ifdef runtimestats
-  call runtime_setup()
-#endif
 #ifdef bodyforce
   call config_body_force()
 #endif

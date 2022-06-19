@@ -4,7 +4,13 @@
             read(15, *) lc
             read(15, *) ys, yl
             read(15, *) remove_spatial_average
+            read(15, *) runtime_read_field_from_idx, runtime_tgt_file_idx
         close(15)
+        if (runtime_read_field_from_idx) then
+            write(rt_tgt_istr,*) runtime_tgt_file_idx
+        else
+            rt_tgt_istr = ""
+        end if
 
         ! process input
         llz=FLOOR(2*PI/lc/beta0)
@@ -83,11 +89,12 @@
         ! open files for ul and us
         if (has_yl) call MPI_file_open(MPI_COMM_L, TRIM("ul.out"), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh_l)
         if (has_ys) then
-            call MPI_file_open(MPI_COMM_S, TRIM("us.out"), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh_us)
-            call MPI_file_open(MPI_COMM_S, TRIM("vs.out"), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh_vs)
-            call MPI_file_open(MPI_COMM_S, TRIM("ws.out"), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh_ws)
-            call MPI_file_open(MPI_COMM_S, TRIM("uvs.out"), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh_uvs)
-            call MPI_file_open(MPI_COMM_S, TRIM("duldy.out"), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh_duldy)
+            call MPI_file_open(MPI_COMM_S, TRIM("us."//TRIM(ADJUSTL(rt_tgt_istr))//".out"), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh_us)
+            call MPI_file_open(MPI_COMM_S, TRIM("vs."//TRIM(ADJUSTL(rt_tgt_istr))//".out"), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh_vs)
+            call MPI_file_open(MPI_COMM_S, TRIM("ws."//TRIM(ADJUSTL(rt_tgt_istr))//".out"), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh_ws)
+            call MPI_file_open(MPI_COMM_S, TRIM("uvs."//TRIM(ADJUSTL(rt_tgt_istr))//".out"), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh_uvs)
+            call MPI_file_open(MPI_COMM_S, TRIM("duldy."//TRIM(ADJUSTL(rt_tgt_istr))//".out"), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh_duldy)
+            call MPI_file_open(MPI_COMM_S, TRIM("ul_at_ys."//TRIM(ADJUSTL(rt_tgt_istr))//".out"), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh_ul_at_ys)
         end if
 
         ! write out stuff

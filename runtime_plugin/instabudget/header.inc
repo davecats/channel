@@ -1,3 +1,8 @@
+    ! parameters to parse - velocity field to be read
+    integer :: runtime_tgt_file_idx
+    logical :: runtime_read_field_from_idx
+    character(len=40) :: rt_tgt_istr
+    
     integer :: llz ! largest z index (iz) belonging to large scales -> large scales are -llz:llz
     real(C_DOUBLE) :: lc ! threshold wavelength for filter
     real(C_DOUBLE) :: ys, yl ! requested y positions for large and small scale signals
@@ -21,7 +26,7 @@
     type(C_PTR) :: ptrBUFveta
 #endif
 
-    type(MPI_File) :: fh_l, fh_us, fh_vs, fh_ws, fh_uvs, fh_duldy
+    type(MPI_File) :: fh_l, fh_us, fh_vs, fh_ws, fh_uvs, fh_duldy, fh_ul_at_ys
     type(MPI_Datatype) :: yconst_plane_type
     integer(C_INT) :: ierror
     type(MPI_Status) :: status
