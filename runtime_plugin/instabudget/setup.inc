@@ -63,7 +63,7 @@
             print *
         end if
         if (has_terminal) then ! look for correct time to start writing
-            open(unit=ft,file="time.out",access="stream",action="readwrite",position="rewind")
+            open(unit=ft,file="time."//TRIM(ADJUSTL(rt_tgt_istr))//".out",access="stream",action="readwrite",position="rewind")
             if (time_from_restart) then
                 inquire(ft, size=fsize)
                 if (fsize/C_DOUBLE > 0) then
@@ -87,7 +87,7 @@
         ! get initial displacement for other files
         disp = no_reads*nzd*8_MPI_OFFSET_KIND
         ! open files for ul and us
-        if (has_yl) call MPI_file_open(MPI_COMM_L, TRIM("ul.out"), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh_l)
+        if (has_yl) call MPI_file_open(MPI_COMM_L, TRIM("ul."//TRIM(ADJUSTL(rt_tgt_istr))//".out"), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh_l)
         if (has_ys) then
             call MPI_file_open(MPI_COMM_S, TRIM("us."//TRIM(ADJUSTL(rt_tgt_istr))//".out"), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh_us)
             call MPI_file_open(MPI_COMM_S, TRIM("vs."//TRIM(ADJUSTL(rt_tgt_istr))//".out"), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh_vs)
