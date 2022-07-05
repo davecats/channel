@@ -269,9 +269,11 @@ contains !----------------------------------------------------------------------
         print *, "The binary array is Fourier-antitransformed with respect to the .out file,"
         print *, "so that it represents a velocity field in space (and not in the Fourier domain)."
         print *, "Syntax:"
-        print *, "   out2bin [-h] [-f] [-u fraction_undersample] file.name"
+        print *, "   out2bin [-h] [-f] [-l -s -ls -sl] file.name"
         print *, "If flag '-f' (or '--fluctuation') is passed, the (spatial) average is"
         print *, "subtracted from the field before converting."
+        print *, "If flags -l, -s or so are passed, filtering thresholds are read from largesmall.in"
+        print *, "and the desired large or small scale field is returned."
     end subroutine
 
 
