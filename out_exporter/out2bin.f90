@@ -15,14 +15,14 @@ use dnsdata
 implicit none
 
 character(len=32) :: cmd_in_buf ! needed to parse arguments
-logical :: fluct_only = .FALSE., get_large = .FALSE., get_small = .FALSE.
+logical :: fluct_only = .FALSE., get_large = .FALSE., get_small = .FALSE., undersample = .FALSE.
+real*4 :: xcent_undersample = 1
 character(len=32) :: arg
 
 integer :: iv, ix, iz, iy
 integer :: ierror, ii=1, imin, imax
 integer :: ndim, nxtot, nytot, nztot, nxloc, nyloc, nzloc, z_threshold
 integer, parameter :: large = 1, small = 2, default = 0
-integer*8 :: nnos      
 real*8, dimension(:,:,:,:), allocatable :: vec ! watch out for this type! must be the same as 
 
 integer :: y_start = 0
@@ -73,10 +73,9 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
     ndim  = 3  ! number of spatial dimension
 
     ! GLOBAL QUANTITIES, which is, overall sizes of stuff
-    nxtot = (2*nx) + 1! no. points
-    nytot = (ny + 1)   ! no. points
-    nztot = (2*nz) + 1 ! no. points
-    nnos  = nxtot*nytot*nztot             ! number of nodes
+    nxtot = nint(xcent_undersample * ((2*nx) + 1)) ! no. points
+    nytot = (ny + 1) ! no. points
+    nztot = nint(xcent_undersample * (2*nz + 1)) ! no. points
 
     ! things that are local to each process
     ! number of points in each direction
@@ -125,6 +124,8 @@ type(MPI_Datatype) :: wtype_3d, type_towrite ! , wtype_scalar
         if (get_large) call convert_outfile(large)
         if (get_small) call convert_outfile(small)
     end do
+
+    call write_metadata()
 
     ! realease memory
     CALL free_fft()
@@ -190,7 +191,7 @@ contains !----------------------------------------------------------------------
             do iV = 1,3
                 do iz=1,nztot
                     do ix=1,nxtot
-                        vec(iV,ix,iy,iz) = rVVdx(ix,iz,iV,1)
+                        call xz_interpolation(iV,ix,iy,iz)
                     end do
                 end do
             end do
@@ -227,6 +228,97 @@ contains !----------------------------------------------------------------------
             CALL MPI_File_set_view(fh, disp, MPI_DOUBLE_PRECISION, wtype_3d, 'native', MPI_INFO_NULL)
             CALL MPI_File_write_all(fh, vec, 3, type_towrite, status)
         CALL MPI_File_close(fh)
+
+    end subroutine
+
+
+
+    subroutine xz_interpolation(ii,xx,iy,zz) ! this interpolates the field on a smaller grid if undersampling is requested
+    integer, intent(in) :: xx, zz, iy, ii
+    real*8 :: xprj, zprj
+    integer :: xc, xf, zc, zf
+    real*8 :: u_cc, u_cf, u_fc, u_ff ! shortcuts for values; first letter of pedix refers to x, second to z
+    real*8 :: w_cc, w_cf, w_fc, w_ff, w_xc, w_zc, w_xf, w_zf ! weights for values above
+    
+        ! first off, project indeces so that maximum range is (2*nx+1), (2*nz+1)
+        call undersampled_to_fullindex(xx,zz, xprj,zprj)
+
+        ! find 4 nearest points
+        xc = ceiling(xprj); zc = ceiling(zprj)
+        xf = floor(xprj); zf = floor(zprj)
+
+        ! find weights in x
+        if (xc == xf) then
+            w_xc = 0.5; w_xf = 0.5
+        else
+            w_xc = abs(real(xf) - xprj) / abs(xc-xf) ! the xf there is correct! the closer xprj to xc, the bigger
+            w_xf = abs(real(xc) - xprj) / abs(xc-xf) ! the xc there is correct! the closer xprj to xf, the bigger
+        end if
+
+        ! find weights in z
+        if (zc == zf) then
+            w_zc = 0.5; w_zf = 0.5
+        else
+            w_zc = abs(real(zf) - zprj) / abs(zc-zf) ! the zf there is correct! the closer zprj to zc, the bigger
+            w_zf = abs(real(zc) - zprj) / abs(zc-zf) ! the zc there is correct! the closer zprj to zf, the bigger
+        end if
+
+        ! shortcuts for values and weights
+        u_cc = rVVdx(xc,zc,ii,1);   w_cc = w_xc * w_zc
+        u_ff = rVVdx(xf,zf,ii,1);   w_ff = w_xf * w_zf
+        u_cf = rVVdx(xc,zf,ii,1);   w_cf = w_xc * w_zf
+        u_fc = rVVdx(xf,zc,ii,1);   w_fc = w_xf * w_zc
+
+        ! do interpolation
+        vec(ii,ix,iy,iz) = u_cc*w_cc + u_ff*w_ff + u_fc*w_fc + u_cf*w_cf
+
+    end subroutine
+
+
+
+    subroutine undersampled_to_fullindex(xx,zz, xprj,zprj)
+    ! Takes indeces xx, zz from the undersampled domain and returns their index-position in the full domain.
+    ! The full domain is what is actually stored in memory (rVVdx); so, xprj and zprj *could* be indeces of
+    ! the rVVdx array, if they were integers. Instead, xx and zz are indeces of the array vec that is being
+    ! written to memory.
+    ! Notice that xx=1,nxtot and zz=1,nztot,
+    ! whereas xprj=1,2*nx+1 and zprj=1,2*nz+1.
+    ! However, xprj and zprj are REAL NUMBERS, meaning that (xx,zz) can correspond to a position that is
+    ! inbetween two points of the array rVVdx.
+    ! The logic here is that:
+    ! - xx=1 gets mapped to xprj=1 (as this is x=0 in space, i.e. the first extreme of the periodic domain)
+    ! - xx=nxtot+1 gets mapped to xprj=2*nx+2 (as this would be the other extreme of the periodic domain)
+    ! Same applies for z.
+
+    integer, intent(in) :: xx, zz
+    real*8, intent(out) :: xprj,zprj
+
+        xprj = real(2*nx+1)/real(nxtot) * (xx - 1.0) + 1
+        zprj = real(2*nz+1)/real(nztot) * (zz - 1.0) + 1
+
+    end subroutine undersampled_to_fullindex
+
+
+
+    subroutine write_metadata()
+    real*8 :: xp, zp, dx, dz
+
+        ! get resolution in x and z directions
+        call undersampled_to_fullindex(2,2, dx,dz)
+        call undersampled_to_fullindex(1,1, xp,zp)
+
+        dx = dx - xp; dx = abs(dx); dx = dx * 2 * PI / alfa0 / (2*nx + 1)
+        dz = dz - zp; dz = abs(dz); dz = dz * 2 * PI / beta0 / (2*nz + 1)
+
+        if (has_terminal) then
+            open(1977, file="spatial_grid.nfo")
+                write(1977,*) nxtot, nztot, dx, dz
+                write(1977,*) ny, ny+1, a, ymin, ymax
+                write(1977,*) "# * ~ - ~ * # LEGEND # * ~ - ~ * #"
+                write(1977,*) "nxtot, nztot, dx, dz"
+                write(1977,*) "ny (see dns.in), nytot, a, ymin, ymax, nztot, dx, dz"
+            close(1977)
+        end if
 
     end subroutine
 
@@ -269,11 +361,14 @@ contains !----------------------------------------------------------------------
         print *, "The binary array is Fourier-antitransformed with respect to the .out file,"
         print *, "so that it represents a velocity field in space (and not in the Fourier domain)."
         print *, "Syntax:"
-        print *, "   out2bin [-h] [-f] [-l -s -ls -sl] file.name"
+        print *, "   out2bin [-h] [-f] [-l -s -ls -sl] [-u undersample_xcent] file.name"
         print *, "If flag '-f' (or '--fluctuation') is passed, the (spatial) average is"
         print *, "subtracted from the field before converting."
         print *, "If flags -l, -s or so are passed, filtering thresholds are read from largesmall.in"
         print *, "and the desired large or small scale field is returned."
+        print *, "Flag -u is used to undersample the field. The the number n_new of points in the x and z"
+        print *, "directions of the output files is given by n_new = usample_xcent*n_old, where n_old is"
+        print *, "the number of points of the input."
     end subroutine
 
 
@@ -301,6 +396,11 @@ contains !----------------------------------------------------------------------
                     get_small = .TRUE.
                     get_large = .TRUE.
                     call largesmall_setup()
+                case ('-u', '--undersample') ! specify undersampling
+                    undersample = .TRUE.
+                    ii = ii + 1
+                    call get_command_argument(ii, cmd_in_buf)
+                    read(cmd_in_buf, *) xcent_undersample
                 case ('-h', '--help') ! call help
                     call print_help()
                     stop
