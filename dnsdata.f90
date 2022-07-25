@@ -673,6 +673,8 @@ MODULE dnsdata
     complex(C_DOUBLE_COMPLEX), intent(INOUT) :: R(ny0-2:nyN+2,-nz:nz,nx0:nxN,1:3)
     character(len=40), intent(IN) :: filename
     integer(C_SIZE_T) :: ix,iy,iz,io
+    integer :: r_nx, r_ny, r_nz
+    real(C_DOUBLE) :: r_alfa0,r_beta0,r_ni,r_a,r_ymin,r_ymax
     INTEGER(MPI_OFFSET_KIND) :: disp = 3*C_INT + 7*C_DOUBLE
     TYPE(MPI_File) :: fh
     real(C_DOUBLE) :: rn(1:3)
@@ -680,7 +682,7 @@ MODULE dnsdata
     OPEN(UNIT=100,FILE=TRIM(filename),access="stream",status="old",action="read",iostat=io)
     IF (io==0) THEN
       if (has_terminal) print *, "Reading from file "//filename
-      READ(100,POS=1) nx,ny,nz,alfa0,beta0,ni,a,ymin,ymax,time
+      READ(100,POS=1) r_nx,r_ny,r_nz,r_alfa0,r_beta0,r_ni,r_a,r_ymin,r_ymax,time
       CLOSE(100)
       call MPI_file_open(MPI_COMM_WORLD, TRIM(filename), MPI_MODE_RDONLY, MPI_INFO_NULL, fh)
       call MPI_file_set_view(fh, disp, MPI_DOUBLE_COMPLEX, vel_read_type, 'native', MPI_INFO_NULL)
@@ -701,6 +703,10 @@ MODULE dnsdata
           !V(iy,0,0,1)=y(iy)-1
         END DO
       END IF
+    END IF
+    IF (r_nx /= nx .OR. r_ny /= ny .OR. r_nz /= nz .OR. r_alfa0 /= alfa0 .OR. r_beta0 /= beta0 .OR. r_ni /= ni .OR. r_a /= a .OR. r_ymin /= ymin .OR. r_ymax /= ymax) THEN
+      IF (has_terminal) PRINT *, "ERROR: mismatch in metadata between restart file and dns.in. Stopping."
+      STOP
     END IF
   END SUBROUTINE read_restart_file
 
