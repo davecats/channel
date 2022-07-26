@@ -38,7 +38,7 @@ type(MPI_Datatype) :: type_w2disk, type_towrite ! , wtype_scalar
         stop
     end if
     call get_command_argument(ii, cmd_in_buf)
-    select case (arg)
+    select case (cmd_in_buf)
         case ('-h', '--help') ! call help
             call print_help()
             stop
@@ -110,20 +110,22 @@ type(MPI_Datatype) :: type_w2disk, type_towrite ! , wtype_scalar
 
 
     ! read file
-    CALL read_restart_file(fname,V) 
-        
+    call read_restart_file(in_fname,V)
+
     ! interpolate
     do ii = 1,3
         do ix=0,cap_x
-            do iz=-cap_z,capz
+            do iz=-cap_z,cap_z
                 do iy = miny,maxy ! skips halo cells: only non-duplicated data
-                    call xz_interpolation(iy,iz,ix,ii)
+                    !call xz_interpolation(iy,iz,ix,ii)
                 end do
             end do
         end do
     end do
     
+    if (has_terminal) print *, "Saving to disk..."
     call write_resized(out_fname,vec)
+    if (has_terminal) print *, "... done!"
 
     ! realease memory
     CALL free_fft()
@@ -162,7 +164,7 @@ contains !----------------------------------------------------------------------
 
         call MPI_File_close(fh)
 
-    END SUBROUTINE save_restart_file
+    END SUBROUTINE write_resized
 
 
 
@@ -170,7 +172,7 @@ contains !----------------------------------------------------------------------
     integer, intent(in) :: xx, zz, iy, ii
     real*8 :: xprj, zprj
     integer :: xc, xf, zc, zf
-    complex() :: u_cc, u_cf, u_fc, u_ff ! shortcuts for values; first letter of pedix refers to x, second to z
+    complex(C_DOUBLE_COMPLEX) :: u_cc, u_cf, u_fc, u_ff ! shortcuts for values; first letter of pedix refers to x, second to z
     real*8 :: w_cc, w_cf, w_fc, w_ff, w_xc, w_zc, w_xf, w_zf ! weights for values above
     
         ! first off, project indeces so that maximum range is (2*nx+1), (2*nz+1)
