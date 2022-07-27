@@ -18,13 +18,12 @@ character(len=32) :: cmd_in_buf ! needed to parse arguments
 
 character(len=40) :: in_fname, out_fname ! input and output files
 
-integer :: n_nx, n_ny, n_nz
+integer :: n_nx, n_nz
 real*8 :: na0, nb0
 
 real*8 :: cap_x, cap_z
-real*8 :: xfull_idx, zfull_idx
 
-integer :: iv, ix, iz, iy
+integer :: ix, iz, iy
 integer :: ierror, ii=1
 complex(C_DOUBLE_COMPLEX), dimension(:,:,:,:), allocatable :: vec ! watch out for this type! must be the same as 
 
@@ -86,8 +85,8 @@ type(MPI_Datatype) :: type_w2disk, type_towrite ! , wtype_scalar
     allocate(vec(ny0-2:nyN+2,-n_nz:n_nz,0:n_nx,1:3)); vec=0 ! this mimicks V from dnsdata, just using new parameters
 
     ! determine bounds for interpolation
-    cap_x = floor(alfa0 * nx / na0)
-    cap_z = floor(beta0 + nz / nb0)
+    cap_x = min(n_nx, floor(alfa0 * nx / na0))
+    cap_z = min(n_nz, floor(beta0 + nz / nb0))
 
 
 
@@ -117,7 +116,7 @@ type(MPI_Datatype) :: type_w2disk, type_towrite ! , wtype_scalar
         do ix=0,cap_x
             do iz=-cap_z,cap_z
                 do iy = miny,maxy ! skips halo cells: only non-duplicated data
-                    !call xz_interpolation(iy,iz,ix,ii)
+                    call xz_interpolation(iy,iz,ix,ii)
                 end do
             end do
         end do
