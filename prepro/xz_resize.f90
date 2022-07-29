@@ -99,7 +99,7 @@ type(MPI_Datatype) :: type_w2disk, type_towrite ! , wtype_scalar
     CALL MPI_Type_commit(type_towrite, ierror)
     
     ! vec - for writing (setting view)
-    CALL MPI_Type_create_subarray(4, [ny+3,2*n_nz+1,n_nx+1,3], [maxy-miny+1, 2*n_nz+1, n_nx+1, 3], [miny+1, 0, 0, 0], MPI_ORDER_FORTRAN, MPI_REAL, type_w2disk)
+    CALL MPI_Type_create_subarray(4, [ny+3,2*n_nz+1,n_nx+1,3], [maxy-miny+1, 2*n_nz+1, n_nx+1, 3], [miny+1, 0, 0, 0], MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, type_w2disk)
     CALL MPI_Type_commit(type_w2disk, ierror)
 
     !----------------------------------!
