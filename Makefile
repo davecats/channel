@@ -69,6 +69,9 @@ out_exporter/out2vtk: $(OBJ) out_exporter/out2vtk.o
 out_exporter/out2bin: $(OBJ) out_exporter/out2bin.o
 	$(F90) $(flags) -o  $@ $(OBJ) out_exporter/out2bin.o $(libs)
 	make clean
+out_exporter/out2staggered: $(OBJ) out_exporter/out2staggered.o
+	$(F90) $(flags) -o  $@ $(OBJ) out_exporter/out2staggered.o $(libs)
+	make clean
 prepro/xz_resize: $(OBJ) prepro/xz_resize.o
 	$(F90) $(flags) -o  $@ $(OBJ) prepro/xz_resize.o $(libs)
 	make clean
