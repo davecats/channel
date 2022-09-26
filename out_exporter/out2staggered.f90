@@ -196,13 +196,13 @@ contains !----------------------------------------------------------------------
         type(MPI_File) :: fh
         TYPE(MPI_Status) :: status
 
-        real(C_DOUBLE), dimension(2*ny) :: locy
+        real(C_DOUBLE), dimension(2*ny+1) :: locy
 
         locy = 0
 
         ! adapt filename
         dotpos = scan(trim(fname),".", BACK= .true.)
-        if ( dotpos > 0 ) fname = fname(1:dotpos)//"bin"
+        if ( dotpos > 0 ) fname = fname(1:dotpos)//"field"
 
         CALL MPI_File_open(MPI_COMM_WORLD, TRIM(fname), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
 
@@ -211,12 +211,12 @@ contains !----------------------------------------------------------------------
                 ! write header
                 call MPI_file_write(fh, [nxtot,nztot,ny,1], 4, MPI_INTEGER, status)
                 call MPI_file_write(fh, [1/alfa0,1/beta0,meanpx,meanpz,ni,time], 6, MPI_DOUBLE_PRECISION, status)
-                call MPI_file_write(fh, locy, 2*ny, MPI_DOUBLE_PRECISION, status)
+                call MPI_file_write(fh, locy, (2*ny+1), MPI_DOUBLE_PRECISION, status)
              end if
-            disp = 4*C_INT + 6*C_DOUBLE + 2*ny*C_DOUBLE
-            CALL MPI_File_set_view(fh, disp, MPI_DOUBLE_PRECISION, wtype_3d, 'native', MPI_INFO_NULL)
-            CALL MPI_File_write_all(fh, vec, 4, type_towrite, status)
-        CALL MPI_File_close(fh)
+            disp = 4*C_INT + 6*C_DOUBLE + (2*ny+1)*C_DOUBLE
+            call MPI_File_set_view(fh, disp, MPI_DOUBLE_PRECISION, wtype_3d, 'native', MPI_INFO_NULL)
+            call MPI_File_write_all(fh, vec, 4, type_towrite, status)
+        call MPI_File_close(fh)
 
     end subroutine
 
@@ -299,7 +299,7 @@ contains !----------------------------------------------------------------------
         print *, "Converts a given .out file from channel into a field for the staggered grid used by"
         print *, "https://git.scc.kit.edu/ar8439/sliplengths."
         print *, "Syntax:"
-        print *, "   out2bin [-h] file.name [other_file.name]"
+        print *, "   out2staggered [-h] file.name [other_file.name]"
     end subroutine
 
 
