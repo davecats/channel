@@ -190,6 +190,9 @@ contains !----------------------------------------------------------------------
 
         character(len = 40) :: fname
         integer(C_SIZE_T) :: disp
+        
+        integer :: ff
+        real :: ry
 
         integer   :: dotpos
 
@@ -199,6 +202,11 @@ contains !----------------------------------------------------------------------
         real(C_DOUBLE), dimension(2*ny+1) :: locy
 
         locy = 0
+
+        do ff = 0,2*ny
+            ry = real(ff)/2
+            locy(ff+1)=ymin+0.5d0*(ymax-ymin)*(tanh(a*(2.0d0*real(ry)/real(ny)-1))/tanh(a)+1)
+        end do
 
         ! adapt filename
         dotpos = scan(trim(fname),".", BACK= .true.)
