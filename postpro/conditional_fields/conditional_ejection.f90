@@ -28,7 +28,7 @@ type(MPI_Datatype) :: wtype_3d, mask_type, type_towrite ! , wtype_scalar
     call MPI_INIT(ierr)
     call MPI_COMM_RANK(MPI_COMM_WORLD,iproc,ierr)
     call MPI_COMM_SIZE(MPI_COMM_WORLD,nproc,ierr)
-    call read_dnsin()
+    call read_dnsin(.TRUE.) ! passing .TRUE. cause dns.in is in parent folder wrt cwd
 
     !-----------!
     ! ATTENTION !
@@ -119,6 +119,12 @@ type(MPI_Datatype) :: wtype_3d, mask_type, type_towrite ! , wtype_scalar
 
     ! determine which process has y_ref
     call get_nearest_y(y_ref, iy_ref, has_ref)
+    if (has_ref) then
+        print *
+        print *, "Found reference y position"
+        print *, "iy_ref", iy_ref
+        print *, "effective y_ref", y(iy_ref)
+    end if
 
     ! let other processes know who has y_ref
     call MPI_Gather(has_ref,1,MPI_LOGICAL,gather_ref,1,MPI_LOGICAL,0,MPI_COMM_WORLD,ierror)
@@ -137,7 +143,7 @@ type(MPI_Datatype) :: wtype_3d, mask_type, type_towrite ! , wtype_scalar
 
         ! read file
         write(istring,*) ii
-        filename=trim("Dati.cart."//TRIM(ADJUSTL(istring))//".out")
+        filename=trim("../Dati.cart."//TRIM(ADJUSTL(istring))//".out")
         call read_restart_file(filename, V)
 
         ! get mask and no_samples
@@ -191,6 +197,9 @@ type(MPI_Datatype) :: wtype_3d, mask_type, type_towrite ! , wtype_scalar
 
     ! write to disk
     call write_cond_field()
+
+    ! be polite and say goodbye
+    if (has_terminal) print *, "Done."
 
     ! realease memory
     CALL free_fft()
@@ -275,6 +284,21 @@ contains !----------------------------------------------------------------------
             CALL MPI_File_set_view(fh, disp, MPI_DOUBLE_PRECISION, wtype_3d, 'native', MPI_INFO_NULL)
             CALL MPI_File_write_all(fh, cond_avg, 3, type_towrite, status)
         CALL MPI_File_close(fh)
+
+        if (has_ref) then
+            filename=trim("cond_field_ejection."//TRIM(ADJUSTL(istring))//"_"//TRIM(ADJUSTL(istring2))//".nfo")
+            open(15, file=filename)
+                write(15,*) "This is conditional_ejection.f90."
+                write(15,*) ""
+                write(15,*) "nmin", nmin 
+                write(15,*) "nmax", nmax
+                write(15,*) "dn", dn
+                write(15,*) "" 
+                write(15,*) "y_ref", y_ref
+                write(15,*) "effective y_ref", y(iy_ref)
+                write(15,*) "u_thr", u_thr
+            close(15)
+        end if
 
     end subroutine
 
