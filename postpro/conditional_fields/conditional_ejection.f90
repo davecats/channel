@@ -328,7 +328,7 @@ contains !----------------------------------------------------------------------
 
 
     subroutine parse_args()
-        
+        ii = 1
         ! read arguments
         if (command_argument_count() < 1) then ! handle exception: no input
             print *, 'ERROR: please provide one input file as command line argument.'
@@ -342,7 +342,7 @@ contains !----------------------------------------------------------------------
                     stop
                 case default
                     if (command_argument_count() < 5) then ! handle exception: no input
-                        print *, 'ERROR: please provide one input file as command line argument.'
+                        print *, 'ERROR: 5 positional arguments are needed.'
                         stop
                     end if
                     call get_command_argument(ii, cmd_in_buf)
