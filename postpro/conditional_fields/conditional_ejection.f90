@@ -84,9 +84,7 @@ type(MPI_Datatype) :: wtype_3d, mask_type, type_towrite ! , wtype_scalar
     allocate(cond_avg(ndim, max(0,miny):min(ny,maxy), 1:nztot)) ! conditionally averaged field
     allocate(temp_fileavg(ndim, max(0,miny):min(ny,maxy), 1:nztot)) ! conditionally averaged field
     allocate(mask(1:nxtot, 1:nztot)) ! tells all processes where the ejections are
-    if (iproc == 0) then
-        allocate(gather_ref(0:(nproc-1))) ! used to determine who has y_ref
-    end if
+    allocate(gather_ref(0:(nproc-1))) ! used to determine who has y_ref
 
     !---------------------------!
     ! MPI FILETYPES FOR WRITING !
