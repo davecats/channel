@@ -12,7 +12,9 @@ logical, dimension(:), allocatable :: gather_ref
 logical, dimension(:,:), allocatable :: mask
 integer :: ierror, ii, nmin, nmax, dn
 integer :: ndim, nxtot, nytot, nztot, nxloc, nyloc, nzloc
-real(C_DOUBLE), dimension(:,:,:), allocatable :: cond_avg, temp_fileavg
+real(C_DOUBLE), dimension(:,:,:), allocatable :: cond_avg, temp_fileavg, temp_cumul
+integer :: it_cumul
+integer, parameter :: max_it_cumul = 10 ! try decreasing this value if you get NaN in the output bin file!
 integer*8 :: no_samples = 0
 
 real(C_DOUBLE) :: y_ref, u_thr
@@ -81,8 +83,9 @@ type(MPI_Datatype) :: wtype_3d, mask_type, type_towrite ! , wtype_scalar
     !-------------------!
 
     ! allocate stuff
-    allocate(cond_avg(ndim, max(0,miny):min(ny,maxy), 1:nztot)) ! conditionally averaged field
-    allocate(temp_fileavg(ndim, max(0,miny):min(ny,maxy), 1:nztot)) ! conditionally averaged field
+    allocate(cond_avg(ndim, max(0,miny):min(ny,maxy), 1:nztot)) ! output - conditional average
+    allocate(temp_fileavg(ndim, max(0,miny):min(ny,maxy), 1:nztot)) ! conditionally averaged field on a single velocity file
+    allocate(temp_cumul(ndim, max(0,miny):min(ny,maxy), 1:nztot)) ! conditionally averaged field: intermediate cumulations
     allocate(mask(1:nxtot, 1:nztot)) ! tells all processes where the ejections are
     allocate(gather_ref(0:(nproc-1))) ! used to determine who has y_ref
 
@@ -135,8 +138,10 @@ type(MPI_Datatype) :: wtype_3d, mask_type, type_towrite ! , wtype_scalar
     end if
     call MPI_Bcast(iproc_ref,1,MPI_INTEGER,0,MPI_COMM_WORLD,ierror)
 
-    ! empty cond_avg
+    ! empty cond_avg, it_cumul, temp_cumul
     cond_avg = 0
+    it_cumul = 0
+    temp_cumul = 0
 
     ! loop over files
     do ii=nmin,nmax
@@ -188,12 +193,24 @@ type(MPI_Datatype) :: wtype_3d, mask_type, type_towrite ! , wtype_scalar
         temp_fileavg = temp_fileavg / no_samples
 
         ! cumulate average of single file into actual array with average
-        cond_avg = cond_avg + temp_fileavg
+        temp_cumul = temp_cumul + temp_fileavg
+        it_cumul = it_cumul + 1
+        
+        ! if you reach max_it_cumul: cumulate temp_cumul into cond_avg
+        if (it_cumul == 10) then
+            temp_cumul = temp_cumul / (nmax - nmin + 1)
+            cond_avg = cond_avg + temp_cumul
+            ! reset the arrays
+            temp_cumul = 0
+            it_cumul = 0
+        end if
         
     end do
 
-    ! divide by number of files
-    cond_avg = cond_avg / (nmax - nmin + 1)
+    ! last cumulation (if you didn't reach max_it_cumul on the last round)
+    ! if you did reach max_it_cumul, temp_cumul will actually be zero, so this section does nothing (as desired)
+    temp_cumul = temp_cumul / (nmax - nmin + 1)
+    cond_avg = cond_avg + temp_cumul
 
     ! write to disk
     call write_cond_field()
