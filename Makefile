@@ -81,11 +81,8 @@ postpro/tke/uiuj_largesmall: $(OBJ) postpro/tke/uiuj_largesmall.o
 postpro/tke/uiuj_spectra: $(OBJ) postpro/tke/uiuj_spectra.o
 	$(F90) $(flags) -o $@ $(OBJ) postpro/tke/uiuj_spectra.o $(libs)
 	make clean
-postpro/conditional/Velocity_cut: $(OBJ) postpro/conditional/Velocity_cut.o
-	$(CC) $(flags) -o $@ $(OBJ) postpro/conditional/Velocity_cut.o $(libs)
-	make clean
-postpro/conditional/zero_crossings: $(OBJ) postpro/conditional/zero_crossings.o
-	$(CC) $(flags) -o $@ $(OBJ) postpro/conditional/zero_crossings.o $(libs)
+postpro/conditional_fields/conditional_ejection: $(OBJ) postpro/conditional_fields/conditional_ejection.o
+	$(F90) $(flags) -o $@ $(OBJ) postpro/conditional_fields/conditional_ejection.o $(libs)
 	make clean
 postpro/am/camstar: $(OBJ) postpro/am/camstar.o
 	$(F90) $(flags) -o $@ $(OBJ) postpro/am/camstar.o $(libs)
