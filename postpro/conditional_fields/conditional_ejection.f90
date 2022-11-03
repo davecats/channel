@@ -185,12 +185,11 @@ type(MPI_Datatype) :: wtype_3d, mask_type, type_towrite ! , wtype_scalar
                 do ix=1,nxtot
                     if (mask(ix,iz)) then
                         call cumulate_on_temp(iz) ! if there is an ejection, use ejection as center and cumulate
+                        ! notice that this subroutine divides by no_samples already
                     end if
                 end do
             end do
         end do
-        ! divide by number of samples to get the proper average for this file
-        temp_fileavg = temp_fileavg / no_samples
 
         ! cumulate average of single file into actual array with average
         temp_cumul = temp_cumul + temp_fileavg
@@ -235,7 +234,7 @@ contains !----------------------------------------------------------------------
 
         do cc = 1,3
             do zz=1,nztot
-                temp_fileavg(cc,iy,convert_idx(zz,nz,cz)) = temp_fileavg(cc,iy,convert_idx(zz,nz,cz)) + rVVdx(ix,zz,cc,1)
+                temp_fileavg(cc,iy,convert_idx(zz,nz,cz)) = temp_fileavg(cc,iy,convert_idx(zz,nz,cz)) + rVVdx(ix,zz,cc,1)/no_samples
             end do
         end do
 
