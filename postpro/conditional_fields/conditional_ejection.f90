@@ -121,6 +121,7 @@ type(MPI_Datatype) :: wtype_3d, mask_type, type_towrite ! , wtype_scalar
     !----------------------------------!
 
     ! determine which process has y_ref
+    has_ref = .FALSE.
     call get_nearest_y(y_ref, iy_ref, has_ref)
     if (has_ref) then
         print *
