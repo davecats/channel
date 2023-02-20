@@ -6,19 +6,21 @@ implicit none
 character(len=32) :: cmd_in_buf ! needed to parse arguments
 character(len=32) :: arg
 
-integer :: iv, ix, iz, iy, iy_ref, iproc_ref
+integer :: iv, ix, iz, iy, iy_ref, iproc_ref, sign
 logical :: has_ref
 logical, dimension(:), allocatable :: gather_ref
 logical, dimension(:,:), allocatable :: mask
 integer :: ierror, ii, nmin, nmax, dn
 integer :: ndim, nxtot, nytot, nztot, nxloc, nyloc, nzloc
+real(C_DOUBLE), dimension(:), allocatable :: mean
 real(C_DOUBLE), dimension(:,:,:), allocatable :: cond_avg, temp_fileavg, temp_cumul
+complex(C_DOUBLE_COMPLEX), allocatable :: dVdy(:,:,:,:)
 integer :: it_cumul
 integer, parameter :: max_it_cumul = 10 ! try decreasing this value if you get NaN in the output bin file!
 integer*8 :: no_samples = 0
 
 real(C_DOUBLE) :: y_ref, u_thr
-character(len = 40) :: istring, istring2, filename
+character(len = 40) :: istring, istring2, filename, barename
 
 integer :: y_start = 0
 
@@ -46,7 +48,7 @@ type(MPI_Datatype) :: wtype_3d, mask_type, type_towrite ! , wtype_scalar
 
     call init_MPI(nx+1,nz,ny,nxd+1,nzd)
     call init_memory(.FALSE.)
-    call init_fft(VVdz,VVdx,rVVdx,nxB,nxB,2*nz+1,2*nz+1,.TRUE.,[3,1])
+    call init_fft(VVdz,VVdx,rVVdx,nxB,nxB,2*nz+1,2*nz+1,.TRUE.,[4,1])
     ! LAST FLAG OF init_fft (.TRUE.) SPECIFIES THAT REAL FFT TRANSFORM HAS AN ODD LOGICAL SIZE
     ! Notice that in the call to init_fft the values of nxd and nzd have been replaced by nxB and 2*nz+1.
     ! Since the parallelisation in xz is deactivated, nxB=nx+1.
@@ -65,8 +67,11 @@ type(MPI_Datatype) :: wtype_3d, mask_type, type_towrite ! , wtype_scalar
     ! PARAMETERS !
     !------------!
 
-    ndim  = 3  ! number of spatial dimension
-
+    ndim  = 10 ! number of spatial dimension
+    ! 1, 2, 3     ->  (u, v, w)
+    ! 4, 5, 6, 7  ->  u'v', u'u', v'v', w'w'
+    ! 8, 9, 10    ->  dudy, sqrt(dudy), dudy^2
+    
     ! GLOBAL QUANTITIES, which is, overall sizes of stuff
     nxtot = (2*nx) + 1 ! no. points
     nytot = (ny + 1) ! no. points
@@ -83,9 +88,11 @@ type(MPI_Datatype) :: wtype_3d, mask_type, type_towrite ! , wtype_scalar
     !-------------------!
 
     ! allocate stuff
+    allocate(dVdy(ny0-2:nyN+2,-nz:nz,nx0:nxN,1:3)) ! iy, iz, ix, iv (veloctiy)
     allocate(cond_avg(ndim, max(0,miny):min(ny,maxy), 1:nztot)) ! output - conditional average
     allocate(temp_fileavg(ndim, max(0,miny):min(ny,maxy), 1:nztot)) ! conditionally averaged field on a single velocity file
     allocate(temp_cumul(ndim, max(0,miny):min(ny,maxy), 1:nztot)) ! conditionally averaged field: intermediate cumulations
+    allocate(mean(max(0,miny):min(ny,maxy))) ! contains mean velocity in streamwise direction
     allocate(mask(1:nxtot, 1:nztot)) ! tells all processes where the ejections are
     allocate(gather_ref(0:(nproc-1))) ! used to determine who has y_ref
 
@@ -112,13 +119,30 @@ type(MPI_Datatype) :: wtype_3d, mask_type, type_towrite ! , wtype_scalar
     ! 1) size along each dimension of the WHOLE array ON DISK
     ! 2) size of the PORTION of array TO BE WRITTEN BY EACH PROCESS
     ! 3) starting position of each component; !!! IT'S ZERO BASED !!!
-    CALL MPI_Type_create_subarray(3, [3, nytot, nztot], [3, nyloc, nzloc], [0, y_start, 0], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, wtype_3d)
+    CALL MPI_Type_create_subarray(3, [ndim, nytot, nztot], [ndim, nyloc, nzloc], [0, y_start, 0], MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, wtype_3d)
     !                             0)            1)                        2)                    3)
     CALL MPI_Type_commit(wtype_3d, ierror)
 
     !----------------------------------!
     ! END OF MPI FILETYPES FOR WRITING !
     !----------------------------------!
+
+    ! get the mean - fast!
+    mean = 0
+    do ii=nmin,nmax ! loop over files
+        write(istring,*) ii
+        filename=trim("../Dati.cart."//TRIM(ADJUSTL(istring))//".out")
+        open(file=filename, unit=999, status="old", access="stream", action="read")
+            do iy = miny, maxy
+                ! skip ghost cells
+                if (iy < 0) cycle
+                if (iy > ny) cycle
+                ! cumulate mean data
+                mean(iy) = mean(iy) + real(fieldmap(999, iy, 0, 0, 1)) ! U
+            end do
+        close(999)
+    end do
+    mean = mean / (nmax-nmin+1) ! divide by number of files
 
     ! determine which process has y_ref
     has_ref = .FALSE.
@@ -151,6 +175,7 @@ type(MPI_Datatype) :: wtype_3d, mask_type, type_towrite ! , wtype_scalar
         write(istring,*) ii
         filename=trim("../Dati.cart."//TRIM(ADJUSTL(istring))//".out")
         call read_restart_file(filename, V)
+        call get_dVdy(V, dVdy)
 
         ! get mask and no_samples
         if (has_ref) then
@@ -159,7 +184,7 @@ type(MPI_Datatype) :: wtype_3d, mask_type, type_towrite ! , wtype_scalar
             call fourier_antitransform(iy_ref)
             do iz=1,nztot
                 do ix=1,nxtot
-                    if (rVVdx(ix,iz,1,1) < u_thr) then
+                    if (rVVdx(ix,iz,1,1) - mean(iy_ref) < u_thr) then
                         mask(ix,iz) = .TRUE.
                         no_samples = no_samples + 1
                     end if
@@ -233,10 +258,27 @@ contains !----------------------------------------------------------------------
         integer, intent(in) :: cz
         integer :: cc, zz
 
-        do cc = 1,3
-            do zz=1,nztot
+        ! average velocity
+        do zz=1,nztot
+            do cc = 1,3
+                ! velocity
                 temp_fileavg(cc,iy,convert_idx(zz,nz,cz)) = temp_fileavg(cc,iy,convert_idx(zz,nz,cz)) + rVVdx(ix,zz,cc,1)/no_samples
+                ! normal reynolds shear stresses
+                if (cc == 1) then
+                    temp_fileavg(cc+4,iy,convert_idx(zz,nz,cz)) = temp_fileavg(cc+4,iy,convert_idx(zz,nz,cz)) + (rVVdx(ix,zz,cc,1) - mean(iy))*(rVVdx(ix,zz,cc,1) - mean(iy))/no_samples
+                else
+                    temp_fileavg(cc+4,iy,convert_idx(zz,nz,cz)) = temp_fileavg(cc+4,iy,convert_idx(zz,nz,cz)) + rVVdx(ix,zz,cc,1)*rVVdx(ix,zz,cc,1)/no_samples
+                end if
             end do
+            
+            ! reynolds shear stress
+            temp_fileavg(4,iy,convert_idx(zz,nz,cz)) = temp_fileavg(4,iy,convert_idx(zz,nz,cz)) + (rVVdx(ix,zz,1,1) - mean(iy))*rVVdx(ix,zz,2,1)/no_samples
+
+            ! dudy
+            temp_fileavg(8,iy,convert_idx(zz,nz,cz)) = temp_fileavg(8,iy,convert_idx(zz,nz,cz)) + rVVdx(ix,zz,4,1)/no_samples
+            temp_fileavg(9,iy,convert_idx(zz,nz,cz)) = temp_fileavg(9,iy,convert_idx(zz,nz,cz)) + sqrt(rVVdx(ix,zz,4,1))/no_samples
+            temp_fileavg(10,iy,convert_idx(zz,nz,cz)) = temp_fileavg(10,iy,convert_idx(zz,nz,cz)) + rVVdx(ix,zz,4,1)*rVVdx(ix,zz,4,1)/no_samples
+
         end do
 
     end subroutine
@@ -259,9 +301,15 @@ contains !----------------------------------------------------------------------
             ! WARNING: this differs from normal program, since there is no extension of the Fourier domain
             ! (or, no increase of spatial resolution to avoid dealiasing)
             ! i.e., no need to set anything zo zero in the arrays
+
+            ! get velocity
             VVdz(1:nz+1,:,1:3,1)=V(iy,0:nz,:,1:3);
-            VVdz(nz+2:2*nz+1,:,1:3,1)=V(iy,-nz:-1,:,1:3); 
-            do iV=1,3
+            VVdz(nz+2:2*nz+1,:,1:3,1)=V(iy,-nz:-1,:,1:3);
+            ! get dudy
+            VVdz(1:nz+1,:,4,1)=dVdy(iy,0:nz,:,1);
+            VVdz(nz+2:2*nz+1,:,4,1)=dVdy(iy,-nz:-1,:,1);
+            
+            do iV=1,4
                 call IFT(VVdz(1:2*nz+1,1:nxB,iV,1)) ! first transform in z
 
                 ! Transpose for next Fourier transform
@@ -278,7 +326,7 @@ contains !----------------------------------------------------------------------
 
             end do
             ! rVVdx is now containing the antitransform
-            ! it has size 2*nx+1,2*nz+1,6,6
+            ! its size is specified in init_fft
 
     end subroutine
 
@@ -292,10 +340,13 @@ contains !----------------------------------------------------------------------
         TYPE(MPI_Status) :: status
 
         if (has_terminal) print *, "Writing 2D conditional field..."
+        if (sign > 0) barename = "cond_field_ejection."
+        if (sign < 0) barename = "cond_field_sweep."
+
 
         write(istring,*) nmin
         write(istring2,*) nmax
-        filename=trim("cond_field_ejection."//TRIM(ADJUSTL(istring))//"_"//TRIM(ADJUSTL(istring2))//".bin")
+        filename=trim(TRIM(ADJUSTL(barename))//TRIM(ADJUSTL(istring))//"_"//TRIM(ADJUSTL(istring2))//".bin")
 
         CALL MPI_File_open(MPI_COMM_WORLD, filename, IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
             CALL MPI_File_set_view(fh, disp, MPI_DOUBLE_PRECISION, wtype_3d, 'native', MPI_INFO_NULL)
@@ -303,7 +354,7 @@ contains !----------------------------------------------------------------------
         CALL MPI_File_close(fh)
 
         if (has_ref) then
-            filename=trim("cond_field_ejection."//TRIM(ADJUSTL(istring))//"_"//TRIM(ADJUSTL(istring2))//".nfo")
+            filename=trim(TRIM(ADJUSTL(barename))//TRIM(ADJUSTL(istring))//"_"//TRIM(ADJUSTL(istring2))//".nfo")
             open(15, file=filename)
                 write(15,*) "This is conditional_ejection.f90."
                 write(15,*) ""
@@ -342,6 +393,26 @@ contains !----------------------------------------------------------------------
             
     end subroutine
 
+
+
+    subroutine get_dVdy(R, grad)
+        ! TODO: this can be done smarter. Gradient vector grad should not have dimension 3 on last index.
+        ! The only gradient that needs to be in memory is in the y direction - grad(:,:,:,:,2)
+        ! Let's call this grad_in_mem; grad_in_mem has same size of R (which is, V)
+        ! A subroutine or a macro can then recover the remaining gradients (1-x and 3-z directions)
+        complex(C_DOUBLE_COMPLEX), intent(in) :: R(ny0-2:nyN+2,-nz:nz,nx0:nxN,3)
+        complex(C_DOUBLE_COMPLEX), intent(out) :: grad(ny0-2:nyN+2,-nz:nz,nx0:nxN,3)
+    
+        ! y derivatives
+        do iv = 1, 3
+            do ix = nx0, nxN
+                do iz = -nz, nz
+                    call COMPLEXderiv(R(:,iz,ix,iv), grad(:,iz,ix,iv))
+                    call LeftLU5divStep2(D0mat, grad(:,iz,ix,iv))
+                end do
+            end do
+        end do
+    end subroutine get_dVdy
     
 
 
@@ -355,13 +426,13 @@ contains !----------------------------------------------------------------------
 
     subroutine print_help()
         print *, "Calculates 2D (spanwise - wall-normal) conditional field centered around"
-        print *, "a sweeping event."
+        print *, "an ejection (or sweep) event."
         print *, "Syntax:"
-        print *, "   conditional_ejection [-h] nmin nmax dn y_ref u_thr"
-        print *, "The sweeping event is defined as u(x,y_ref,z,t) < u_thr, where u is the"
+        print *, "   conditional_ejection [-h] nmin nmax dn y_ref u_thr sign."
+        print *, "The ejection event is defined as sign*u(x,y_ref,z,t) < u_thr, where u is the"
         print *, "streamwise velocity, x,z describe the stream- and span-wise positions and"
         print *, "t represents the time. The field is effectively conditionally averaged in"
-        print *, "x and t."
+        print *, "x and t. Sweep is recovered by passing a negative value for sign."
     end subroutine
 
 
@@ -398,6 +469,9 @@ contains !----------------------------------------------------------------------
                     ii = ii + 1
                     call get_command_argument(ii, cmd_in_buf)
                     read(cmd_in_buf, *) u_thr
+                    ii = ii + 1
+                    call get_command_argument(ii, cmd_in_buf)
+                    read(cmd_in_buf, *) sign
             end select
             ii = ii + 1
         end do
