@@ -350,7 +350,7 @@ contains !----------------------------------------------------------------------
 
         CALL MPI_File_open(MPI_COMM_WORLD, filename, IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
             CALL MPI_File_set_view(fh, disp, MPI_DOUBLE_PRECISION, wtype_3d, 'native', MPI_INFO_NULL)
-            CALL MPI_File_write_all(fh, cond_avg, 3, type_towrite, status)
+            CALL MPI_File_write_all(fh, cond_avg, ndim, type_towrite, status)
         CALL MPI_File_close(fh)
 
         if (has_ref) then
