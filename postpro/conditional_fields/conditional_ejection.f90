@@ -48,6 +48,7 @@ type(MPI_Datatype) :: wtype_3d, mask_type, type_towrite ! , wtype_scalar
 
     call init_MPI(nx+1,nz,ny,nxd+1,nzd)
     call init_memory(.FALSE.)
+    call setup_derivatives()
     call init_fft(VVdz,VVdx,rVVdx,nxB,nxB,2*nz+1,2*nz+1,.TRUE.,[4,1])
     ! LAST FLAG OF init_fft (.TRUE.) SPECIFIES THAT REAL FFT TRANSFORM HAS AN ODD LOGICAL SIZE
     ! Notice that in the call to init_fft the values of nxd and nzd have been replaced by nxB and 2*nz+1.
@@ -92,7 +93,9 @@ type(MPI_Datatype) :: wtype_3d, mask_type, type_towrite ! , wtype_scalar
     allocate(cond_avg(ndim, max(0,miny):min(ny,maxy), 1:nztot)) ! output - conditional average
     allocate(temp_fileavg(ndim, max(0,miny):min(ny,maxy), 1:nztot)) ! conditionally averaged field on a single velocity file
     allocate(temp_cumul(ndim, max(0,miny):min(ny,maxy), 1:nztot)) ! conditionally averaged field: intermediate cumulations
-    allocate(mean(max(0,miny):min(ny,maxy))) ! contains mean velocity in streamwise direction
+    allocate(mean(ny0-2:nyN+2)) ! contains mean velocity in streamwise direction
+    ! notice that mean includes ghost and halo cells!
+    ! this makes it easy to get the wall-normal derivative with built in routines
     allocate(mask(1:nxtot, 1:nztot)) ! tells all processes where the ejections are
     allocate(gather_ref(0:(nproc-1))) ! used to determine who has y_ref
 
@@ -133,11 +136,7 @@ type(MPI_Datatype) :: wtype_3d, mask_type, type_towrite ! , wtype_scalar
         write(istring,*) ii
         filename=trim("../Dati.cart."//TRIM(ADJUSTL(istring))//".out")
         open(file=filename, unit=999, status="old", access="stream", action="read")
-            do iy = miny, maxy
-                ! skip ghost cells
-                if (iy < 0) cycle
-                if (iy > ny) cycle
-                ! cumulate mean data
+            do iy = ny0-2, nyN+2
                 mean(iy) = mean(iy) + real(fieldmap(999, iy, 0, 0, 1)) ! U
             end do
         close(999)
@@ -175,7 +174,10 @@ type(MPI_Datatype) :: wtype_3d, mask_type, type_towrite ! , wtype_scalar
         write(istring,*) ii
         filename=trim("../Dati.cart."//TRIM(ADJUSTL(istring))//".out")
         call read_restart_file(filename, V)
-        call get_dVdy(V, dVdy)
+        ! remove mean
+        V(:,0,0,1) = V(:,0,0,1) - cmplx(mean(:))
+        ! get gradient
+        call get_dVdy(V,dVdy)
 
         ! get mask and no_samples
         if (has_ref) then
@@ -184,7 +186,7 @@ type(MPI_Datatype) :: wtype_3d, mask_type, type_towrite ! , wtype_scalar
             call fourier_antitransform(iy_ref)
             do iz=1,nztot
                 do ix=1,nxtot
-                    if (rVVdx(ix,iz,1,1) - mean(iy_ref) < u_thr) then
+                    if (sign*(rVVdx(ix,iz,1,1)) < u_thr) then
                         mask(ix,iz) = .TRUE.
                         no_samples = no_samples + 1
                     end if
@@ -258,25 +260,23 @@ contains !----------------------------------------------------------------------
         integer, intent(in) :: cz
         integer :: cc, zz
 
-        ! average velocity
+        ! average velocity and normal reynolds stresses
         do zz=1,nztot
             do cc = 1,3
-                ! velocity
+                ! velocity fluctuation
                 temp_fileavg(cc,iy,convert_idx(zz,nz,cz)) = temp_fileavg(cc,iy,convert_idx(zz,nz,cz)) + rVVdx(ix,zz,cc,1)/no_samples
                 ! normal reynolds shear stresses
-                if (cc == 1) then
-                    temp_fileavg(cc+4,iy,convert_idx(zz,nz,cz)) = temp_fileavg(cc+4,iy,convert_idx(zz,nz,cz)) + (rVVdx(ix,zz,cc,1) - mean(iy))*(rVVdx(ix,zz,cc,1) - mean(iy))/no_samples
-                else
-                    temp_fileavg(cc+4,iy,convert_idx(zz,nz,cz)) = temp_fileavg(cc+4,iy,convert_idx(zz,nz,cz)) + rVVdx(ix,zz,cc,1)*rVVdx(ix,zz,cc,1)/no_samples
-                end if
+                temp_fileavg(cc+4,iy,convert_idx(zz,nz,cz)) = temp_fileavg(cc+4,iy,convert_idx(zz,nz,cz)) + rVVdx(ix,zz,cc,1)*rVVdx(ix,zz,cc,1)/no_samples
             end do
             
-            ! reynolds shear stress
-            temp_fileavg(4,iy,convert_idx(zz,nz,cz)) = temp_fileavg(4,iy,convert_idx(zz,nz,cz)) + (rVVdx(ix,zz,1,1) - mean(iy))*rVVdx(ix,zz,2,1)/no_samples
+            ! average reynolds shear stress
+            temp_fileavg(4,iy,convert_idx(zz,nz,cz)) = temp_fileavg(4,iy,convert_idx(zz,nz,cz)) + rVVdx(ix,zz,1,1)*rVVdx(ix,zz,2,1)/no_samples
 
-            ! dudy
+            ! average dudy
             temp_fileavg(8,iy,convert_idx(zz,nz,cz)) = temp_fileavg(8,iy,convert_idx(zz,nz,cz)) + rVVdx(ix,zz,4,1)/no_samples
-            temp_fileavg(9,iy,convert_idx(zz,nz,cz)) = temp_fileavg(9,iy,convert_idx(zz,nz,cz)) + sqrt(rVVdx(ix,zz,4,1))/no_samples
+            if (rVVdx(ix,zz,4,1)>-1000) then
+                temp_fileavg(9,iy,convert_idx(zz,nz,cz)) = temp_fileavg(9,iy,convert_idx(zz,nz,cz)) + (sqrt(1000+rVVdx(ix,zz,4,1))-sqrt(1000.0))/no_samples
+            end if
             temp_fileavg(10,iy,convert_idx(zz,nz,cz)) = temp_fileavg(10,iy,convert_idx(zz,nz,cz)) + rVVdx(ix,zz,4,1)*rVVdx(ix,zz,4,1)/no_samples
 
         end do
@@ -342,7 +342,6 @@ contains !----------------------------------------------------------------------
         if (has_terminal) print *, "Writing 2D conditional field..."
         if (sign > 0) barename = "cond_field_ejection."
         if (sign < 0) barename = "cond_field_sweep."
-
 
         write(istring,*) nmin
         write(istring2,*) nmax
