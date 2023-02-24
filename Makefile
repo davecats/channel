@@ -84,6 +84,9 @@ postpro/tke/uiuj_spectra: $(OBJ) postpro/tke/uiuj_spectra.o
 postpro/conditional_fields/conditional_ejection: $(OBJ) postpro/conditional_fields/conditional_ejection.o
 	$(F90) $(flags) -o $@ $(OBJ) postpro/conditional_fields/conditional_ejection.o $(libs)
 	make clean
+postpro/spectra/fake_psd: $(OBJ) postpro/spectra/fake_psd.o
+	$(F90) $(flags) -o $@ $(OBJ) postpro/spectra/fake_psd.o $(libs)
+	make clean
 postpro/am/camstar: $(OBJ) postpro/am/camstar.o
 	$(F90) $(flags) -o $@ $(OBJ) postpro/am/camstar.o $(libs)
 	make clean

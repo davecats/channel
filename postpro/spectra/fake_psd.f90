@@ -1,4 +1,4 @@
-program conditional_ejection
+program get_fake_psd
 
 use dnsdata
 implicit none
@@ -6,10 +6,11 @@ implicit none
 character(len=32) :: cmd_in_buf ! needed to parse arguments
 character(len=32) :: arg
 
-integer :: iv, ix, iz, iy
+integer :: iv, ix, iz, iy, y_start
 integer :: ierror, ii, nmin, nmax, dn
 integer :: ndim, nxtot, nytot, nztot, nxloc, nyloc, nzloc
 real(C_DOUBLE), dimension(:), allocatable :: mean
+real(C_DOUBLE), allocatable :: fake_psd(:,:,:,:)
 
 character(len = 40) :: istring, istring2, filename, barename
 type(MPI_Datatype) :: wtype_3d, type_towrite 
@@ -68,7 +69,7 @@ type(MPI_Datatype) :: wtype_3d, type_towrite
     ! GLOBAL QUANTITIES, which is, overall sizes of stuff
     nxtot = nx+1 ! no. points
     nytot = ny+1 ! no. points
-    nztot = nz+1 ! no. points
+    nztot = 2*nz+1 ! no. points
 
     ! things that are local to each process
     ! number of points in each direction
@@ -81,7 +82,7 @@ type(MPI_Datatype) :: wtype_3d, type_towrite
     !-------------------!
 
     ! allocate stuff
-    allocate(fake_psd(0:nz,nx0:nxN,ny0-2:nyN+2,1:3)) ! iz, ix, iy, iv (veloctiy)
+    allocate(fake_psd(-nz:nz,nx0:nxN,ny0-2:nyN+2,1:3)) ! iz, ix, iy, iv (veloctiy)
     allocate(mean(ny0-2:nyN+2)) ! contains mean velocity in streamwise direction
     ! notice that mean includes ghost and halo cells!
     ! this makes it easy to get the wall-normal derivative with built in routines
@@ -153,9 +154,9 @@ type(MPI_Datatype) :: wtype_3d, type_towrite
             ! transform back to Fourier domain
             call fourier_transform(iy)
             do iV=1,3
-                do iz=1,nztot
-                    do ix=1,nxtot
-                        fake_psd(iz,ix,iy,iV) = fake_psd(iz,ix,iy,iV) + dreal(dconjg(V(iy,0:nz,nx0:nxN,iV))*V(iy,0:nz,nx0:nxN,iV))
+                do iz=-nz,nz
+                    do ix=0,nx
+                        fake_psd(iz,ix,iy,iV) = fake_psd(iz,ix,iy,iV) + dreal(dconjg(V(iy,iz,ix,iV))*V(iy,iz,ix,iV))
                     end do
                 end do
             end do
@@ -203,17 +204,13 @@ contains !----------------------------------------------------------------------
             VVdz(nzd+1-nz:nzd,1:nxB,1:3,1)=V(iy,-nz:-1,nx0:nxN,1:3)
             
             do iV=1,3
-                call IFT(VVdz(1:2*nz+1,1:nxB,iV,1)) ! first transform in z
+                call IFT(VVdz(1:nzd,1:nxB,iV,1)) ! first transform in z
 
                 ! Transpose for next Fourier transform
                 ! WARNING: IF YOU WANT TO USE XZ PARALLELISATION, you need to use a MPI_Alltoall
                 ! call similar to the one used in channel to do this matrix transposition.
                 ! Thing is, you need to redefine the MPI types npx and npz.
-                do ix = 1, nxB
-                    do iz = 1, 2*nz + 1
-                        VVdx(ix,iz,iV,1) = VVdz(iz,ix,iV,1)
-                    end do
-                end do
+                call MPI_Alltoall(VVdz(:,:,iV,1), 1, Mdz, VVdx(:,:,iV,1), 1, Mdx, MPI_COMM_X)
 
                 call RFT(VVdx(:,:,iV,1),rVVdx(:,:,iV,1)) ! second transform in x
 
@@ -240,8 +237,8 @@ contains !----------------------------------------------------------------------
         end do
 
         ! get velocity
-        V(iy,0:nz,nx0:nxN,1:3)=VVdz(1:nz+1,1:nxB,1:3,1)
-        V(iy,0:nz,nx0:nxN,1:3)=VVdz(nzd+1-nz:nzd,1:nxB,1:3,1)
+        V(iy,0:nz,nx0:nxN,1:3) = VVdz(1:nz+1,1:nxB,1:3,1)
+        V(iy,-nz:-1,nx0:nxN,1:3) = VVdz(nzd+1-nz:nzd,1:nxB,1:3,1)
 
     end subroutine
 
@@ -266,7 +263,7 @@ contains !----------------------------------------------------------------------
             CALL MPI_File_write_all(fh, fake_psd, ndim, type_towrite, status)
         CALL MPI_File_close(fh)
 
-        if (has_ref) then
+        if (iproc == 0) then
             filename=trim(TRIM(ADJUSTL(barename))//TRIM(ADJUSTL(istring))//"_"//TRIM(ADJUSTL(istring2))//".nfo")
             open(15, file=filename)
                 write(15,*) "This is fake_psd.f90."
