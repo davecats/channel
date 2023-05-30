@@ -7,7 +7,8 @@
 > [Parallelisation](#parallelisation)<br/>
 > [Running](#running)<br/>
 > [Output files](#output)<br/>
-> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;[Runtimedata](#notice_restart)<br/>
+> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;[Runtimedata](#runtimedata)<br/> 
+> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;[Quick plot of Runtimedata with gnuplot](#quickplot_rtd)
 > &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;[Velocity fields (Dati.cart*.out)](#velocity_fields)<br/>
 > [Domain](#domain)<br/>
 > &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;[Why do we only store positive wavenumbers in the x direction?](#note_nxp1)<br/>
@@ -179,6 +180,24 @@ Here we separated names by commas, but values in _Runtimedata_ are actually only
 - _dpdx_ and _dpdz_ are the pressure gradients in the stream- and span-wise directions respectively.
 - XXX I don't know what this is, seriously. FIXME
 - _deltat_ is the difference between the __next__ time (the time of the next line) and the current one.
+
+<a name="quickplot_rtd">
+ 
+#### Quick plotting of Runtimedata with gnuplot
+ 
+Gnuplot can be used to quickly assess the data produced on HPC clusters without downloading it (gnuplot usually comes preinstalled on clusters). The Runtimedata file is essentially a CSV file that is easily digested by gnuplot. First, one should navigate to the simulation folder and open gnuplot:
+```
+user@cluster-login-node:/path/to/sim$ gnuplot
+```
+Then, one needs to set the backend of gnuplot to __dumb__. This means that the output is plotted in the terminal as ascii art; of course, since most likely the connection to the cluster happens though command-line ssh, no graphical backend (like qt, x11) would be available. (One can of course resort to an ssh -x connection, in which case one can try some x11 based backend).
+```
+gnuplot> set terminal dumb
+```
+Finally, one can plot selected columns of Runtimedata:
+```
+gnuplot> plot "Runtimedata" x:y
+```
+x and y should be replaced with the number of the column to be used for the x-axis and y-axis data respectively. Enumeration starts from 1, so that column 1 corresponds to the time. Column 0 actually returns the line number (so, not the first column).
 
 <a name="velocity_fields">
 
