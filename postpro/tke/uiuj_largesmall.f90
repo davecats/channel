@@ -242,7 +242,8 @@ integer(MPI_OFFSET_KIND) :: offset
                 ! antitransform
                 do cntr = 1,4
                     call IFT(VVdz(1:nzd,1:nxB,cntr,1))
-                    call MPI_Alltoall(VVdz(:,:,cntr,1), 1, Mdz, VVdx(:,:,cntr,1), 1, Mdx, MPI_COMM_X) ! you could just copy without MPI since you deactivated xz parallelisation but ok
+                    call zTOx(VVdz(:,:,cntr,1), VVdx(:,:,cntr,1))
+                    !call MPI_Alltoall(VVdz(:,:,cntr,1), 1, Mdz, VVdx(:,:,cntr,1), 1, Mdx, MPI_COMM_X) ! you could just copy without MPI since you deactivated xz parallelisation but ok
                     VVdx(nx+2:nxd+1,1:nzB,cntr,1)=0
                     call RFT(VVdx(1:nxd+1,1:nzB,cntr,1),rVVdx(1:2*nxd+2,1:nzB,cntr,1))
                 end do
@@ -252,7 +253,8 @@ integer(MPI_OFFSET_KIND) :: offset
                     rVVdx(:,:,ilasm,2) = rVVdx(:,:, ilasm + i_ft, 1) * rVVdx(:,:, ilasm + j_ft, 1) ! ui*uj
                     ! transform back
                     call HFT(rVVdx(1:2*nxd+2,1:nzB,ilasm,2), VVdx(1:nxd+1,1:nzB,ilasm,2)); 
-                    call MPI_Alltoall(VVdx(:,:,ilasm,2), 1, Mdx, VVdz(:,:,ilasm,2), 1, Mdz, MPI_COMM_X) ! you could just copy without MPI since you deactivated xz parallelisation but ok
+                    call xTOz(VVdx(:,:,ilasm,2), VVdz(:,:,ilasm,2))
+                    !call MPI_Alltoall(VVdx(:,:,ilasm,2), 1, Mdx, VVdz(:,:,ilasm,2), 1, Mdz, MPI_COMM_X) ! you could just copy without MPI since you deactivated xz parallelisation but ok
                     call FFT(VVdz(1:nzd,1:nxB,ilasm,2));
                     VVdz(1:nzd,1:nxB,ilasm,2) = VVdz(1:nzd,1:nxB,ilasm,2) * factor
                 end do
@@ -286,7 +288,8 @@ integer(MPI_OFFSET_KIND) :: offset
                     end do
                     ! antitransform
                     call IFT(VVdz(1:nzd,1:nxB,uk_ft,1))
-                    call MPI_Alltoall(VVdz(:,:,uk_ft,1), 1, Mdz, VVdx(:,:,uk_ft,1), 1, Mdx, MPI_COMM_X) ! you could just copy without MPI since you deactivated xz parallelisation but ok
+                    call zTOx(VVdz(:,:,uk_ft,1), VVdx(:,:,uk_ft,1))
+                    !call MPI_Alltoall(VVdz(:,:,uk_ft,1), 1, Mdz, VVdx(:,:,uk_ft,1), 1, Mdx, MPI_COMM_X) ! you could just copy without MPI since you deactivated xz parallelisation but ok
                     VVdx(nx+2:nxd+1,1:nzB,uk_ft,1)=0
                     call RFT(VVdx(1:nxd+1,1:nzB,uk_ft,1),rVVdx(1:2*nxd+2,1:nzB,uk_ft,1))
                     ! compute products
@@ -297,7 +300,8 @@ integer(MPI_OFFSET_KIND) :: offset
                     ! transform back
                     do cntr=1,4
                         call HFT(rVVdx(1:2*nxd+2,1:nzB,cntr,2), VVdx(1:nxd+1,1:nzB,cntr,2)); 
-                        call MPI_Alltoall(VVdx(:,:,cntr,2), 1, Mdx, VVdz(:,:,cntr,2), 1, Mdz, MPI_COMM_X) ! you could just copy without MPI since you deactivated xz parallelisation but ok
+                        call xTOz(VVdx(:,:,cntr,2), VVdz(:,:,cntr,2))
+                        !call MPI_Alltoall(VVdx(:,:,cntr,2), 1, Mdx, VVdz(:,:,cntr,2), 1, Mdz, MPI_COMM_X) ! you could just copy without MPI since you deactivated xz parallelisation but ok
                         call FFT(VVdz(1:nzd,1:nxB,cntr,2));
                         VVdz(1:nzd,1:nxB,cntr,2) = VVdz(1:nzd,1:nxB,cntr,2) * factor
                     end do
