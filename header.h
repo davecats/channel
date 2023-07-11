@@ -2,7 +2,7 @@
 ! C preprocessor defines
 ! ==============================================
 ! Which mpi transpose do you want?
-!#define packunpack
+#define packunpack
 
 ! Stop program when warnings or interactive prompts
 ! are met; suggested for execution on cluster.

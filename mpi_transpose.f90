@@ -22,7 +22,7 @@ MODULE mpi_transpose
 
   TYPE(MPI_Comm) :: MPI_CART_COMM, MPI_COMM_X, MPI_COMM_Y 
   integer(C_INT), save :: nproc,iproc,ierr,npx,ipx,npy,ipy,nzd,nx
-  integer(C_INT), save :: nx0,nxN,nxB,nz0,nzN,nzB,block,nxpp
+  integer(C_INT), save :: nx0,nxN,nxB,nz0,nzN,nzB,block
   integer(C_INT), save :: ny0,nyN,miny,maxy
   integer(C_INT), save :: TAG_LUDECOMP=100, TAG_LUDIVSTEP1=101, TAG_LUDIVSTEP2=102, TAG_DUDY=103
   complex(C_DOUBLE_COMPLEX), allocatable :: Ain(:),Aout(:)
@@ -172,8 +172,8 @@ CONTAINS
 
   !------- Divide the problem in 1D slices -------! 
   !-----------------------------------------------!
-  SUBROUTINE init_MPI(nx,nz,ny,nxd,nzd)
-    integer(C_INT), intent(in)  :: nx,nz,ny,nxd,nzd
+  SUBROUTINE init_MPI(nxpp,nz,ny,nxd,nzd)
+    integer(C_INT), intent(in)  :: nxpp,nz,ny,nxd,nzd
     integer, parameter :: ndims = 4 
     integer :: array_of_sizes(ndims), array_of_subsizes(ndims), array_of_starts(ndims), ierror
     integer(C_INT) :: i,j,dims(1:2),coords(1:2)
@@ -181,7 +181,6 @@ CONTAINS
     TYPE(MPI_Datatype), save :: row, column, tmp
     integer(kind=MPI_ADDRESS_KIND) :: stride,lb
     integer(C_INT), allocatable, dimension(:) :: rankW, rankX, rankY
-    nxpp=nx+1
     ! Define which process write on screen
     has_terminal=(iproc==0)
 #ifdef nonblockingY
