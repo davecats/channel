@@ -24,7 +24,7 @@ MODULE dnsdata
 
   !Simulation parameters
   real(C_DOUBLE) :: PI=3.1415926535897932384626433832795028841971
-  integer(C_INT) :: nx,ny,nz,nxd,nzd
+  integer(C_INT) :: ny,nz,nxd
   real(C_DOUBLE) :: alfa0,beta0,ni,a,ymin,ymax,deltat,cflmax,time,time0=0,dt_field,dt_save,t_max,gamma
   real(C_DOUBLE) :: u0,uN
   logical :: CPI
@@ -509,7 +509,8 @@ MODULE dnsdata
      DO iV=1,3
        CALL IFT(VVdz(1:nzd,1:nxB,iV,i))  
 #ifdef nonblockingXZ
-       CALL MPI_IAlltoall(VVdz(:,:,iV,i), 1, Mdz, VVdx(:,:,iV,i), 1, Mdx, MPI_COMM_X, Rs(iV))
+       CALL zTOx(VVdz(:,:,iV,i),VVdx(:,:,iV,i),Rs(iV)) 
+       !MPI_IAlltoall(VVdz(:,:,iV,i), 1, Mdz, VVdx(:,:,iV,i), 1, Mdx, MPI_COMM_X, Rs(iV))
 #endif
 #ifdef convvel
        IF (compute_convvel) THEN
@@ -529,7 +530,8 @@ MODULE dnsdata
        END IF
 #endif
 #ifndef nonblockingXZ
-       CALL MPI_Alltoall(VVdz(:,:,iV,i), 1, Mdz, VVdx(:,:,iV,i), 1, Mdx, MPI_COMM_X)
+       CALL zTOx(VVdz(:,:,iV,i),VVdx(:,:,iV,i))
+       !CALL MPI_Alltoall(VVdz(:,:,iV,i), 1, Mdz, VVdx(:,:,iV,i), 1, Mdx, MPI_COMM_X)
        VVdx(nx+2:nxd+1,1:nzB,iV,i)=0;    CALL RFT(VVdx(1:nxd+1,1:nzB,iV,i),rVVdx(1:2*nxd+2,1:nzB,iV,i))
 #endif
      END DO
@@ -568,7 +570,8 @@ MODULE dnsdata
        END DO
        DO iV=1,3
          CALL HFT(rFdx(1:2*nxd+2,1:nzB,iV,1), Fdx(1:nxd+1,1:nzB,iV,1))
-         CALL MPI_Alltoall(Fdx(:,:,iV,1), 1, Mdx, Fdz(:,:,iV,1), 1, Mdz, MPI_COMM_X)
+         CALL xTOz(Fdx(:,:,iV,1),Fdz(:,:,iV,1))
+         !CALL MPI_Alltoall(Fdx(:,:,iV,1), 1, Mdx, Fdz(:,:,iV,1), 1, Mdz, MPI_COMM_X)
          CALL FFT(Fdz(1:nzd,1:nxB,iV,1))
        END DO
        F(iy,0:nz,nx0:nxN,1:3)=Fdz(1:nz+1,1:nxB,1:3,1)*factor
@@ -582,10 +585,12 @@ MODULE dnsdata
      DO iV=1,6
        CALL HFT(rVVdx(1:2*nxd+2,1:nzB,iV,i),VVdx(1:nxd+1,1:nzB,iV,i)); 
 #ifndef nonblockingXZ
-       CALL MPI_Alltoall(VVdx(:,:,iV,i), 1, Mdx, VVdz(:,:,iV,i), 1, Mdz, MPI_COMM_X)
+       CALL xTOz(VVdx(:,:,iV,i), VVdz(:,:,iV,i))
+       !CALL MPI_Alltoall(VVdx(:,:,iV,i), 1, Mdx, VVdz(:,:,iV,i), 1, Mdz, MPI_COMM_X)
        CALL FFT(VVdz(1:nzd,1:nxB,iV,i));
 #else 
-       CALL MPI_IAlltoall(VVdx(:,:,iV,i), 1, Mdx, VVdz(:,:,iV,i), 1, Mdz, MPI_COMM_X, Rs(iV))
+       CALL xTOz(VVdx(:,:,iV,i), VVdz(:,:,iV,i), Rs(iV))
+       !CALL MPI_IAlltoall(VVdx(:,:,iV,i), 1, Mdx, VVdz(:,:,iV,i), 1, Mdz, MPI_COMM_X, Rs(iV))
 #endif
      END DO
 #ifdef nonblockingXZ

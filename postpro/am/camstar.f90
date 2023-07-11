@@ -344,7 +344,8 @@ contains !----------------------------------------------------------------------
         do icnt=1,2
             do iV=1,4
                 call IFT(VVdz(:,:,iV,icnt)) ! first transform in z
-                call MPI_Alltoall(VVdz(:,:,iv,icnt), 1, Mdz, VVdx(:,:,iv,icnt), 1, Mdx, MPI_COMM_X)
+                call zTOx(VVdz(:,:,iv,icnt),VVdx(:,:,iv,icnt))
+                !call MPI_Alltoall(VVdz(:,:,iv,icnt), 1, Mdz, VVdx(:,:,iv,icnt), 1, Mdx, MPI_COMM_X)
                 VVdx(nx+2:nxd+1,1:nzB,iV,icnt)=0
                 call RFT(VVdx(:,:,iV,icnt),rVVdx(:,:,iV,icnt)) ! second transform in x
             end do
