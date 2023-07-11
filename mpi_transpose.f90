@@ -28,9 +28,7 @@ MODULE mpi_transpose
   complex(C_DOUBLE_COMPLEX), allocatable :: Ain(:),Aout(:)
   logical, save :: first,last,has_terminal,has_average
   TYPE(MPI_Datatype), save :: writeview_type,owned2write_type,vel_read_type,vel_field_type
-#ifndef packunpack
   TYPE(MPI_Datatype), save :: Mdz,Mdx,cmpl
-#endif
 #ifdef nonblockingY
   ! Array of requests for nonblocking communication in linsolve
   TYPE(MPI_REQUEST), allocatable :: REQlinSolve(:), REQvetaTOuvw(:)
@@ -148,7 +146,7 @@ CONTAINS
 #else
   !-------------- Transpose: Z to X --------------!
   !-----------------------------------------------!
-  SUBROUTINE zTOx(Vz, Vx)  
+  SUBROUTINE zTOx(Vz, Vx, Rs)  
     complex(C_DOUBLE_COMPLEX), intent(in)  :: Vz(1:,1:)
     complex(C_DOUBLE_COMPLEX), intent(out) :: Vx(1:,1:)
     type(MPI_REQUEST), intent(inout) :: Rs
@@ -160,7 +158,7 @@ CONTAINS
 
   !-------------- Transpose: X to Z --------------!
   !-----------------------------------------------!
-  SUBROUTINE xTOz(Vx,Vz)
+  SUBROUTINE xTOz(Vx,Vz,Rs)
     complex(C_DOUBLE_COMPLEX), intent(out) :: Vz(1:,1:)
     complex(C_DOUBLE_COMPLEX), intent(in) :: Vx(1:,1:)
     type(MPI_REQUEST), intent(inout) :: Rs
@@ -230,7 +228,7 @@ CONTAINS
     ! Allocate buffers for transposes
     ALLOCATE(Ain(0:block-1)); Ain=0
     ALLOCATE(Aout(0:block-1)); Aout=0
-#else
+#endif
     ! MPI derived datatyped - basics
     CALL MPI_Type_contiguous(2,MPI_DOUBLE_PRECISION,cmpl)   !complex
     CALL MPI_Type_commit(cmpl)
@@ -242,7 +240,6 @@ CONTAINS
     lb=0; stride=8*2;  CALL MPI_Type_create_resized(column,lb,stride,tmp)
     CALL MPI_Type_contiguous(nxB,tmp,Mdx)
     CALL MPI_Type_commit(Mdx)
-#endif
     ! For READING VELOCITY, SETTING VIEW: datatype that maps velocity on disk to memory (it differs from writing: halo cells are read twice!)
     CALL MPI_Type_create_subarray(ndims, [ny+3, 2*nz+1, nxpp, 3], [nyN-ny0+5, 2*nz+1, nxB, 3], [ny0-1,0,nx0,0], MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, vel_read_type, ierror)
     CALL MPI_Type_commit(vel_read_type, ierror)

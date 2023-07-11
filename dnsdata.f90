@@ -509,7 +509,7 @@ MODULE dnsdata
      DO iV=1,3
        CALL IFT(VVdz(1:nzd,1:nxB,iV,i))  
 #ifdef nonblockingXZ
-       CALL zTOx(VVdz(:,:,iV,i),VVdx(:,:,iV,i),Rs) 
+       CALL zTOx(VVdz(:,:,iV,i),VVdx(:,:,iV,i),Rs(iV)) 
        !MPI_IAlltoall(VVdz(:,:,iV,i), 1, Mdz, VVdx(:,:,iV,i), 1, Mdx, MPI_COMM_X, Rs(iV))
 #endif
 #ifdef convvel
