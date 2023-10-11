@@ -1,6 +1,7 @@
 from argparse import ArgumentParser
 import channel as ch
 import numpy as np
+import os
 
 parser = ArgumentParser(
     prog = 'uiuj_spectra2largesmall',
@@ -22,7 +23,7 @@ offs = (ny+3)*7*8
 sp_data = np.fromfile(psdfile, dtype=np.float64, count=arr_len, offset=offs).reshape((ny+3, 2*nz+1,10,6))
 
 # read largesmall_settings
-with open('largesmall_settings.in','r') as f:
+with open(base_dir + 'largesmall_settings.in','r') as f:
     kz_thr = float(f.readline().split('!')[0])
 
 # get mask for scale separation
@@ -70,5 +71,7 @@ mean_data = np.fromfile(psdfile, dtype=np.float64, count=arr_len, offset=0).resh
 towrite = header_data.tobytes() + mean_data.tobytes() + uiuj_ls.tobytes()
 
 # write to disk
-with open('profiles/uiuj_largesmall.bin', 'wb') as of:
+if not os.path.isdir(base_dir + 'profiles/'):
+    os.mkdir(base_dir + 'profiles/')
+with open(base_dir + 'profiles/uiuj_largesmall.bin', 'wb') as of:
     of.write(towrite)
