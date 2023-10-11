@@ -70,5 +70,5 @@ mean_data = np.fromfile(psdfile, dtype=np.float64, count=arr_len, offset=0).resh
 towrite = header_data.tobytes() + mean_data.tobytes() + uiuj_ls.tobytes()
 
 # write to disk
-with open('profiles/uiuj_largesmall_exported.bin', 'wb') as of:
+with open('profiles/uiuj_largesmall.bin', 'wb') as of:
     of.write(towrite)
