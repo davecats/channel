@@ -81,6 +81,9 @@ postpro/tke/uiuj_largesmall: $(OBJ) postpro/tke/uiuj_largesmall.o
 postpro/tke/uiuj_spectra: $(OBJ) postpro/tke/uiuj_spectra.o
 	$(F90) $(flags) -o $@ $(OBJ) postpro/tke/uiuj_spectra.o $(libs)
 	make clean
+postpro/spectra/psd: $(OBJ) postpro/spectra/psd.o
+	$(F90) $(flags) -o $@ $(OBJ) postpro/spectra/psd.o $(libs)
+	make clean
 postpro/conditional_fields/conditional_ejection: $(OBJ) postpro/conditional_fields/conditional_ejection.o
 	$(F90) $(flags) -o $@ $(OBJ) postpro/conditional_fields/conditional_ejection.o $(libs)
 	make clean

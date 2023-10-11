@@ -248,15 +248,8 @@ contains !----------------------------------------------------------------------
 
         integer(C_SIZE_T), parameter :: disp = 0
 
-        type(MPI_File) :: fh
-        TYPE(MPI_Status) :: status
-
-        if (has_terminal) print *, "Writing fake psd..."
-        barename = "fake_psd."
-
-        write(istring,*) nmin
-        write(istring2,*) nmax
-        filename=trim(TRIM(ADJUSTL(barename))//TRIM(ADJUSTL(istring))//"_"//TRIM(ADJUSTL(istring2))//".bin")
+        type(MPI_File) :: fh    ! cond_avg - for writing (setting view)
+RIM(ADJUSTL(istring))//"_"//TRIM(ADJUSTL(istring2))//".bin")
 
         CALL MPI_File_open(MPI_COMM_WORLD, filename, IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
             CALL MPI_File_set_view(fh, disp, MPI_DOUBLE_PRECISION, wtype_3d, 'native', MPI_INFO_NULL)
