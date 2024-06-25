@@ -14,7 +14,7 @@ subroutine config_body_force()
     y_threshold_top = ymax - y_threshold_bot
     iz_thr = min(nz,floor(kz_cutoff/beta0))
     ! print out parameters
-    if (has_terminal) print *, "Ro(tation number)", omega2/2
+    if (has_terminal) print *, "Ro(tation number)", -omega2
     if (has_terminal) print *, "kz_cutoff, iz_cutoff", kz_cutoff, iz_thr
     if (has_terminal) print *, "y_threshold_bottom", y_threshold_bot
     if (has_terminal) print *, ""

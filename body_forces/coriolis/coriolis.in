@@ -1,3 +1,3 @@
-0.02    ! 2*Ro(tation number)
+0.02    ! -Ro(tation number)
 9999999 ! kz_cutoff (for large/small scale discrimination)
 1.0     ! y_threshold (defines maximum y, wrt bottom plate, at which force is active)
