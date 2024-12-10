@@ -78,20 +78,21 @@ MODULE rbmat
   !---- in-place LU Decomposition of a banded matrix ---!
   !-----------------------------------------------------!
   SUBROUTINE LU5decomp(A)
-    real(C_DOUBLE), intent(inout) :: A(0:,-2:)
-    integer(C_INT) :: HI
-    real(C_DOUBLE) :: piv
-    HI=SIZE(A,1)-1;
-    DO i=HI,0,-1 
-      piv=1.0d0/A(i,0); A(i,0)=piv; A(i,-2:-1)=A(i,-2:-1)*piv
-      DO k=max(-2,-i),-1 
-        piv=A(i+k,-k)
-        DO j=-1,-2,-1
-        !A(i+k,M:2*M-1)=A(i+k,M:2*M-1)-piv*A(i,1:M)
-          A(i+k,j-k)=A(i+k,j-k)-piv*A(i,j)
-        END DO
-      END DO  
-    END DO
+	  real(C_DOUBLE), intent(inout) :: A(0:,-2:)
+	  integer(C_INT) :: HI1,HI2
+	  real(C_DOUBLE) :: piv
+	  HI1=SIZE(A,1)-1; HI2=SIZE(A,2)-3;
+	  A(HI1-2,1:2)=0; A(HI1-3,2)=0
+	  DO i=HI1-HI2,0,-1 
+	    DO k=HI2,1,-1
+	      piv=A(i,k)
+	      DO j=-1,-2,-1
+		A(i,j+k)=A(i,j+k)-piv*A(i+k,j)
+	      END DO
+	    END DO  
+	    piv=1.0d0/A(i,0); A(i,0)=piv; A(i,-2:-1)=A(i,-2:-1)*piv
+	  END DO  
+	  A(0,-2:-1)=0; A(1,-2)=0
   END SUBROUTINE LU5decomp
 
   !- Left LU division of a square matrix -!
@@ -144,20 +145,21 @@ MODULE rbmat
 
   !- Left LU division of a banded matrix -!
   !---------------------------------------!
-  SUBROUTINE LeftLU5div(A,b)
-    complex(C_DOUBLE_COMPLEX), intent(inout)  :: b(:)
-    real(C_DOUBLE), intent(in)  :: A(:,-2:)
-    integer(C_INT) :: HI
-    HI=SIZE(A,1)
-    DO i=HI,1,-1
-      j=MIN(2,HI-i)
-      b(i)=(b(i)-sum(A(i,1:j)*b(i+1:i+j)))*A(i,0)
-    END DO
-    DO i=1,HI
-      j=MAX(-2,1-i)
-      b(i)=b(i)-sum(A(i,j:-1)*b(i+j:i-1))
-    END DO
+  SUBROUTINE LeftLU5div(x,A,b)
+  complex(C_DOUBLE_COMPLEX), intent(out) :: x(-2:)
+  complex(C_DOUBLE_COMPLEX), intent(in) :: b(-2:)
+  real(C_DOUBLE), intent(in)  :: A(0:,-2:)
+  integer(C_INT) :: HI1,HI2
+  HI1=SIZE(A,1)-1; HI2=SIZE(A,2)-3;
+  x=b
+  DO i=HI1-HI2,0,-1 
+    x(i)=(x(i)-sum(A(i,1:2)*x(i+1:i+2)))*A(i,0)
+  END DO
+  DO i=0,HI1
+    x(i)=x(i)-sum(A(i,-2:-1)*x(i-2:i-1))
+  END DO
   END SUBROUTINE LeftLU5div
+  
 
   !- Left LU division of a square matrix -!
   !----OPERATOR----Doolittle--------------!
