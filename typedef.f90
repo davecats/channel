@@ -8,21 +8,19 @@
 !============================================!
 !
 ! Author: M.Sc. Davide Gatti
-! Date  : 28/Jul/2015
-!
+! Date  : 11/Dec/2024
+! 
+
+#include "header.h"
 
 MODULE typedef
 
   USE, intrinsic :: iso_c_binding
   IMPLICIT NONE
 
-  TYPE :: REFINEMENT
-    integer(C_INT) :: n
-    real(C_DOUBLE) :: y
-  END TYPE REFINEMENT
-
   TYPE :: RHSTYPE
     complex(C_DOUBLE_COMPLEX) :: eta,d2v
+    complex(C_DOUBLE_COMPLEX) :: phi(1:nPhi)
   END TYPE RHSTYPE
 
   TYPE :: Di
@@ -31,10 +29,7 @@ MODULE typedef
 
   TYPE :: BCOND
     complex(C_DOUBLE_COMPLEX) :: u,v,w,vy,eta
+    complex(C_DOUBLE_COMPLEX) :: phi(1:nPhi)
   END TYPE BCOND
-
-  TYPE :: VETA 
-    complex(C_DOUBLE_COMPLEX) :: v,eta
-  END TYPE VETA
 
 END MODULE typedef

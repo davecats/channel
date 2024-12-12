@@ -18,9 +18,15 @@
 !#define nonblockingY
 !#endif
 
-	! Force (nxd,nzd) to be at most the product of a
+! Force (nxd,nzd) to be at most the product of a
 ! power of 2 and a single factor 3
 #define useFFTfit
+
+! Scalar equations
+#define nPhi 3
+!#define phiNeumann
+#define t0 -1.0
+#define tn 1.0
 
 ! half or full channel
 !#define halfchannel

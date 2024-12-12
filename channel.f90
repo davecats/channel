@@ -69,6 +69,10 @@ PROGRAM channel
   IF (cflmax == 0) THEN
     deltat = deltat_from_dnsin
   END IF
+  
+pr(1) = 0.25
+pr(2) = 0.5
+pr(3) = 1.0
 
 IF (has_terminal) THEN
   ! Output DNS.in
@@ -122,6 +126,14 @@ END IF
     IF (has_average) THEN ! apply boundary conditions from dns.in (Couette-like)
       bc0(0,0)%u=u0; bcn(0,0)%u=uN
     END IF
+    DO iPhi=1,nPhi
+       DO ix=0,nx
+         DO iz=-nz,nz
+            bc0(iz,ix)%phi(iPhi)=(-sum(d140(-2:2)*V(-1:3,iz,ix,3+iPhi))+d140(-1)*V(0,iz,ix,3+iPhi))/d140(-1)
+            bcn(iz,ix)%phi(iPhi)=(-sum(d14n(-2:2)*V(ny-3:ny+1,iz,ix,3+iPhi))+d14n(1)*V(ny,iz,ix,3+iPhi))/d14n(1)
+         END DO 
+       END DO
+    END DO 
     ! Increment number of steps
     istep=istep+1
     ! Solve (RK3 - Step1)

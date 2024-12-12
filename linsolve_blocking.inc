@@ -2,15 +2,18 @@
   !------------------- solve the linear system  -----------------!
   SUBROUTINE linsolve(lambda)
     real(C_DOUBLE), intent(in) :: lambda
-    integer(C_INT) :: ix,iz,i
+    integer(C_INT) :: ix,iz,i,iPhi
     complex(C_DOUBLE_COMPLEX) :: temp(ny0-2:nyN+2)
     complex(C_DOUBLE_COMPLEX) :: ucor(ny0-2:nyN+2)
-    real(C_DOUBLE) :: frl(1:3)
+    real(C_DOUBLE) :: frl(1:3+nPhi)
     DO ix=nx0,nxN
       DO iz=-nz,nz
         DO CONCURRENT (iy=ny0:nyN)
           D2vmat(iy,-2:2,iz)=lambda*(der(iy)%d2(-2:2)-k2(iz,ix)*der(iy)%d0(-2:2))-OS(iy,-2:2)
           etamat(iy,-2:2,iz)=lambda*der(iy)%d0(-2:2)-SQ(iy,-2:2)
+          DO iPhi=1,nPhi
+             phimat(iy,-2:2,iz,iPhi)=lambda*der(iy)%d0(-2:2)-pr(iPhi)*(SQ(iy,-2:2))
+          END DO
         END DO
         IF (first) THEN 
           IF (ix==0 .AND. iz==0) THEN
@@ -25,6 +28,11 @@
           CALL applybc_0(etamat(:,:,iz),eta0bc,eta0m1bc)
           V(1,iz,ix,1)=V(1,iz,ix,1)-etamat(1,-1,iz)*bc0(iz,ix)%eta/eta0bc(-1)
           V(2,iz,ix,1)=V(2,iz,ix,1)-etamat(2,-2,iz)*bc0(iz,ix)%eta/eta0bc(-1)
+          DO iPhi=1,nPhi
+             CALL applybc_0(phimat(:,:,iz,iPhi),phi0bc,phi0m1bc)
+             V(1,iz,ix,3+iPhi)=V(1,iz,ix,3+iPhi)-phimat(1,-1,iz,iPhi)*bc0(iz,ix)%phi(iPhi)/phi0bc(-1)
+             V(2,iz,ix,3+iPhi)=V(2,iz,ix,3+iPhi)-phimat(2,-2,iz,iPhi)*bc0(iz,ix)%phi(iPhi)/phi0bc(-1)
+          END DO
         END IF
         IF (last) THEN 
           IF (ix==0 .AND. iz==0) THEN
@@ -39,25 +47,46 @@
           CALL applybc_n(etamat(:,:,iz),etanbc,etanp1bc)
           V(ny-1,iz,ix,1)=V(ny-1,iz,ix,1)-etamat(ny-1,1,iz)*bcn(iz,ix)%eta/etanbc(1) 
           V(ny-2,iz,ix,1)=V(ny-2,iz,ix,1)-etamat(ny-2,2,iz)*bcn(iz,ix)%eta/etanbc(1)
+          DO iPhi=1,nPhi
+             CALL applybc_n(phimat(:,:,iz,iPhi),phinbc,phinp1bc)
+             V(ny-1,iz,ix,3+iPhi)=V(ny-1,iz,ix,3+iPhi)-phimat(ny-1,1,iz,iPhi)*bcn(iz,ix)%phi(iPhi)/phinbc(1) 
+             V(ny-2,iz,ix,3+iPhi)=V(ny-2,iz,ix,3+iPhi)-phimat(ny-2,2,iz,iPhi)*bcn(iz,ix)%phi(iPhi)/phinbc(1)
+          END DO
         END IF 
         CALL LU5decompStep(D2vmat(:,:,iz)); CALL LU5decompStep(etamat(:,:,iz))
         CALL LeftLU5divStep1(V(:,iz,ix,2),D2vmat(:,:,iz),V(:,iz,ix,2))
         CALL LeftLU5divStep1(V(:,iz,ix,1),etamat(:,:,iz),V(:,iz,ix,1))
+        DO iPhi=1,nPhi
+          CALL LU5decompStep(phimat(:,:,iz,iPhi))
+          CALL LeftLU5divStep1(V(:,iz,ix,3+iPhi),phimat(:,:,iz,iPhi),V(:,iz,ix,3+iPhi))
+        END DO
+
       END DO    
       DO iz=-nz,nz
         CALL LeftLU5divStep2(D2vmat(:,:,iz),V(:,iz,ix,2))
         CALL LeftLU5divStep2(etamat(:,:,iz),V(:,iz,ix,1))
+        DO iPhi=1,nPhi
+          CALL LeftLU5divStep2(phimat(:,:,iz,iPhi),V(:,iz,ix,3+iPhi))
+        END DO
         IF (first) THEN
           V(0,iz,ix,2)=(bc0(iz,ix)%v-sum(V(1:3,iz,ix,2)*v0bc(0:2)))/v0bc(-1)
           V(-1,iz,ix,2)=(bc0(iz,ix)%vy-sum(V(0:3,iz,ix,2)*v0m1bc(-1:2)))/v0m1bc(-2)
           V(0,iz,ix,1)=(bc0(iz,ix)%eta-sum(V(1:3,iz,ix,1)*eta0bc(0:2)))/eta0bc(-1)
           V(-1,iz,ix,1)=-sum(V(0:3,iz,ix,1)*eta0m1bc(-1:2))/eta0m1bc(-2)
+          DO iPhi=1,nPhi
+             V(0,iz,ix,3+iPhi)=(bc0(iz,ix)%phi(iPhi)-sum(V(1:3,iz,ix,3+iPhi)*phi0bc(0:2)))/phi0bc(-1)
+             V(-1,iz,ix,3+iPhi)=-sum(V(0:3,iz,ix,3+iPhi)*phi0m1bc(-1:2))/phi0m1bc(-2)
+          END DO
         END IF
         IF (last) THEN 
           V(ny,iz,ix,2)=(bcn(iz,ix)%v-sum(V(ny-3:ny-1,iz,ix,2)*vnbc(-2:0)))/vnbc(1)
           V(ny+1,iz,ix,2)=(bcn(iz,ix)%vy-sum(V(ny-3:ny,iz,ix,2)*vnp1bc(-2:1)))/vnp1bc(2)
           V(ny,iz,ix,1)=(bcn(iz,ix)%eta-sum(V(ny-3:ny-1,iz,ix,1)*etanbc(-2:0)))/etanbc(1)
           V(ny+1,iz,ix,1)=-sum(V(ny-3:ny,iz,ix,1)*etanp1bc(-2:1))/etanp1bc(2)
+          DO iPhi=1,nPhi
+             V(ny,iz,ix,3+iPhi)=(bcn(iz,ix)%phi(iPhi)-sum(V(ny-3:ny-1,iz,ix,3+iPhi)*phinbc(-2:0)))/phinbc(1)
+             V(ny+1,iz,ix,3+iPhi)=-sum(V(ny-3:ny,iz,ix,3+iPhi)*phinp1bc(-2:1))/phinp1bc(2)
+          END DO
         END IF
         IF (ix==0 .AND. iz==0) THEN       
             V(:,0,0,3) = dcmplx(dimag(V(:,0,0,1)),0.d0); 
@@ -75,7 +104,10 @@
               ucor(ny+1)=-sum(ucor(ny-3:ny)*etanp1bc(-2:1))/etanp1bc(2)  
             END IF
             frl(1)=yintegr(dreal(V(:,0,0,1))); frl(2)=yintegr(dreal(V(:,0,0,3))); frl(3)=yintegr(dreal(ucor))
-            CALL MPI_Allreduce(frl,fr,3,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_Y)
+            DO iPhi=1,nPhi
+               frl(3+iPhi)=yintegr(dreal(V(:,0,0,3+iPhi)));
+            END DO
+            CALL MPI_Allreduce(frl,fr,3+nPhi,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_Y)
             IF (abs(meanflowx)>1.0d-7 .AND. .NOT. CPI) THEN
               corrpx = (meanflowx-fr(1))/fr(3)
               V(:,0,0,1)=dcmplx(dreal(V(:,0,0,1))+corrpx*dreal(ucor),dimag(V(:,0,0,1)))

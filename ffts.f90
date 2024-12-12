@@ -51,6 +51,7 @@ CONTAINS
        ! meaning that by default the logical size of the real transform is even
        if (odd_n_real .eqv. .TRUE.) rn_x=rn_x - 1
      endif
+     sn(1)=sn(1)+3*nPhi
      if (present(s)) sn = s
      !Allocate aligned memory
      ptrVVdz=fftw_alloc_complex(int(nxB*nzd*sn(1)*sn(2), C_SIZE_T))

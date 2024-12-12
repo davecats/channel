@@ -84,3 +84,7 @@ dkms.conf
 
 # VS code hidden files
 .vscode/
+
+# Other files
+Runtimedata
+Runtimedata.phi
