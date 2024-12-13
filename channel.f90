@@ -22,7 +22,7 @@ PROGRAM channel
 #ifdef crhon
   REAL timei,timee
 #endif
-  REAL(C_DOUBLE) :: frl(1:3), deltat_from_dnsin
+  REAL(C_DOUBLE) :: frl(1:3+2*nPhi), deltat_from_dnsin
   CHARACTER(len = 40) :: end_filename
 
   ! Init MPI
@@ -70,10 +70,6 @@ PROGRAM channel
     deltat = deltat_from_dnsin
   END IF
   
-pr(1) = 0.25
-pr(2) = 0.5
-pr(3) = 1.0
-
 IF (has_terminal) THEN
   ! Output DNS.in
   WRITE(*,*) " "
@@ -104,7 +100,10 @@ END IF
   ! Compute flow rate flow rate
   IF (has_average) THEN
     frl(1)=yintegr(dreal(V(:,0,0,1))); frl(2)=yintegr(dreal(V(:,0,0,3))); 
-    CALL MPI_Allreduce(frl,fr,3,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_Y)
+    DO iPhi=1,nPhi
+        frl(3+iPhi)=yintegr(dreal(V(:,0,0,3+iPhi)));
+    END DO
+    CALL MPI_Allreduce(frl,fr,3+2*nPhi,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_Y)
     IF (CPI) THEN
       SELECT CASE (CPI_type)
         CASE (0)
@@ -127,10 +126,19 @@ END IF
       bc0(0,0)%u=u0; bcn(0,0)%u=uN
     END IF
     DO iPhi=1,nPhi
-       DO ix=0,nx
+       DO ix=nx0,nxN
          DO iz=-nz,nz
-            bc0(iz,ix)%phi(iPhi)=(-sum(d140(-2:2)*V(-1:3,iz,ix,3+iPhi))+d140(-1)*V(0,iz,ix,3+iPhi))/d140(-1)
-            bcn(iz,ix)%phi(iPhi)=(-sum(d14n(-2:2)*V(ny-3:ny+1,iz,ix,3+iPhi))+d14n(1)*V(ny,iz,ix,3+iPhi))/d14n(1)
+            ! Neumann, but explicit
+            ! bc0(iz,ix)%phi(iPhi)=(-sum(d140(-2:2)*V(-1:3,iz,ix,3+iPhi))+d140(-1)*V(0,iz,ix,3+iPhi))/d140(-1)
+            ! bcn(iz,ix)%phi(iPhi)=(-sum(d14n(-2:2)*V(ny-3:ny+1,iz,ix,3+iPhi))+d14n(1)*V(ny,iz,ix,3+iPhi))/d14n(1)
+            ! Dirichlet
+            IF (ix==0 .and. iz==0) THEN 
+              bc0(iz,ix)%phi(iPhi)=t0
+              bcn(iz,ix)%phi(iPhi)=tn
+            ELSE 
+              bc0(iz,ix)%phi=0
+              bcn(iz,ix)%phi=0
+            END IF
          END DO 
        END DO
     END DO 

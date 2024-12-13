@@ -26,10 +26,11 @@ MODULE dnsdata
   real(C_DOUBLE) :: PI=3.1415926535897932384626433832795028841971
   integer(C_INT) :: ny,nz,nxd
   real(C_DOUBLE) :: alfa0,beta0,ni,a,ymin,ymax,deltat,cflmax,time,time0=0,dt_field,dt_save,t_max,gamma
-  real(C_DOUBLE) :: u0,uN
+  real(C_DOUBLE) :: pr(1:nPhi)
+  real(C_DOUBLE) :: u0,uN,t0,tn
   logical :: CPI
   integer(C_INT) :: CPI_type
-  real(C_DOUBLE) :: meanpx,meanpz,meanflowx,meanflowz
+  real(C_DOUBLE) :: meanpx,meanpz,meanflowx,meanflowz,meantx,meantb
   integer(C_INT), allocatable :: izd(:)
   complex(C_DOUBLE_COMPLEX), allocatable :: ialfa(:),ibeta(:)
   real(C_DOUBLE), allocatable :: k2(:,:)
@@ -41,7 +42,7 @@ MODULE dnsdata
   !Derivatives
   TYPE(Di), allocatable :: der(:)
   real(C_DOUBLE), dimension(-2:2) :: d040,d140,d240,d14m1,d24m1,d04n,d14n,d24n,d14np1,d24np1
-  real(C_DOUBLE), allocatable :: D0mat(:,:), etamat(:,:,:), eta00mat(:,:), D2vmat(:,:,:)
+  real(C_DOUBLE), allocatable :: D0mat(:,:), etamat(:,:,:), eta00mat(:,:), D2vmat(:,:,:), phimat(:,:,:,:)
   !Fourier-transformable arrays (allocated in ffts.f90)
   complex(C_DOUBLE_COMPLEX), pointer, dimension(:,:,:,:) :: VVdx, VVdz
   real(C_DOUBLE), pointer, dimension(:,:,:,:) :: rVVdx
@@ -62,10 +63,10 @@ MODULE dnsdata
 #endif
 #endif
   !Boundary conditions
-  real(C_DOUBLE), dimension(-2:2) :: v0bc,v0m1bc,vnbc,vnp1bc,eta0bc,eta0m1bc,etanbc,etanp1bc
+  real(C_DOUBLE), dimension(-2:2) :: v0bc,v0m1bc,vnbc,vnp1bc,eta0bc,eta0m1bc,etanbc,etanp1bc,phi0bc,phi0m1bc,phinbc,phinp1bc
   TYPE(BCOND),    allocatable :: bc0(:,:), bcn(:,:)
   !Mean pressure correction
-  real(C_DOUBLE), private :: corrpx=0.d0, corrpz=0.d0
+  real(C_DOUBLE), private :: corrpx=0.d0, corrpz=0.d0, corrtx(1:nPhi)=0.d0
   !ODE Library
   real(C_DOUBLE) :: RK1_rai(1:3)=(/ 120.0d0/32.0d0, 2.0d0, 0.0d0 /), &
                     RK2_rai(1:3)=(/ 120.0d0/8.0d0,  50.0d0/8.0d0,  34.0d0/8.0d0 /), &
@@ -73,7 +74,7 @@ MODULE dnsdata
   !Outstats
   real(C_DOUBLE) :: cfl=0.0d0
   integer(C_SIZE_T) :: istep,nstep,ifield
-  real(C_DOUBLE) :: fr(1:3)
+  real(C_DOUBLE) :: fr(1:3+2*nPhi)
   logical :: prev_was_close = .FALSE.
 #ifdef runtimestats
   integer :: rtstats_savenow = .FALSE.
@@ -98,6 +99,7 @@ MODULE dnsdata
   SUBROUTINE read_dnsin(in_in_parent)
     logical, optional, intent(in) :: in_in_parent
     logical :: i
+    integer :: iPhi
     if (present(in_in_parent)) then
       if (in_in_parent) then
         OPEN(15, file='../dns.in')
@@ -114,8 +116,9 @@ MODULE dnsdata
 #endif
     READ(15, *) ni; READ(15, *) a, ymin, ymax; ni=1/ni
     READ(15, *) CPI, CPI_type, gamma
-    READ(15, *) meanpx, meanpz; READ(15, *) meanflowx, meanflowz
-    READ(15, *) u0,uN
+    READ(15, *) meanpx, meanpz; READ(15, *) meanflowx, meanflowz; READ(15, *) meantx, meantb
+    READ(15, *) u0,uN,t0,tN
+    READ(15, *) pr(1:nPhi); DO iPhi=1,nPhi; pr(iPhi)=1/pr(iPhi); END DO
     READ(15, *) deltat, cflmax, time
     READ(15, *) dt_field, dt_save, t_max, time_from_restart
     READ(15, *) nstep
@@ -129,7 +132,7 @@ MODULE dnsdata
   SUBROUTINE init_memory(solveNS)
     INTEGER(C_INT) :: ix,iz
     logical, intent(IN) :: solveNS
-    ALLOCATE(V(ny0-2:nyN+2,-nz:nz,nx0:nxN,1:3)); V=0
+    ALLOCATE(V(ny0-2:nyN+2,-nz:nz,nx0:nxN,1:3+nPhi)); V=0
 #ifdef bodyforce
     ALLOCATE(F(ny0-2:nyN+2,-nz:nz,nx0:nxN,1:3)); F=0
 #ifdef ibm
@@ -145,6 +148,7 @@ MODULE dnsdata
 #define newrhs(iy,iz,ix) memrhs(MOD(iy+1000,3),iz,ix)
 #define imod(iy) MOD(iy+1000,5)
     ALLOCATE(der(MAX(1,ny0-2):MIN(ny-1,nyN+2)),d0mat(ny0:nyN+2,-2:2),etamat(ny0:nyN+2,-2:2,-nz:nz),eta00mat(ny0:nyN+2,-2:2),D2vmat(ny0:nyN+2,-2:2,-nz:nz))
+    ALLOCATE(phimat(ny0:nyN+2,-2:2,-nz:nz,1:nPhi))
     ALLOCATE(y(MAX(-1,ny0-4):MIN(ny+1,nyN+4)),dy(MAX(1,ny0-2):MIN(ny-1,nyN+2)))
     ALLOCATE(izd(-nz:nz),ialfa(nx0:nxN),ibeta(-nz:nz),k2(-nz:nz,nx0:nxN)) 
 #ifdef halfchannel
@@ -156,6 +160,7 @@ MODULE dnsdata
     izd=(/(merge(iz,nzd+iz,iz>=0),iz=-nz,nz)/);     ialfa=(/(dcmplx(0.0d0,ix*alfa0),ix=nx0,nxN)/);
     ibeta=(/(dcmplx(0.0d0,iz*beta0),iz=-nz,nz)/); 
     FORALL  (iz=-nz:nz,ix=nx0:nxN) k2(iz,ix)=(alfa0*ix)**2.0d0+(beta0*iz)**2.0d0
+    OPEN(UNIT=195,FILE='Runtimedata.phi',ACTION='write')
     INQUIRE(FILE="Runtimedata", EXIST=rtd_exists)
     IF (solveNS .AND. has_terminal) THEN
       IF (time_from_restart .AND. rtd_exists) THEN
@@ -292,8 +297,13 @@ MODULE dnsdata
     IF (first) THEN 
       v0bc=d040; v0m1bc=d140; eta0bc=d040
       eta0m1bc=der(1)%d4
-      v0bc(-1:2)=v0bc(-1:2)-v0bc(-2)*v0m1bc(-1:2)/v0m1bc(-2)
+      phi0bc=d040; phi0m1bc=der(1)%d4	! Dirichlet
+#ifdef phiNeumann
+      phi0bc=d140; phi0m1bc=der(1)%d4	! Neumann
+#endif
+      v0bc(-1:2)  =v0bc(-1:2)  -v0bc(-2)*v0m1bc(-1:2)/v0m1bc(-2)
       eta0bc(-1:2)=eta0bc(-1:2)-eta0bc(-2)*eta0m1bc(-1:2)/eta0m1bc(-2)
+      phi0bc(-1:2)=phi0bc(-1:2)-phi0bc(-2)*phi0m1bc(-1:2)/phi0m1bc(-2)
     END IF
     IF (last) THEN 
 #ifdef halfchannel
@@ -302,8 +312,13 @@ MODULE dnsdata
       vnbc=d04n; vnp1bc=d14n; etanbc=d04n
 #endif
       etanp1bc=der(ny-1)%d4
+      phinbc=d04n; phinp1bc=der(ny-1)%d4 ! Dirichlet
+#ifdef phiNeumann
+      phinbc=d14n; phinp1bc=d04n
+#endif
       vnbc(-2:1)=vnbc(-2:1)-vnbc(2)*vnp1bc(-2:1)/vnp1bc(2)
       etanbc(-2:1)=etanbc(-2:1)-etanbc(2)*etanp1bc(-2:1)/etanp1bc(2)
+      phinbc(-2:1)=phinbc(-2:1)-phinbc(2)*phinp1bc(-2:1)/phinp1bc(2)
     END IF 
   END SUBROUTINE setup_boundary_conditions
 
@@ -488,10 +503,7 @@ MODULE dnsdata
      real(C_DOUBLE), intent(in) :: ODE(1:3)
      integer(C_INT), intent(in) :: iy,i
      logical, intent(in) :: compute_cfl, in_timeloop
-     integer(C_INT) :: iV,ix,iz
-#ifdef nonblockingXZ
-     TYPE(MPI_REQUEST) :: Rs(1:6)
-#endif
+     integer(C_INT) :: iV,iPhi,ix,iz
 #ifdef ibm
      real(C_DOUBLE) :: newcoef,oldcoef
      real(C_DOUBLE) :: dU(1:3)
@@ -503,15 +515,15 @@ MODULE dnsdata
 #endif
      VVdz(1:nz+1,1:nxB,1:3,i)=V(iy,0:nz,nx0:nxN,1:3);         VVdz(nz+2:nzd-nz,1:nxB,1:3,i)=0;
      VVdz(nzd+1-nz:nzd,1:nxB,1:3,i)=V(iy,-nz:-1,nx0:nxN,1:3); 
+     DO iPhi=1,nPhi
+          VVdz(1:nz+1,1:nxB,6+3*iPhi,i)=V(iy,0:nz,nx0:nxN,3+iPhi);         VVdz(nz+2:nzd-nz,1:nxB,6+3*iPhi,i)=0;
+	  VVdz(nzd+1-nz:nzd,1:nxB,6+3*iPhi,i)=V(iy,-nz:-1,nx0:nxN,3+iPhi); 
+     END DO
 #ifdef ibm
      newcoef=ODE(2)/ODE(1); oldcoef=-ODE(3)/ODE(1)
 #endif
      DO iV=1,3
        CALL IFT(VVdz(1:nzd,1:nxB,iV,i))  
-#ifdef nonblockingXZ
-       CALL zTOx(VVdz(:,:,iV,i),VVdx(:,:,iV,i),Rs(iV)) 
-       !MPI_IAlltoall(VVdz(:,:,iV,i), 1, Mdz, VVdx(:,:,iV,i), 1, Mdx, MPI_COMM_X, Rs(iV))
-#endif
 #ifdef convvel
        IF (compute_convvel) THEN
          IF (convvel_cnt>-1) THEN
@@ -529,19 +541,16 @@ MODULE dnsdata
          Voldz(1:nzd,1:nxB,iy,iV)=VVdz(1:nzd,1:nxB,iV,i)
        END IF
 #endif
-#ifndef nonblockingXZ
        CALL zTOx(VVdz(:,:,iV,i),VVdx(:,:,iV,i))
        !CALL MPI_Alltoall(VVdz(:,:,iV,i), 1, Mdz, VVdx(:,:,iV,i), 1, Mdx, MPI_COMM_X)
        VVdx(nx+2:nxd+1,1:nzB,iV,i)=0;    CALL RFT(VVdx(1:nxd+1,1:nzB,iV,i),rVVdx(1:2*nxd+2,1:nzB,iV,i))
-#endif
      END DO
-#ifdef nonblockingXZ
-     DO iV=1,3
-       CALL MPI_wait(Rs(iV),MPI_STATUS_IGNORE); 
-       VVdx(nx+2:nxd+1,1:nzB,iV,i)=0; 
-       CALL RFT(VVdx(1:nxd+1,1:nzB,iV,i),rVVdx(1:2*nxd+2,1:nzB,iV,i));
+     DO iPhi=1,nPhi
+	CALL IFT(VVdz(1:nzd,1:nxB,6+3*iPhi,i))  
+	CALL zTOx(VVdz(:,:,6+3*iPhi,i),VVdx(:,:,6+3*iPhi,i))
+        VVdx(nx+2:nxd+1,1:nzB,6+3*iPhi,i)=0;    
+        CALL RFT(VVdx(1:nxd+1,1:nzB,6+3*iPhi,i),rVVdx(1:2*nxd+2,1:nzB,6+3*iPhi,i))
      END DO
-#endif
 #ifdef convvel
      IF (iy==nyN+2 .AND. compute_convvel) THEN
        convvel_cnt=convvel_cnt+1
@@ -581,24 +590,23 @@ MODULE dnsdata
      rVVdx(1:2*nxd,1:nzB,4,i)  = rVVdx(1:2*nxd,1:nzB,1,i)  * rVVdx(1:2*nxd,1:nzB,2,i)*factor
      rVVdx(1:2*nxd,1:nzB,5,i)  = rVVdx(1:2*nxd,1:nzB,2,i)  * rVVdx(1:2*nxd,1:nzB,3,i)*factor
      rVVdx(1:2*nxd,1:nzB,6,i)  = rVVdx(1:2*nxd,1:nzB,1,i)  * rVVdx(1:2*nxd,1:nzB,3,i)*factor
+     DO iPhi=0,nPhi-1
+       rVVdx(1:2*nxd,1:nzB,6+3*iPhi+1,i)  = rVVdx(1:2*nxd,1:nzB,1,i)  * rVVdx(1:2*nxd,1:nzB,6+3*iPhi+3,i)*factor
+       rVVdx(1:2*nxd,1:nzB,6+3*iPhi+2,i)  = rVVdx(1:2*nxd,1:nzB,2,i)  * rVVdx(1:2*nxd,1:nzB,6+3*iPhi+3,i)*factor
+       rVVdx(1:2*nxd,1:nzB,6+3*iPhi+3,i)  = rVVdx(1:2*nxd,1:nzB,3,i)  * rVVdx(1:2*nxd,1:nzB,6+3*iPhi+3,i)*factor
+     END DO
      rVVdx(1:2*nxd,1:nzB,1:3,i)= rVVdx(1:2*nxd,1:nzB,1:3,i)* rVVdx(1:2*nxd,1:nzB,1:3,i)*factor
      DO iV=1,6
        CALL HFT(rVVdx(1:2*nxd+2,1:nzB,iV,i),VVdx(1:nxd+1,1:nzB,iV,i)); 
-#ifndef nonblockingXZ
        CALL xTOz(VVdx(:,:,iV,i), VVdz(:,:,iV,i))
        !CALL MPI_Alltoall(VVdx(:,:,iV,i), 1, Mdx, VVdz(:,:,iV,i), 1, Mdz, MPI_COMM_X)
        CALL FFT(VVdz(1:nzd,1:nxB,iV,i));
-#else 
-       CALL xTOz(VVdx(:,:,iV,i), VVdz(:,:,iV,i), Rs(iV))
-       !CALL MPI_IAlltoall(VVdx(:,:,iV,i), 1, Mdx, VVdz(:,:,iV,i), 1, Mdz, MPI_COMM_X, Rs(iV))
-#endif
      END DO
-#ifdef nonblockingXZ
-     DO iV=1,6
-       CALL MPI_Wait(Rs(iV),MPI_STATUS_IGNORE)
-       CALL FFT(VVdz(1:nzd,1:nxB,iV,i));
+     DO iPhi=1,3*nPhi
+       CALL HFT(rVVdx(1:2*nxd+2,1:nzB,6+iPhi,i),VVdx(1:nxd+1,1:nzB,6+iPhi,i)); 
+       CALL xTOz(VVdx(:,:,6+iPhi,i), VVdz(:,:,6+iPhi,i))
+       CALL FFT(VVdz(1:nzd,1:nxB,6+iPhi,i));
      END DO
-#endif
   END SUBROUTINE convolutions
 
 
@@ -611,8 +619,8 @@ MODULE dnsdata
   SUBROUTINE buildrhs(ODE,compute_cfl)
     logical, intent(in) :: compute_cfl
     real(C_DOUBLE), intent(in) :: ODE(1:3)
-    integer(C_INT) :: iy,iz,ix,i,im2,im1,i0,i1,i2
-    complex(C_DOUBLE_COMPLEX) :: rhsu,rhsv,rhsw,DD0_6,DD1_6,expl
+    integer(C_INT) :: iy,iz,ix,i,im2,im1,i0,i1,i2,iPhi
+    complex(C_DOUBLE_COMPLEX) :: rhsu,rhsv,rhsw,rhst,DD0_6,DD1_6,expl
 #ifdef bodyforce
     IF (first) THEN 
         iy=1; F(-1:0,:,:,:)=0
@@ -660,6 +668,10 @@ MODULE dnsdata
                    )
               timescheme(newrhs(iy,iz,ix)%eta, oldrhs(iy,iz,ix)%eta,ibeta(iz)*D0(V,1)-ialfa(ix)*D0(V,3),sum(SQ(iy,-2:2)*[ibeta(iz)*V(iy-2:iy+2,iz,ix,1)-ialfa(ix)*V(iy-2:iy+2,iz,ix,3)]),expl) !(eta)
             END IF
+            DO iPhi=1,nPhi
+                rhst=-ialfa(ix)*DD(d0,6+3*(iPhi-1)+1)-DD(d1,6+3*(iPhi-1)+2)-ibeta(iz)*DD(d0,6+3*(iPhi-1)+3)
+                timescheme(newrhs(iy,iz,ix)%phi(iPhi), oldrhs(iy,iz,ix)%phi(iPhi),D0(V,3+iPhi),pr(iPhi)*sum(SQ(iy,-2:2)*V(iy-2:iy+2,iz,ix,3+iPhi)),rhst) !(Phi)
+            END DO
         END DO
         END DO
       END IF
@@ -667,6 +679,9 @@ MODULE dnsdata
       IF (iy-2>=ny0) THEN !(iy-2>=1) THEN
         DO CONCURRENT (ix=nx0:nxN, iz=-nz:nz) 
           V(iy-2,iz,ix,1) = newrhs(iy-2,iz,ix)%eta; V(iy-2,iz,ix,2) = newrhs(iy-2,iz,ix)%d2v; 
+          DO iPhi=1,nPhi
+             V(iy-2,iz,ix,3+iPhi) = newrhs(iy-2,iz,ix)%phi(iPhi);
+          END DO
         END DO
       END IF      
     END DO
@@ -675,9 +690,9 @@ MODULE dnsdata
   !--------------------------------------------------------------!
   !-------------------- read_restart_file -----------------------! 
   SUBROUTINE read_restart_file(filename,R)
-    complex(C_DOUBLE_COMPLEX), intent(INOUT) :: R(ny0-2:nyN+2,-nz:nz,nx0:nxN,1:3)
+    complex(C_DOUBLE_COMPLEX), intent(INOUT) :: R(ny0-2:nyN+2,-nz:nz,nx0:nxN,1:3+nPhi)
     character(len=40), intent(IN) :: filename
-    integer(C_SIZE_T) :: ix,iy,iz,io
+    integer(C_SIZE_T) :: ix,iy,iz,io,iPhi
     integer(C_INT) :: r_nx, r_ny, r_nz
     real(C_DOUBLE) :: r_alfa0,r_beta0,r_ni,r_a,r_ymin,r_ymax
     INTEGER(MPI_OFFSET_KIND) :: disp = 3*C_INT + 7*C_DOUBLE
@@ -693,6 +708,23 @@ MODULE dnsdata
       call MPI_file_set_view(fh, disp, MPI_DOUBLE_COMPLEX, vel_read_type, 'native', MPI_INFO_NULL)
       call MPI_file_read_all(fh, R, 1, vel_field_type, MPI_STATUS_IGNORE)
       call MPI_file_close(fh)
+        IF (r_nx /= nx .OR. r_ny /= ny .OR. r_nz /= nz .OR. r_alfa0 /= alfa0 .OR. r_beta0 /= beta0 \ 
+            .OR. r_ni /= ni .OR. r_a /= a .OR. r_ymin /= ymin .OR. r_ymax /= ymax) THEN
+        IF (has_terminal) PRINT *, "ERROR: mismatch in metadata between restart file and dns.in. Stopping."
+        IF (has_terminal) PRINT *, "From .out file:"
+        IF (has_terminal) PRINT *, r_nx, r_ny, r_nz, r_alfa0, r_beta0, r_ni, r_a, r_ymin, r_ymax
+        IF (has_terminal) PRINT *, "From dns.in:"
+        IF (has_terminal) PRINT *, nx, ny, nz, alfa0, beta0, ni, a, ymin, ymax
+        STOP
+      END IF
+      DO iPhi=1,nPhi
+         R(:,:,:,3+iPhi)=0
+         IF (has_average) THEN
+            DO CONCURRENT (iy=ny0-2:nyN+2)
+              R(iy,0,0,3+iPhi)=3*0.5*y(iy)*(2-y(iy))
+            END DO
+         END IF
+      END DO
     ELSE
       CLOSE(100)
       R=0
@@ -704,19 +736,15 @@ MODULE dnsdata
       IF (has_average) THEN
         DO CONCURRENT (iy=ny0-2:nyN+2)
           R(iy,0,0,1)=3*0.5*y(iy)*(2-y(iy))  !+ 0.01*SIN(8*y(iy)*2*PI)/ni
+          DO iPhi=1,nPhi
+              R(iy,0,0,3+iPhi)=3*0.5*y(iy)*(2-y(iy))
+          END DO
           !V(iy,0,0,1)=y(iy)*(2-y(iy))*3.d0/2.d0 + 0.001*SIN(8*y(iy)*2*PI);
           !V(iy,0,0,1)=y(iy)-1
         END DO
       END IF
     END IF
-    IF (r_nx /= nx .OR. r_ny /= ny .OR. r_nz /= nz .OR. r_alfa0 /= alfa0 .OR. r_beta0 /= beta0 .OR. r_ni /= ni .OR. r_a /= a .OR. r_ymin /= ymin .OR. r_ymax /= ymax) THEN
-      IF (has_terminal) PRINT *, "ERROR: mismatch in metadata between restart file and dns.in. Stopping."
-      IF (has_terminal) PRINT *, "From .out file:"
-      IF (has_terminal) PRINT *, r_nx, r_ny, r_nz, r_alfa0, r_beta0, r_ni, r_a, r_ymin, r_ymax
-      IF (has_terminal) PRINT *, "From dns.in:"
-      IF (has_terminal) PRINT *, nx, ny, nz, alfa0, beta0, ni, a, ymin, ymax
-      STOP
-    END IF
+
   END SUBROUTINE read_restart_file
 
 #ifdef ibm
@@ -851,10 +879,11 @@ MODULE dnsdata
   !--------------------------------------------------------------!
   !------------------------- outstats ---------------------------!
   SUBROUTINE outstats()
-   real(C_DOUBLE) :: runtime_global,dudy(1:2,1:2)   !cfl
+   real(C_DOUBLE) :: runtime_global,dudy(1:2+nPhi,1:2)   !cfl
    character(len=40) :: istring, filename
    TYPE(MPI_REQUEST) :: Rs,Rr
    TYPE(MPI_STATUS) :: S
+   integer(C_INT)   :: iPhi
 #ifdef convvel
    compute_convvel=.TRUE.
 #endif
@@ -863,11 +892,17 @@ MODULE dnsdata
    IF (ipx==0) THEN 
      IF (ipy==npy-1) THEN 
        dudy(1,2)=-sum(d14n(-2:2)*dreal(V(ny-3:ny+1,0,0,1))); dudy(2,2)=-sum(d14n(-2:2)*dreal(V(ny-3:ny+1,0,0,3)))
-       CALL MPI_ISend(dudy(1:2,2),2,MPI_DOUBLE_PRECISION,0,TAG_DUDY,MPI_COMM_Y,Rs)
+       DO iPhi=1,nPhi
+          dudy(2+iPhi,2)=sum(d14n(-2:2)*dreal(V(ny-3:ny+1,0,0,3+iPhi)));
+       END DO
+       CALL MPI_ISend(dudy(1:2+nPhi,2),2+nPhi,MPI_DOUBLE_PRECISION,0,TAG_DUDY,MPI_COMM_Y,Rs)
      END IF
      IF (ipy==0) THEN
        dudy(1,1)=sum(d140(-2:2)*dreal(V(-1:3,0,0,1)));       dudy(2,1)=sum(d140(-2:2)*dreal(V(-1:3,0,0,3)))
-       CALL MPI_IRecv(dudy(1:2,2),2,MPI_DOUBLE_PRECISION,npy-1,TAG_DUDY,MPI_COMM_Y,Rr)
+       DO iPhi=1,nPhi
+           dudy(2+iPhi,1)=sum(d140(-2:2)*dreal(V(-1:3,0,0,3+iPhi)));
+       END DO
+       CALL MPI_IRecv(dudy(1:2+nPhi,2),2+nPhi,MPI_DOUBLE_PRECISION,npy-1,TAG_DUDY,MPI_COMM_Y,Rr)
        CALL MPI_Wait(Rr,S);
      END IF
      IF (ipy==npy-1) CALL MPI_Wait(Rs,S)
@@ -876,7 +911,8 @@ MODULE dnsdata
      WRITE(*,"(F10.4,3X,4(F11.6,3X),4(F9.4,3X),2(F9.6,3X))") &
            time,dudy(1,1),dudy(1,2),dudy(2,1),dudy(2,2),fr(1)+corrpx*fr(3),meanpx+corrpx,fr(2)+corrpz*fr(3),meanpz+corrpz,runtime_global*deltat,deltat
      WRITE(101,*) time,dudy(1,1),dudy(1,2),dudy(2,1),dudy(2,2),fr(1)+corrpx*fr(3),meanpx+corrpx,fr(2)+corrpz*fr(3),meanpz+corrpz,runtime_global*deltat,deltat
-     FLUSH(101)
+     WRITE(195,*) time,dudy(3:,1),dudy(3:,2),fr(4:3+nPhi)+corrtx(:)*fr(3+nPhi+1:3+2*nPhi),corrtx+meantx
+     FLUSH(101); FLUSH(195)
    END IF
    runtime_global=0
    IF (dt_save > 0) THEN ! save restart file

@@ -5,7 +5,8 @@
     integer(C_INT) :: ix,iz,i,iPhi
     complex(C_DOUBLE_COMPLEX) :: temp(ny0-2:nyN+2)
     complex(C_DOUBLE_COMPLEX) :: ucor(ny0-2:nyN+2)
-    real(C_DOUBLE) :: frl(1:3+nPhi)
+    complex(C_DOUBLE_COMPLEX) :: tcor(ny0-2:nyN+2,1:nPhi)
+    real(C_DOUBLE) :: frl(1:3+2*nPhi)
     DO ix=nx0,nxN
       DO iz=-nz,nz
         DO CONCURRENT (iy=ny0:nyN)
@@ -92,7 +93,7 @@
             V(:,0,0,3) = dcmplx(dimag(V(:,0,0,1)),0.d0); 
             V(:,0,0,1) = dcmplx(dreal(V(:,0,0,1)),0.d0);
             ucor(ny0-2:ny0-1)=0; ucor(ny0:nyN)=1; ucor(nyN+1:nyN+2)=0
-            ! XXX TODO Make computation of ucor communication-free
+	    ! XXX TODO Make computation of ucor communication-free
             CALL LeftLU5divStep1(ucor,etamat(:,:,iz),ucor)
             CALL LeftLU5divStep2(etamat(:,:,iz),ucor)
             IF (first) THEN
@@ -103,11 +104,25 @@
               ucor(ny)=-sum(ucor(ny-3:ny-1)*etanbc(-2:0))/etanbc(1)
               ucor(ny+1)=-sum(ucor(ny-3:ny)*etanp1bc(-2:1))/etanp1bc(2)  
             END IF
+	    tcor(ny0-2:ny0-1,:)=0; tcor(ny0:nyN,:)=1; tcor(nyN+1:nyN+2,:)=0
+            DO iPhi=1,nPhi
+	       CALL LeftLU5divStep1(tcor(:,iPhi),phimat(:,:,iz,iPhi),tcor(:,iPhi))
+	       CALL LeftLU5divStep2(phimat(:,:,iz,iPhi),tcor(:,iPhi))
+	       IF (first) THEN
+                  tcor(0,iPhi)=-sum(tcor(1:3,iPhi)*phi0bc(0:2))/phi0bc(-1)
+                  tcor(-1,iPhi)=-sum(tcor(0:3,iPhi)*phi0m1bc(-1:2))/phi0m1bc(-2)
+	       END IF
+	       IF (last) THEN
+                  tcor(ny,iPhi)=-sum(tcor(ny-3:ny-1,iPhi)*phinbc(-2:0))/phinbc(1)
+                  tcor(ny+1,iPhi)=-sum(tcor(ny-3:ny,iPhi)*phinp1bc(-2:1))/phinp1bc(2)  
+	       END IF
+	    END DO
             frl(1)=yintegr(dreal(V(:,0,0,1))); frl(2)=yintegr(dreal(V(:,0,0,3))); frl(3)=yintegr(dreal(ucor))
             DO iPhi=1,nPhi
+               frl(3+nPhi+iPhi)=yintegr(dreal(tcor(:,iPhi)));
                frl(3+iPhi)=yintegr(dreal(V(:,0,0,3+iPhi)));
             END DO
-            CALL MPI_Allreduce(frl,fr,3+nPhi,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_Y)
+            CALL MPI_Allreduce(frl,fr,3+2*nPhi,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_Y)
             IF (abs(meanflowx)>1.0d-7 .AND. .NOT. CPI) THEN
               corrpx = (meanflowx-fr(1))/fr(3)
               V(:,0,0,1)=dcmplx(dreal(V(:,0,0,1))+corrpx*dreal(ucor),dimag(V(:,0,0,1)))
@@ -115,6 +130,12 @@
             IF (abs(meanflowz)>1.0d-7 .AND. .NOT. CPI) THEN
               corrpz = (meanflowz-fr(2))/fr(3)
               V(:,0,0,3)=dcmplx(dreal(V(:,0,0,3))+corrpz*dreal(ucor),dimag(V(:,0,0,3)))
+            END IF
+            IF (abs(meantb)>1.0d-7) THEN
+	      DO iPhi=1,nPhi
+                corrtx(iPhi) = (meantb-fr(3+iPhi))/fr(3+nPhi+iPhi)
+                V(:,0,0,3+iPhi)=dcmplx(dreal(V(:,0,0,3+iPhi))+corrtx(iPhi)*dreal(tcor(:,iPhi)),dimag(V(:,0,0,3+iPhi)))
+              END DO
             END IF
             IF (CPI) THEN
               SELECT CASE (CPI_type)
