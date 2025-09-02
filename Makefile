@@ -1,32 +1,42 @@
-.NOTPARALLEL: 
+# Makefile for the GPU-accelerated DNS channel flow code
+#
+# Usage:
+#   make           - Compiles the code
+#   make clean     - Removes compiled files
+#
+# Requires NVIDIA HPC SDK (nvfortran compiler) and an MPI implementation.
+#
 
-# Fortran + MPI
-F90 = mpifort
+# Compiler
+FC = mpifort
 
-# Path to FFTW library
-FFTW_INC = /usr/include/
-FFTW_LIB = /usr/lib/
+# Compiler flags
+# -mp=gpu         : Enable OpenMP GPU offloading
+# -Minfo=mp       : Provide feedback on OpenMP parallelization
+# -cuda           : Enable CUDA Fortran features (for cuFFT)
+# -cudalib=cufft  : Link against the cuFFT library
+FFLAGS = -mp=gpu -Minfo=mp -cuda -cudalib=cufft -cpp
 
 
+# Executable name
+TARGET = channel.x
 
-# COMPILER FLAGS
+# Source files and objects
+SRCS = mpi_transpose.f90 ffts.f90 rbmat.f90  dnsdata.f90 channel.f90
+OBJS = $(SRCS:.f90=.o)
 
-# CC = GCC (uncomment following line for GCC compiler) 
-#FLAGS = -cpp -Ofast -malign-double -fall-intrinsics -ffree-line-length-none
+# Default target
+all: $(TARGET)
 
-# GCC, DEBUG (uncomment following line for GCC compiler)
-FLAGS = -cpp -O0 -malign-double -fall-intrinsics -ffree-line-length-none -fbacktrace -g  -fcheck=all -Wall
+$(TARGET): $(OBJS)
+	$(FC) $(FFLAGS) -o $@ $(OBJS) $(MPI_LIBS)
 
-OBJ = rbmat.o mpi_transpose.o ffts.o dnsdata.o
-flags = -I$(FFTW_INC) -L$(FFTW_LIB) $(FLAGS)
-libs = -lfftw3
+%.o: %.f90
+	$(FC) $(FFLAGS) $(MPI_FFLAGS) -c $< -o $@
 
-channel: $(OBJ) channel.o
-	$(F90) $(flags) -o  $@ $(OBJ) channel.o $(libs)
-	make clean
-%.o : %.f90
-	$(F90) $(flags) -o $@ -c  $<
-.PHONY: clean configure
+# Clean up
 clean:
-	find . -type f -name '*.o' | xargs -t rm
-	find . -type f -name '*.mod' |xargs -t rm
+	rm -f *.o *.mod $(TARGET)
+
+.PHONY: all clean
+
