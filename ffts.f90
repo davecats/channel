@@ -16,7 +16,6 @@
 MODULE ffts
 
   USE, intrinsic :: iso_c_binding
-  USE typedef
   IMPLICIT NONE
   INCLUDE 'fftw3.f03'
   integer, save        :: plan_type=FFTW_PATIENT
