@@ -15,6 +15,11 @@
 
 MODULE dnsdata
 
+  ! V(iy,iz,ix,i) , 				i={1:u,2:v,3:w}
+  ! oldrhs(iy,iz,ix,i), 			i={1:eta,2:d2v}
+  ! bc0(iz,ix,i), bcn(iz,ix,i), 		i={1:u, 2:v, 3:w, 4:vy, 5:eta}
+  ! der(iy,i,j), 				i={0:d0, 1:d1, 2:d2, 3:d4}, j={-2:2}
+  
   USE, intrinsic :: iso_c_binding
   USE rbmat
   USE mpi_transpose
@@ -37,21 +42,21 @@ MODULE dnsdata
   real(C_DOUBLE), allocatable :: y(:),dy(:)
   real(C_DOUBLE) :: dx,dz,factor
   !Derivatives
-  TYPE(Di), allocatable :: der(:)
+  real(C_DOUBLE), allocatable :: der(:,:,:)
   real(C_DOUBLE), dimension(-2:2) :: d040,d140,d240,d14m1,d24m1,d04n,d14n,d24n,d14np1,d24np1
   real(C_DOUBLE), allocatable :: D0mat(:,:), etamat(:,:,:), eta00mat(:,:), D2vmat(:,:,:)
   !Fourier-transformable arrays (allocated in ffts.f90)
   complex(C_DOUBLE_COMPLEX), pointer, dimension(:,:,:,:) :: VVdx, VVdz
   real(C_DOUBLE), pointer, dimension(:,:,:,:) :: rVVdx
   !Solution
-  TYPE(RHSTYPE),  allocatable :: memrhs(:,:,:), oldrhs(:,:,:)
+  complex(C_DOUBLE_COMPLEX),  allocatable :: memrhs(:,:,:,:), oldrhs(:,:,:,:)
   complex(C_DOUBLE_COMPLEX), allocatable :: V(:,:,:,:)
 #ifdef bodyforce
   complex(C_DOUBLE_COMPLEX), allocatable :: F(:,:,:,:)
 #endif
   !Boundary conditions
   real(C_DOUBLE), dimension(-2:2) :: v0bc,v0m1bc,vnbc,vnp1bc,eta0bc,eta0m1bc,etanbc,etanp1bc
-  TYPE(BCOND),    allocatable :: bc0(:,:), bcn(:,:)
+  complex(C_DOUBLE_COMPLEX),    allocatable :: bc0(:,:,:), bcn(:,:,:)
   !Mean pressure correction
   real(C_DOUBLE), private :: corrpx=0.d0, corrpz=0.d0
   !ODE Library
@@ -100,10 +105,10 @@ MODULE dnsdata
 #ifdef bodyforce
     ALLOCATE(F(ny0-2:nyN+2,-nz:nz,nx0:nxN,1:3)); F=0
 #endif
-    IF (solveNS) ALLOCATE(memrhs(0:2,-nz:nz,nx0:nxN),oldrhs(1:ny-1,-nz:nz,nx0:nxN),bc0(-nz:nz,nx0:nxN),bcn(-nz:nz,nx0:nxN))
-#define newrhs(iy,iz,ix) memrhs(MOD(iy+1000,3),iz,ix)
+    IF (solveNS) ALLOCATE(memrhs(0:2,-nz:nz,nx0:nxN,1:2),oldrhs(1:ny-1,-nz:nz,nx0:nxN,1:2),bc0(-nz:nz,nx0:nxN,1:5),bcn(-nz:nz,nx0:nxN,1:5))
+#define newrhs(iy,iz,ix,i) memrhs(MOD(iy+1000,3),iz,ix,i)
 #define imod(iy) MOD(iy+1000,5)
-    ALLOCATE(der(1:ny-1),d0mat(ny0:nyN+2,-2:2),etamat(ny0:nyN+2,-2:2,-nz:nz),eta00mat(ny0:nyN+2,-2:2),D2vmat(ny0:nyN+2,-2:2,-nz:nz))
+    ALLOCATE(der(1:ny-1,0:3,-2:2),d0mat(ny0:nyN+2,-2:2),etamat(ny0:nyN+2,-2:2,-nz:nz),eta00mat(ny0:nyN+2,-2:2),D2vmat(ny0:nyN+2,-2:2,-nz:nz))
     ALLOCATE(y(-1:ny+1),dy(1:ny-1))
     ALLOCATE(izd(-nz:nz),ialfa(nx0:nxN),ibeta(-nz:nz),k2(-nz:nz,nx0:nxN)) 
 #ifdef halfchannel
@@ -137,15 +142,15 @@ MODULE dnsdata
     DO iy=1,ny-1
       FORALL (i=0:4, j=0:4) M(i,j)=(y(iy-2+j)-y(iy))**(4.0d0-i); CALL LUdecomp(M)
       t=0; t(0)=24
-      der(iy)%d4(-2:2)=M.bs.t
+      der(iy,3,-2:2)=M.bs.t
       FORALL (i=0:4, j=0:4) M(i,j)=(5.0d0-i)*(6.0d0-i)*(7.0d0-i)*(8.0d0-i)*(y(iy-2+j)-y(iy))**(4.0d0-i); CALL LUdecomp(M)
-      FORALL (i=0:4) t(i)=sum( der(iy)%d4(-2:2)*(y(iy-2:iy+2)-y(iy))**(8.0d0-i) )
-      der(iy)%d0(-2:2)=M.bs.t
+      FORALL (i=0:4) t(i)=sum( der(iy,3,-2:2)*(y(iy-2:iy+2)-y(iy))**(8.0d0-i) )
+      der(iy,0,-2:2)=M.bs.t
       FORALL (i=0:4, j=0:4) M(i,j)=(y(iy-2+j)-y(iy))**(4.0d0-i); CALL LUdecomp(M)
-      t=0; FORALL (i=0:2) t(i)=sum( der(iy)%d0(-2:2)*(4.0d0-i)*(3.0d0-i)*(y(iy-2:iy+2)-y(iy))**(2.0d0-i) )
-      der(iy)%d2(-2:2)=M.bs.t
-      t=0; FORALL (i=0:3) t(i)=sum( der(iy)%d0(-2:2)*(4.0d0-i)*(y(iy-2:iy+2)-y(iy))**(3.0d0-i) )
-      der(iy)%d1(-2:2)=M.bs.t
+      t=0; FORALL (i=0:2) t(i)=sum( der(iy,0,-2:2)*(4.0d0-i)*(3.0d0-i)*(y(iy-2:iy+2)-y(iy))**(2.0d0-i) )
+      der(iy,2,-2:2)=M.bs.t
+      t=0; FORALL (i=0:3) t(i)=sum( der(iy,0,-2:2)*(4.0d0-i)*(y(iy-2:iy+2)-y(iy))**(3.0d0-i) )
+      der(iy,1,-2:2)=M.bs.t
     END DO
     FORALL (i=0:4, j=0:4) M(i,j)=(y(-1+j)-y(0))**(4.0d0-i); CALL LUdecomp(M)
     t=0; t(3)=1.0; d140(-2:2)=M.bs.t
@@ -161,7 +166,7 @@ MODULE dnsdata
     t=0; t(3)=1; d14np1(-2:2)=M.bs.t
     t=0; t(2)=2; d24np1(-2:2)=M.bs.t
     d04n=0; d04n(1)=1;
-    FORALL (iy=1:ny-1) D0mat(iy,-2:2)=der(iy)%d0(-2:2); 
+    FORALL (iy=1:ny-1) D0mat(iy,-2:2)=der(iy,0,-2:2); 
     CALL LU5decomp(D0mat)
   END SUBROUTINE setup_derivatives
 
@@ -170,7 +175,7 @@ MODULE dnsdata
   SUBROUTINE setup_boundary_conditions()
     ! Bottom wall
       v0bc=d040; v0m1bc=d140; eta0bc=d040
-      eta0m1bc=der(1)%d4
+      eta0m1bc=der(1,3,:)
       v0bc(-1:2)=v0bc(-1:2)-v0bc(-2)*v0m1bc(-1:2)/v0m1bc(-2)
       eta0bc(-1:2)=eta0bc(-1:2)-eta0bc(-2)*eta0m1bc(-1:2)/eta0m1bc(-2)
     ! Top wall
@@ -179,7 +184,7 @@ MODULE dnsdata
 #else
       vnbc=d04n; vnp1bc=d14n; etanbc=d04n
 #endif
-      etanp1bc=der(ny-1)%d4
+      etanp1bc=der(ny-1,3,:)
       vnbc(-2:1)=vnbc(-2:1)-vnbc(2)*vnp1bc(-2:1)/vnp1bc(2)
       etanbc(-2:1)=etanbc(-2:1)-etanbc(2)*etanp1bc(-2:1)/etanp1bc(2)
   END SUBROUTINE setup_boundary_conditions
@@ -200,14 +205,14 @@ MODULE dnsdata
     END DO
   END FUNCTION yintegr
 
-#define rD0(f,g,k) sum(dcmplx(der(iy)%d0(-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy)%d0(-2:2)*dreal(f(iy-2:iy+2,iz,ix,k))))
-#define rD1(f,g,k) sum(dcmplx(der(iy)%d1(-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy)%d1(-2:2)*dreal(f(iy-2:iy+2,iz,ix,k))))
-#define rD2(f,g,k) sum(dcmplx(der(iy)%d2(-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy)%d2(-2:2)*dreal(f(iy-2:iy+2,iz,ix,k))))
-#define rD4(f,g,k) sum(dcmplx(der(iy)%d4(-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy)%d4(-2:2)*dreal(f(iy-2:iy+2,iz,ix,k))))
-#define D0(f,g) sum(dcmplx(der(iy)%d0(-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy)%d0(-2:2)*dimag(f(iy-2:iy+2,iz,ix,g))))
-#define D1(f,g) sum(dcmplx(der(iy)%d1(-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy)%d1(-2:2)*dimag(f(iy-2:iy+2,iz,ix,g))))
-#define D2(f,g) sum(dcmplx(der(iy)%d2(-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy)%d2(-2:2)*dimag(f(iy-2:iy+2,iz,ix,g))))
-#define D4(f,g) sum(dcmplx(der(iy)%d4(-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy)%d4(-2:2)*dimag(f(iy-2:iy+2,iz,ix,g))))
+#define rD0(f,g,k) sum(dcmplx(der(iy,0,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,0,-2:2)*dreal(f(iy-2:iy+2,iz,ix,k))))
+#define rD1(f,g,k) sum(dcmplx(der(iy,1,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,1,-2:2)*dreal(f(iy-2:iy+2,iz,ix,k))))
+#define rD2(f,g,k) sum(dcmplx(der(iy,2,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,2,-2:2)*dreal(f(iy-2:iy+2,iz,ix,k))))
+#define rD4(f,g,k) sum(dcmplx(der(iy,3,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,3,-2:2)*dreal(f(iy-2:iy+2,iz,ix,k))))
+#define D0(f,g) sum(dcmplx(der(iy,0,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,0,-2:2)*dimag(f(iy-2:iy+2,iz,ix,g))))
+#define D1(f,g) sum(dcmplx(der(iy,1,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,1,-2:2)*dimag(f(iy-2:iy+2,iz,ix,g))))
+#define D2(f,g) sum(dcmplx(der(iy,2,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,2,-2:2)*dimag(f(iy-2:iy+2,iz,ix,g))))
+#define D4(f,g) sum(dcmplx(der(iy,3,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,3,-2:2)*dimag(f(iy-2:iy+2,iz,ix,g))))
   !--------------------------------------------------------------!
   !---COMPLEX----- derivative in the y-direction ----------------!
   SUBROUTINE COMPLEXderiv(f0,f1)
@@ -218,12 +223,12 @@ MODULE dnsdata
     f1(ny)=sum(d14n(-2:2)*f0(ny-3:ny+1))
     f1(ny+1)=sum(d14np1(-2:2)*f0(ny-3:ny+1))
     DO CONCURRENT (iy=ny0:nyN)
-      f1(iy)=sum(der(iy)%d1(-2:2)*f0(iy-2:iy+2))
+      f1(iy)=sum(der(iy,1,-2:2)*f0(iy-2:iy+2))
     END DO
-    f1(1)=f1(1)-(der(1)%d0(-1)*f1(0)+der(1)%d0(-2)*f1(-1))
-    f1(2)=f1(2)-der(2)%d0(-2)*f1(0)
-    f1(ny-1)=f1(ny-1)-(der(ny-1)%d0(1)*f1(ny)+der(ny-1)%d0(2)*f1(ny+1))
-    f1(ny-2)=f1(ny-2)-der(ny-2)%d0(2)*f1(ny)
+    f1(1)=f1(1)-(der(1,0,-1)*f1(0)+der(1,0,-2)*f1(-1))
+    f1(2)=f1(2)-der(2,0,-2)*f1(0)
+    f1(ny-1)=f1(ny-1)-(der(ny-1,0,1)*f1(ny)+der(ny-1,0,2)*f1(ny+1))
+    f1(ny-2)=f1(ny-2)-der(ny-2,0,2)*f1(ny)
     CALL LeftLU5div(f1,D0mat,f1)
   END SUBROUTINE COMPLEXderiv
 
@@ -246,8 +251,8 @@ MODULE dnsdata
   END SUBROUTINE applybc_n
 
 ! Orr-Sommerfeld and Squire opearators
-#define OS(iy,j) (ni*(der(iy)%d4(j)-2.0d0*k2(iz,ix)*der(iy)%d2(j)+k2(iz,ix)*k2(iz,ix)*der(iy)%d0(j)))
-#define SQ(iy,j) (ni*(der(iy)%d2(j)-k2(iz,ix)*der(iy)%d0(j)))
+#define OS(iy,j) (ni*(der(iy,3,j)-2.0d0*k2(iz,ix)*der(iy,2,j)+k2(iz,ix)*k2(iz,ix)*der(iy,0,j)))
+#define SQ(iy,j) (ni*(der(iy,2,j)-k2(iz,ix)*der(iy,0,j)))
   !--------------------------------------------------------------!
   !------------------- solve the linear system  -----------------!
   SUBROUTINE linsolve(lambda)
@@ -255,50 +260,51 @@ MODULE dnsdata
     integer(C_INT) :: ix,iz,i
     complex(C_DOUBLE_COMPLEX) :: temp(ny0-2:nyN+2)
     complex(C_DOUBLE_COMPLEX) :: ucor(ny0-2:nyN+2)
+    ! bc0(iz,ix,i), bcn(iz,ix,i), 		i={1:u, 2:v, 3:w, 4:vy, 5:eta}
     DO ix=nx0,nxN
       DO iz=-nz,nz
         ! Build the linear system
         DO CONCURRENT (iy=ny0:nyN)
-          D2vmat(iy,-2:2,iz)=lambda*(der(iy)%d2(-2:2)-k2(iz,ix)*der(iy)%d0(-2:2))-OS(iy,-2:2)
-          etamat(iy,-2:2,iz)=lambda*der(iy)%d0(-2:2)-SQ(iy,-2:2)
+          D2vmat(iy,-2:2,iz)=lambda*(der(iy,2,-2:2)-k2(iz,ix)*der(iy,0,-2:2))-OS(iy,-2:2)
+          etamat(iy,-2:2,iz)=lambda*der(iy,0,-2:2)-SQ(iy,-2:2)
         END DO
         IF (ix==0 .AND. iz==0) THEN
-          bc0(iz,ix)%v=0; bc0(iz,ix)%vy=0; bc0(iz,ix)%eta=dcmplx(dreal(bc0(iz,ix)%u)-dimag(bc0(iz,ix)%w),dimag(bc0(iz,ix)%u)+dreal(bc0(iz,ix)%w))
+          bc0(iz,ix,1)=0; bc0(iz,ix,4)=0; bc0(iz,ix,5)=dcmplx(dreal(bc0(iz,ix,1))-dimag(bc0(iz,ix,3)),dimag(bc0(iz,ix,1))+dreal(bc0(iz,ix,3)))
         ELSE
-          bc0(iz,ix)%vy=-ialfa(ix)*bc0(iz,ix)%u-ibeta(iz)*bc0(iz,ix)%w; bc0(iz,ix)%eta=ibeta(iz)*bc0(iz,ix)%u-ialfa(ix)*bc0(iz,ix)%w
+          bc0(iz,ix,4)=-ialfa(ix)*bc0(iz,ix,1)-ibeta(iz)*bc0(iz,ix,3); bc0(iz,ix,5)=ibeta(iz)*bc0(iz,ix,1)-ialfa(ix)*bc0(iz,ix,3)
         END IF
-        bc0(iz,ix)%v=bc0(iz,ix)%v-v0bc(-2)*bc0(iz,ix)%vy/v0m1bc(-2)
+        bc0(iz,ix,2)=bc0(iz,ix,2)-v0bc(-2)*bc0(iz,ix,4)/v0m1bc(-2)
         CALL applybc_0(D2vmat(:,:,iz),v0bc,v0m1bc)
-        V(1,iz,ix,2)=V(1,iz,ix,2)-D2vmat(1,-2,iz)*bc0(iz,ix)%vy/v0m1bc(-2)-D2vmat(1,-1,iz)*bc0(iz,ix)%v/v0bc(-1)
-        V(2,iz,ix,2)=V(2,iz,ix,2)-D2vmat(2,-2,iz)*bc0(iz,ix)%v/v0bc(-1)       
+        V(1,iz,ix,2)=V(1,iz,ix,2)-D2vmat(1,-2,iz)*bc0(iz,ix,4)/v0m1bc(-2)-D2vmat(1,-1,iz)*bc0(iz,ix,2)/v0bc(-1)
+        V(2,iz,ix,2)=V(2,iz,ix,2)-D2vmat(2,-2,iz)*bc0(iz,ix,2)/v0bc(-1)       
         CALL applybc_0(etamat(:,:,iz),eta0bc,eta0m1bc)
-        V(1,iz,ix,1)=V(1,iz,ix,1)-etamat(1,-1,iz)*bc0(iz,ix)%eta/eta0bc(-1)
-        V(2,iz,ix,1)=V(2,iz,ix,1)-etamat(2,-2,iz)*bc0(iz,ix)%eta/eta0bc(-1)
+        V(1,iz,ix,1)=V(1,iz,ix,1)-etamat(1,-1,iz)*bc0(iz,ix,5)/eta0bc(-1)
+        V(2,iz,ix,1)=V(2,iz,ix,1)-etamat(2,-2,iz)*bc0(iz,ix,5)/eta0bc(-1)
         IF (ix==0 .AND. iz==0) THEN
-          bcn(iz,ix)%v=0; bcn(iz,ix)%vy=0; bcn(iz,ix)%eta=dcmplx(dreal(bcn(iz,ix)%u)-dimag(bcn(iz,ix)%w),dimag(bcn(iz,ix)%u)+dreal(bcn(iz,ix)%w))
+          bcn(iz,ix,2)=0; bcn(iz,ix,4)=0; bcn(iz,ix,5)=dcmplx(dreal(bcn(iz,ix,1))-dimag(bcn(iz,ix,3)),dimag(bcn(iz,ix,1))+dreal(bcn(iz,ix,3)))
         ELSE
-          bcn(iz,ix)%vy=-ialfa(ix)*bcn(iz,ix)%u-ibeta(iz)*bcn(iz,ix)%w; bcn(iz,ix)%eta=ibeta(iz)*bcn(iz,ix)%u-ialfa(ix)*bcn(iz,ix)%w
+          bcn(iz,ix,4)=-ialfa(ix)*bcn(iz,ix,1)-ibeta(iz)*bcn(iz,ix,3); bcn(iz,ix,5)=ibeta(iz)*bcn(iz,ix,1)-ialfa(ix)*bcn(iz,ix,3)
         END IF
-        bcn(iz,ix)%v=bcn(iz,ix)%v-vnbc(2)*bcn(iz,ix)%vy/vnp1bc(2)
+        bcn(iz,ix,2)=bcn(iz,ix,2)-vnbc(2)*bcn(iz,ix,4)/vnp1bc(2)
         CALL applybc_n(D2vmat(:,:,iz),vnbc,vnp1bc)
-        V(ny-1,iz,ix,2)=V(ny-1,iz,ix,2)-D2vmat(ny-1,2,iz)*bcn(iz,ix)%vy/vnp1bc(2)-D2vmat(ny-1,1,iz)*bcn(iz,ix)%v/vnbc(1)
-        V(ny-2,iz,ix,2)=V(ny-2,iz,ix,2)-D2vmat(ny-2,2,iz)*bcn(iz,ix)%v/vnbc(1)
+        V(ny-1,iz,ix,2)=V(ny-1,iz,ix,2)-D2vmat(ny-1,2,iz)*bcn(iz,ix,4)/vnp1bc(2)-D2vmat(ny-1,1,iz)*bcn(iz,ix,2)/vnbc(1)
+        V(ny-2,iz,ix,2)=V(ny-2,iz,ix,2)-D2vmat(ny-2,2,iz)*bcn(iz,ix,2)/vnbc(1)
         CALL applybc_n(etamat(:,:,iz),etanbc,etanp1bc)
-        V(ny-1,iz,ix,1)=V(ny-1,iz,ix,1)-etamat(ny-1,1,iz)*bcn(iz,ix)%eta/etanbc(1) 
-        V(ny-2,iz,ix,1)=V(ny-2,iz,ix,1)-etamat(ny-2,2,iz)*bcn(iz,ix)%eta/etanbc(1)
+        V(ny-1,iz,ix,1)=V(ny-1,iz,ix,1)-etamat(ny-1,1,iz)*bcn(iz,ix,5)/etanbc(1) 
+        V(ny-2,iz,ix,1)=V(ny-2,iz,ix,1)-etamat(ny-2,2,iz)*bcn(iz,ix,5)/etanbc(1)
         ! LU decomposition and solution of the 5-diagonal system
 
         CALL LU5decomp(D2vmat(:,:,iz)); CALL LU5decomp(etamat(:,:,iz))
         CALL LeftLU5div(V(:,iz,ix,2),D2vmat(:,:,iz),V(:,iz,ix,2))
         CALL LeftLU5div(V(:,iz,ix,1),etamat(:,:,iz),V(:,iz,ix,1))
         ! Retrieve solutions at boundaries
-        V(0,iz,ix,2)=(bc0(iz,ix)%v-sum(V(1:3,iz,ix,2)*v0bc(0:2)))/v0bc(-1)
-        V(-1,iz,ix,2)=(bc0(iz,ix)%vy-sum(V(0:3,iz,ix,2)*v0m1bc(-1:2)))/v0m1bc(-2)
-        V(0,iz,ix,1)=(bc0(iz,ix)%eta-sum(V(1:3,iz,ix,1)*eta0bc(0:2)))/eta0bc(-1)
+        V(0,iz,ix,2)=(bc0(iz,ix,2)-sum(V(1:3,iz,ix,2)*v0bc(0:2)))/v0bc(-1)
+        V(-1,iz,ix,2)=(bc0(iz,ix,4)-sum(V(0:3,iz,ix,2)*v0m1bc(-1:2)))/v0m1bc(-2)
+        V(0,iz,ix,1)=(bc0(iz,ix,5)-sum(V(1:3,iz,ix,1)*eta0bc(0:2)))/eta0bc(-1)
         V(-1,iz,ix,1)=-sum(V(0:3,iz,ix,1)*eta0m1bc(-1:2))/eta0m1bc(-2)
-        V(ny,iz,ix,2)=(bcn(iz,ix)%v-sum(V(ny-3:ny-1,iz,ix,2)*vnbc(-2:0)))/vnbc(1)
-        V(ny+1,iz,ix,2)=(bcn(iz,ix)%vy-sum(V(ny-3:ny,iz,ix,2)*vnp1bc(-2:1)))/vnp1bc(2)
-        V(ny,iz,ix,1)=(bcn(iz,ix)%eta-sum(V(ny-3:ny-1,iz,ix,1)*etanbc(-2:0)))/etanbc(1)
+        V(ny,iz,ix,2)=(bcn(iz,ix,2)-sum(V(ny-3:ny-1,iz,ix,2)*vnbc(-2:0)))/vnbc(1)
+        V(ny+1,iz,ix,2)=(bcn(iz,ix,4)-sum(V(ny-3:ny,iz,ix,2)*vnp1bc(-2:1)))/vnp1bc(2)
+        V(ny,iz,ix,1)=(bcn(iz,ix,5)-sum(V(ny-3:ny-1,iz,ix,1)*etanbc(-2:0)))/etanbc(1)
         V(ny+1,iz,ix,1)=-sum(V(ny-3:ny,iz,ix,1)*etanp1bc(-2:1))/etanp1bc(2)
         ! Correct flow rate
         IF (ix==0 .AND. iz==0) THEN       
@@ -366,8 +372,8 @@ MODULE dnsdata
   !-------------------------- buildRHS --------------------------!
   ! (u,v,w) = (1,2,3)
   ! (uu,vv,ww,uv,vw,uw) = (1,2,3,4,5,6)
-#define DD(f,k) ( der(iy)%f(-2)*VVdz(izd(iz)+1,ix+1-nx0,k,im2)+der(iy)%f(-1)*VVdz(izd(iz)+1,ix+1-nx0,k,im1)+der(iy)%f(0)*VVdz(izd(iz)+1,ix+1-nx0,k,i0)+ \
-                  der(iy)%f(1 )*VVdz(izd(iz)+1,ix+1-nx0,k,i1 )+der(iy)%f(2 )*VVdz(izd(iz)+1,ix+1-nx0,k,i2 ) )
+#define DD(f,k) ( der(iy,f,-2)*VVdz(izd(iz)+1,ix+1-nx0,k,im2)+der(iy,f,-1)*VVdz(izd(iz)+1,ix+1-nx0,k,im1)+der(iy,f,0)*VVdz(izd(iz)+1,ix+1-nx0,k,i0)+ \
+                  der(iy,f,1)*VVdz(izd(iz)+1,ix+1-nx0,k,i1 )+der(iy,f,2)*VVdz(izd(iz)+1,ix+1-nx0,k,i2 ) )
   SUBROUTINE buildrhs(ODE,compute_cfl)
     logical, intent(in) :: compute_cfl
     real(C_DOUBLE), intent(in) :: ODE(1:3)
@@ -376,11 +382,11 @@ MODULE dnsdata
 #ifdef bodyforce
      iy=1; F(-1:0,:,:,:)=0
      DO CONCURRENT (iz=-nz:nz, ix=nx0:nxN, i=1:3)
-       F(-1,iz,ix,i)=-D4(F,i)/der(iy)%d4(-2) 
+       F(-1,iz,ix,i)=-D4(F,i)/der(iy,3,-2) 
      END DO
      iy=ny-1; F(ny:ny+1,:,:,:)=0
      DO CONCURRENT (iz=-nz:nz, ix=nx0:nxN, i=1:3)
-       F(ny+1,iz,ix,i)=-D4(F,i)/der(iy)%d4(2)
+       F(ny+1,iz,ix,i)=-D4(F,i)/der(iy,3,2)
      END DO
 #endif
     DO iy=-3,ny+1 
@@ -390,31 +396,31 @@ MODULE dnsdata
         im2=imod(iy-2)+1; im1=imod(iy-1)+1; i0=imod(iy)+1; i1=imod(iy+1)+1; i2=imod(iy+2)+1;
         DO iz=-nz,nz 
         DO ix=nx0,nxN
-            DD0_6=DD(d0,6); DD1_6=DD(d1,6);
-            rhsu=-ialfa(ix)*DD(d0,1)-DD(d1,4)-ibeta(iz)*DD0_6
-            rhsv=-ialfa(ix)*DD(d0,4)-DD(d1,2)-ibeta(iz)*DD(d0,5)
-            rhsw=-ialfa(ix)*DD0_6-DD(d1,5)-ibeta(iz)*DD(d0,3)
-            expl=(ialfa(ix)*(ialfa(ix)*DD(d1,1)+DD(d2,4)+ibeta(iz)*DD1_6)+&
-                  ibeta(iz)*(ialfa(ix)*DD1_6+DD(d2,5)+ibeta(iz)*DD(d1,3))-k2(iz,ix)*rhsv &
+            DD0_6=DD(0,6); DD1_6=DD(1,6);
+            rhsu=-ialfa(ix)*DD(0,1)-DD(1,4)-ibeta(iz)*DD0_6
+            rhsv=-ialfa(ix)*DD(0,4)-DD(1,2)-ibeta(iz)*DD(0,5)
+            rhsw=-ialfa(ix)*DD0_6-DD(1,5)-ibeta(iz)*DD(0,3)
+            expl=(ialfa(ix)*(ialfa(ix)*DD(1,1)+DD(2,4)+ibeta(iz)*DD1_6)+&
+                  ibeta(iz)*(ialfa(ix)*DD1_6+DD(2,5)+ibeta(iz)*DD(1,3))-k2(iz,ix)*rhsv &
 #ifdef bodyforce
                  - k2(iz,ix)*D0(F,2)-ialfa(ix)*D1(F,1)-ibeta(iz)*D1(F,3) &
 #endif
                  )
-            timescheme(newrhs(iy,iz,ix)%D2v, oldrhs(iy,iz,ix)%D2v, D2(V,2)-k2(iz,ix)*D0(V,2),sum(OS(iy,-2:2)*V(iy-2:iy+2,iz,ix,2)),expl); !(D2v)
+            timescheme(newrhs(iy,iz,ix,2), oldrhs(iy,iz,ix,2), D2(V,2)-k2(iz,ix)*D0(V,2),sum(OS(iy,-2:2)*V(iy-2:iy+2,iz,ix,2)),expl); !(D2v)
             IF (ix==0 .AND. iz==0) THEN
               expl=(dcmplx(dreal(rhsu)+meanpx,dreal(rhsw)+meanpz) &
 #ifdef bodyforce
                    +rD0(F,1,3) &
 #endif
                    )
-              timescheme(newrhs(iy,0,0)%eta,oldrhs(iy,0,0)%eta,rD0(V,1,3),ni*rD2(V,1,3),expl)!(Ubar, Wbar)
+              timescheme(newrhs(iy,0,0,1),oldrhs(iy,0,0,1),rD0(V,1,3),ni*rD2(V,1,3),expl)!(Ubar, Wbar)
             ELSE
               expl=(ibeta(iz)*rhsu-ialfa(ix)*rhsw &
 #ifdef bodyforce
                    +ibeta(iz)*D0(F,1)-ialfa(ix)*D0(F,3) &
 #endif
                    )
-              timescheme(newrhs(iy,iz,ix)%eta, oldrhs(iy,iz,ix)%eta,ibeta(iz)*D0(V,1)-ialfa(ix)*D0(V,3),sum(SQ(iy,-2:2)*[ibeta(iz)*V(iy-2:iy+2,iz,ix,1)-ialfa(ix)*V(iy-2:iy+2,iz,ix,3)]),expl) !(eta)
+              timescheme(newrhs(iy,iz,ix,1), oldrhs(iy,iz,ix,1),ibeta(iz)*D0(V,1)-ialfa(ix)*D0(V,3),sum(SQ(iy,-2:2)*[ibeta(iz)*V(iy-2:iy+2,iz,ix,1)-ialfa(ix)*V(iy-2:iy+2,iz,ix,3)]),expl) !(eta)
             END IF
         END DO
         END DO
@@ -422,7 +428,7 @@ MODULE dnsdata
       END IF
       IF (iy-2>=1) THEN 
         DO CONCURRENT (ix=nx0:nxN, iz=-nz:nz) 
-          V(iy-2,iz,ix,1) = newrhs(iy-2,iz,ix)%eta; V(iy-2,iz,ix,2) = newrhs(iy-2,iz,ix)%d2v; 
+          V(iy-2,iz,ix,1) = newrhs(iy-2,iz,ix,1); V(iy-2,iz,ix,2) = newrhs(iy-2,iz,ix,2); 
         END DO
       END IF      
     END DO

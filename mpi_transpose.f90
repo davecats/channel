@@ -17,7 +17,6 @@ MODULE mpi_transpose
   
   USE, intrinsic :: iso_c_binding
   USE, intrinsic :: iso_fortran_env
-  USE typedef
   USE mpi_f08
   
   IMPLICIT NONE

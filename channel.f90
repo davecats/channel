@@ -80,7 +80,7 @@ END IF
 #endif
     ! apply boundary conditions from dns.in (Couette-like)
     IF (has_average) THEN 
-      bc0(0,0)%u=u0; bcn(0,0)%u=uN
+      bc0(0,0,1)=u0; bcn(0,0,1)=uN
     END IF
     ! Increment number of steps
     istep=istep+1

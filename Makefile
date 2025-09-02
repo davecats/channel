@@ -17,7 +17,7 @@ FFTW_LIB = /usr/lib/
 # GCC, DEBUG (uncomment following line for GCC compiler)
 FLAGS = -cpp -O0 -malign-double -fall-intrinsics -ffree-line-length-none -fbacktrace -g  -fcheck=all -Wall
 
-OBJ = typedef.o rbmat.o mpi_transpose.o ffts.o dnsdata.o
+OBJ = rbmat.o mpi_transpose.o ffts.o dnsdata.o
 flags = -I$(FFTW_INC) -L$(FFTW_LIB) $(FLAGS)
 libs = -lfftw3
 
