@@ -84,3 +84,5 @@ dkms.conf
 
 # VS code hidden files
 .vscode/
+
+build*/
