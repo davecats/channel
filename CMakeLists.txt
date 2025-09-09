@@ -20,22 +20,58 @@ find_package(FFTW REQUIRED COMPONENTS DOUBLE_LIB)
 # --------------------------------------------------------------------
 # Sources
 # --------------------------------------------------------------------
-set(SOURCES
+add_library(channel_core
     rbmat.f90
     mpi_transpose.f90
     ffts.f90
     dnsdata.f90
-    channel.f90
+    driver.f90
 )
+
+target_link_libraries(channel_core PUBLIC MPI::MPI_Fortran FFTW::Double)
 
 # --------------------------------------------------------------------
 # Executable
 # --------------------------------------------------------------------
-add_executable(channel ${SOURCES})
+add_executable(channel ${SOURCES} channel.f90)
+target_link_libraries(channel PRIVATE channel_core)
 
-target_link_libraries(channel PRIVATE MPI::MPI_Fortran)
-target_link_libraries(channel PRIVATE FFTW::Double)
+# --------------------------------------------------------------------
+# Tests
+# --------------------------------------------------------------------
 
+set(TEST_NPROCS 1 CACHE STRING "Number of MPI ranks for regression test")
+
+add_executable(test_regression test_regression.f90)
+target_link_libraries(test_regression PRIVATE channel_core)
+
+# Add a CTest target
+enable_testing()
+
+# Register the regression test
+# You can pass input filenames here if needed
+
+# 1-rank regression test
+add_test(NAME regression_test_1rank
+    COMMAND ${MPIEXEC_EXECUTABLE}
+            ${MPIEXEC_NUMPROC_FLAG} 1
+            ${MPIEXEC_PREFLAGS}
+            $<TARGET_FILE:test_regression>
+            ${MPIEXEC_POSTFLAGS}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(regression_test_1rank PROPERTIES PROCESSORS 1)
+
+# 4-rank regression test
+add_test(NAME regression_test_4rank
+    COMMAND ${MPIEXEC_EXECUTABLE}
+            ${MPIEXEC_NUMPROC_FLAG} 2
+            ${MPIEXEC_PREFLAGS}
+            $<TARGET_FILE:test_regression>
+            ${MPIEXEC_POSTFLAGS}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(regression_test_4rank PROPERTIES PROCESSORS 4)
 # --------------------------------------------------------------------
 # Compiler flags
 # --------------------------------------------------------------------

@@ -74,9 +74,11 @@ CONTAINS
 
   !--------------------------------------------------------------!
   !---------------------- Read input files ----------------------!
-  SUBROUTINE read_dnsin()
+  SUBROUTINE read_dnsin(filename)
+    IMPLICIT NONE
     logical :: i
-    OPEN (15, file='dns.in')
+    CHARACTER(len=*), INTENT(IN) :: filename
+    OPEN (15, file=filename)
     READ (15, *) nx, ny, nz; READ (15, *) alfa0, beta0; nxd = 3*(nx + 1)/2; nzd = 3*nz
 #ifdef useFFTfit
     i = fftFIT(nxd); DO WHILE (.NOT. i); nxd = nxd + 1; i = fftFIT(nxd); END DO
@@ -450,7 +452,7 @@ CONTAINS
   !-------------------- read_restart_file -----------------------!
   SUBROUTINE read_restart_file(filename, R)
     complex(C_DOUBLE_COMPLEX), intent(INOUT) :: R(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3)
-    character(len=40), intent(IN) :: filename
+    character(len=*), intent(IN) :: filename
     integer(C_SIZE_T) :: ix, iy, iz, io
     integer(C_INT) :: r_nx, r_ny, r_nz
     real(C_DOUBLE) :: r_alfa0, r_beta0, r_ni, r_a, r_ymin, r_ymax
@@ -475,6 +477,7 @@ CONTAINS
         STOP
       END IF
     ELSE
+      IF (has_terminal) PRINT *, "Restart file "//filename//" not found"
       R = 0
       IF (has_terminal) WRITE (*, *) "Generating initial field..."
       DO iy = ny0 - 2, nyN + 2; DO ix = nx0, nxN; DO iz = -nz, nz
@@ -483,8 +486,8 @@ CONTAINS
         END DO; END DO; END DO
       IF (has_average) THEN
         DO iy = ny0 - 2, nyN + 2
-          R(iy, 0, 0, 1) = 3*0.5*y(iy)*(2 - y(iy))  !+ 0.01*SIN(8*y(iy)*2*PI)/ni
-          !V(iy,0,0,1)=y(iy)*(2-y(iy))*3.d0/2.d0 + 0.001*SIN(8*y(iy)*2*PI);
+          R(iy, 0, 0, 1) = 3*0.5*y(iy)*(2 - y(iy)) + 0.01*SIN(8*y(iy)*2*PI)/ni
+          R(iy, 0, 0, 1) = y(iy)*(2 - y(iy))*3.d0/2.d0 + 0.001*SIN(8*y(iy)*2*PI); 
           !V(iy,0,0,1)=y(iy)-1
         END DO
       END IF
