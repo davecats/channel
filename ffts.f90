@@ -60,7 +60,7 @@ CONTAINS
     integer(C_INT) :: j
     j = i
     DO WHILE (MOD(j, 2) == 0)
-      j = SHIFTA(j, 1)
+      j = ishft(j, -1)
     END DO
     isFIT = ((j == 1) .OR. (j == 3))
   END FUNCTION fftFIT

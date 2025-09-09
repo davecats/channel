@@ -86,3 +86,4 @@ dkms.conf
 .vscode/
 
 build*/
+.venv/

@@ -105,11 +105,14 @@ CONTAINS
 #endif
     IF (solveNS) then
       ALLOCATE(memrhs(0:2,-nz:nz,nx0:nxN,1:2),oldrhs(1:ny-1,-nz:nz,nx0:nxN,1:2),bc0(-nz:nz,nx0:nxN,1:5),bcn(-nz:nz,nx0:nxN,1:5)); 
+      memrhs = 0.0; oldrhs = 0.0; bc0 = 0.0; bcn = 0.0
     END IF
 #define newrhs(iy,iz,ix,i) memrhs(MOD(iy+1000,3),iz,ix,i)
 #define imod(iy) MOD(iy+1000,5)
     ALLOCATE(der(1:ny-1,0:3,-2:2),d0mat(ny0:nyN+2,-2:2),etamat(ny0:nyN+2,-2:2,-nz:nz),eta00mat(ny0:nyN+2,-2:2),D2vmat(ny0:nyN+2,-2:2,-nz:nz))
+    der = 0.0; d0mat = 0.0; etamat = 0.0; eta00mat = 0.0; D2vmat = 0.0
     ALLOCATE (y(-1:ny + 1), dy(1:ny - 1))
+    y = 0.0; dy = 0.0
     ALLOCATE (izd(-nz:nz), ialfa(nx0:nxN), ibeta(-nz:nz), k2(-nz:nz, nx0:nxN))
 #ifdef halfchannel
     FORALL (iy=-1:ny + 1) y(iy) = ymin + (ymax - ymin)*(tanh(a*(real(iy)/real(ny) - 1))/tanh(a) + 1)
@@ -337,7 +340,6 @@ CONTAINS
 
   !--------------------------------------------------------------!
   !------------------------ convolutions ------------------------!
-#define timescheme(rhs,old,unkn,impl,expl) rhs=ODE(1)*(unkn)/deltat+(impl)+ODE(2)*(expl)-ODE(3)*(old); old=expl
   SUBROUTINE convolutions(iy, i, compute_cfl)
     integer(C_INT), intent(in) :: iy, i
     logical, intent(in) :: compute_cfl
@@ -364,12 +366,14 @@ CONTAINS
       CALL xTOz(VVdx(:, :, iV, i), VVdz(:, :, iV, i))
       CALL FFT(VVdz(1:nzd, 1:nxB, iV, i)); 
     END DO
+    !print *, "i", i, "VVdz", VVdz(1:nzd, 1:nxB, iV, i)
   END SUBROUTINE convolutions
 
   !--------------------------------------------------------------!
   !-------------------------- buildRHS --------------------------!
   ! (u,v,w) = (1,2,3)
   ! (uu,vv,ww,uv,vw,uw) = (1,2,3,4,5,6)
+#define timescheme(rhs,old,unkn,impl,expl) rhs=ODE(1)*(unkn)/deltat+(impl)+ODE(2)*(expl)-ODE(3)*(old); old=expl
 #define DD(f,k) ( der(iy,f,-2)*VVdz(izd(iz)+1,ix+1-nx0,k,im2)+der(iy,f,-1)*VVdz(izd(iz)+1,ix+1-nx0,k,im1)+der(iy,f,0)*VVdz(izd(iz)+1,ix+1-nx0,k,i0)+ \
   der(iy, f, 1)*VVdz(izd(iz) + 1, ix + 1 - nx0, k, i1) + der(iy, f, 2)*VVdz(izd(iz) + 1, ix + 1 - nx0, k, i2))
   SUBROUTINE buildrhs(ODE, compute_cfl)
