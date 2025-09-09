@@ -40,7 +40,9 @@ target_link_libraries(channel PRIVATE FFTW::Double)
 # Compiler flags
 # --------------------------------------------------------------------
 if (CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
-    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cpp -Ofast -malign-double -fall-intrinsics -ffree-line-length-none")
+    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cpp -O0 -malign-double -fall-intrinsics -ffree-line-length-none")
 elseif (CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
-    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cpp -O0 -Wall")
+    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cpp -O0 -Wall -Kieee -Mnofma ")
+elseif (CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
+    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -fpp -O0 -fp-model=precise")
 endif()
