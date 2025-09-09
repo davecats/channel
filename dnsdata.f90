@@ -103,7 +103,9 @@ CONTAINS
 #ifdef bodyforce
     ALLOCATE (F(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3)); F = 0
 #endif
-    IF (solveNS) ALLOCATE(memrhs(0:2,-nz:nz,nx0:nxN,1:2),oldrhs(1:ny-1,-nz:nz,nx0:nxN,1:2),bc0(-nz:nz,nx0:nxN,1:5),bcn(-nz:nz,nx0:nxN,1:5))
+    IF (solveNS) then
+      ALLOCATE(memrhs(0:2,-nz:nz,nx0:nxN,1:2),oldrhs(1:ny-1,-nz:nz,nx0:nxN,1:2),bc0(-nz:nz,nx0:nxN,1:5),bcn(-nz:nz,nx0:nxN,1:5)); 
+    END IF
 #define newrhs(iy,iz,ix,i) memrhs(MOD(iy+1000,3),iz,ix,i)
 #define imod(iy) MOD(iy+1000,5)
     ALLOCATE(der(1:ny-1,0:3,-2:2),d0mat(ny0:nyN+2,-2:2),etamat(ny0:nyN+2,-2:2,-nz:nz),eta00mat(ny0:nyN+2,-2:2),D2vmat(ny0:nyN+2,-2:2,-nz:nz))
@@ -220,7 +222,7 @@ CONTAINS
     f1(-1) = sum(d14m1(-2:2)*f0(-1:3))
     f1(ny) = sum(d14n(-2:2)*f0(ny - 3:ny + 1))
     f1(ny + 1) = sum(d14np1(-2:2)*f0(ny - 3:ny + 1))
-    DO CONCURRENT(iy=ny0:nyN)
+    DO iy = ny0, nyN
       f1(iy) = sum(der(iy, 1, -2:2)*f0(iy - 2:iy + 2))
     END DO
     f1(1) = f1(1) - (der(1, 0, -1)*f1(0) + der(1, 0, -2)*f1(-1))
@@ -262,7 +264,7 @@ CONTAINS
     DO ix = nx0, nxN
       DO iz = -nz, nz
         ! Build the linear system
-        DO CONCURRENT(iy=ny0:nyN)
+        DO iy = ny0, nyN
           D2vmat(iy, -2:2, iz) = lambda*(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)) - OS(iy, -2:2)
           etamat(iy, -2:2, iz) = lambda*der(iy, 0, -2:2) - SQ(iy, -2:2)
         END DO
@@ -377,12 +379,20 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX) :: rhsu, rhsv, rhsw, DD0_6, DD1_6, expl
 #ifdef bodyforce
     iy = 1; F(-1:0, :, :, :) = 0
-    DO CONCURRENT(iz=-nz:nz, ix=nx0:nxN, i=1:3)
-      F(-1, iz, ix, i) = -D4(F, i)/der(iy, 3, -2)
+    DO iz = -nz, nz
+      DO ix = nx0, nxN
+        DO i = 1, 3
+          F(-1, iz, ix, i) = -D4(F, i)/der(iy, 3, -2)
+        END DO
+      END DO
     END DO
     iy = ny - 1; F(ny:ny + 1, :, :, :) = 0
-    DO CONCURRENT(iz=-nz:nz, ix=nx0:nxN, i=1:3)
-      F(ny + 1, iz, ix, i) = -D4(F, i)/der(iy, 3, 2)
+    DO iz = -nz, nz
+      DO ix = nx0, nxN
+        DO i = 1, 3
+          F(ny + 1, iz, ix, i) = -D4(F, i)/der(iy, 3, 2)
+        END DO
+      END DO
     END DO
 #endif
     DO iy = -3, ny + 1
@@ -423,8 +433,10 @@ CONTAINS
         END IF
       END IF
       IF (iy - 2 >= 1) THEN
-        DO CONCURRENT(ix=nx0:nxN, iz=-nz:nz)
-          V(iy - 2, iz, ix, 1) = newrhs(iy - 2, iz, ix, 1); V(iy - 2, iz, ix, 2) = newrhs(iy - 2, iz, ix, 2); 
+        DO ix = nx0, nxN
+          DO iz = -nz, nz
+            V(iy - 2, iz, ix, 1) = newrhs(iy - 2, iz, ix, 1); V(iy - 2, iz, ix, 2) = newrhs(iy - 2, iz, ix, 2); 
+          END DO
         END DO
       END IF
     END DO
@@ -466,7 +478,7 @@ CONTAINS
           !R(iy,iz,ix,1) = 0.0001*EXP(dcmplx(0,rn(1)-0.5));  R(iy,iz,ix,2) = 0.0001*EXP(dcmplx(0,rn(2)-0.5));  R(iy,iz,ix,3) = 0.0001*EXP(dcmplx(0,rn(3)-0.5));
         END DO; END DO; END DO
       IF (has_average) THEN
-        DO CONCURRENT(iy=ny0 - 2:nyN + 2)
+        DO iy = ny0 - 2, nyN + 2
           R(iy, 0, 0, 1) = 3*0.5*y(iy)*(2 - y(iy))  !+ 0.01*SIN(8*y(iy)*2*PI)/ni
           !V(iy,0,0,1)=y(iy)*(2-y(iy))*3.d0/2.d0 + 0.001*SIN(8*y(iy)*2*PI);
           !V(iy,0,0,1)=y(iy)-1
