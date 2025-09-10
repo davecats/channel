@@ -49,6 +49,8 @@ CONTAINS
     CALL c_f_pointer(ptrVVdz, VVdz, [nzd, nxB, sn(1), sn(2)]); 
     CALL c_f_pointer(ptrVVdx, VVdx, [nxd + 1, nzB, sn(1), sn(2)])
     CALL c_f_pointer(ptrVVdx, rVVdx, [2*(nxd + 1), nzB, sn(1), sn(2)])
+
+    !$omp target enter data map(to: VVdz)
     !FFTs plans
     pFFT = fftw_plan_many_dft(1, n_z, nxB, VVdz(:, :, 1, 1), n_z, 1, nzd, VVdz(:, :, 1, 1), n_z, 1, nzd, FFTW_FORWARD, plan_type)
     pIFT = fftw_plan_many_dft(1, n_z, nxB, VVdz(:, :, 1, 1), n_z, 1, nzd, VVdz(:, :, 1, 1), n_z, 1, nzd, FFTW_BACKWARD, plan_type)
@@ -90,7 +92,11 @@ CONTAINS
     CALL fftw_execute_dft_r2c(pHFT, rx, x)
   END SUBROUTINE HFT
 
-  SUBROUTINE free_fft()
+  SUBROUTINE free_fft(VVdz, VVdx, rVVdx)
+    complex(C_DOUBLE_COMPLEX), pointer, dimension(:, :, :, :), intent(out) :: VVdx, VVdz
+    real(C_DOUBLE), pointer, dimension(:, :, :, :), intent(out) :: rVVdx
+
+    !$omp target exit data map(from: VVdz)
     CALL fftw_free(ptrVVdx); CALL fftw_free(ptrVVdz); 
   END SUBROUTINE free_fft
 

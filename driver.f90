@@ -131,7 +131,7 @@ CONTAINS
 
     IF (has_terminal) CLOSE (102)
     ! Realease memory
-    CALL free_fft()
+    CALL free_fft(VVdz, VVdx, rVVdx)
     CALL free_memory(.TRUE.)
     CALL MPI_Finalize()
   END SUBROUTINE finalize

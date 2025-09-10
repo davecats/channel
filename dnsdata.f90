@@ -133,7 +133,7 @@ CONTAINS
     izd = (/(merge(iz, nzd + iz, iz >= 0), iz=-nz, nz)/); ialfa = (/(dcmplx(0.0d0, ix*alfa0), ix=nx0, nxN)/); 
     ibeta = (/(dcmplx(0.0d0, iz*beta0), iz=-nz, nz)/); 
     FORALL (iz=-nz:nz, ix=nx0:nxN) k2(iz, ix) = (alfa0*ix)**2.0d0 + (beta0*iz)**2.0d0
-    !$omp target enter data map(to: izd, ialfa, ibeta, k2, y, iy)
+    !$omp target enter data map(to: izd, ialfa, ibeta, k2, y, iy, rk1_rai, rk2_rai, rk3_rai, d2vmat, etamat)
     IF (solveNS .AND. has_terminal) OPEN (UNIT=101, FILE='Runtimedata', ACTION='write')
   END SUBROUTINE init_memory
 
@@ -301,14 +301,12 @@ CONTAINS
     real(C_DOUBLE), pointer :: EQ2(:, :)
     ! bc0(iz,ix,i), bcn(iz,ix,i),                 i={1:u, 2:v, 3:w, 4:vy, 5:eta}
 
-    !$omp target update to(V)
-
     !$omp target teams distribute parallel do collapse(2)  defaultmap(none) default(none)  &
     !$omp shared(d2vmat, etamat, V, d0mat) shared(y, bc0, bcn, der, k2, lambda, ni, ialfa, ibeta) &
     !$omp shared(v0bc, v0m1bc, eta0bc, eta0m1bc, vnbc, vnp1bc, etanbc, etanp1bc) &
     !$omp shared(nx0, nxN, nz, ny0, nyN, ny) &
-    !$omp shared(fr, corrpx, corrpz, meanflowz, meanflowx) &
-    !$omp private(ix, iz, iy, temp, ucor)
+    !$omp private(fr, corrpx, corrpz) shared(meanflowz, meanflowx) &
+    !$omp private(ix, iz, iy, temp, ucor) map(alloc: temp, ucor)
     DO ix = nx0, nxN
       DO iz = -nz, nz
         ! Build the linear system
@@ -457,10 +455,14 @@ CONTAINS
         CALL convolutions(iy + 2, compute_cfl)
       END IF
     END do
+
+    !$omp target update to(vvdz, v)
+
     !embarassingly parallel
     !$omp target teams distribute parallel do collapse(2) defaultmap(none) default(none)  &
     !$omp private(rhsu, rhsv, rhsw, DD0_6, DD1_6, expl) private(iz, ix, iy, im2, im1, i0, i1, i2) &
-    !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta)
+    !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(der, k2, izd) shared(memrhs, oldrhs) shared(meanpx, meanpz, ni, deltat, ode) &
+    !$omp shared(vvdz, v)
     DO iz = -nz, nz
     DO ix = nx0, nxN
     DO iy = -3, ny + 1
