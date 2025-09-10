@@ -30,6 +30,7 @@ MODULE dnsdata
   !Simulation parameters
   real(C_DOUBLE) :: PI = 3.1415926535897932384626433832795028841971
   integer(C_INT) :: ny, nz, nxd
+  !$omp declare target(ny)
   real(C_DOUBLE) :: alfa0, beta0, ni, a, ymin, ymax, deltat, cflmax, time, time0 = 0, dt_field, dt_save, t_max, gamma
   real(C_DOUBLE) :: u0, uN
   real(C_DOUBLE) :: meanpx, meanpz, meanflowx, meanflowz
@@ -44,7 +45,9 @@ MODULE dnsdata
   !Derivatives
   real(C_DOUBLE), allocatable :: der(:, :, :)
   real(C_DOUBLE), dimension(-2:2) :: d040, d140, d240, d14m1, d24m1, d04n, d14n, d24n, d14np1, d24np1
-  real(C_DOUBLE), allocatable :: D0mat(:, :), etamat(:, :, :), eta00mat(:, :), D2vmat(:, :, :)
+  !$omp declare target(d14np1, d14n, d14m1, d140)
+  real(C_DOUBLE), allocatable :: D0mat(:, :), etamat(:, :, :, :), eta00mat(:, :), D2vmat(:, :, :, :)
+
   !Fourier-transformable arrays (allocated in ffts.f90)
   complex(C_DOUBLE_COMPLEX), pointer, dimension(:, :, :, :) :: VVdx, VVdz
   real(C_DOUBLE), pointer, dimension(:, :, :, :) :: rVVdx
@@ -80,6 +83,7 @@ CONTAINS
     CHARACTER(len=*), INTENT(IN) :: filename
     OPEN (15, file=filename)
     READ (15, *) nx, ny, nz; READ (15, *) alfa0, beta0; nxd = 3*(nx + 1)/2; nzd = 3*nz
+    !$omp target update to(ny)
 #ifdef useFFTfit
     i = fftFIT(nxd); DO WHILE (.NOT. i); nxd = nxd + 1; i = fftFIT(nxd); END DO
     i = fftFIT(nzd); DO WHILE (.NOT. i); nzd = nzd + 1; i = fftFIT(nzd); END DO
@@ -99,19 +103,23 @@ CONTAINS
   !--------------------------------------------------------------!
   !---------------- Allocate memory for solution ----------------!
   SUBROUTINE init_memory(solveNS)
+    IMPLICIT NONE
     INTEGER(C_INT) :: ix, iz
     logical, intent(IN) :: solveNS
     ALLOCATE (V(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3)); V = 0
+    !$omp target enter data map(to: V)
 #ifdef bodyforce
     ALLOCATE (F(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3)); F = 0
+    !$omp target enter data map(to: F)
 #endif
     IF (solveNS) then
       ALLOCATE(memrhs(0:2,-nz:nz,nx0:nxN,1:2),oldrhs(1:ny-1,-nz:nz,nx0:nxN,1:2),bc0(-nz:nz,nx0:nxN,1:5),bcn(-nz:nz,nx0:nxN,1:5)); 
       memrhs = 0.0; oldrhs = 0.0; bc0 = 0.0; bcn = 0.0
+      !$omp target enter data map(to: memrhs, oldrhs, bc0, bcn)
     END IF
 #define newrhs(iy,iz,ix,i) memrhs(MOD(iy+1000,3),iz,ix,i)
 #define imod(iy) MOD(iy+1000,5)
-    ALLOCATE(der(1:ny-1,0:3,-2:2),d0mat(ny0:nyN+2,-2:2),etamat(ny0:nyN+2,-2:2,-nz:nz),eta00mat(ny0:nyN+2,-2:2),D2vmat(ny0:nyN+2,-2:2,-nz:nz))
+    ALLOCATE(der(1:ny-1,0:3,-2:2),d0mat(ny0:nyN+2,-2:2),etamat(ny0:nyN+2,-2:2,-nz:nz, nx0:nxN),eta00mat(ny0:nyN+2,-2:2),D2vmat(ny0:nyN+2,-2:2,-nz:nz, nx0:nxN))
     der = 0.0; d0mat = 0.0; etamat = 0.0; eta00mat = 0.0; D2vmat = 0.0
     ALLOCATE (y(-1:ny + 1), dy(1:ny - 1))
     y = 0.0; dy = 0.0
@@ -125,13 +133,22 @@ CONTAINS
     izd = (/(merge(iz, nzd + iz, iz >= 0), iz=-nz, nz)/); ialfa = (/(dcmplx(0.0d0, ix*alfa0), ix=nx0, nxN)/); 
     ibeta = (/(dcmplx(0.0d0, iz*beta0), iz=-nz, nz)/); 
     FORALL (iz=-nz:nz, ix=nx0:nxN) k2(iz, ix) = (alfa0*ix)**2.0d0 + (beta0*iz)**2.0d0
+    !$omp target enter data map(to: izd, ialfa, ibeta, k2, y, iy)
     IF (solveNS .AND. has_terminal) OPEN (UNIT=101, FILE='Runtimedata', ACTION='write')
   END SUBROUTINE init_memory
 
   !--------------------------------------------------------------!
   !--------------- Deallocate memory for solution ---------------!
   SUBROUTINE free_memory(solveNS)
+    IMPLICIT NONE
     LOGICAL, intent(IN) :: solveNS
+    !$omp target exit data map(delete: d240, d24m1, d04n, d24n, d24np1, D0mat)
+    !$omp target exit data map(delete: V)
+    !$omp target exit data map(delete: memrhs, oldrhs, bc0, bcn)
+    !$omp target exit data map(delete: izd, ialfa, ibeta, k2)
+#ifdef bodyforce
+    !$omp target exit data map(delete: F)
+#endif
     DEALLOCATE (V, der, d0mat, etamat, D2vmat, y, dy)
     IF (solveNS) THEN
       DEALLOCATE (memrhs, oldrhs, bc0, bcn)
@@ -142,6 +159,7 @@ CONTAINS
   !--------------------------------------------------------------!
   !--------------- Set-up the compact derivatives ---------------!
   SUBROUTINE setup_derivatives()
+    IMPLICIT NONE
     real(C_DOUBLE)    :: M(0:4, 0:4), t(0:4)
     integer(C_INT)    :: iy, i, j
     DO iy = 1, ny - 1
@@ -173,11 +191,14 @@ CONTAINS
     d04n = 0; d04n(1) = 1; 
     FORALL (iy=1:ny - 1) D0mat(iy, -2:2) = der(iy, 0, -2:2); 
     CALL LU5decomp(D0mat)
+    !$omp target update to(d14np1, d14n, d14m1, d140)
+    !$omp target enter data map(to: d240, d24m1, d04n, d14n, d24n, d24np1, D0mat, der)
   END SUBROUTINE setup_derivatives
 
   !--------------------------------------------------------------!
   !--------------- Set-up the boundary conditions ---------------!
   SUBROUTINE setup_boundary_conditions()
+    IMPLICIT NONE
     ! Bottom wall
     v0bc = d040; v0m1bc = d140; eta0bc = d040
     eta0m1bc = der(1, 3, :)
@@ -192,12 +213,16 @@ CONTAINS
     etanp1bc = der(ny - 1, 3, :)
     vnbc(-2:1) = vnbc(-2:1) - vnbc(2)*vnp1bc(-2:1)/vnp1bc(2)
     etanbc(-2:1) = etanbc(-2:1) - etanbc(2)*etanp1bc(-2:1)/etanp1bc(2)
+    !$omp target enter data map(to: v0bc, v0m1bc, vnbc, vnp1bc, eta0bc, eta0m1bc, etanbc, etanp1bc)
   END SUBROUTINE setup_boundary_conditions
 
   !--------------------------------------------------------------!
   !---------------- integral in the y-direction -----------------!
-  PURE FUNCTION yintegr(f) result(II)
+  !$omp declare target(yintegr)
+  PURE FUNCTION yintegr(f, y) result(II)
+    IMPLICIT NONE
     real(C_DOUBLE), intent(in) :: f(ny0 - 2:nyN + 2)
+    real(C_DOUBLE), intent(in) :: y(-1:ny + 1)
     real(C_DOUBLE) :: II, yp1, ym1, a1, a2, a3
     integer(C_INT) :: iy
     II = 0.0d0
@@ -220,9 +245,14 @@ CONTAINS
 #define D4(f,g) sum(dcmplx(der(iy,3,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,3,-2:2)*dimag(f(iy-2:iy+2,iz,ix,g))))
   !--------------------------------------------------------------!
   !---COMPLEX----- derivative in the y-direction ----------------!
-  SUBROUTINE COMPLEXderiv(f0, f1)
+  !$omp declare target(COMPLEXderiv)
+  SUBROUTINE COMPLEXderiv(f0, f1, der, D0mat)
+    IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), intent(in)  :: f0(-1:ny + 1)
     complex(C_DOUBLE_COMPLEX), intent(out) :: f1(-1:ny + 1)
+    real(C_DOUBLE), DIMENSION(:, :), intent(in) :: der(ny0:nyN, 0:3, -2:2)
+    real(C_DOUBLE), DIMENSION(:, :), intent(in) :: D0mat(ny0:nyN + 2, -2:2)
+    integer(C_INT) :: iy
     f1(0) = sum(d140(-2:2)*f0(-1:3))
     f1(-1) = sum(d14m1(-2:2)*f0(-1:3))
     f1(ny) = sum(d14n(-2:2)*f0(ny - 3:ny + 1))
@@ -239,6 +269,7 @@ CONTAINS
 
   !--------------------------------------------------------------!
   !----------------- apply the boundary conditions --------------!
+  !$omp declare target(applybc_0)
   PURE SUBROUTINE applybc_0(EQ, bc0, bc0m1)
     real(C_DOUBLE), intent(inout) :: EQ(ny0:nyN + 2, -2:2)
     real(C_DOUBLE), intent(in) :: bc0(-2:2), bc0m1(-2:2)
@@ -247,6 +278,7 @@ CONTAINS
     EQ(2, -1:1) = EQ(2, -1:1) - EQ(2, -2)*bc0(0:2)/bc0(-1)
   END SUBROUTINE applybc_0
 
+  !$omp declare target(applybc_n)
   PURE SUBROUTINE applybc_n(EQ, bcn, bcnp1)
     real(C_DOUBLE), intent(inout) :: EQ(ny0:nyN + 2, -2:2)
     real(C_DOUBLE), intent(in) :: bcn(-2:2), bcnp1(-2:2)
@@ -261,47 +293,59 @@ CONTAINS
   !--------------------------------------------------------------!
   !------------------- solve the linear system  -----------------!
   SUBROUTINE linsolve(lambda)
+    IMPLICIT NONE
     real(C_DOUBLE), intent(in) :: lambda
-    integer(C_INT) :: ix, iz, i
+    integer(C_INT) :: ix, iz, i, j
     complex(C_DOUBLE_COMPLEX) :: temp(ny0 - 2:nyN + 2)
     complex(C_DOUBLE_COMPLEX) :: ucor(ny0 - 2:nyN + 2)
+    real(C_DOUBLE), pointer :: EQ2(:, :)
     ! bc0(iz,ix,i), bcn(iz,ix,i),                 i={1:u, 2:v, 3:w, 4:vy, 5:eta}
+
+    !$omp target update to(V)
+
+    !$omp target teams distribute parallel do collapse(2)  defaultmap(none) default(none)  &
+    !$omp shared(d2vmat, etamat, V, d0mat) shared(y, bc0, bcn, der, k2, lambda, ni, ialfa, ibeta) &
+    !$omp shared(v0bc, v0m1bc, eta0bc, eta0m1bc, vnbc, vnp1bc, etanbc, etanp1bc) &
+    !$omp shared(nx0, nxN, nz, ny0, nyN, ny) &
+    !$omp shared(fr, corrpx, corrpz, meanflowz, meanflowx) &
+    !$omp private(ix, iz, iy, temp, ucor)
     DO ix = nx0, nxN
       DO iz = -nz, nz
         ! Build the linear system
         DO iy = ny0, nyN
-          D2vmat(iy, -2:2, iz) = lambda*(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)) - OS(iy, -2:2)
-          etamat(iy, -2:2, iz) = lambda*der(iy, 0, -2:2) - SQ(iy, -2:2)
+          D2vmat(iy, -2:2, iz, ix) = lambda*(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)) - OS(iy, -2:2)
+          etamat(iy, -2:2, iz, ix) = lambda*der(iy, 0, -2:2) - SQ(iy, -2:2)
         END DO
+
         IF (ix == 0 .AND. iz == 0) THEN
           bc0(iz, ix, 1) = 0; bc0(iz, ix, 4) = 0; bc0(iz, ix, 5) = dcmplx(dreal(bc0(iz, ix, 1)) - dimag(bc0(iz, ix, 3)), dimag(bc0(iz, ix, 1)) + dreal(bc0(iz, ix, 3)))
         ELSE
           bc0(iz, ix, 4) = -ialfa(ix)*bc0(iz, ix, 1) - ibeta(iz)*bc0(iz, ix, 3); bc0(iz, ix, 5) = ibeta(iz)*bc0(iz, ix, 1) - ialfa(ix)*bc0(iz, ix, 3)
         END IF
         bc0(iz, ix, 2) = bc0(iz, ix, 2) - v0bc(-2)*bc0(iz, ix, 4)/v0m1bc(-2)
-        CALL applybc_0(D2vmat(:, :, iz), v0bc, v0m1bc)
-        V(1, iz, ix, 2) = V(1, iz, ix, 2) - D2vmat(1, -2, iz)*bc0(iz, ix, 4)/v0m1bc(-2) - D2vmat(1, -1, iz)*bc0(iz, ix, 2)/v0bc(-1)
-        V(2, iz, ix, 2) = V(2, iz, ix, 2) - D2vmat(2, -2, iz)*bc0(iz, ix, 2)/v0bc(-1)
-        CALL applybc_0(etamat(:, :, iz), eta0bc, eta0m1bc)
-        V(1, iz, ix, 1) = V(1, iz, ix, 1) - etamat(1, -1, iz)*bc0(iz, ix, 5)/eta0bc(-1)
-        V(2, iz, ix, 1) = V(2, iz, ix, 1) - etamat(2, -2, iz)*bc0(iz, ix, 5)/eta0bc(-1)
+        CALL applybc_0(D2vmat(:, :, iz, ix), v0bc, v0m1bc)
+ V(1, iz, ix, 2) = V(1, iz, ix, 2) - D2vmat(1, -2, iz, ix)*bc0(iz, ix, 4)/v0m1bc(-2) - D2vmat(1, -1, iz, ix)*bc0(iz, ix, 2)/v0bc(-1)
+        V(2, iz, ix, 2) = V(2, iz, ix, 2) - D2vmat(2, -2, iz, ix)*bc0(iz, ix, 2)/v0bc(-1)
+        CALL applybc_0(etamat(:, :, iz, ix), eta0bc, eta0m1bc)
+        V(1, iz, ix, 1) = V(1, iz, ix, 1) - etamat(1, -1, iz, ix)*bc0(iz, ix, 5)/eta0bc(-1)
+        V(2, iz, ix, 1) = V(2, iz, ix, 1) - etamat(2, -2, iz, ix)*bc0(iz, ix, 5)/eta0bc(-1)
         IF (ix == 0 .AND. iz == 0) THEN
           bcn(iz, ix, 2) = 0; bcn(iz, ix, 4) = 0; bcn(iz, ix, 5) = dcmplx(dreal(bcn(iz, ix, 1)) - dimag(bcn(iz, ix, 3)), dimag(bcn(iz, ix, 1)) + dreal(bcn(iz, ix, 3)))
         ELSE
           bcn(iz, ix, 4) = -ialfa(ix)*bcn(iz, ix, 1) - ibeta(iz)*bcn(iz, ix, 3); bcn(iz, ix, 5) = ibeta(iz)*bcn(iz, ix, 1) - ialfa(ix)*bcn(iz, ix, 3)
         END IF
         bcn(iz, ix, 2) = bcn(iz, ix, 2) - vnbc(2)*bcn(iz, ix, 4)/vnp1bc(2)
-        CALL applybc_n(D2vmat(:, :, iz), vnbc, vnp1bc)
-        V(ny-1,iz,ix,2)=V(ny-1,iz,ix,2)-D2vmat(ny-1,2,iz)*bcn(iz,ix,4)/vnp1bc(2)-D2vmat(ny-1,1,iz)*bcn(iz,ix,2)/vnbc(1)
-        V(ny - 2, iz, ix, 2) = V(ny - 2, iz, ix, 2) - D2vmat(ny - 2, 2, iz)*bcn(iz, ix, 2)/vnbc(1)
-        CALL applybc_n(etamat(:, :, iz), etanbc, etanp1bc)
-        V(ny - 1, iz, ix, 1) = V(ny - 1, iz, ix, 1) - etamat(ny - 1, 1, iz)*bcn(iz, ix, 5)/etanbc(1)
-        V(ny - 2, iz, ix, 1) = V(ny - 2, iz, ix, 1) - etamat(ny - 2, 2, iz)*bcn(iz, ix, 5)/etanbc(1)
+        CALL applybc_n(D2vmat(:, :, iz, ix), vnbc, vnp1bc)
+        V(ny-1,iz,ix,2)=V(ny-1,iz,ix,2)-D2vmat(ny-1,2,iz, ix)*bcn(iz,ix,4)/vnp1bc(2)-D2vmat(ny-1,1,iz, ix)*bcn(iz,ix,2)/vnbc(1)
+        V(ny - 2, iz, ix, 2) = V(ny - 2, iz, ix, 2) - D2vmat(ny - 2, 2, iz, ix)*bcn(iz, ix, 2)/vnbc(1)
+        CALL applybc_n(etamat(:, :, iz, ix), etanbc, etanp1bc)
+        V(ny - 1, iz, ix, 1) = V(ny - 1, iz, ix, 1) - etamat(ny - 1, 1, iz, ix)*bcn(iz, ix, 5)/etanbc(1)
+        V(ny - 2, iz, ix, 1) = V(ny - 2, iz, ix, 1) - etamat(ny - 2, 2, iz, ix)*bcn(iz, ix, 5)/etanbc(1)
         ! LU decomposition and solution of the 5-diagonal system
 
-        CALL LU5decomp(D2vmat(:, :, iz)); CALL LU5decomp(etamat(:, :, iz))
-        CALL LeftLU5div(V(:, iz, ix, 2), D2vmat(:, :, iz), V(:, iz, ix, 2))
-        CALL LeftLU5div(V(:, iz, ix, 1), etamat(:, :, iz), V(:, iz, ix, 1))
+        CALL LU5decomp(D2vmat(:, :, iz, ix)); CALL LU5decomp(etamat(:, :, iz, ix))
+        CALL LeftLU5div(V(:, iz, ix, 2), D2vmat(:, :, iz, ix), V(:, iz, ix, 2))
+        CALL LeftLU5div(V(:, iz, ix, 1), etamat(:, :, iz, ix), V(:, iz, ix, 1))
         ! Retrieve solutions at boundaries
         V(0, iz, ix, 2) = (bc0(iz, ix, 2) - sum(V(1:3, iz, ix, 2)*v0bc(0:2)))/v0bc(-1)
         V(-1, iz, ix, 2) = (bc0(iz, ix, 4) - sum(V(0:3, iz, ix, 2)*v0m1bc(-1:2)))/v0m1bc(-2)
@@ -316,12 +360,12 @@ CONTAINS
           V(:, 0, 0, 3) = dcmplx(dimag(V(:, 0, 0, 1)), 0.d0); 
           V(:, 0, 0, 1) = dcmplx(dreal(V(:, 0, 0, 1)), 0.d0); 
           ucor(ny0 - 2:ny0 - 1) = 0; ucor(ny0:nyN) = 1; ucor(nyN + 1:nyN + 2) = 0
-          CALL LeftLU5div(ucor, etamat(:, :, iz), ucor)
+          CALL LeftLU5div(ucor, etamat(:, :, iz, ix), ucor)
           ucor(0) = -sum(ucor(1:3)*eta0bc(0:2))/eta0bc(-1)
           ucor(-1) = -sum(ucor(0:3)*eta0m1bc(-1:2))/eta0m1bc(-2)
           ucor(ny) = -sum(ucor(ny - 3:ny - 1)*etanbc(-2:0))/etanbc(1)
           ucor(ny + 1) = -sum(ucor(ny - 3:ny)*etanp1bc(-2:1))/etanp1bc(2)
-          fr(1) = yintegr(dreal(V(:, 0, 0, 1))); fr(2) = yintegr(dreal(V(:, 0, 0, 3))); fr(3) = yintegr(dreal(ucor))
+          fr(1) = yintegr(dreal(V(:, 0, 0, 1)), y); fr(2) = yintegr(dreal(V(:, 0, 0, 3)), y); fr(3) = yintegr(dreal(ucor), y)
           IF (abs(meanflowx) > 1.0d-7) THEN
             corrpx = (meanflowx - fr(1))/fr(3)
             V(:, 0, 0, 1) = dcmplx(dreal(V(:, 0, 0, 1)) + corrpx*dreal(ucor), dimag(V(:, 0, 0, 1)))
@@ -331,18 +375,20 @@ CONTAINS
             V(:, 0, 0, 3) = dcmplx(dreal(V(:, 0, 0, 3)) + corrpz*dreal(ucor), dimag(V(:, 0, 0, 3)))
           END IF
         ELSE
-          CALL COMPLEXderiv(V(:, iz, ix, 2), V(:, iz, ix, 3))
+          CALL COMPLEXderiv(V(:, iz, ix, 2), V(:, iz, ix, 3), der, D0mat)
           temp = (ialfa(ix)*V(:, iz, ix, 3) - ibeta(iz)*V(:, iz, ix, 1))/k2(iz, ix)
           V(:, iz, ix, 3) = (ibeta(iz)*V(:, iz, ix, 3) + ialfa(ix)*V(:, iz, ix, 1))/k2(iz, ix)
           V(:, iz, ix, 1) = temp
         END IF
       END DO
     END DO
+    !$omp target update from(V)
   END SUBROUTINE linsolve
 
   !--------------------------------------------------------------!
   !------------------------ convolutions ------------------------!
   SUBROUTINE convolutions(iy, i, compute_cfl)
+    IMPLICIT NONE
     integer(C_INT), intent(in) :: iy, i
     logical, intent(in) :: compute_cfl
     integer(C_INT) :: iV
@@ -379,6 +425,7 @@ CONTAINS
 #define DD(f,k) ( der(iy,f,-2)*VVdz(izd(iz)+1,ix+1-nx0,k,im2)+der(iy,f,-1)*VVdz(izd(iz)+1,ix+1-nx0,k,im1)+der(iy,f,0)*VVdz(izd(iz)+1,ix+1-nx0,k,i0)+ \
   der(iy, f, 1)*VVdz(izd(iz) + 1, ix + 1 - nx0, k, i1) + der(iy, f, 2)*VVdz(izd(iz) + 1, ix + 1 - nx0, k, i2))
   SUBROUTINE buildrhs(ODE, compute_cfl)
+    IMPLICIT NONE
     logical, intent(in) :: compute_cfl
     real(C_DOUBLE), intent(in) :: ODE(1:3)
     integer(C_INT) :: iy, iz, ix, i, im2, im1, i0, i1, i2
@@ -451,6 +498,7 @@ CONTAINS
   !--------------------------------------------------------------!
   !-------------------- read_restart_file -----------------------!
   SUBROUTINE read_restart_file(filename, R)
+    IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), intent(INOUT) :: R(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3)
     character(len=*), intent(IN) :: filename
     integer(C_SIZE_T) :: ix, iy, iz, io
@@ -498,6 +546,7 @@ CONTAINS
   !--------------------------------------------------------------!
   !-------------------- save_restart_file -----------------------!
   SUBROUTINE save_restart_file(filename, R)
+    IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), intent(in) :: R(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3)
     character(len=40), intent(in) :: filename
     ! mpi stuff
@@ -529,6 +578,7 @@ CONTAINS
   !--------------------------------------------------------------!
   !------------------------- outstats ---------------------------!
   SUBROUTINE outstats()
+    IMPLICIT NONE
     real(C_DOUBLE) :: runtime_global, dudy(1:2, 1:2)   !cfl
     character(len=40) :: istring, filename
     CALL MPI_Allreduce(cfl, runtime_global, 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD); cfl = 0; 

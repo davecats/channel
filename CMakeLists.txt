@@ -78,7 +78,7 @@ set_tests_properties(regression_test_4rank PROPERTIES PROCESSORS 4)
 if (CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cpp -O0 -malign-double -fall-intrinsics -ffree-line-length-none")
 elseif (CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
-    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cpp -O0 -Wall -Kieee -Mnofma -Mbounds -traceback")
+    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cpp -O2 -Wall -Kieee -Mnofma -traceback -mp -mp=gpu -Minfo=mp -Mcache_align -gpu=sm_75") #
 elseif (CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -fpp -O0 -fp-model=precise")
 endif()

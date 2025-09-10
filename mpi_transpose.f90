@@ -24,6 +24,7 @@ MODULE mpi_transpose
   TYPE(MPI_Comm) :: MPI_CART_COMM, MPI_COMM_X, MPI_COMM_Y
   integer(C_INT), save :: nproc, iproc, ierr, nzd, nx
   integer(C_INT), save :: nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN, miny, maxy, block
+  !$omp declare target(ny0, nyN)
   complex(C_DOUBLE_COMPLEX), allocatable :: Ain(:), Aout(:)
   logical, save :: has_terminal, has_average
   TYPE(MPI_Datatype), save :: writeview_type, owned2write_type, vel_read_type, vel_field_type
@@ -109,6 +110,8 @@ CONTAINS
     has_terminal = (iproc == 0)
     ! Calculate domain division in wall-normal direction
     ny0 = 1; nyN = ny - 1; miny = ny0 - 2; maxy = nyN + 2
+    !$omp target update to(ny0, nyN)
+
     ! Calculate domain division
     nx0 = iproc*(nxpp)/nproc; nxN = (iproc + 1)*(nxpp)/nproc - 1; nxB = nxN - nx0 + 1; 
     nz0 = iproc*nzd/nproc; nzN = (iproc + 1)*nzd/nproc - 1; nzB = nzN - nz0 + 1; 

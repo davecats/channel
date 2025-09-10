@@ -77,6 +77,7 @@ CONTAINS
 
   !---- in-place LU Decomposition of a banded matrix ---!
   !-----------------------------------------------------!
+  !$omp declare target(LU5decomp)
   SUBROUTINE LU5decomp(A)
     real(C_DOUBLE), intent(inout) :: A(0:, -2:)
     integer(C_INT) :: HI1, HI2
@@ -145,6 +146,7 @@ CONTAINS
 
   !- Left LU division of a banded matrix -!
   !---------------------------------------!
+  !$omp declare target(LeftLU5div)
   SUBROUTINE LeftLU5div(x, A, b)
     complex(C_DOUBLE_COMPLEX), intent(out) :: x(-2:)
     complex(C_DOUBLE_COMPLEX), intent(in) :: b(-2:)

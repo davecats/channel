@@ -72,7 +72,7 @@ CONTAINS
     END DO
     ! Compute flow rate
     IF (has_average) THEN
-      fr(1) = yintegr(dreal(V(:, 0, 0, 1))); fr(2) = yintegr(dreal(V(:, 0, 0, 3))); 
+      fr(1) = yintegr(dreal(V(:, 0, 0, 1)), y); fr(2) = yintegr(dreal(V(:, 0, 0, 3)), y); 
     END IF
     CALL outstats()
   END SUBROUTINE initialize
