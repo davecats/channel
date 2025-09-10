@@ -23,8 +23,8 @@ MODULE ffts
 
 CONTAINS
 
-  SUBROUTINE init_fft(VVdz, VVdx, rVVdx, nxd, nxB, nzd, nzB, odd_n_real, s)
-    integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB
+  SUBROUTINE init_fft(VVdz, VVdx, rVVdx, nxd, nxB, ny, nzd, nzB, odd_n_real, s)
+    integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, ny
     complex(C_DOUBLE_COMPLEX), pointer, dimension(:, :, :, :), intent(out) :: VVdx, VVdz
     real(C_DOUBLE), pointer, dimension(:, :, :, :), intent(out) :: rVVdx
     logical, optional, intent(in) :: odd_n_real
@@ -39,12 +39,15 @@ CONTAINS
       if (odd_n_real .eqv. .TRUE.) rn_x = rn_x - 1
     end if
     if (present(s)) sn = s
+
+    sn(2) = ny + 3
     !Allocate aligned memory
     ptrVVdz = fftw_alloc_complex(int(nxB*nzd*sn(1)*sn(2), C_SIZE_T))
     ptrVVdx = fftw_alloc_complex(int((nxd + 1)*nzB*sn(1)*sn(2), C_SIZE_T))
 
     !Convert C to F pointer
-    CALL c_f_pointer(ptrVVdz, VVdz, [nzd, nxB, sn(1), sn(2)]); CALL c_f_pointer(ptrVVdx, VVdx, [nxd + 1, nzB, sn(1), sn(2)])
+    CALL c_f_pointer(ptrVVdz, VVdz, [nzd, nxB, sn(1), sn(2)]); 
+    CALL c_f_pointer(ptrVVdx, VVdx, [nxd + 1, nzB, sn(1), sn(2)])
     CALL c_f_pointer(ptrVVdx, rVVdx, [2*(nxd + 1), nzB, sn(1), sn(2)])
     !FFTs plans
     pFFT = fftw_plan_many_dft(1, n_z, nxB, VVdz(:, :, 1, 1), n_z, 1, nzd, VVdz(:, :, 1, 1), n_z, 1, nzd, FFTW_FORWARD, plan_type)

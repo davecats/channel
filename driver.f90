@@ -35,7 +35,7 @@ CONTAINS
     CALL init_memory(.TRUE.)
 
     ! Init various subroutines
-    CALL init_fft(VVdz, VVdx, rVVdx, nxd, nxB, nzd, nzB)
+    CALL init_fft(VVdz, VVdx, rVVdx, nxd, nxB, ny, nzd, nzB)
     CALL setup_derivatives()
     CALL setup_boundary_conditions()
     CALL read_restart_file(restart_file, V)
@@ -68,7 +68,7 @@ CONTAINS
     ! Compute CFL
     DO iy = ny0, nyN
       IF (deltat == 0) deltat = 1.0; 
-      CALL convolutions(iy, 1, .TRUE.)
+      CALL convolutions(iy, .TRUE.)
     END DO
     ! Compute flow rate
     IF (has_average) THEN

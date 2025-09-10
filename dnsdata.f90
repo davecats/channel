@@ -387,11 +387,15 @@ CONTAINS
 
   !--------------------------------------------------------------!
   !------------------------ convolutions ------------------------!
-  SUBROUTINE convolutions(iy, i, compute_cfl)
+
+  SUBROUTINE convolutions(iy, compute_cfl)
     IMPLICIT NONE
-    integer(C_INT), intent(in) :: iy, i
+    integer(C_INT), intent(in) :: iy
+    integer(C_INT) :: i
     logical, intent(in) :: compute_cfl
     integer(C_INT) :: iV
+    i = iy + 2
+
     VVdz(1:nz + 1, 1:nxB, 1:3, i) = V(iy, 0:nz, nx0:nxN, 1:3); VVdz(nz + 2:nzd - nz, 1:nxB, 1:3, i) = 0; 
     VVdz(nzd + 1 - nz:nzd, 1:nxB, 1:3, i) = V(iy, -nz:-1, nx0:nxN, 1:3); 
     DO iV = 1, 3
@@ -450,48 +454,52 @@ CONTAINS
 #endif
     DO iy = -3, ny + 1
       IF (iy <= ny - 1) THEN
-        CALL convolutions(iy + 2, imod(iy + 2) + 1, compute_cfl)
+        CALL convolutions(iy + 2, compute_cfl)
+      END IF
+    END do
+    !embarassingly parallel
+    !$omp target teams distribute parallel do collapse(2) defaultmap(none) default(none)  &
+    !$omp private(rhsu, rhsv, rhsw, DD0_6, DD1_6, expl) private(iz, ix, iy, im2, im1, i0, i1, i2) &
+    !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta)
+    DO iz = -nz, nz
+    DO ix = nx0, nxN
+    DO iy = -3, ny + 1
+      IF (iy <= ny - 1) THEN
         IF (iy >= 1) THEN
-          im2 = imod(iy - 2) + 1; im1 = imod(iy - 1) + 1; i0 = imod(iy) + 1; i1 = imod(iy + 1) + 1; i2 = imod(iy + 2) + 1; 
-          DO iz = -nz, nz
-          DO ix = nx0, nxN
-            DD0_6 = DD(0, 6); DD1_6 = DD(1, 6); 
-            rhsu = -ialfa(ix)*DD(0, 1) - DD(1, 4) - ibeta(iz)*DD0_6
-            rhsv = -ialfa(ix)*DD(0, 4) - DD(1, 2) - ibeta(iz)*DD(0, 5)
-            rhsw = -ialfa(ix)*DD0_6 - DD(1, 5) - ibeta(iz)*DD(0, 3)
-            expl = (ialfa(ix)*(ialfa(ix)*DD(1, 1) + DD(2, 4) + ibeta(iz)*DD1_6) + &
-                    ibeta(iz)*(ialfa(ix)*DD1_6 + DD(2, 5) + ibeta(iz)*DD(1, 3)) - k2(iz, ix)*rhsv &
+          im2 = iy; im1 = iy + 1; i0 = iy + 2; i1 = iy + 3; i2 = iy + 4; 
+          DD0_6 = DD(0, 6); DD1_6 = DD(1, 6); 
+          rhsu = -ialfa(ix)*DD(0, 1) - DD(1, 4) - ibeta(iz)*DD0_6
+          rhsv = -ialfa(ix)*DD(0, 4) - DD(1, 2) - ibeta(iz)*DD(0, 5)
+          rhsw = -ialfa(ix)*DD0_6 - DD(1, 5) - ibeta(iz)*DD(0, 3)
+          expl = (ialfa(ix)*(ialfa(ix)*DD(1, 1) + DD(2, 4) + ibeta(iz)*DD1_6) + &
+                  ibeta(iz)*(ialfa(ix)*DD1_6 + DD(2, 5) + ibeta(iz)*DD(1, 3)) - k2(iz, ix)*rhsv &
 #ifdef bodyforce
-                    - k2(iz, ix)*D0(F, 2) - ialfa(ix)*D1(F, 1) - ibeta(iz)*D1(F, 3) &
+                  - k2(iz, ix)*D0(F, 2) - ialfa(ix)*D1(F, 1) - ibeta(iz)*D1(F, 3) &
+#endif
+                  )
+          timescheme(newrhs(iy,iz,ix,2), oldrhs(iy,iz,ix,2), D2(V,2)-k2(iz,ix)*D0(V,2),sum(OS(iy,-2:2)*V(iy-2:iy+2,iz,ix,2)),expl); !(D2v)
+          IF (ix == 0 .AND. iz == 0) THEN
+            expl = (dcmplx(dreal(rhsu) + meanpx, dreal(rhsw) + meanpz) &
+#ifdef bodyforce
+                    + rD0(F, 1, 3) &
 #endif
                     )
-            timescheme(newrhs(iy,iz,ix,2), oldrhs(iy,iz,ix,2), D2(V,2)-k2(iz,ix)*D0(V,2),sum(OS(iy,-2:2)*V(iy-2:iy+2,iz,ix,2)),expl); !(D2v)
-            IF (ix == 0 .AND. iz == 0) THEN
-              expl = (dcmplx(dreal(rhsu) + meanpx, dreal(rhsw) + meanpz) &
+            timescheme(newrhs(iy, 0, 0, 1), oldrhs(iy, 0, 0, 1), rD0(V, 1, 3), ni*rD2(V, 1, 3), expl)!(Ubar, Wbar)
+          ELSE
+            expl = (ibeta(iz)*rhsu - ialfa(ix)*rhsw &
 #ifdef bodyforce
-                      + rD0(F, 1, 3) &
+                    + ibeta(iz)*D0(F, 1) - ialfa(ix)*D0(F, 3) &
 #endif
-                      )
-              timescheme(newrhs(iy, 0, 0, 1), oldrhs(iy, 0, 0, 1), rD0(V, 1, 3), ni*rD2(V, 1, 3), expl)!(Ubar, Wbar)
-            ELSE
-              expl = (ibeta(iz)*rhsu - ialfa(ix)*rhsw &
-#ifdef bodyforce
-                      + ibeta(iz)*D0(F, 1) - ialfa(ix)*D0(F, 3) &
-#endif
-                      )
+                    )
               timescheme(newrhs(iy,iz,ix,1), oldrhs(iy,iz,ix,1),ibeta(iz)*D0(V,1)-ialfa(ix)*D0(V,3),sum(SQ(iy,-2:2)*[ibeta(iz)*V(iy-2:iy+2,iz,ix,1)-ialfa(ix)*V(iy-2:iy+2,iz,ix,3)]),expl) !(eta)
-            END IF
-          END DO
-          END DO
+          END IF
         END IF
       END IF
       IF (iy - 2 >= 1) THEN
-        DO ix = nx0, nxN
-          DO iz = -nz, nz
-            V(iy - 2, iz, ix, 1) = newrhs(iy - 2, iz, ix, 1); V(iy - 2, iz, ix, 2) = newrhs(iy - 2, iz, ix, 2); 
-          END DO
-        END DO
+        V(iy - 2, iz, ix, 1) = newrhs(iy - 2, iz, ix, 1); V(iy - 2, iz, ix, 2) = newrhs(iy - 2, iz, ix, 2); 
       END IF
+    END DO
+    END DO
     END DO
   END SUBROUTINE buildrhs
 
