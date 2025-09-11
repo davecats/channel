@@ -114,11 +114,11 @@ CONTAINS
     !$omp target enter data map(to: F)
 #endif
     IF (solveNS) then
-      ALLOCATE(memrhs(0:2,-nz:nz,nx0:nxN,1:2),oldrhs(1:ny-1,-nz:nz,nx0:nxN,1:2),bc0(-nz:nz,nx0:nxN,1:5),bcn(-nz:nz,nx0:nxN,1:5)); 
+      ALLOCATE(memrhs(1:ny-1,-nz:nz,nx0:nxN,1:2),oldrhs(1:ny-1,-nz:nz,nx0:nxN,1:2),bc0(-nz:nz,nx0:nxN,1:5),bcn(-nz:nz,nx0:nxN,1:5)); 
       memrhs = 0.0; oldrhs = 0.0; bc0 = 0.0; bcn = 0.0
       !$omp target enter data map(to: memrhs, oldrhs, bc0, bcn)
     END IF
-#define newrhs(iy,iz,ix,i) memrhs(MOD(iy+1000,3),iz,ix,i)
+#define newrhs(iy,iz,ix,i) memrhs(iy,iz,ix,i)
 #define imod(iy) MOD(iy+1000,5)
     ALLOCATE(der(1:ny-1,0:3,-2:2),d0mat(ny0:nyN+2,-2:2),etamat(ny0:nyN+2,-2:2,-nz:nz, nx0:nxN),eta00mat(ny0:nyN+2,-2:2),D2vmat(ny0:nyN+2,-2:2,-nz:nz, nx0:nxN))
     der = 0.0; d0mat = 0.0; etamat = 0.0; eta00mat = 0.0; D2vmat = 0.0
@@ -390,8 +390,8 @@ CONTAINS
   SUBROUTINE convolutions(compute_cfl)
     IMPLICIT NONE
     integer(C_INT) :: iy
-    integer(C_INT) :: i, j, k
-    real(C_DOUBLE) :: tmp
+    integer(C_INT) :: i, j, k, m
+    real(C_DOUBLE) :: tmp, a, b, c
     logical, intent(in) :: compute_cfl
     integer(C_INT) :: iV
     integer :: istat
@@ -399,28 +399,41 @@ CONTAINS
 
     !$omp target update to(V)
 
-    !$omp target teams distribute parallel do defaultmap(none) default(none) &
-    !$omp shared(V, VVdz) shared(ny, nxB, nzd, nx0, nxN, nz)
+    !$omp target teams distribute parallel do collapse(4) defaultmap(none) default(none) &
+    !$omp shared(V, VVdz) shared(ny, nxB, nzd, nx0, nxN, nz) private(i,j,k,m)
     DO i = 1, ny + 3
-      VVdz(1:nz + 1, 1:nxB, 1:3, i) = V(i - 2, 0:nz, nx0:nxN, 1:3); 
-      VVdz(nz + 2:nzd - nz, 1:nxB, 1:3, i) = 0; 
-      VVdz(nzd + 1 - nz:nzd, 1:nxB, 1:3, i) = V(i - 2, -nz:-1, nx0:nxN, 1:3); 
+      DO k = 1, nzd
+        DO j = 1, nxB
+          DO m = 1, 3
+            IF (k <= nz + 1) THEN
+              VVdz(k, j, m, i) = V(i - 2, k - 1, j + nx0 - 1, m)
+            ELSEIF (k >= nz + 2 .AND. k <= nzd - nz) THEN
+              VVdz(k, j, m, i) = 0.0
+            ELSE
+              VVdz(k, j, m, i) = V(i - 2, k - nzd - 1, j + nx0 - 1, m)
+            END IF
+          END DO
+        END DO
+      END DO
     END DO
     CALL IFT(VVdz, ny)
+    print *, "before zTOx"
     !$omp target update from(VVdz)
-    DO i = 1, ny + 3
-      DO iV = 1, 3
-        CALL zTOx(VVdz(:, :, iV, i), VVdx(:, :, iV, i))
-      END DO
-    END DO
-    !$omp target update to (VVdx)
+    CALL zTOx(VVdz, VVdx, ny)
+    !$omp target update to(VVdx)
+    print *, "after zTOx"
 
-    !$omp target teams distribute parallel do collapse(2) defaultmap(none) default(none) shared(VVdx) shared(nx, nxd, nzB, ny)
+    !$omp target teams distribute parallel do collapse(4) defaultmap(none) default(none) shared(VVdx) shared(nx, nxd, nzB, ny)
     DO i = 1, ny + 3
       DO iV = 1, 6
-        VVdx(nx + 2:nxd + 1, 1:nzB, iV, i) = 0; 
+        DO j = 1, nzB
+          DO k = nx + 2, nxd + 1
+            VVdx(k, j, iV, i) = 0.0
+          END DO
+        END DO
       END DO
     END DO
+
     CALL RFT(VVdx, rVVdx, ny)
     if (compute_cfl) THEN
       !$omp target teams distribute parallel do collapse(3) default(none) defaultmap(none) &
@@ -436,22 +449,31 @@ CONTAINS
       end do
     END IF
 
-    !$omp target teams distribute parallel do defaultmap(none) default(none) &
-    !$omp shared(rVVdx) shared(nxd, nzB, ny, factor)
+    !$omp target teams distribute parallel do collapse(3) defaultmap(none) default(none) &
+    !$omp shared(rVVdx) shared(nxd, nzB, ny, factor) private(a, b, c)
     DO i = 1, ny + 3
-      rVVdx(1:2*nxd, 1:nzB, 4, i) = rVVdx(1:2*nxd, 1:nzB, 1, i)*rVVdx(1:2*nxd, 1:nzB, 2, i)*factor
-      rVVdx(1:2*nxd, 1:nzB, 5, i) = rVVdx(1:2*nxd, 1:nzB, 2, i)*rVVdx(1:2*nxd, 1:nzB, 3, i)*factor
-      rVVdx(1:2*nxd, 1:nzB, 6, i) = rVVdx(1:2*nxd, 1:nzB, 1, i)*rVVdx(1:2*nxd, 1:nzB, 3, i)*factor
-      rVVdx(1:2*nxd, 1:nzB, 1:3, i) = rVVdx(1:2*nxd, 1:nzB, 1:3, i)*rVVdx(1:2*nxd, 1:nzB, 1:3, i)*factor
-    END DO
-    CALL HFT(rVVdx, VVdx, ny)
-    !$omp target update from (VVdx)
-    DO i = 1, ny + 3
-      DO iV = 1, 6
-        CALL xTOz(VVdx(:, :, iV, i), VVdz(:, :, iV, i))
+      DO j = 1, nzB
+        DO k = 1, 2*nxd
+          !Reduce memory transactions by using temporaries
+          a = rVVdx(k, j, 1, i)
+          b = rVVdx(k, j, 2, i)
+          c = rVVdx(k, j, 3, i)
+
+          rVVdx(k, j, 4, i) = a*b*factor
+          rVVdx(k, j, 5, i) = b*c*factor
+          rVVdx(k, j, 6, i) = a*c*factor
+          rVVdx(k, j, 1, i) = a*a*factor
+          rVVdx(k, j, 2, i) = b*b*factor
+          rVVdx(k, j, 3, i) = c*c*factor
+        END DO
       END DO
     END DO
+    CALL HFT(rVVdx, VVdx, ny)
+    print *, "before xTOz"
+    !$omp target update from (VVdx)
+    CALL xTOz(VVdx, VVdz, ny)
     !$omp target update to(VVdz)
+    print *, "after xTOz"
     CALL FFT(VVdz, ny)
   END SUBROUTINE convolutions
 
@@ -466,8 +488,8 @@ CONTAINS
     IMPLICIT NONE
     logical, intent(in) :: compute_cfl
     real(C_DOUBLE), intent(in) :: ODE(1:3)
-    integer(C_INT) :: iy, iz, ix, i, im2, im1, i0, i1, i2
-    complex(C_DOUBLE_COMPLEX) :: rhsu, rhsv, rhsw, DD0_6, DD1_6, expl
+    integer(C_INT) :: iy, iz, ix, i, im2, im1, i0, i1, i2, k
+    complex(C_DOUBLE_COMPLEX) :: rhsu, rhsv, rhsw, DD0_6, DD1_6, expl, tmp
 #ifdef bodyforce
     iy = 1; F(-1:0, :, :, :) = 0
     DO iz = -nz, nz
@@ -488,48 +510,58 @@ CONTAINS
 #endif
     CALL convolutions(compute_cfl)
 
-    !embarassingly parallel
-    !$omp target teams distribute parallel do collapse(2) defaultmap(none) default(none)  &
-    !$omp private(rhsu, rhsv, rhsw, DD0_6, DD1_6, expl) private(iz, ix, iy, im2, im1, i0, i1, i2) &
+    !$omp target teams distribute parallel do collapse(3) defaultmap(none) default(none)  &
+    !$omp private(rhsu, rhsv, rhsw, DD0_6, DD1_6, expl) private(iz, ix, iy, im2, im1, i0, i1, i2, tmp) &
     !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(der, k2, izd) shared(memrhs, oldrhs) shared(meanpx, meanpz, ni, deltat, ode) &
     !$omp shared(vvdz, v)
     DO iz = -nz, nz
     DO ix = nx0, nxN
-    DO iy = -3, ny + 1
-      IF (iy <= ny - 1) THEN
-        IF (iy >= 1) THEN
-          im2 = iy; im1 = iy + 1; i0 = iy + 2; i1 = iy + 3; i2 = iy + 4; 
-          DD0_6 = DD(0, 6); DD1_6 = DD(1, 6); 
-          rhsu = -ialfa(ix)*DD(0, 1) - DD(1, 4) - ibeta(iz)*DD0_6
-          rhsv = -ialfa(ix)*DD(0, 4) - DD(1, 2) - ibeta(iz)*DD(0, 5)
-          rhsw = -ialfa(ix)*DD0_6 - DD(1, 5) - ibeta(iz)*DD(0, 3)
-          expl = (ialfa(ix)*(ialfa(ix)*DD(1, 1) + DD(2, 4) + ibeta(iz)*DD1_6) + &
-                  ibeta(iz)*(ialfa(ix)*DD1_6 + DD(2, 5) + ibeta(iz)*DD(1, 3)) - k2(iz, ix)*rhsv &
+    DO iy = 1, ny - 1
+      im2 = iy; im1 = iy + 1; i0 = iy + 2; i1 = iy + 3; i2 = iy + 4; 
+      DD0_6 = DD(0, 6); DD1_6 = DD(1, 6); 
+      rhsu = -ialfa(ix)*DD(0, 1) - DD(1, 4) - ibeta(iz)*DD0_6
+      rhsv = -ialfa(ix)*DD(0, 4) - DD(1, 2) - ibeta(iz)*DD(0, 5)
+      rhsw = -ialfa(ix)*DD0_6 - DD(1, 5) - ibeta(iz)*DD(0, 3)
+      expl = (ialfa(ix)*(ialfa(ix)*DD(1, 1) + DD(2, 4) + ibeta(iz)*DD1_6) + &
+              ibeta(iz)*(ialfa(ix)*DD1_6 + DD(2, 5) + ibeta(iz)*DD(1, 3)) - k2(iz, ix)*rhsv &
 #ifdef bodyforce
-                  - k2(iz, ix)*D0(F, 2) - ialfa(ix)*D1(F, 1) - ibeta(iz)*D1(F, 3) &
+              - k2(iz, ix)*D0(F, 2) - ialfa(ix)*D1(F, 1) - ibeta(iz)*D1(F, 3) &
 #endif
-                  )
-          timescheme(newrhs(iy,iz,ix,2), oldrhs(iy,iz,ix,2), D2(V,2)-k2(iz,ix)*D0(V,2),sum(OS(iy,-2:2)*V(iy-2:iy+2,iz,ix,2)),expl); !(D2v)
-          IF (ix == 0 .AND. iz == 0) THEN
-            expl = (dcmplx(dreal(rhsu) + meanpx, dreal(rhsw) + meanpz) &
+              )
+      tmp = 0.0
+      DO k = -2, 2
+        tmp = tmp + OS(iy, k)*V(iy + k, iz, ix, 2)
+      END DO
+      timescheme(newrhs(iy,iz,ix,2), oldrhs(iy,iz,ix,2), D2(V,2)-k2(iz,ix)*D0(V,2),sum(OS(iy,-2:2)*V(iy-2:iy+2,iz,ix,2)),expl); !(D2v)
+      IF (ix == 0 .AND. iz == 0) THEN
+        expl = (dcmplx(dreal(rhsu) + meanpx, dreal(rhsw) + meanpz) &
 #ifdef bodyforce
-                    + rD0(F, 1, 3) &
+                + rD0(F, 1, 3) &
 #endif
-                    )
-            timescheme(newrhs(iy, 0, 0, 1), oldrhs(iy, 0, 0, 1), rD0(V, 1, 3), ni*rD2(V, 1, 3), expl)!(Ubar, Wbar)
-          ELSE
-            expl = (ibeta(iz)*rhsu - ialfa(ix)*rhsw &
+                )
+        timescheme(newrhs(iy, 0, 0, 1), oldrhs(iy, 0, 0, 1), rD0(V, 1, 3), ni*rD2(V, 1, 3), expl)!(Ubar, Wbar)
+      ELSE
+        expl = (ibeta(iz)*rhsu - ialfa(ix)*rhsw &
 #ifdef bodyforce
-                    + ibeta(iz)*D0(F, 1) - ialfa(ix)*D0(F, 3) &
+                + ibeta(iz)*D0(F, 1) - ialfa(ix)*D0(F, 3) &
 #endif
-                    )
-              timescheme(newrhs(iy,iz,ix,1), oldrhs(iy,iz,ix,1),ibeta(iz)*D0(V,1)-ialfa(ix)*D0(V,3),sum(SQ(iy,-2:2)*[ibeta(iz)*V(iy-2:iy+2,iz,ix,1)-ialfa(ix)*V(iy-2:iy+2,iz,ix,3)]),expl) !(eta)
-          END IF
-        END IF
+                )
+        tmp = 0.0
+        DO k = -2, 2
+          tmp = tmp + SQ(iy, k)*(ibeta(iz)*V(iy + k, iz, ix, 1) - ialfa(ix)*V(iy + k, iz, ix, 3))
+        END DO
+        timescheme(newrhs(iy, iz, ix, 1), oldrhs(iy, iz, ix, 1), ibeta(iz)*D0(V, 1) - ialfa(ix)*D0(V, 3), tmp, expl) !(eta)
       END IF
-      IF (iy - 2 >= 1) THEN
-        V(iy - 2, iz, ix, 1) = newrhs(iy - 2, iz, ix, 1); V(iy - 2, iz, ix, 2) = newrhs(iy - 2, iz, ix, 2); 
-      END IF
+    END DO
+    END DO
+    END DO
+    !$omp target teams distribute parallel do collapse(3) defaultmap(none) default(none) &
+    !$omp shared(memrhs, V) shared(nz, nx0, nxN, ny) private(iy, ix, iz)
+    DO iz = -nz, nz
+    DO ix = nx0, nxN
+    DO iy = 1, ny - 1
+      V(iy, iz, ix, 1) = newrhs(iy, iz, ix, 1); 
+      V(iy, iz, ix, 2) = newrhs(iy, iz, ix, 2); 
     END DO
     END DO
     END DO

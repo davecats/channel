@@ -33,69 +33,79 @@ CONTAINS
 
   !-------------- Transpose: Z to X --------------!
   !-----------------------------------------------!
-  SUBROUTINE zTOx(Vz, Vx)
-    complex(C_DOUBLE_COMPLEX), intent(in)  :: Vz(1:, 1:)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: Vx(1:, 1:)
-    integer(C_SIZE_T) :: i, j
+  SUBROUTINE zTOx(Vz, Vx, ny)
+    complex(C_DOUBLE_COMPLEX), intent(in)  :: Vz(1:, 1:, :, :)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: Vx(1:, 1:, :, :)
+    integer(C_INT), intent(in) :: ny
+    integer(C_SIZE_T) :: i, j, iy, iV
     integer(C_SIZE_T) :: ix, iz, one, num, zero, npxt
+    DO iy = 1, ny + 3
+      DO iV = 1, 3
+        one = 1
+        num = nzd/nproc
+        zero = 0
+        npxt = nproc
 
-    one = 1
-    num = nzd/nproc
-    zero = 0
-    npxt = nproc
+        Ain = 0; Aout = 0
 
-    Ain = 0; Aout = 0
+        !Pack
+        i = zero
+        DO j = zero, npxt - one
+          DO ix = nx0, nxN
+            Ain(i:i + num - one) = Vz(one + j*num:(j + one)*num, ix - nx0 + one, iV, iy)
+            i = i + num
+          END DO
+        END DO
 
-    !Pack
-    i = zero
-    DO j = zero, npxt - one
-      DO ix = nx0, nxN
-        Ain(i:i + num - one) = Vz(one + j*num:(j + one)*num, ix - nx0 + one)
-        i = i + num
-      END DO
-    END DO
+        !Send
+        CALL MPI_Alltoall(Ain, nxB*nzB, MPI_DOUBLE_COMPLEX, Aout, nxB*nzB, MPI_DOUBLE_COMPLEX, MPI_COMM_WORLD)
 
-    !Send
-    CALL MPI_Alltoall(Ain, nxB*nzB, MPI_DOUBLE_COMPLEX, Aout, nxB*nzB, MPI_DOUBLE_COMPLEX, MPI_COMM_WORLD)
-
-    !Unpack
-    i = zero
-    DO ix = 0, nx
-      Vx(ix + one, one:num) = Aout(i:i + num - one)
-      i = i + num
+        !Unpack
+        i = zero
+        DO ix = 0, nx
+          Vx(ix + one, one:num, iV, iy) = Aout(i:i + num - one)
+          i = i + num
+        END DO
+      END do
     END DO
   END SUBROUTINE zTOx
 
   !-------------- Transpose: X to Z --------------!
   !-----------------------------------------------!
-  SUBROUTINE xTOz(Vx, Vz)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: Vz(1:, 1:)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: Vx(1:, 1:)
-    integer(C_SIZE_T) :: i, j
+  SUBROUTINE xTOz(Vx, Vz, ny)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: Vz(1:, 1:, :, :)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: Vx(1:, 1:, :, :)
+    integer(C_INT), intent(in) :: ny
+    integer(C_SIZE_T) :: i, j, iy, iV
     integer(C_SIZE_T) :: ix, iz, one, num, zero, npxt
 
-    one = 1
-    num = (nx + 1)/nproc
-    zero = 0
-    npxt = nproc
+    DO iy = 1, ny + 3
+      DO iV = 1, 6
 
-    !Pack
-    i = zero
-    DO j = zero, npxt - one
-      DO iz = nz0, nzN
-        Ain(i:i + num - one) = Vx(one + j*num:(j + one)*num, iz - nz0 + one)
-        i = i + num
+        one = 1
+        num = (nx + 1)/nproc
+        zero = 0
+        npxt = nproc
+
+        !Pack
+        i = zero
+        DO j = zero, npxt - one
+          DO iz = nz0, nzN
+            Ain(i:i + num - one) = Vx(one + j*num:(j + one)*num, iz - nz0 + one, iV, iy)
+            i = i + num
+          END DO
+        END DO
+
+        !Send
+        CALL MPI_Alltoall(Ain, nxB*nzB, MPI_DOUBLE_COMPLEX, Aout, nxB*nzB, MPI_DOUBLE_COMPLEX, MPI_COMM_WORLD)
+
+        !Unpack
+        i = zero
+        DO iz = 0, nzd - 1
+          Vz(iz + one, one:num, iV, iy) = Aout(i:i + num - one)
+          i = i + num
+        END DO
       END DO
-    END DO
-
-    !Send
-    CALL MPI_Alltoall(Ain, nxB*nzB, MPI_DOUBLE_COMPLEX, Aout, nxB*nzB, MPI_DOUBLE_COMPLEX, MPI_COMM_WORLD)
-
-    !Unpack
-    i = zero
-    DO iz = 0, nzd - 1
-      Vz(iz + one, one:num) = Aout(i:i + num - one)
-      i = i + num
     END DO
   END SUBROUTINE xTOz
 
