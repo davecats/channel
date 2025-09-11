@@ -35,7 +35,11 @@ CONTAINS
     CALL init_memory(.TRUE.)
 
     ! Init various subroutines
+#ifdef HAVE_CUDA
+    CALL init_cufft(nxd, nxB, ny, nzd, nzB)
+#else
     CALL init_fft(VVdz, VVdx, rVVdx, nxd, nxB, ny, nzd, nzB)
+#endif
     CALL setup_derivatives()
     CALL setup_boundary_conditions()
     CALL read_restart_file(restart_file, V)
@@ -130,7 +134,9 @@ CONTAINS
 
     IF (has_terminal) CLOSE (102)
     ! Realease memory
+#ifndef HAVE_CUDA
     CALL free_fft(VVdz, VVdx, rVVdx)
+#endif
     CALL free_memory(.TRUE.)
     CALL MPI_Finalize()
   END SUBROUTINE finalize

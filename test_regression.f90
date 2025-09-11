@@ -32,7 +32,6 @@ PROGRAM regression_test
     CALL MPI_ABORT(MPI_COMM_WORLD, 1, ierr)
   END IF
 
-  CALL free_fft(VVdz, VVdx, rVVdx)
   CALL free_memory(.TRUE.)
   CALL MPI_Finalize()
 END PROGRAM regression_test

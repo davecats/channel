@@ -47,10 +47,11 @@ MODULE dnsdata
   real(C_DOUBLE), dimension(-2:2) :: d040, d140, d240, d14m1, d24m1, d04n, d14n, d24n, d14np1, d24np1
   !$omp declare target(d14np1, d14n, d14m1, d140)
   real(C_DOUBLE), allocatable :: D0mat(:, :), etamat(:, :, :, :), eta00mat(:, :), D2vmat(:, :, :, :)
-
+#ifndef HAVE_CUDA
   !Fourier-transformable arrays (allocated in ffts.f90)
   complex(C_DOUBLE_COMPLEX), pointer, dimension(:, :, :, :) :: VVdx, VVdz
   real(C_DOUBLE), pointer, dimension(:, :, :, :) :: rVVdx
+#endif
   !Solution
   complex(C_DOUBLE_COMPLEX), allocatable :: memrhs(:, :, :, :), oldrhs(:, :, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable :: V(:, :, :, :)
@@ -393,6 +394,8 @@ CONTAINS
     real(C_DOUBLE) :: tmp
     logical, intent(in) :: compute_cfl
     integer(C_INT) :: iV
+    integer :: istat
+    real(C_DOUBLE), dimension(:, :, :, :), allocatable :: rVVdx2
 
     !$omp target update to(V)
 
@@ -403,33 +406,23 @@ CONTAINS
       VVdz(nz + 2:nzd - nz, 1:nxB, 1:3, i) = 0; 
       VVdz(nzd + 1 - nz:nzd, 1:nxB, 1:3, i) = V(i - 2, -nz:-1, nx0:nxN, 1:3); 
     END DO
+    CALL IFT(VVdz, ny)
     !$omp target update from(VVdz)
-    DO i = 1, ny + 3
-      DO iV = 1, 3
-        CALL IFT(VVdz(1:nzd, 1:nxB, iV, i))
-      END DO
-    END DO
     DO i = 1, ny + 3
       DO iV = 1, 3
         CALL zTOx(VVdz(:, :, iV, i), VVdx(:, :, iV, i))
       END DO
     END DO
     !$omp target update to (VVdx)
+
     !$omp target teams distribute parallel do collapse(2) defaultmap(none) default(none) shared(VVdx) shared(nx, nxd, nzB, ny)
     DO i = 1, ny + 3
       DO iV = 1, 6
         VVdx(nx + 2:nxd + 1, 1:nzB, iV, i) = 0; 
       END DO
     END DO
-    !$omp target update from (VVdx)
-    DO i = 1, ny + 3
-      DO iV = 1, 3
-        CALL RFT(VVdx(1:nxd + 1, 1:nzB, iV, i), rVVdx(1:2*nxd + 2, 1:nzB, iV, i))
-      END DO
-    END DO
-
+    CALL RFT(VVdx, rVVdx, ny)
     if (compute_cfl) THEN
-      !$omp target update to(rVVdx)
       !$omp target teams distribute parallel do collapse(3) default(none) defaultmap(none) &
       !$omp private(i,j,k,tmp) reduction(max:cfl) &
       !$omp shared(rVVdx, dx, dy, dz, ny, nxd, nzB, ny)
@@ -443,7 +436,6 @@ CONTAINS
       end do
     END IF
 
-    !$omp target update to (rVVdx)
     !$omp target teams distribute parallel do defaultmap(none) default(none) &
     !$omp shared(rVVdx) shared(nxd, nzB, ny, factor)
     DO i = 1, ny + 3
@@ -452,22 +444,15 @@ CONTAINS
       rVVdx(1:2*nxd, 1:nzB, 6, i) = rVVdx(1:2*nxd, 1:nzB, 1, i)*rVVdx(1:2*nxd, 1:nzB, 3, i)*factor
       rVVdx(1:2*nxd, 1:nzB, 1:3, i) = rVVdx(1:2*nxd, 1:nzB, 1:3, i)*rVVdx(1:2*nxd, 1:nzB, 1:3, i)*factor
     END DO
-    !$omp target update from (rVVdx)
-    DO i = 1, ny + 3
-      DO iV = 1, 6
-        CALL HFT(rVVdx(1:2*nxd + 2, 1:nzB, iV, i), VVdx(1:nxd + 1, 1:nzB, iV, i)); 
-      END DO
-    END DO
+    CALL HFT(rVVdx, VVdx, ny)
+    !$omp target update from (VVdx)
     DO i = 1, ny + 3
       DO iV = 1, 6
         CALL xTOz(VVdx(:, :, iV, i), VVdz(:, :, iV, i))
       END DO
     END DO
-    DO i = 1, ny + 3
-      DO iV = 1, 6
-        CALL FFT(VVdz(1:nzd, 1:nxB, iV, i)); 
-      END DO
-    END do
+    !$omp target update to(VVdz)
+    CALL FFT(VVdz, ny)
   END SUBROUTINE convolutions
 
   !--------------------------------------------------------------!
@@ -502,8 +487,6 @@ CONTAINS
     END DO
 #endif
     CALL convolutions(compute_cfl)
-
-    !$omp target update to(vvdz, v)
 
     !embarassingly parallel
     !$omp target teams distribute parallel do collapse(2) defaultmap(none) default(none)  &

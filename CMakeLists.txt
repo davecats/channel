@@ -78,7 +78,19 @@ set_tests_properties(regression_test_4rank PROPERTIES PROCESSORS 4)
 if (CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cpp -O0 -malign-double -fall-intrinsics -ffree-line-length-none")
 elseif (CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
-    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cpp -O2 -Wall -Kieee -Mnofma -traceback -mp -mp=gpu -Minfo=mp -Mcache_align -gpu=sm_75") #
+    find_package(CUDAToolkit REQUIRED)
+
+    if(CMAKE_CUDA_ARCHITECTURES LESS 75)
+        set(CMAKE_CUDA_ARCHITECTURES 75 80 86 90 100 120)
+    endif()
+
+    target_include_directories(channel_core PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+    target_link_libraries(channel_core PUBLIC CUDA::cufft CUDA::cudart)
+
+    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cpp -O2 -Wall -Kieee -Mnofma -traceback -mp -mp=gpu -Minfo=mp -Mcache_align -gpu=sm_75 -cuda") #
+    target_compile_definitions(channel_core PRIVATE HAVE_CUDA)
+
+
 elseif (CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -fpp -O0 -fp-model=precise")
 endif()
