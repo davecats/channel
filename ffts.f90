@@ -55,9 +55,9 @@ CONTAINS
     ptrVVdx = fftw_alloc_complex(int((nxd + 1)*nzB*sn(1)*sn(2), C_SIZE_T))
 
     !Convert C to F pointer
-    CALL c_f_pointer(ptrVVdz, VVdz, [nzd, nxB, sn(1), sn(2)]); 
-    CALL c_f_pointer(ptrVVdx, VVdx, [nxd + 1, nzB, sn(1), sn(2)])
-    CALL c_f_pointer(ptrVVdx, rVVdx, [2*(nxd + 1), nzB, sn(1), sn(2)])
+    CALL c_f_pointer(ptrVVdz, VVdz, [nzd, nxB, sn(2), sn(1)]); 
+    CALL c_f_pointer(ptrVVdx, VVdx, [nxd + 1, nzB, sn(2), sn(1)])
+    CALL c_f_pointer(ptrVVdx, rVVdx, [2*(nxd + 1), nzB, sn(2), sn(1)])
 
     !$omp target enter data map(to: VVdz)
     !FFTs plans
@@ -74,30 +74,27 @@ CONTAINS
     use cufft
     IMPLICIT NONE
     integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, ny
-    integer, dimension(2) :: sn = 6
     integer :: istat
     integer, dimension(1) :: n, inembed, onembed
     integer :: batch, idist, odist, istride, ostride
 
-    integer(C_INT), dimension(1) :: n_z, n_x, rn_x
-    n_z = [nzd]; n_x = [nxd]; rn_x = [2*nxd]; 
-    allocate (VVdz(nzd, nxB, 6, ny + 3))
-    allocate (VVdx(nxd + 1, nzB, 6, ny + 3))
-    allocate (rVVdx(2*(nxd + 1), nzB, 6, ny + 3))
+    allocate (VVdz(nzd, nxB, ny + 3, 6))
+    allocate (VVdx(nxd + 1, nzB, ny + 3, 6))
+    allocate (rVVdx(2*(nxd + 1), nzB, ny + 3, 6))
     !$omp target enter data map(to: VVdz, VVdx, rVVdx)
 
     !!$omp target enter data map(alloc: VVdz, VVdx, rVVdx)
     !FFTs plans
     istat = cufftCreate(cu_pIFT)
     istat = cufftSetAutoAllocation(cu_pIFT, 0)
-    istat = cufftPlan1d(cu_pIFT, nzd, CUFFT_Z2Z, 6*(ny + 3)*nxB)
+    istat = cufftPlan1d(cu_pIFT, nzd, CUFFT_Z2Z, 3*(ny + 3)*nxB)
 
     istat = cufftCreate(cu_pFFT)
     istat = cufftSetAutoAllocation(cu_pFFT, 0)
     istat = cufftPlan1d(cu_pFFT, nzd, CUFFT_Z2Z, 6*(ny + 3)*nxB)
 
     n(1) = 2*nxd            ! length
-    batch = nzB*6*(ny + 3)
+    batch = nzB*3*(ny + 3)
     istride = 1                  ! contiguous along x
     ostride = 1
     idist = nxd + 1            ! distance between consecutive complex transforms
@@ -114,7 +111,7 @@ CONTAINS
     istat = cufftCreate(cu_pHFT)
     istat = cufftSetAutoAllocation(cu_pHFT, 0)
     istat = cufftPlanMany(cu_pHFT, 1, n, onembed, ostride, odist, &
-                          inembed, istride, idist, CUFFT_D2Z, batch)
+                          inembed, istride, idist, CUFFT_D2Z, batch*2)
 
   END SUBROUTINE init_cufft
 #endif
@@ -142,7 +139,7 @@ CONTAINS
 #else
     DO i = 1, ny + 3
       DO iV = 1, 6
-        CALL fftw_execute_dft(pFFT, x(:, :, iV, i), x(:, :, iV, i)); 
+        CALL fftw_execute_dft(pFFT, x(:, :, i, iV), x(:, :, i, iV)); 
       END DO
     END do
 #endif
@@ -161,7 +158,7 @@ CONTAINS
 #else
     DO i = 1, ny + 3
       DO iV = 1, 3
-        CALL fftw_execute_dft(pIFT, x(:, :, iV, i), x(:, :, iV, i))
+        CALL fftw_execute_dft(pIFT, x(:, :, i, iV), x(:, :, i, iV))
       END DO
     END DO
 #endif
@@ -182,7 +179,7 @@ CONTAINS
 #else
     DO i = 1, ny + 3
       DO iV = 1, 3
-        CALL fftw_execute_dft_c2r(pRFT, x(:, :, iV, i), rx(:, :, iV, i))
+        CALL fftw_execute_dft_c2r(pRFT, x(:, :, i, iV), rx(:, :, i, iV))
       END DO
     END DO
 #endif
@@ -203,7 +200,7 @@ CONTAINS
 #else
     DO i = 1, ny + 3
       DO iV = 1, 6
-        CALL fftw_execute_dft_r2c(pHFT, rx(:, :, iV, i), x(:, :, iV, i)); 
+        CALL fftw_execute_dft_r2c(pHFT, rx(:, :, i, iV), x(:, :, i, iV)); 
       END DO
     END DO
 #endif

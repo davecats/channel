@@ -406,11 +406,11 @@ CONTAINS
         DO j = 1, nxB
           DO m = 1, 3
             IF (k <= nz + 1) THEN
-              VVdz(k, j, m, i) = V(i - 2, k - 1, j + nx0 - 1, m)
+              VVdz(k, j, i, m) = V(i - 2, k - 1, j + nx0 - 1, m)
             ELSEIF (k >= nz + 2 .AND. k <= nzd - nz) THEN
-              VVdz(k, j, m, i) = 0.0
+              VVdz(k, j, i, m) = 0.0
             ELSE
-              VVdz(k, j, m, i) = V(i - 2, k - nzd - 1, j + nx0 - 1, m)
+              VVdz(k, j, i, m) = V(i - 2, k - nzd - 1, j + nx0 - 1, m)
             END IF
           END DO
         END DO
@@ -428,7 +428,7 @@ CONTAINS
       DO iV = 1, 6
         DO j = 1, nzB
           DO k = nx + 2, nxd + 1
-            VVdx(k, j, iV, i) = 0.0
+            VVdx(k, j, i, iV) = 0.0
           END DO
         END DO
       END DO
@@ -442,7 +442,7 @@ CONTAINS
       do j = 1, 2*nxd
         do k = 1, nzB
           do i = 3, ny + 1
-            tmp = abs(rVVdx(j, k, 1, i))/dx + abs(rVVdx(j, k, 2, i))/dy(i - 2) + abs(rVVdx(j, k, 3, i))/dz
+            tmp = abs(rVVdx(j, k, i, 1))/dx + abs(rVVdx(j, k, i, 2))/dy(i - 2) + abs(rVVdx(j, k, i, 3))/dz
             cfl = max(cfl, tmp)
           end do
         end do
@@ -455,16 +455,16 @@ CONTAINS
       DO j = 1, nzB
         DO k = 1, 2*nxd
           !Reduce memory transactions by using temporaries
-          a = rVVdx(k, j, 1, i)
-          b = rVVdx(k, j, 2, i)
-          c = rVVdx(k, j, 3, i)
+          a = rVVdx(k, j, i, 1)
+          b = rVVdx(k, j, i, 2)
+          c = rVVdx(k, j, i, 3)
 
-          rVVdx(k, j, 4, i) = a*b*factor
-          rVVdx(k, j, 5, i) = b*c*factor
-          rVVdx(k, j, 6, i) = a*c*factor
-          rVVdx(k, j, 1, i) = a*a*factor
-          rVVdx(k, j, 2, i) = b*b*factor
-          rVVdx(k, j, 3, i) = c*c*factor
+          rVVdx(k, j, i, 4) = a*b*factor
+          rVVdx(k, j, i, 5) = b*c*factor
+          rVVdx(k, j, i, 6) = a*c*factor
+          rVVdx(k, j, i, 1) = a*a*factor
+          rVVdx(k, j, i, 2) = b*b*factor
+          rVVdx(k, j, i, 3) = c*c*factor
         END DO
       END DO
     END DO
@@ -482,8 +482,8 @@ CONTAINS
   ! (u,v,w) = (1,2,3)
   ! (uu,vv,ww,uv,vw,uw) = (1,2,3,4,5,6)
 #define timescheme(rhs,old,unkn,impl,expl) rhs=ODE(1)*(unkn)/deltat+(impl)+ODE(2)*(expl)-ODE(3)*(old); old=expl
-#define DD(f,k) ( der(iy,f,-2)*VVdz(izd(iz)+1,ix+1-nx0,k,im2)+der(iy,f,-1)*VVdz(izd(iz)+1,ix+1-nx0,k,im1)+der(iy,f,0)*VVdz(izd(iz)+1,ix+1-nx0,k,i0)+ \
-  der(iy, f, 1)*VVdz(izd(iz) + 1, ix + 1 - nx0, k, i1) + der(iy, f, 2)*VVdz(izd(iz) + 1, ix + 1 - nx0, k, i2))
+#define DD(f,k) ( der(iy,f,-2)*VVdz(izd(iz)+1,ix+1-nx0,im2,k)+der(iy,f,-1)*VVdz(izd(iz)+1,ix+1-nx0,im1,k)+der(iy,f,0)*VVdz(izd(iz)+1,ix+1-nx0,i0,k)+ \
+  der(iy, f, 1)*VVdz(izd(iz) + 1, ix + 1 - nx0, i1, k) + der(iy, f, 2)*VVdz(izd(iz) + 1, ix + 1 - nx0, i2, k))
   SUBROUTINE buildrhs(ODE, compute_cfl)
     IMPLICIT NONE
     logical, intent(in) :: compute_cfl

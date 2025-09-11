@@ -52,7 +52,7 @@ CONTAINS
         i = zero
         DO j = zero, npxt - one
           DO ix = nx0, nxN
-            Ain(i:i + num - one) = Vz(one + j*num:(j + one)*num, ix - nx0 + one, iV, iy)
+            Ain(i:i + num - one) = Vz(one + j*num:(j + one)*num, ix - nx0 + one, iy, iV)
             i = i + num
           END DO
         END DO
@@ -63,7 +63,7 @@ CONTAINS
         !Unpack
         i = zero
         DO ix = 0, nx
-          Vx(ix + one, one:num, iV, iy) = Aout(i:i + num - one)
+          Vx(ix + one, one:num, iy, iV) = Aout(i:i + num - one)
           i = i + num
         END DO
       END do
@@ -91,7 +91,7 @@ CONTAINS
         i = zero
         DO j = zero, npxt - one
           DO iz = nz0, nzN
-            Ain(i:i + num - one) = Vx(one + j*num:(j + one)*num, iz - nz0 + one, iV, iy)
+            Ain(i:i + num - one) = Vx(one + j*num:(j + one)*num, iz - nz0 + one, iy, iV)
             i = i + num
           END DO
         END DO
@@ -102,7 +102,7 @@ CONTAINS
         !Unpack
         i = zero
         DO iz = 0, nzd - 1
-          Vz(iz + one, one:num, iV, iy) = Aout(i:i + num - one)
+          Vz(iz + one, one:num, iy, iV) = Aout(i:i + num - one)
           i = i + num
         END DO
       END DO
