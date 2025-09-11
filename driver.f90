@@ -66,10 +66,9 @@ CONTAINS
     END IF
 
     ! Compute CFL
-    DO iy = ny0, nyN
-      IF (deltat == 0) deltat = 1.0; 
-      CALL convolutions(iy, .TRUE.)
-    END DO
+    if (deltat == 0.0) deltat = 1.0
+    CALL convolutions(.TRUE.)
+    print *, "CFL", deltat, cfl
     ! Compute flow rate
     IF (has_average) THEN
       fr(1) = yintegr(dreal(V(:, 0, 0, 1)), y); fr(2) = yintegr(dreal(V(:, 0, 0, 3)), y); 

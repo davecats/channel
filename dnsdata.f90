@@ -386,37 +386,88 @@ CONTAINS
   !--------------------------------------------------------------!
   !------------------------ convolutions ------------------------!
 
-  SUBROUTINE convolutions(iy, compute_cfl)
+  SUBROUTINE convolutions(compute_cfl)
     IMPLICIT NONE
-    integer(C_INT), intent(in) :: iy
-    integer(C_INT) :: i
+    integer(C_INT) :: iy
+    integer(C_INT) :: i, j, k
+    real(C_DOUBLE) :: tmp
     logical, intent(in) :: compute_cfl
     integer(C_INT) :: iV
-    i = iy + 2
 
-    VVdz(1:nz + 1, 1:nxB, 1:3, i) = V(iy, 0:nz, nx0:nxN, 1:3); VVdz(nz + 2:nzd - nz, 1:nxB, 1:3, i) = 0; 
-    VVdz(nzd + 1 - nz:nzd, 1:nxB, 1:3, i) = V(iy, -nz:-1, nx0:nxN, 1:3); 
-    DO iV = 1, 3
-      CALL IFT(VVdz(1:nzd, 1:nxB, iV, i))
-      CALL zTOx(VVdz(:, :, iV, i), VVdx(:, :, iV, i))
-      VVdx(nx + 2:nxd + 1, 1:nzB, iV, i) = 0; CALL RFT(VVdx(1:nxd + 1, 1:nzB, iV, i), rVVdx(1:2*nxd + 2, 1:nzB, iV, i))
+    !$omp target update to(V)
+
+    !$omp target teams distribute parallel do defaultmap(none) default(none) &
+    !$omp shared(V, VVdz) shared(ny, nxB, nzd, nx0, nxN, nz)
+    DO i = 1, ny + 3
+      VVdz(1:nz + 1, 1:nxB, 1:3, i) = V(i - 2, 0:nz, nx0:nxN, 1:3); 
+      VVdz(nz + 2:nzd - nz, 1:nxB, 1:3, i) = 0; 
+      VVdz(nzd + 1 - nz:nzd, 1:nxB, 1:3, i) = V(i - 2, -nz:-1, nx0:nxN, 1:3); 
     END DO
-    VVdx(nx + 2:nxd + 1, 1:nzB, 4:6, i) = 0
-    IF (compute_cfl .and. iy >= 1 .and. iy <= ny - 1) THEN
-      cfl = max(cfl, (maxval(abs(rVVdx(1:2*nxd, 1:nzB, 1, i))/dx + &
-                             abs(rVVdx(1:2*nxd, 1:nzB, 2, i))/dy(iy) + &
-                             abs(rVVdx(1:2*nxd, 1:nzB, 3, i))/dz)))
+    !$omp target update from(VVdz)
+    DO i = 1, ny + 3
+      DO iV = 1, 3
+        CALL IFT(VVdz(1:nzd, 1:nxB, iV, i))
+      END DO
+    END DO
+    DO i = 1, ny + 3
+      DO iV = 1, 3
+        CALL zTOx(VVdz(:, :, iV, i), VVdx(:, :, iV, i))
+      END DO
+    END DO
+    !$omp target update to (VVdx)
+    !$omp target teams distribute parallel do collapse(2) defaultmap(none) default(none) shared(VVdx) shared(nx, nxd, nzB, ny)
+    DO i = 1, ny + 3
+      DO iV = 1, 6
+        VVdx(nx + 2:nxd + 1, 1:nzB, iV, i) = 0; 
+      END DO
+    END DO
+    !$omp target update from (VVdx)
+    DO i = 1, ny + 3
+      DO iV = 1, 3
+        CALL RFT(VVdx(1:nxd + 1, 1:nzB, iV, i), rVVdx(1:2*nxd + 2, 1:nzB, iV, i))
+      END DO
+    END DO
+
+    if (compute_cfl) THEN
+      !$omp target update to(rVVdx)
+      !$omp target teams distribute parallel do collapse(3) default(none) defaultmap(none) &
+      !$omp private(i,j,k,tmp) reduction(max:cfl) &
+      !$omp shared(rVVdx, dx, dy, dz, ny, nxd, nzB, ny)
+      do j = 1, 2*nxd
+        do k = 1, nzB
+          do i = 3, ny + 1
+            tmp = abs(rVVdx(j, k, 1, i))/dx + abs(rVVdx(j, k, 2, i))/dy(i - 2) + abs(rVVdx(j, k, 3, i))/dz
+            cfl = max(cfl, tmp)
+          end do
+        end do
+      end do
     END IF
-    rVVdx(1:2*nxd, 1:nzB, 4, i) = rVVdx(1:2*nxd, 1:nzB, 1, i)*rVVdx(1:2*nxd, 1:nzB, 2, i)*factor
-    rVVdx(1:2*nxd, 1:nzB, 5, i) = rVVdx(1:2*nxd, 1:nzB, 2, i)*rVVdx(1:2*nxd, 1:nzB, 3, i)*factor
-    rVVdx(1:2*nxd, 1:nzB, 6, i) = rVVdx(1:2*nxd, 1:nzB, 1, i)*rVVdx(1:2*nxd, 1:nzB, 3, i)*factor
-    rVVdx(1:2*nxd, 1:nzB, 1:3, i) = rVVdx(1:2*nxd, 1:nzB, 1:3, i)*rVVdx(1:2*nxd, 1:nzB, 1:3, i)*factor
-    DO iV = 1, 6
-      CALL HFT(rVVdx(1:2*nxd + 2, 1:nzB, iV, i), VVdx(1:nxd + 1, 1:nzB, iV, i)); 
-      CALL xTOz(VVdx(:, :, iV, i), VVdz(:, :, iV, i))
-      CALL FFT(VVdz(1:nzd, 1:nxB, iV, i)); 
+
+    !$omp target update to (rVVdx)
+    !$omp target teams distribute parallel do defaultmap(none) default(none) &
+    !$omp shared(rVVdx) shared(nxd, nzB, ny, factor)
+    DO i = 1, ny + 3
+      rVVdx(1:2*nxd, 1:nzB, 4, i) = rVVdx(1:2*nxd, 1:nzB, 1, i)*rVVdx(1:2*nxd, 1:nzB, 2, i)*factor
+      rVVdx(1:2*nxd, 1:nzB, 5, i) = rVVdx(1:2*nxd, 1:nzB, 2, i)*rVVdx(1:2*nxd, 1:nzB, 3, i)*factor
+      rVVdx(1:2*nxd, 1:nzB, 6, i) = rVVdx(1:2*nxd, 1:nzB, 1, i)*rVVdx(1:2*nxd, 1:nzB, 3, i)*factor
+      rVVdx(1:2*nxd, 1:nzB, 1:3, i) = rVVdx(1:2*nxd, 1:nzB, 1:3, i)*rVVdx(1:2*nxd, 1:nzB, 1:3, i)*factor
     END DO
-    !print *, "i", i, "VVdz", VVdz(1:nzd, 1:nxB, iV, i)
+    !$omp target update from (rVVdx)
+    DO i = 1, ny + 3
+      DO iV = 1, 6
+        CALL HFT(rVVdx(1:2*nxd + 2, 1:nzB, iV, i), VVdx(1:nxd + 1, 1:nzB, iV, i)); 
+      END DO
+    END DO
+    DO i = 1, ny + 3
+      DO iV = 1, 6
+        CALL xTOz(VVdx(:, :, iV, i), VVdz(:, :, iV, i))
+      END DO
+    END DO
+    DO i = 1, ny + 3
+      DO iV = 1, 6
+        CALL FFT(VVdz(1:nzd, 1:nxB, iV, i)); 
+      END DO
+    END do
   END SUBROUTINE convolutions
 
   !--------------------------------------------------------------!
@@ -450,11 +501,7 @@ CONTAINS
       END DO
     END DO
 #endif
-    DO iy = -3, ny + 1
-      IF (iy <= ny - 1) THEN
-        CALL convolutions(iy + 2, compute_cfl)
-      END IF
-    END do
+    CALL convolutions(compute_cfl)
 
     !$omp target update to(vvdz, v)
 
