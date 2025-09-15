@@ -222,7 +222,7 @@ CONTAINS
   !$omp declare target(yintegr)
   PURE FUNCTION yintegr(f, y) result(II)
     IMPLICIT NONE
-    real(C_DOUBLE), intent(in) :: f(ny0 - 2:nyN + 2)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: f(ny0 - 2:nyN + 2)
     real(C_DOUBLE), intent(in) :: y(-1:ny + 1)
     real(C_DOUBLE) :: II, yp1, ym1, a1, a2, a3
     integer(C_INT) :: iy
@@ -232,7 +232,7 @@ CONTAINS
       a1 = -1.0d0/3.0d0*ym1 + 1.0d0/6.0d0*yp1 + 1.0d0/6.0d0*yp1*yp1/ym1
       a3 = +1.0d0/3.0d0*yp1 - 1.0d0/6.0d0*ym1 - 1.0d0/6.0d0*ym1*ym1/yp1
       a2 = yp1 - ym1 - a1 - a3
-      II = II + a1*f(iy - 1) + a2*f(iy) + a3*f(iy + 1)
+      II = II + a1*dreal(f(iy - 1)) + a2*dreal(f(iy)) + a3*dreal(f(iy + 1))
     END DO
   END FUNCTION yintegr
 
@@ -365,7 +365,9 @@ CONTAINS
           ucor(-1) = -sum(ucor(0:3)*eta0m1bc(-1:2))/eta0m1bc(-2)
           ucor(ny) = -sum(ucor(ny - 3:ny - 1)*etanbc(-2:0))/etanbc(1)
           ucor(ny + 1) = -sum(ucor(ny - 3:ny)*etanp1bc(-2:1))/etanp1bc(2)
-          fr(1) = yintegr(dreal(V(:, 0, 0, 1)), y); fr(2) = yintegr(dreal(V(:, 0, 0, 3)), y); fr(3) = yintegr(dreal(ucor), y)
+          fr(1) = yintegr(V(:, 0, 0, 1), y)
+          fr(2) = yintegr(V(:, 0, 0, 3), y)
+          fr(3) = yintegr(ucor, y)
           IF (abs(meanflowx) > 1.0d-7) THEN
             corrpx = (meanflowx - fr(1))/fr(3)
             V(:, 0, 0, 1) = dcmplx(dreal(V(:, 0, 0, 1)) + corrpx*dreal(ucor), dimag(V(:, 0, 0, 1)))

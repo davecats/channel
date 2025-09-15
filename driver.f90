@@ -76,7 +76,7 @@ CONTAINS
     print *, "CFL", deltat, cfl
     ! Compute flow rate
     IF (has_average) THEN
-      fr(1) = yintegr(dreal(V(:, 0, 0, 1)), y); fr(2) = yintegr(dreal(V(:, 0, 0, 3)), y); 
+      fr(1) = yintegr(V(:, 0, 0, 1), y); fr(2) = yintegr(V(:, 0, 0, 3), y); 
     END IF
     CALL outstats()
   END SUBROUTINE initialize

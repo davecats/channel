@@ -152,14 +152,26 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(in) :: b(-2:)
     real(C_DOUBLE), intent(in)  :: A(0:, -2:)
     integer(C_INT) :: HI1, HI2
-    HI1 = SIZE(A, 1) - 1; HI2 = SIZE(A, 2) - 3; 
-    x = b
+    HI1 = SIZE(A, 1) - 1
+    HI2 = SIZE(A, 2) - 3
+
+    ! initialise x with rhs
+
+    DO i = LBOUND(x, 1), UBOUND(x, 1)
+      x(i) = b(i)
+    END DO
+
+    ! backward substitution
     DO i = HI1 - HI2, 0, -1
-      x(i) = (x(i) - sum(A(i, 1:2)*x(i + 1:i + 2)))*A(i, 0)
+      x(i) = x(i) - (A(i, 1)*x(i + 1) + A(i, 2)*x(i + 2))
+      x(i) = x(i)*A(i, 0)
     END DO
+
+    ! forward substitution
     DO i = 0, HI1
-      x(i) = x(i) - sum(A(i, -2:-1)*x(i - 2:i - 1))
+      x(i) = x(i) - (A(i, -2)*x(i - 2) + A(i, -1)*x(i - 1))
     END DO
+
   END SUBROUTINE LeftLU5div
 
   !- Left LU division of a square matrix -!
