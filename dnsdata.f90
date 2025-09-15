@@ -46,7 +46,7 @@ MODULE dnsdata
   real(C_DOUBLE), allocatable :: der(:, :, :)
   real(C_DOUBLE), dimension(-2:2) :: d040, d140, d240, d14m1, d24m1, d04n, d14n, d24n, d14np1, d24np1
   !$omp declare target(d14np1, d14n, d14m1, d140)
-  real(C_DOUBLE), allocatable :: D0mat(:, :), etamat(:, :, :, :), eta00mat(:, :), D2vmat(:, :, :, :)
+  real(C_DOUBLE), allocatable :: D0mat(:, :), eta00mat(:, :)
 #ifndef HAVE_CUDA
   !Fourier-transformable arrays (allocated in ffts.f90)
   complex(C_DOUBLE_COMPLEX), pointer, dimension(:, :, :, :) :: VVdx, VVdz
@@ -120,8 +120,8 @@ CONTAINS
     END IF
 #define newrhs(iy,iz,ix,i) memrhs(iy,iz,ix,i)
 #define imod(iy) MOD(iy+1000,5)
-    ALLOCATE(der(1:ny-1,0:3,-2:2),d0mat(ny0:nyN+2,-2:2),etamat(ny0:nyN+2,-2:2,-nz:nz, nx0:nxN),eta00mat(ny0:nyN+2,-2:2),D2vmat(ny0:nyN+2,-2:2,-nz:nz, nx0:nxN))
-    der = 0.0; d0mat = 0.0; etamat = 0.0; eta00mat = 0.0; D2vmat = 0.0
+    ALLOCATE (der(1:ny - 1, 0:3, -2:2), d0mat(ny0:nyN + 2, -2:2), eta00mat(ny0:nyN + 2, -2:2))
+    der = 0.0; d0mat = 0.0; eta00mat = 0.0
     ALLOCATE (y(-1:ny + 1), dy(1:ny - 1))
     y = 0.0; dy = 0.0
     ALLOCATE (izd(-nz:nz), ialfa(nx0:nxN), ibeta(-nz:nz), k2(-nz:nz, nx0:nxN))
@@ -134,7 +134,7 @@ CONTAINS
     izd = (/(merge(iz, nzd + iz, iz >= 0), iz=-nz, nz)/); ialfa = (/(dcmplx(0.0d0, ix*alfa0), ix=nx0, nxN)/); 
     ibeta = (/(dcmplx(0.0d0, iz*beta0), iz=-nz, nz)/); 
     FORALL (iz=-nz:nz, ix=nx0:nxN) k2(iz, ix) = (alfa0*ix)**2.0d0 + (beta0*iz)**2.0d0
-    !$omp target enter data map(to: izd, ialfa, ibeta, k2, y, iy, rk1_rai, rk2_rai, rk3_rai, d2vmat, etamat)
+    !$omp target enter data map(to: izd, ialfa, ibeta, k2, y, iy, rk1_rai, rk2_rai, rk3_rai)
     IF (solveNS .AND. has_terminal) OPEN (UNIT=101, FILE='Runtimedata', ACTION='write')
   END SUBROUTINE init_memory
 
@@ -150,7 +150,7 @@ CONTAINS
 #ifdef bodyforce
     !$omp target exit data map(delete: F)
 #endif
-    DEALLOCATE (V, der, d0mat, etamat, D2vmat, y, dy)
+    DEALLOCATE (V, der, d0mat, y, dy)
     IF (solveNS) THEN
       DEALLOCATE (memrhs, oldrhs, bc0, bcn)
       IF (has_terminal) CLOSE (UNIT=101)
@@ -299,21 +299,22 @@ CONTAINS
     integer(C_INT) :: ix, iz, i, j
     complex(C_DOUBLE_COMPLEX) :: temp(ny0 - 2:nyN + 2)
     complex(C_DOUBLE_COMPLEX) :: ucor(ny0 - 2:nyN + 2)
+    real(C_DOUBLE), dimension(:, :) :: etamat(ny0:nyN + 2, -2:2), D2vmat(ny0:nyN + 2, -2:2)
     real(C_DOUBLE), pointer :: EQ2(:, :)
     ! bc0(iz,ix,i), bcn(iz,ix,i),                 i={1:u, 2:v, 3:w, 4:vy, 5:eta}
 
     !$omp target teams distribute parallel do collapse(2)  defaultmap(none) default(none)  &
-    !$omp shared(d2vmat, etamat, V, d0mat) shared(y, bc0, bcn, der, k2, lambda, ni, ialfa, ibeta) &
+    !$omp shared(V, d0mat) shared(y, bc0, bcn, der, k2, lambda, ni, ialfa, ibeta) &
     !$omp shared(v0bc, v0m1bc, eta0bc, eta0m1bc, vnbc, vnp1bc, etanbc, etanp1bc) &
     !$omp shared(nx0, nxN, nz, ny0, nyN, ny) &
     !$omp private(fr, corrpx, corrpz) shared(meanflowz, meanflowx) &
-    !$omp private(ix, iz, iy, temp, ucor) map(alloc: temp, ucor)
+    !$omp private(ix, iz, iy, temp, ucor, etamat, d2vmat) map(alloc: temp, ucor, etamat, d2vmat)
     DO ix = nx0, nxN
       DO iz = -nz, nz
         ! Build the linear system
         DO iy = ny0, nyN
-          D2vmat(iy, -2:2, iz, ix) = lambda*(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)) - OS(iy, -2:2)
-          etamat(iy, -2:2, iz, ix) = lambda*der(iy, 0, -2:2) - SQ(iy, -2:2)
+          D2vmat(iy, -2:2) = lambda*(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)) - OS(iy, -2:2)
+          etamat(iy, -2:2) = lambda*der(iy, 0, -2:2) - SQ(iy, -2:2)
         END DO
 
         IF (ix == 0 .AND. iz == 0) THEN
@@ -322,29 +323,29 @@ CONTAINS
           bc0(iz, ix, 4) = -ialfa(ix)*bc0(iz, ix, 1) - ibeta(iz)*bc0(iz, ix, 3); bc0(iz, ix, 5) = ibeta(iz)*bc0(iz, ix, 1) - ialfa(ix)*bc0(iz, ix, 3)
         END IF
         bc0(iz, ix, 2) = bc0(iz, ix, 2) - v0bc(-2)*bc0(iz, ix, 4)/v0m1bc(-2)
-        CALL applybc_0(D2vmat(:, :, iz, ix), v0bc, v0m1bc)
- V(1, iz, ix, 2) = V(1, iz, ix, 2) - D2vmat(1, -2, iz, ix)*bc0(iz, ix, 4)/v0m1bc(-2) - D2vmat(1, -1, iz, ix)*bc0(iz, ix, 2)/v0bc(-1)
-        V(2, iz, ix, 2) = V(2, iz, ix, 2) - D2vmat(2, -2, iz, ix)*bc0(iz, ix, 2)/v0bc(-1)
-        CALL applybc_0(etamat(:, :, iz, ix), eta0bc, eta0m1bc)
-        V(1, iz, ix, 1) = V(1, iz, ix, 1) - etamat(1, -1, iz, ix)*bc0(iz, ix, 5)/eta0bc(-1)
-        V(2, iz, ix, 1) = V(2, iz, ix, 1) - etamat(2, -2, iz, ix)*bc0(iz, ix, 5)/eta0bc(-1)
+        CALL applybc_0(D2vmat(:, :), v0bc, v0m1bc)
+        V(1, iz, ix, 2) = V(1, iz, ix, 2) - D2vmat(1, -2)*bc0(iz, ix, 4)/v0m1bc(-2) - D2vmat(1, -1)*bc0(iz, ix, 2)/v0bc(-1)
+        V(2, iz, ix, 2) = V(2, iz, ix, 2) - D2vmat(2, -2)*bc0(iz, ix, 2)/v0bc(-1)
+        CALL applybc_0(etamat(:, :), eta0bc, eta0m1bc)
+        V(1, iz, ix, 1) = V(1, iz, ix, 1) - etamat(1, -1)*bc0(iz, ix, 5)/eta0bc(-1)
+        V(2, iz, ix, 1) = V(2, iz, ix, 1) - etamat(2, -2)*bc0(iz, ix, 5)/eta0bc(-1)
         IF (ix == 0 .AND. iz == 0) THEN
           bcn(iz, ix, 2) = 0; bcn(iz, ix, 4) = 0; bcn(iz, ix, 5) = dcmplx(dreal(bcn(iz, ix, 1)) - dimag(bcn(iz, ix, 3)), dimag(bcn(iz, ix, 1)) + dreal(bcn(iz, ix, 3)))
         ELSE
           bcn(iz, ix, 4) = -ialfa(ix)*bcn(iz, ix, 1) - ibeta(iz)*bcn(iz, ix, 3); bcn(iz, ix, 5) = ibeta(iz)*bcn(iz, ix, 1) - ialfa(ix)*bcn(iz, ix, 3)
         END IF
         bcn(iz, ix, 2) = bcn(iz, ix, 2) - vnbc(2)*bcn(iz, ix, 4)/vnp1bc(2)
-        CALL applybc_n(D2vmat(:, :, iz, ix), vnbc, vnp1bc)
-        V(ny-1,iz,ix,2)=V(ny-1,iz,ix,2)-D2vmat(ny-1,2,iz, ix)*bcn(iz,ix,4)/vnp1bc(2)-D2vmat(ny-1,1,iz, ix)*bcn(iz,ix,2)/vnbc(1)
-        V(ny - 2, iz, ix, 2) = V(ny - 2, iz, ix, 2) - D2vmat(ny - 2, 2, iz, ix)*bcn(iz, ix, 2)/vnbc(1)
-        CALL applybc_n(etamat(:, :, iz, ix), etanbc, etanp1bc)
-        V(ny - 1, iz, ix, 1) = V(ny - 1, iz, ix, 1) - etamat(ny - 1, 1, iz, ix)*bcn(iz, ix, 5)/etanbc(1)
-        V(ny - 2, iz, ix, 1) = V(ny - 2, iz, ix, 1) - etamat(ny - 2, 2, iz, ix)*bcn(iz, ix, 5)/etanbc(1)
+        CALL applybc_n(D2vmat(:, :), vnbc, vnp1bc)
+ V(ny - 1, iz, ix, 2) = V(ny - 1, iz, ix, 2) - D2vmat(ny - 1, 2)*bcn(iz, ix, 4)/vnp1bc(2) - D2vmat(ny - 1, 1)*bcn(iz, ix, 2)/vnbc(1)
+        V(ny - 2, iz, ix, 2) = V(ny - 2, iz, ix, 2) - D2vmat(ny - 2, 2)*bcn(iz, ix, 2)/vnbc(1)
+        CALL applybc_n(etamat(:, :), etanbc, etanp1bc)
+        V(ny - 1, iz, ix, 1) = V(ny - 1, iz, ix, 1) - etamat(ny - 1, 1)*bcn(iz, ix, 5)/etanbc(1)
+        V(ny - 2, iz, ix, 1) = V(ny - 2, iz, ix, 1) - etamat(ny - 2, 2)*bcn(iz, ix, 5)/etanbc(1)
         ! LU decomposition and solution of the 5-diagonal system
 
-        CALL LU5decomp(D2vmat(:, :, iz, ix)); CALL LU5decomp(etamat(:, :, iz, ix))
-        CALL LeftLU5div(V(:, iz, ix, 2), D2vmat(:, :, iz, ix), V(:, iz, ix, 2))
-        CALL LeftLU5div(V(:, iz, ix, 1), etamat(:, :, iz, ix), V(:, iz, ix, 1))
+        CALL LU5decomp(D2vmat(:, :)); CALL LU5decomp(etamat(:, :))
+        CALL LeftLU5div(V(:, iz, ix, 2), D2vmat(:, :), V(:, iz, ix, 2))
+        CALL LeftLU5div(V(:, iz, ix, 1), etamat(:, :), V(:, iz, ix, 1))
         ! Retrieve solutions at boundaries
         V(0, iz, ix, 2) = (bc0(iz, ix, 2) - sum(V(1:3, iz, ix, 2)*v0bc(0:2)))/v0bc(-1)
         V(-1, iz, ix, 2) = (bc0(iz, ix, 4) - sum(V(0:3, iz, ix, 2)*v0m1bc(-1:2)))/v0m1bc(-2)
@@ -359,7 +360,7 @@ CONTAINS
           V(:, 0, 0, 3) = dcmplx(dimag(V(:, 0, 0, 1)), 0.d0); 
           V(:, 0, 0, 1) = dcmplx(dreal(V(:, 0, 0, 1)), 0.d0); 
           ucor(ny0 - 2:ny0 - 1) = 0; ucor(ny0:nyN) = 1; ucor(nyN + 1:nyN + 2) = 0
-          CALL LeftLU5div(ucor, etamat(:, :, iz, ix), ucor)
+          CALL LeftLU5div(ucor, etamat(:, :), ucor)
           ucor(0) = -sum(ucor(1:3)*eta0bc(0:2))/eta0bc(-1)
           ucor(-1) = -sum(ucor(0:3)*eta0m1bc(-1:2))/eta0m1bc(-2)
           ucor(ny) = -sum(ucor(ny - 3:ny - 1)*etanbc(-2:0))/etanbc(1)
@@ -616,6 +617,7 @@ CONTAINS
     INTEGER(MPI_OFFSET_KIND) :: disp
     TYPE(MPI_Status) :: status
 
+    !$omp target update from(V)
     ! open file
     CALL MPI_File_open(MPI_COMM_WORLD, TRIM(filename), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
 
@@ -644,8 +646,8 @@ CONTAINS
     real(C_DOUBLE) :: runtime_global, dudy(1:2, 1:2)   !cfl
     character(len=40) :: istring, filename
 
-    !$omp target update from(V)
-    
+    !$omp target update from(V(ny-3:ny+1, 0, 0, 1:3))
+
     CALL MPI_Allreduce(cfl, runtime_global, 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD); cfl = 0; 
     IF (cflmax > 0) deltat = cflmax/runtime_global
     IF (has_average) THEN
