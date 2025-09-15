@@ -71,6 +71,7 @@ CONTAINS
 
     ! Compute CFL
     if (deltat == 0.0) deltat = 1.0
+    !$omp target update to(V)
     CALL convolutions(.TRUE.)
     print *, "CFL", deltat, cfl
     ! Compute flow rate

@@ -381,7 +381,6 @@ CONTAINS
         END IF
       END DO
     END DO
-    !$omp target update from(V)
   END SUBROUTINE linsolve
 
   !--------------------------------------------------------------!
@@ -396,8 +395,6 @@ CONTAINS
     integer(C_INT) :: iV
     integer :: istat
     real(C_DOUBLE), dimension(:, :, :, :), allocatable :: rVVdx2
-
-    !$omp target update to(V)
 
     !$omp target teams distribute parallel do collapse(4) defaultmap(none) default(none) &
     !$omp shared(V, VVdz) shared(ny, nxB, nzd, nx0, nxN, nz) private(i,j,k,m)
@@ -500,6 +497,7 @@ CONTAINS
       END DO
     END DO
 #endif
+
     CALL convolutions(compute_cfl)
 
     !$omp target teams distribute parallel do collapse(3) defaultmap(none) default(none)  &
