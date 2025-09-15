@@ -39,35 +39,55 @@ CONTAINS
     integer(C_INT), intent(in) :: ny
     integer(C_SIZE_T) :: i, j, iy, iV
     integer(C_SIZE_T) :: ix, iz, one, num, zero, npxt
-    DO iy = 1, ny + 3
-      DO iV = 1, 3
-        one = 1
-        num = nzd/nproc
-        zero = 0
-        npxt = nproc
 
-        Ain = 0; Aout = 0
+    
+    IF (nproc==1) THEN
+      !$omp target teams distribute parallel do collapse(4) defaultmap(none) default(none) &
+      !$omp shared(Vx, Vz) shared(ny, nx0, nzd, nx) private(iy, iV, ix, iz)
+      DO iy = 1, ny + 3
+        DO iV = 1, 3
+          DO ix = 0, nx
+            DO iz = 1, nzd
+              Vx(ix + 1, iz, iy, iV) = Vz(iz, ix - nx0 + 1, iy, iV)
+            END DO
+          END DO
+        END DO
+      END DO
 
-        !Pack
-        i = zero
-        DO j = zero, npxt - one
-          DO ix = nx0, nxN
-            Ain(i:i + num - one) = Vz(one + j*num:(j + one)*num, ix - nx0 + one, iy, iV)
+    ELSE
+      !$omp target update from(Vz)
+      DO iy = 1, ny + 3
+        DO iV = 1, 3
+          one = 1
+          num = nzd/nproc
+          zero = 0
+          npxt = nproc
+
+          Ain = 0; Aout = 0
+
+          !Pack
+          i = zero
+          DO j = zero, npxt - one
+            DO ix = nx0, nxN
+              Ain(i:i + num - one) = Vz(one + j*num:(j + one)*num, ix - nx0 + one, iy, iV)
+              i = i + num
+            END DO
+          END DO
+
+          !Send
+          CALL MPI_Alltoall(Ain, nxB*nzB, MPI_DOUBLE_COMPLEX, Aout, nxB*nzB, MPI_DOUBLE_COMPLEX, MPI_COMM_WORLD)
+
+          !Unpack
+          i = zero
+          DO ix = 0, nx
+            Vx(ix + one, one:num, iy, iV) = Aout(i:i + num - one)
             i = i + num
           END DO
         END DO
+      END DO
+      !$omp target update to(Vx)
+    END IF
 
-        !Send
-        CALL MPI_Alltoall(Ain, nxB*nzB, MPI_DOUBLE_COMPLEX, Aout, nxB*nzB, MPI_DOUBLE_COMPLEX, MPI_COMM_WORLD)
-
-        !Unpack
-        i = zero
-        DO ix = 0, nx
-          Vx(ix + one, one:num, iy, iV) = Aout(i:i + num - one)
-          i = i + num
-        END DO
-      END do
-    END DO
   END SUBROUTINE zTOx
 
   !-------------- Transpose: X to Z --------------!
@@ -79,34 +99,51 @@ CONTAINS
     integer(C_SIZE_T) :: i, j, iy, iV
     integer(C_SIZE_T) :: ix, iz, one, num, zero, npxt
 
-    DO iy = 1, ny + 3
-      DO iV = 1, 6
+    IF (nproc==1) THEN
+      !$omp target teams distribute parallel do collapse(4) defaultmap(none) default(none) &
+      !$omp shared(Vx, Vz) shared(ny, nz0, nzd, nx) private(iy, iV, ix, iz)
+      DO iy = 1, ny + 3
+        DO iV = 1, 6
+          DO iz = 0, nzd - 1
+            DO ix = 1,nx+1
+              Vz(iz + 1, ix, iy, iV) = Vx(ix, iz - nz0 + 1, iy, iV)
+            END DO
+          END DO
+        END DO
+      END DO
+    ELSE
 
-        one = 1
-        num = (nx + 1)/nproc
-        zero = 0
-        npxt = nproc
+      !$omp target update from (Vx)
+      DO iy = 1, ny + 3
+        DO iV = 1, 6
 
-        !Pack
-        i = zero
-        DO j = zero, npxt - one
-          DO iz = nz0, nzN
-            Ain(i:i + num - one) = Vx(one + j*num:(j + one)*num, iz - nz0 + one, iy, iV)
+          one = 1
+          num = (nx + 1)/nproc
+          zero = 0
+          npxt = nproc
+
+          !Pack
+          i = zero
+          DO j = zero, npxt - one
+            DO iz = nz0, nzN
+              Ain(i:i + num - one) = Vx(one + j*num:(j + one)*num, iz - nz0 + one, iy, iV)
+              i = i + num
+            END DO
+          END DO
+
+          !Send
+          CALL MPI_Alltoall(Ain, nxB*nzB, MPI_DOUBLE_COMPLEX, Aout, nxB*nzB, MPI_DOUBLE_COMPLEX, MPI_COMM_WORLD)
+
+          !Unpack
+          i = zero
+          DO iz = 0, nzd - 1
+            Vz(iz + one, one:num, iy, iV) = Aout(i:i + num - one)
             i = i + num
           END DO
         END DO
-
-        !Send
-        CALL MPI_Alltoall(Ain, nxB*nzB, MPI_DOUBLE_COMPLEX, Aout, nxB*nzB, MPI_DOUBLE_COMPLEX, MPI_COMM_WORLD)
-
-        !Unpack
-        i = zero
-        DO iz = 0, nzd - 1
-          Vz(iz + one, one:num, iy, iV) = Aout(i:i + num - one)
-          i = i + num
-        END DO
       END DO
-    END DO
+    !$omp target update to(Vz)
+    END IF
   END SUBROUTINE xTOz
 
   !------- Divide the problem in 1D slices -------!

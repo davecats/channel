@@ -417,11 +417,7 @@ CONTAINS
       END DO
     END DO
     CALL IFT(VVdz, ny)
-    print *, "before zTOx"
-    !$omp target update from(VVdz)
     CALL zTOx(VVdz, VVdx, ny)
-    !$omp target update to(VVdx)
-    print *, "after zTOx"
 
     !$omp target teams distribute parallel do collapse(4) defaultmap(none) default(none) shared(VVdx) shared(nx, nxd, nzB, ny)
     DO i = 1, ny + 3
@@ -469,11 +465,7 @@ CONTAINS
       END DO
     END DO
     CALL HFT(rVVdx, VVdx, ny)
-    print *, "before xTOz"
-    !$omp target update from (VVdx)
     CALL xTOz(VVdx, VVdz, ny)
-    !$omp target update to(VVdz)
-    print *, "after xTOz"
     CALL FFT(VVdz, ny)
   END SUBROUTINE convolutions
 
@@ -653,6 +645,9 @@ CONTAINS
     IMPLICIT NONE
     real(C_DOUBLE) :: runtime_global, dudy(1:2, 1:2)   !cfl
     character(len=40) :: istring, filename
+
+    !$omp target update from(V)
+    
     CALL MPI_Allreduce(cfl, runtime_global, 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD); cfl = 0; 
     IF (cflmax > 0) deltat = cflmax/runtime_global
     IF (has_average) THEN
