@@ -45,6 +45,9 @@ set(TEST_NPROCS 1 CACHE STRING "Number of MPI ranks for regression test")
 add_executable(test_regression test_regression.f90)
 target_link_libraries(test_regression PRIVATE channel_core)
 
+add_executable(test_regression_scalar test_regression_scalar.f90)
+target_link_libraries(test_regression_scalar PRIVATE channel_core)
+
 # Add a CTest target
 enable_testing()
 
@@ -72,11 +75,33 @@ add_test(NAME regression_test_4rank
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
 set_tests_properties(regression_test_4rank PROPERTIES PROCESSORS 4)
+
+add_test(NAME regression_test_scalar_1rank
+    COMMAND ${MPIEXEC_EXECUTABLE}
+            ${MPIEXEC_NUMPROC_FLAG} 1
+            ${MPIEXEC_PREFLAGS}
+            $<TARGET_FILE:test_regression_scalar>
+            ${MPIEXEC_POSTFLAGS}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(regression_test_scalar_1rank PROPERTIES PROCESSORS 1)
+
+# 4-rank regression test
+add_test(NAME regression_test_scalar_4rank
+    COMMAND ${MPIEXEC_EXECUTABLE}
+            ${MPIEXEC_NUMPROC_FLAG} 2
+            ${MPIEXEC_PREFLAGS}
+            $<TARGET_FILE:test_regression_scalar>
+            ${MPIEXEC_POSTFLAGS}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(regression_test_scalar_4rank PROPERTIES PROCESSORS 4)
+
 # --------------------------------------------------------------------
 # Compiler flags
 # --------------------------------------------------------------------
 if (CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
-    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cpp -O0 -malign-double -fall-intrinsics -ffree-line-length-none")
+    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cpp -O0 -malign-double -fall-intrinsics -ffree-line-length-none -g -fcheck=all -fbacktrace -Wall")
 elseif (CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
     find_package(CUDAToolkit REQUIRED)
 

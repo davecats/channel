@@ -613,7 +613,7 @@ CONTAINS
   SUBROUTINE save_restart_file(filename, R)
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), intent(in) :: R(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3)
-    character(len=40), intent(in) :: filename
+    character(len=*), intent(in) :: filename
     ! mpi stuff
     TYPE(MPI_File) :: fh
     INTEGER(MPI_OFFSET_KIND) :: disp

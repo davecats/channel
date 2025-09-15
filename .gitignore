@@ -88,3 +88,4 @@ dkms.conf
 build*/
 .venv/
 !tests/data/*.out
+Runtimedata*
