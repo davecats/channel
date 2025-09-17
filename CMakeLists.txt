@@ -112,7 +112,7 @@ elseif (CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
     target_include_directories(channel_core PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
     target_link_libraries(channel_core PUBLIC CUDA::cufft CUDA::cudart)
 
-    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cpp -O2 -Wall -Kieee -Mnofma -traceback -mp -mp=gpu -Minfo=mp -Mcache_align -cuda") #
+    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cpp -O3 -mp -mp=gpu -Minfo=mp -Mcache_align -cuda") #
     target_compile_definitions(channel_core PRIVATE HAVE_CUDA)
 
 

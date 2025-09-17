@@ -19,15 +19,31 @@ CONTAINS
   !==========================================================
   SUBROUTINE initialize(config_file, restart_file)
     USE dnsdata
+#ifdef HAVE_CUDA
+    use omp_lib
+#endif
     IMPLICIT NONE
     CHARACTER(len=*), INTENT(IN) :: config_file, restart_file
     REAL(C_DOUBLE) :: deltat_from_dnsin
-    integer :: iy, iPhi
+    integer :: iy, iPhi, num_dev, dev
 
     ! Init MPI
     CALL MPI_INIT(ierr)
     CALL MPI_COMM_RANK(MPI_COMM_WORLD, iproc, ierr)
     CALL MPI_COMM_SIZE(MPI_COMM_WORLD, nproc, ierr)
+
+#ifdef HAVE_CUDA
+    num_dev = omp_get_num_devices()
+    dev = mod(iproc, num_dev)
+
+    call omp_set_default_device(dev)
+
+    print *, 'Rank', iproc, 'of', nproc, 'using device', dev, 'out of', num_dev
+
+    !$omp target
+    print *, 'Hello from GPU on rank', iproc, 'device', dev
+    !$omp end target
+#endif
 
     CALL read_dnsin(config_file)
     deltat_from_dnsin = deltat
@@ -138,7 +154,7 @@ CONTAINS
 
 #ifdef chron
       CALL CPU_TIME(timee)
-      IF (has_terminal) WRITE (*, *) timee - timei
+      IF (has_terminal) WRITE (*, *) "TIME PER TIMESTEP"timee - timei
 #endif
     END DO
   END SUBROUTINE timeloop
