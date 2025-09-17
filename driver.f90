@@ -22,7 +22,7 @@ CONTAINS
     IMPLICIT NONE
     CHARACTER(len=*), INTENT(IN) :: config_file, restart_file
     REAL(C_DOUBLE) :: deltat_from_dnsin
-    integer :: iy
+    integer :: iy, iPhi
 
     ! Init MPI
     CALL MPI_INIT(ierr)
@@ -31,14 +31,14 @@ CONTAINS
 
     CALL read_dnsin(config_file)
     deltat_from_dnsin = deltat
-    CALL init_MPI(nx + 1, nz, ny, nxd + 1, nzd)
+    CALL init_MPI(nx + 1, nz, ny, nxd + 1, nzd, nPhi)
     CALL init_memory(.TRUE.)
 
     ! Init various subroutines
 #ifdef HAVE_CUDA
-    CALL init_cufft(nxd, nxB, ny, nzd, nzB)
+    CALL init_cufft(nxd, nxB, ny, nzd, nzB, nPhi)
 #else
-    CALL init_fft(VVdz, VVdx, rVVdx, nxd, nxB, ny, nzd, nzB)
+    CALL init_fft(VVdz, VVdx, rVVdx, nxd, nxB, ny, nzd, nzB, nPhi)
 #endif
     CALL setup_derivatives()
     CALL setup_boundary_conditions()
@@ -77,6 +77,9 @@ CONTAINS
     ! Compute flow rate
     IF (has_average) THEN
       fr(1) = yintegr(V(:, 0, 0, 1), y); fr(2) = yintegr(V(:, 0, 0, 3), y); 
+      DO iPhi = 1, nPhi
+        fr(3 + iPhi) = yintegr(V(:, 0, 0, 3 + iPhi), y)
+      END DO
     END IF
     CALL outstats()
   END SUBROUTINE initialize
@@ -85,6 +88,7 @@ CONTAINS
   SUBROUTINE timeloop()
     USE dnsdata
     IMPLICIT NONE
+    integer:: iPhi, ix, iz
 #ifdef chron
     REAL timei, timee
 #endif
@@ -97,6 +101,20 @@ CONTAINS
       IF (has_average) THEN
         bc0(0, 0, 1) = u0; bcn(0, 0, 1) = uN
       END IF
+      DO iPhi = 1, nPhi
+        DO ix = nx0, nxN
+          DO iz = -nz, nz
+            IF (ix == 0 .and. iz == 0) THEN
+              bc0(iz, ix, 5 + iPhi) = t0
+              bcn(iz, ix, 5 + iPhi) = tn
+            ELSE
+              bc0(iz, ix, 5 + iPhi) = 0
+              bcn(iz, ix, 5 + iPhi) = 0
+            END IF
+          END DO
+        END DO
+      END DO
+      !$omp target update to(bc0, bcn)
       ! Increment number of steps
       istep = istep + 1
 

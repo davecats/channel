@@ -32,8 +32,8 @@ MODULE ffts
 CONTAINS
 
 #ifndef HAVE_CUDA
-  SUBROUTINE init_fft(VVdz, VVdx, rVVdx, nxd, nxB, ny, nzd, nzB, odd_n_real, s)
-    integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, ny
+  SUBROUTINE init_fft(VVdz, VVdx, rVVdx, nxd, nxB, ny, nzd, nzB, nPhi, odd_n_real, s)
+    integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, ny, nPhi
     complex(C_DOUBLE_COMPLEX), pointer, dimension(:, :, :, :), intent(out) :: VVdx, VVdz
     real(C_DOUBLE), pointer, dimension(:, :, :, :), intent(out) :: rVVdx
     logical, optional, intent(in) :: odd_n_real
@@ -50,6 +50,7 @@ CONTAINS
     if (present(s)) sn = s
 
     sn(2) = ny + 3
+    sn(1) = 6 + 3*nPhi
     !Allocate aligned memory
     ptrVVdz = fftw_alloc_complex(int(nxB*nzd*sn(1)*sn(2), C_SIZE_T))
     ptrVVdx = fftw_alloc_complex(int((nxd + 1)*nzB*sn(1)*sn(2), C_SIZE_T))
@@ -70,31 +71,31 @@ CONTAINS
   END SUBROUTINE init_fft
 #endif
 #ifdef HAVE_CUDA
-  SUBROUTINE init_cufft(nxd, nxB, ny, nzd, nzB)
+  SUBROUTINE init_cufft(nxd, nxB, ny, nzd, nzB, nPhi)
     use cufft
     IMPLICIT NONE
-    integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, ny
+    integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, ny, nPhi
     integer :: istat
     integer, dimension(1) :: n, inembed, onembed
     integer :: batch, idist, odist, istride, ostride
 
-    allocate (VVdz(nzd, nxB, ny + 3, 6))
-    allocate (VVdx(nxd + 1, nzB, ny + 3, 6))
-    allocate (rVVdx(2*(nxd + 1), nzB, ny + 3, 6))
+    allocate (VVdz(nzd, nxB, ny + 3, 6 + 3*nPhi))
+    allocate (VVdx(nxd + 1, nzB, ny + 3, 6 + 3*nPhi))
+    allocate (rVVdx(2*(nxd + 1), nzB, ny + 3, 6 + 3*nPhi))
     !$omp target enter data map(to: VVdz, VVdx, rVVdx)
 
     !!$omp target enter data map(alloc: VVdz, VVdx, rVVdx)
     !FFTs plans
     istat = cufftCreate(cu_pIFT)
     istat = cufftSetAutoAllocation(cu_pIFT, 0)
-    istat = cufftPlan1d(cu_pIFT, nzd, CUFFT_Z2Z, 3*(ny + 3)*nxB)
+    istat = cufftPlan1d(cu_pIFT, nzd, CUFFT_Z2Z, (3 + nPhi)*(ny + 3)*nxB)
 
     istat = cufftCreate(cu_pFFT)
     istat = cufftSetAutoAllocation(cu_pFFT, 0)
-    istat = cufftPlan1d(cu_pFFT, nzd, CUFFT_Z2Z, 6*(ny + 3)*nxB)
+    istat = cufftPlan1d(cu_pFFT, nzd, CUFFT_Z2Z, (6 + 3*nPhi)*(ny + 3)*nxB)
 
     n(1) = 2*nxd            ! length
-    batch = nzB*3*(ny + 3)
+    batch = nzB*(3 + nPhi)*(ny + 3)
     istride = 1                  ! contiguous along x
     ostride = 1
     idist = nxd + 1            ! distance between consecutive complex transforms
@@ -111,7 +112,7 @@ CONTAINS
     istat = cufftCreate(cu_pHFT)
     istat = cufftSetAutoAllocation(cu_pHFT, 0)
     istat = cufftPlanMany(cu_pHFT, 1, n, onembed, ostride, odist, &
-                          inembed, istride, idist, CUFFT_D2Z, batch*2)
+                          inembed, istride, idist, CUFFT_D2Z, nzB*(6 + 3*nPhi)*(ny + 3))
 
   END SUBROUTINE init_cufft
 #endif
@@ -126,80 +127,80 @@ CONTAINS
     isFIT = ((j == 1) .OR. (j == 3))
   END FUNCTION fftFIT
 
-  SUBROUTINE FFT(x, ny)
+  SUBROUTINE FFT(x, ny, nPhi)
     complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, :, :)
-    integer(C_INT), intent(in) :: ny
+    integer(C_INT), intent(in) :: ny, nPhi
     integer :: i, iV, istat
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(x)
-    istat = cudaDeviceSynchronize
+    istat = cudaDeviceSynchronize()
     istat = cufftExecZ2Z(cu_pFFT, x(1, 1, 1, 1), x(1, 1, 1, 1), CUFFT_FORWARD)
-    istat = cudaDeviceSynchronize
+    istat = cudaDeviceSynchronize()
     !$omp end target data
 #else
     DO i = 1, ny + 3
-      DO iV = 1, 6
+      DO iV = 1, 6 + 3*nPhi
         CALL fftw_execute_dft(pFFT, x(:, :, i, iV), x(:, :, i, iV)); 
       END DO
     END do
 #endif
   END SUBROUTINE FFT
 
-  SUBROUTINE IFT(x, ny)
+  SUBROUTINE IFT(x, ny, nPhi)
     complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, :, :)
-    integer(C_INT), intent(in) :: ny
+    integer(C_INT), intent(in) :: ny, nPhi
     integer :: i, iV, istat
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(x)
-    istat = cudaDeviceSynchronize
+    istat = cudaDeviceSynchronize()
     istat = cufftExecZ2Z(cu_pIFT, x(1, 1, 1, 1), x(1, 1, 1, 1), CUFFT_INVERSE)
-    istat = cudaDeviceSynchronize
+    istat = cudaDeviceSynchronize()
     !$omp end target data
 #else
     DO i = 1, ny + 3
-      DO iV = 1, 3
+      DO iV = 1, 3 + nPhi
         CALL fftw_execute_dft(pIFT, x(:, :, i, iV), x(:, :, i, iV))
       END DO
     END DO
 #endif
   END SUBROUTINE IFT
 
-  SUBROUTINE RFT(x, rx, ny)
+  SUBROUTINE RFT(x, rx, ny, nPhi)
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX) :: x(:, :, :, :)
-    integer(C_INT), intent(in) :: ny
+    integer(C_INT), intent(in) :: ny, nPhi
     real(C_DOUBLE) :: rx(:, :, :, :)
     integer :: i, iV, istat
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(x, rx)
-    istat = cudaDeviceSynchronize
+    istat = cudaDeviceSynchronize()
     istat = cufftExecZ2D(cu_pRFT, x(1, 1, 1, 1), rx(1, 1, 1, 1))
-    istat = cudaDeviceSynchronize
+    istat = cudaDeviceSynchronize()
     !$omp end target data
 #else
     DO i = 1, ny + 3
-      DO iV = 1, 3
+      DO iV = 1, 3 + nPhi
         CALL fftw_execute_dft_c2r(pRFT, x(:, :, i, iV), rx(:, :, i, iV))
       END DO
     END DO
 #endif
   END SUBROUTINE RFT
 
-  SUBROUTINE HFT(rx, x, ny)
+  SUBROUTINE HFT(rx, x, ny, nPhi)
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX) :: x(:, :, :, :)
-    integer(C_INT), intent(in) :: ny
+    integer(C_INT), intent(in) :: ny, nPhi
     real(C_DOUBLE) :: rx(:, :, :, :)
     integer :: i, iV, istat
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(rx, x)
-    istat = cudaDeviceSynchronize
+    istat = cudaDeviceSynchronize()
     istat = cufftExecD2Z(cu_pHFT, rx(1, 1, 1, 1), x(1, 1, 1, 1))
-    istat = cudaDeviceSynchronize
+    istat = cudaDeviceSynchronize()
     !$omp end target data
 #else
     DO i = 1, ny + 3
-      DO iV = 1, 6
+      DO iV = 1, 6 + 3*nPhi
         CALL fftw_execute_dft_r2c(pHFT, rx(:, :, i, iV), x(:, :, i, iV)); 
       END DO
     END DO

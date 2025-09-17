@@ -33,19 +33,18 @@ CONTAINS
 
   !-------------- Transpose: Z to X --------------!
   !-----------------------------------------------!
-  SUBROUTINE zTOx(Vz, Vx, ny)
+  SUBROUTINE zTOx(Vz, Vx, ny, nPhi)
     complex(C_DOUBLE_COMPLEX), intent(in)  :: Vz(1:, 1:, :, :)
     complex(C_DOUBLE_COMPLEX), intent(out) :: Vx(1:, 1:, :, :)
-    integer(C_INT), intent(in) :: ny
+    integer(C_INT), intent(in) :: ny, nPhi
     integer(C_SIZE_T) :: i, j, iy, iV
     integer(C_SIZE_T) :: ix, iz, one, num, zero, npxt
 
-    
-    IF (nproc==1) THEN
+    IF (nproc == 1) THEN
       !$omp target teams distribute parallel do collapse(4) defaultmap(none) default(none) &
-      !$omp shared(Vx, Vz) shared(ny, nx0, nzd, nx) private(iy, iV, ix, iz)
+      !$omp shared(Vx, Vz) shared(ny, nx0, nzd, nx, nPhi) private(iy, iV, ix, iz)
       DO iy = 1, ny + 3
-        DO iV = 1, 3
+        DO iV = 1, 3 + nPhi
           DO ix = 0, nx
             DO iz = 1, nzd
               Vx(ix + 1, iz, iy, iV) = Vz(iz, ix - nx0 + 1, iy, iV)
@@ -57,7 +56,7 @@ CONTAINS
     ELSE
       !$omp target update from(Vz)
       DO iy = 1, ny + 3
-        DO iV = 1, 3
+        DO iV = 1, 3 + nPhi
           one = 1
           num = nzd/nproc
           zero = 0
@@ -92,20 +91,20 @@ CONTAINS
 
   !-------------- Transpose: X to Z --------------!
   !-----------------------------------------------!
-  SUBROUTINE xTOz(Vx, Vz, ny)
+  SUBROUTINE xTOz(Vx, Vz, ny, nPhi)
     complex(C_DOUBLE_COMPLEX), intent(out) :: Vz(1:, 1:, :, :)
     complex(C_DOUBLE_COMPLEX), intent(in) :: Vx(1:, 1:, :, :)
-    integer(C_INT), intent(in) :: ny
+    integer(C_INT), intent(in) :: ny, nPhi
     integer(C_SIZE_T) :: i, j, iy, iV
     integer(C_SIZE_T) :: ix, iz, one, num, zero, npxt
 
-    IF (nproc==1) THEN
+    IF (nproc == 1) THEN
       !$omp target teams distribute parallel do collapse(4) defaultmap(none) default(none) &
-      !$omp shared(Vx, Vz) shared(ny, nz0, nzd, nx) private(iy, iV, ix, iz)
+      !$omp shared(Vx, Vz) shared(ny, nz0, nzd, nx, nPhi) private(iy, iV, ix, iz)
       DO iy = 1, ny + 3
-        DO iV = 1, 6
+        DO iV = 1, 6 + 3*nPhi
           DO iz = 0, nzd - 1
-            DO ix = 1,nx+1
+            DO ix = 1, nx + 1
               Vz(iz + 1, ix, iy, iV) = Vx(ix, iz - nz0 + 1, iy, iV)
             END DO
           END DO
@@ -115,8 +114,7 @@ CONTAINS
 
       !$omp target update from (Vx)
       DO iy = 1, ny + 3
-        DO iV = 1, 6
-
+        DO iV = 1, 6 + 3*nPhi
           one = 1
           num = (nx + 1)/nproc
           zero = 0
@@ -142,14 +140,14 @@ CONTAINS
           END DO
         END DO
       END DO
-    !$omp target update to(Vz)
+      !$omp target update to(Vz)
     END IF
   END SUBROUTINE xTOz
 
   !------- Divide the problem in 1D slices -------!
   !-----------------------------------------------!
-  SUBROUTINE init_MPI(nxpp, nz, ny, nxd, nzd)
-    integer(C_INT), intent(in)  :: nxpp, nz, ny, nxd, nzd
+  SUBROUTINE init_MPI(nxpp, nz, ny, nxd, nzd, nPhi)
+    integer(C_INT), intent(in)  :: nxpp, nz, ny, nxd, nzd, nPhi
     integer, parameter :: ndims = 4
     integer :: i
     integer :: array_of_sizes(ndims), array_of_subsizes(ndims), array_of_starts(ndims), ierror
@@ -175,19 +173,19 @@ CONTAINS
     ALLOCATE (Ain(0:block - 1)); Ain = 0
     ALLOCATE (Aout(0:block - 1)); Aout = 0
     ! For READING VELOCITY, SETTING VIEW: datatype that maps velocity on disk to memory (it differs from writing: halo cells are read twice!)
-    CALL MPI_Type_create_subarray(ndims, [ny+3, 2*nz+1, nxpp, 3], [nyN-ny0+5, 2*nz+1, nxB, 3], [ny0-1,0,nx0,0], MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, vel_read_type, ierror)
+    CALL MPI_Type_create_subarray(ndims, [ny+3, 2*nz+1, nxpp, 3+nPhi], [nyN-ny0+5, 2*nz+1, nxB, 3+nPhi], [ny0-1,0,nx0,0], MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, vel_read_type, ierror)
     CALL MPI_Type_commit(vel_read_type, ierror)
     ! For READING VELOCITY, datatype in memory (avoids overflow) - NOTICE THAT THIS ARRAY IS FULL (NOT REALLY SUBARRAY)
-    CALL MPI_Type_create_subarray(ndims, [nyN-ny0+5, 2*nz+1, nxB, 3], [nyN-ny0+5, 2*nz+1, nxB, 3], [0,0,0,0], MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, vel_field_type, ierror)
+    CALL MPI_Type_create_subarray(ndims, [nyN-ny0+5, 2*nz+1, nxB, 3+nPhi], [nyN-ny0+5, 2*nz+1, nxB, 3+nPhi], [0,0,0,0], MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, vel_field_type, ierror)
     CALL MPI_Type_commit(vel_field_type, ierror)
     ! For WRITING VELOCITY, SETTING VIEW: datatype to map distributed velocity array to file
-    array_of_sizes = [ny + 3, 2*nz + 1, nxpp, 3] ! size along each dimension of the WHOLE array ON DISK
-    array_of_subsizes = [maxy - miny + 1, 2*nz + 1, nxB, 3] ! size of the PORTION of array TO BE WRITTEN BY EACH PROCESS
+    array_of_sizes = [ny + 3, 2*nz + 1, nxpp, 3 + nPhi] ! size along each dimension of the WHOLE array ON DISK
+    array_of_subsizes = [maxy - miny + 1, 2*nz + 1, nxB, 3 + nPhi] ! size of the PORTION of array TO BE WRITTEN BY EACH PROCESS
     array_of_starts = [miny + 1, 0, nx0, 0] ! starting position of each component; !!! IT'S ZERO BASED !!!
     CALL MPI_Type_create_subarray(ndims, array_of_sizes, array_of_subsizes, array_of_starts, MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, writeview_type, ierror)
     CALL MPI_Type_commit(writeview_type, ierror)
     ! For WRITING VELOCITY, SKIPPING HALO CELLS: datatype with holes to skip halo cells and select only data to be written
-    array_of_sizes = [(nyN + 2) - (ny0 - 2) + 1, 2*nz + 1, nxB, 3] ! size along each dimension of the array IN MEMORY owned by each process
+    array_of_sizes = [(nyN + 2) - (ny0 - 2) + 1, 2*nz + 1, nxB, 3 + nPhi] ! size along each dimension of the array IN MEMORY owned by each process
     array_of_subsizes = [maxy - miny + 1, 2*nz + 1, nxB, 3] ! size of the PORTION of array TO BE WRITTEN BY EACH PROCESS
     array_of_starts = [miny - (ny0 - 2), 0, 0, 0] ! starting position of each component; !!! IT'S ZERO BASED AND WRT TO ARRAY IN MEMORY !!!
     CALL MPI_Type_create_subarray(ndims, array_of_sizes, array_of_subsizes, array_of_starts, MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, owned2write_type, ierror)

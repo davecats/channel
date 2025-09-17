@@ -7,7 +7,7 @@
 0.0       2.0                            ! meantx,meantb 
 0.0       0.0    0.0         0.0         ! u0 uN t0 tn
 2
-0 0                                      ! pr(1:nPhi)
+0.5 2                                      ! pr(1:nPhi)
 0.0       1.0    0.0                     ! deltat, cflmax, time
 30       -1      7000        .TRUE.      ! dt_field, dt_save, t_max, time_from_restart
 3                                        ! nstep

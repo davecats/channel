@@ -18,4 +18,4 @@
 ! Verbose echo of parallel parameters
 #define mpiverbose
 
-#define nPhi 0
+! #define phiNeumann
