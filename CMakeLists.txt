@@ -92,12 +92,15 @@ set_tests_properties(regression_test_scalar_4rank PROPERTIES PROCESSORS 4)
 # --------------------------------------------------------------------
 # Compiler flags
 # --------------------------------------------------------------------
+
+target_link_libraries(channel_core PUBLIC MPI::MPI_Fortran)
+
 if (CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cpp -O0 -malign-double -fall-intrinsics -ffree-line-length-none -g -fcheck=all -fbacktrace -Wall")
 
     target_compile_definitions(channel_core PRIVATE HAVE_FFTW)
     find_package(FFTW REQUIRED COMPONENTS DOUBLE_LIB)
-    target_link_libraries(channel_core PUBLIC MPI::MPI_Fortran FFTW::Double)
+    target_link_libraries(channel_core PUBLIC FFTW::Double)
 
 
 elseif (CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
@@ -118,7 +121,7 @@ elseif (CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -fpp -O0 -fp-model=precise")
     target_compile_definitions(channel_core PRIVATE HAVE_FFTW)
     find_package(FFTW REQUIRED COMPONENTS DOUBLE_LIB)
-    target_link_libraries(channel_core PUBLIC MPI::MPI_Fortran FFTW::Double)
+    target_link_libraries(channel_core PUBLIC FFTW::Double)
 
 elseif (CMAKE_Fortran_COMPILER_ID MATCHES "Cray")
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -e Z -O0 -hfp0 -homp")

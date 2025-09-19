@@ -47,7 +47,7 @@ MODULE dnsdata
   real(C_DOUBLE), dimension(-2:2) :: d040, d140, d240, d14m1, d24m1, d04n, d14n, d24n, d14np1, d24np1
   !$omp declare target(d14np1, d14n, d14m1, d140)
   real(C_DOUBLE), allocatable :: D0mat(:, :), eta00mat(:, :)
-#if !(defined(HAVE_CUDA) || defined(HAVE_HIP)) 
+#if !(defined(HAVE_CUDA) || defined(HAVE_HIP))
   !Fourier-transformable arrays (allocated in ffts.f90)
   complex(C_DOUBLE_COMPLEX), pointer, dimension(:, :, :, :) :: VVdx, VVdz
   real(C_DOUBLE), pointer, dimension(:, :, :, :) :: rVVdx
@@ -262,14 +262,32 @@ CONTAINS
     END DO
   END FUNCTION yintegr
 
-#define rD0(f,g,k) sum(dcmplx(der(iy,0,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,0,-2:2)*dreal(f(iy-2:iy+2,iz,ix,k))))
-#define rD1(f,g,k) sum(dcmplx(der(iy,1,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,1,-2:2)*dreal(f(iy-2:iy+2,iz,ix,k))))
-#define rD2(f,g,k) sum(dcmplx(der(iy,2,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,2,-2:2)*dreal(f(iy-2:iy+2,iz,ix,k))))
-#define rD4(f,g,k) sum(dcmplx(der(iy,3,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,3,-2:2)*dreal(f(iy-2:iy+2,iz,ix,k))))
-#define D0(f,g) sum(dcmplx(der(iy,0,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,0,-2:2)*dimag(f(iy-2:iy+2,iz,ix,g))))
-#define D1(f,g) sum(dcmplx(der(iy,1,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,1,-2:2)*dimag(f(iy-2:iy+2,iz,ix,g))))
-#define D2(f,g) sum(dcmplx(der(iy,2,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,2,-2:2)*dimag(f(iy-2:iy+2,iz,ix,g))))
-#define D4(f,g) sum(dcmplx(der(iy,3,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,3,-2:2)*dimag(f(iy-2:iy+2,iz,ix,g))))
+! Helper for stencil with real/real combination (rD*)
+#define RDERIV(OP, f, g, k, ord) ( \
+  (dcmplx(der(iy, ord, -2)*dreal(f(iy - 2, iz, ix, g)), der(iy, ord, -2)*dreal(f(iy - 2, iz, ix, k)))) + \
+  (dcmplx(der(iy, ord, -1)*dreal(f(iy - 1, iz, ix, g)), der(iy, ord, -1)*dreal(f(iy - 1, iz, ix, k)))) + \
+  (dcmplx(der(iy, ord, 0)*dreal(f(iy, iz, ix, g)), der(iy, ord, 0)*dreal(f(iy, iz, ix, k)))) + \
+  (dcmplx(der(iy, ord, 1)*dreal(f(iy + 1, iz, ix, g)), der(iy, ord, 1)*dreal(f(iy + 1, iz, ix, k)))) + \
+  (dcmplx(der(iy, ord, 2)*dreal(f(iy + 2, iz, ix, g)), der(iy, ord, 2)*dreal(f(iy + 2, iz, ix, k)))))
+
+! Helper for stencil with real/imag combination (D*)
+#define CDERIV(OP, f, g, ord) ( \
+  (dcmplx(der(iy, ord, -2)*dreal(f(iy - 2, iz, ix, g)), der(iy, ord, -2)*dimag(f(iy - 2, iz, ix, g)))) + \
+  (dcmplx(der(iy, ord, -1)*dreal(f(iy - 1, iz, ix, g)), der(iy, ord, -1)*dimag(f(iy - 1, iz, ix, g)))) + \
+  (dcmplx(der(iy, ord, 0)*dreal(f(iy, iz, ix, g)), der(iy, ord, 0)*dimag(f(iy, iz, ix, g)))) + \
+  (dcmplx(der(iy, ord, 1)*dreal(f(iy + 1, iz, ix, g)), der(iy, ord, 1)*dimag(f(iy + 1, iz, ix, g)))) + \
+  (dcmplx(der(iy, ord, 2)*dreal(f(iy + 2, iz, ix, g)), der(iy, ord, 2)*dimag(f(iy + 2, iz, ix, g)))))
+
+#define rD0(f,g,k) RDERIV(rD0,f,g,k,0)
+#define rD1(f,g,k) RDERIV(rD1,f,g,k,1)
+#define rD2(f,g,k) RDERIV(rD2,f,g,k,2)
+#define rD4(f,g,k) RDERIV(rD4,f,g,k,3)
+
+#define D0(f,g) CDERIV(D0,f,g,0)
+#define D1(f,g) CDERIV(D1,f,g,1)
+#define D2(f,g) CDERIV(D2,f,g,2)
+#define D4(f,g) CDERIV(D4,f,g,3)
+
   !--------------------------------------------------------------!
   !---COMPLEX----- derivative in the y-direction ----------------!
 #ifdef HAVE_CUDA
@@ -324,7 +342,7 @@ CONTAINS
 #define OS(iy,j) (ni*(der(iy,3,j)-2.0d0*k2(iz,ix)*der(iy,2,j)+k2(iz,ix)*k2(iz,ix)*der(iy,0,j)))
 #define SQ(iy,j) (ni*(der(iy,2,j)-k2(iz,ix)*der(iy,0,j)))
 
-#ifdef __NVHPC__
+#ifdef HAVE_CUDA
   !$omp declare target(LU5decomp)
 #endif
   !---- in-place LU Decomposition of a banded matrix ---!
@@ -351,7 +369,7 @@ CONTAINS
 
   !- Left LU division of a banded matrix -!
   !---------------------------------------!
-#ifdef HAVE_CUDA 
+#ifdef HAVE_CUDA
   !$omp declare target(LeftLU5div)
 #endif
   SUBROUTINE LeftLU5div(x, A, b)
@@ -651,7 +669,7 @@ CONTAINS
     CALL convolutions(compute_cfl)
 
     !$omp target teams distribute parallel do collapse(3) default(none)  &
-    !$omp private(rhsu, rhsv, rhsw, rhst, DD0_6, DD1_6, expl) private(iz, ix, iy, im2, im1, i0, i1, i2, tmp) &
+    !$omp private(rhsu, rhsv, rhsw, rhst, DD0_6, DD1_6, expl) private(iz, ix, iy, im2, im1, i0, i1, i2, tmp, k) &
     !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(der, k2, izd) shared(memrhs, oldrhs) shared(meanpx, meanpz, ni, deltat, ode) &
     !$omp shared(vvdz, v, pra, nPhi)
     DO iz = -nz, nz
