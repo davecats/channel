@@ -24,7 +24,6 @@ MODULE rbmat
   INTERFACE operator(.bsr.)
     PROCEDURE LLU5div
   END INTERFACE OPERATOR(.bsr.)
-
 CONTAINS
 
   !- in-place LU Decomposition of a real square matrix -!
@@ -75,27 +74,6 @@ CONTAINS
     A(1, 1) = 1.0d0/A(1, 1)
   END SUBROUTINE LUdecomp
 
-  !---- in-place LU Decomposition of a banded matrix ---!
-  !-----------------------------------------------------!
-  !$omp declare target(LU5decomp)
-  SUBROUTINE LU5decomp(A)
-    real(C_DOUBLE), intent(inout) :: A(0:, -2:)
-    integer(C_INT) :: HI1, HI2
-    real(C_DOUBLE) :: piv
-    HI1 = SIZE(A, 1) - 1; HI2 = SIZE(A, 2) - 3; 
-    A(HI1 - 2, 1:2) = 0; A(HI1 - 3, 2) = 0
-    DO i = HI1 - HI2, 0, -1
-      DO k = HI2, 1, -1
-        piv = A(i, k)
-        DO j = -1, -2, -1
-          A(i, j + k) = A(i, j + k) - piv*A(i + k, j)
-        END DO
-      END DO
-      piv = 1.0d0/A(i, 0); A(i, 0) = piv; A(i, -2:-1) = A(i, -2:-1)*piv
-    END DO
-    A(0, -2:-1) = 0; A(1, -2) = 0
-  END SUBROUTINE LU5decomp
-
   !- Left LU division of a square matrix -!
   !---------------Doolittle---------------!
   SUBROUTINE LeftLUdivD(x, A)
@@ -143,36 +121,6 @@ CONTAINS
       x(i) = x(i) - sum(A(i, 1:i - 1)*x(1:i - 1))
     END DO
   END SUBROUTINE LeftLUdiv
-
-  !- Left LU division of a banded matrix -!
-  !---------------------------------------!
-  !$omp declare target(LeftLU5div)
-  SUBROUTINE LeftLU5div(x, A, b)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: x(-2:)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: b(-2:)
-    real(C_DOUBLE), intent(in)  :: A(0:, -2:)
-    integer(C_INT) :: HI1, HI2
-    HI1 = SIZE(A, 1) - 1
-    HI2 = SIZE(A, 2) - 3
-
-    ! initialise x with rhs
-
-    DO i = LBOUND(x, 1), UBOUND(x, 1)
-      x(i) = b(i)
-    END DO
-
-    ! backward substitution
-    DO i = HI1 - HI2, 0, -1
-      x(i) = x(i) - (A(i, 1)*x(i + 1) + A(i, 2)*x(i + 2))
-      x(i) = x(i)*A(i, 0)
-    END DO
-
-    ! forward substitution
-    DO i = 0, HI1
-      x(i) = x(i) - (A(i, -2)*x(i - 2) + A(i, -1)*x(i - 1))
-    END DO
-
-  END SUBROUTINE LeftLU5div
 
   !- Left LU division of a square matrix -!
   !----OPERATOR----Doolittle--------------!

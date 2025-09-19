@@ -244,6 +244,26 @@ The following rules/guidelines apply to all postprocessing tools (at least, the 
 
 TODO
 
+## Build instructions for Hunter
+
+We use ftn here
+
+- Build hipfort:  
+  ```sh
+  git clone https://github.com/ROCm/hipfort.git
+  mkdir build && cd build 
+  cmake .. -DCMAKE_Fortran_COMPILER=ftn -DCMAKE_INSTALL_PREFIX=~/hipfort-cray
+  make -j # this takes a while (~30 mins)
+  make install
+  ```
+- Build the channel project:
+  ```
+  mkdir build && cd build 
+  cmake .. -DCMAKE_Fortran_COMPILER=ftn -DCMAKE_PREFIX_PATH=$HOME/hipfort-cray
+  ```
+
+
+
  
 ## Contacts
 

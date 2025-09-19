@@ -47,7 +47,7 @@ MODULE dnsdata
   real(C_DOUBLE), dimension(-2:2) :: d040, d140, d240, d14m1, d24m1, d04n, d14n, d24n, d14np1, d24np1
   !$omp declare target(d14np1, d14n, d14m1, d140)
   real(C_DOUBLE), allocatable :: D0mat(:, :), eta00mat(:, :)
-#ifndef HAVE_CUDA
+#if !(defined(HAVE_CUDA) || defined(HAVE_HIP)) 
   !Fourier-transformable arrays (allocated in ffts.f90)
   complex(C_DOUBLE_COMPLEX), pointer, dimension(:, :, :, :) :: VVdx, VVdz
   real(C_DOUBLE), pointer, dimension(:, :, :, :) :: rVVdx
@@ -147,7 +147,7 @@ CONTAINS
     FORALL (iz=-nz:nz, ix=nx0:nxN) k2(iz, ix) = (alfa0*ix)**2.0d0 + (beta0*iz)**2.0d0
     !$omp target enter data map(to: izd, ialfa, ibeta, k2, y, iy, rk1_rai, rk2_rai, rk3_rai)
     OPEN (UNIT=195, FILE='Runtimedata.phi', ACTION='write')
-    IF (solveNS .AND. has_terminal) OPEN (UNIT=101, FILE='Runtimedata', ACTION='write')
+    IF (solveNS .AND. has_terminal) OPEN (UNIT=121, FILE='Runtimedata', ACTION='write')
 
     allocate (fr(3 + 2*nPhi)); fr = 0.0
   END SUBROUTINE init_memory
@@ -167,7 +167,7 @@ CONTAINS
     DEALLOCATE (V, der, d0mat, y, dy)
     IF (solveNS) THEN
       DEALLOCATE (memrhs, oldrhs, bc0, bcn)
-      IF (has_terminal) CLOSE (UNIT=101)
+      IF (has_terminal) CLOSE (UNIT=121)
     END IF
   END SUBROUTINE free_memory
 
@@ -243,7 +243,9 @@ CONTAINS
 
   !--------------------------------------------------------------!
   !---------------- integral in the y-direction -----------------!
+#ifdef HAVE_CUDA
   !$omp declare target(yintegr)
+#endif
   PURE FUNCTION yintegr(f, y) result(II)
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), intent(in) :: f(ny0 - 2:nyN + 2)
@@ -270,7 +272,9 @@ CONTAINS
 #define D4(f,g) sum(dcmplx(der(iy,3,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,3,-2:2)*dimag(f(iy-2:iy+2,iz,ix,g))))
   !--------------------------------------------------------------!
   !---COMPLEX----- derivative in the y-direction ----------------!
+#ifdef HAVE_CUDA
   !$omp declare target(COMPLEXderiv)
+#endif
   SUBROUTINE COMPLEXderiv(f0, f1, der, D0mat)
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), intent(in)  :: f0(-1:ny + 1)
@@ -294,7 +298,9 @@ CONTAINS
 
   !--------------------------------------------------------------!
   !----------------- apply the boundary conditions --------------!
+#ifdef HAVE_CUDA
   !$omp declare target(applybc_0)
+#endif
   PURE SUBROUTINE applybc_0(EQ, bc0, bc0m1)
     real(C_DOUBLE), intent(inout) :: EQ(ny0:nyN + 2, -2:2)
     real(C_DOUBLE), intent(in) :: bc0(-2:2), bc0m1(-2:2)
@@ -303,7 +309,9 @@ CONTAINS
     EQ(2, -1:1) = EQ(2, -1:1) - EQ(2, -2)*bc0(0:2)/bc0(-1)
   END SUBROUTINE applybc_0
 
+#ifdef HAVE_CUDA
   !$omp declare target(applybc_n)
+#endif
   PURE SUBROUTINE applybc_n(EQ, bcn, bcnp1)
     real(C_DOUBLE), intent(inout) :: EQ(ny0:nyN + 2, -2:2)
     real(C_DOUBLE), intent(in) :: bcn(-2:2), bcnp1(-2:2)
@@ -315,6 +323,64 @@ CONTAINS
 ! Orr-Sommerfeld and Squire opearators
 #define OS(iy,j) (ni*(der(iy,3,j)-2.0d0*k2(iz,ix)*der(iy,2,j)+k2(iz,ix)*k2(iz,ix)*der(iy,0,j)))
 #define SQ(iy,j) (ni*(der(iy,2,j)-k2(iz,ix)*der(iy,0,j)))
+
+#ifdef __NVHPC__
+  !$omp declare target(LU5decomp)
+#endif
+  !---- in-place LU Decomposition of a banded matrix ---!
+  !-----------------------------------------------------!
+  SUBROUTINE LU5decomp(A)
+    IMPLICIT NONE
+    real(C_DOUBLE), intent(inout) :: A(0:, -2:)
+    integer(C_INT) :: HI1, HI2
+    real(C_DOUBLE) :: piv
+    INTEGER :: i, k, j
+    HI1 = SIZE(A, 1) - 1; HI2 = SIZE(A, 2) - 3; 
+    A(HI1 - 2, 1:2) = 0; A(HI1 - 3, 2) = 0
+    DO i = HI1 - HI2, 0, -1
+      DO k = HI2, 1, -1
+        piv = A(i, k)
+        DO j = -1, -2, -1
+          A(i, j + k) = A(i, j + k) - piv*A(i + k, j)
+        END DO
+      END DO
+      piv = 1.0d0/A(i, 0); A(i, 0) = piv; A(i, -2:-1) = A(i, -2:-1)*piv
+    END DO
+    A(0, -2:-1) = 0; A(1, -2) = 0
+  END SUBROUTINE LU5decomp
+
+  !- Left LU division of a banded matrix -!
+  !---------------------------------------!
+#ifdef HAVE_CUDA 
+  !$omp declare target(LeftLU5div)
+#endif
+  SUBROUTINE LeftLU5div(x, A, b)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: x(-2:)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: b(-2:)
+    real(C_DOUBLE), intent(in)  :: A(0:, -2:)
+    integer(C_INT) :: HI1, HI2, i
+    HI1 = SIZE(A, 1) - 1
+    HI2 = SIZE(A, 2) - 3
+
+    ! initialise x with rhs
+
+    DO i = LBOUND(x, 1), UBOUND(x, 1)
+      x(i) = b(i)
+    END DO
+
+    ! backward substitution
+    DO i = HI1 - HI2, 0, -1
+      x(i) = x(i) - (A(i, 1)*x(i + 1) + A(i, 2)*x(i + 2))
+      x(i) = x(i)*A(i, 0)
+    END DO
+
+    ! forward substitution
+    DO i = 0, HI1
+      x(i) = x(i) - (A(i, -2)*x(i - 2) + A(i, -1)*x(i - 1))
+    END DO
+
+  END SUBROUTINE LeftLU5div
+
   !--------------------------------------------------------------!
   !------------------- solve the linear system  -----------------!
   SUBROUTINE linsolve(lambda)
@@ -330,12 +396,12 @@ CONTAINS
     real(C_DOUBLE), pointer :: EQ2(:, :)
     ! bc0(iz,ix,i), bcn(iz,ix,i),                 i={1:u, 2:v, 3:w, 4:vy, 5:eta}
 
-    !$omp target teams distribute parallel do collapse(2)  defaultmap(none) default(none)  &
+    !$omp target teams distribute parallel do collapse(2) default(none)  &
     !$omp shared(V, D0mat) shared(y, bc0, bcn, der, k2, lambda, ni, ialfa, ibeta, pra) &
     !$omp shared(v0bc, v0m1bc, eta0bc, eta0m1bc, vnbc, vnp1bc, etanbc, etanp1bc,  phi0bc, phinbc, phi0m1bc, phinp1bc) &
     !$omp shared(nx0, nxN, nz, ny0, nyN, ny, nPhi) &
     !$omp private(fr, corrpx, corrpz, corrtx) shared(meanflowz, meanflowx, meantb) &
-    !$omp private(ix, iz, iy, iPhi, temp, ucor, tcor, etamat, d2vmat, phimat) map(alloc: temp, ucor, tcor, etamat, d2vmat, phimat)
+    !$omp private(ix, iz, iy, iPhi, temp, ucor, tcor, etamat, d2vmat, phimat)
     DO ix = nx0, nxN
       DO iz = -nz, nz
         ! Build the linear system
@@ -474,7 +540,7 @@ CONTAINS
     integer :: istat
     real(C_DOUBLE), dimension(:, :, :, :), allocatable :: rVVdx2
 
-    !$omp target teams distribute parallel do collapse(4) defaultmap(none) default(none) &
+    !$omp target teams distribute parallel do collapse(4) default(none) &
     !$omp shared(V, VVdz) shared(ny, nxB, nzd, nx0, nxN, nz, nPhi) private(i,j,k,m)
     DO i = 1, ny + 3
       DO k = 1, nzd
@@ -494,7 +560,7 @@ CONTAINS
     CALL IFT(VVdz, ny, nPhi)
     CALL zTOx(VVdz, VVdx, ny, nPhi)
 
-    !$omp target teams distribute parallel do collapse(4) defaultmap(none) default(none) shared(VVdx) shared(nx, nxd, nzB, ny, nPhi)
+    !$omp target teams distribute parallel do collapse(4) default(none) shared(VVdx) shared(nx, nxd, nzB, ny, nPhi)
     DO i = 1, ny + 3
       DO iV = 1, 6 + 3*nPhi
         DO j = 1, nzB
@@ -507,7 +573,7 @@ CONTAINS
 
     CALL RFT(VVdx, rVVdx, ny, nPhi)
     if (compute_cfl) THEN
-      !$omp target teams distribute parallel do collapse(3) default(none) defaultmap(none) &
+      !$omp target teams distribute parallel do collapse(3) default(none) &
       !$omp private(i,j,k,tmp) reduction(max:cfl) &
       !$omp shared(rVVdx, dx, dy, dz, ny, nxd, nzB, ny)
       do j = 1, 2*nxd
@@ -520,7 +586,7 @@ CONTAINS
       end do
     END IF
 
-    !$omp target teams distribute parallel do collapse(3) defaultmap(none) default(none) &
+    !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp shared(rVVdx) shared(nxd, nzB, ny, factor, nPhi) private(a, b, c, iPhi)
     DO i = 1, ny + 3
       DO j = 1, nzB
@@ -584,7 +650,7 @@ CONTAINS
 
     CALL convolutions(compute_cfl)
 
-    !$omp target teams distribute parallel do collapse(3) defaultmap(none) default(none)  &
+    !$omp target teams distribute parallel do collapse(3) default(none)  &
     !$omp private(rhsu, rhsv, rhsw, rhst, DD0_6, DD1_6, expl) private(iz, ix, iy, im2, im1, i0, i1, i2, tmp) &
     !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(der, k2, izd) shared(memrhs, oldrhs) shared(meanpx, meanpz, ni, deltat, ode) &
     !$omp shared(vvdz, v, pra, nPhi)
@@ -638,7 +704,7 @@ CONTAINS
     END DO
     END DO
     END DO
-    !$omp target teams distribute parallel do collapse(3) defaultmap(none) default(none) &
+    !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp shared(memrhs, V) shared(nz, nx0, nxN, ny, nPhi) private(iy, ix, iz)
     DO iz = -nz, nz
     DO ix = nx0, nxN
@@ -666,10 +732,10 @@ CONTAINS
     TYPE(MPI_File) :: fh
     real(C_DOUBLE) :: rn(1:3)
 
-    OPEN (UNIT=100, FILE=TRIM(filename), access="stream", status="old", action="read", iostat=io)
+    OPEN (UNIT=120, FILE=TRIM(filename), access="stream", status="old", action="read", iostat=io)
     IF (io == 0) THEN
       if (has_terminal) print *, "Reading from file "//filename
-      READ (100, POS=1) r_nx, r_ny, r_nz, r_alfa0, r_beta0, r_ni, r_a, r_ymin, r_ymax, time
+      READ (120, POS=1) r_nx, r_ny, r_nz, r_alfa0, r_beta0, r_ni, r_a, r_ymin, r_ymax, time
       call MPI_file_open(MPI_COMM_WORLD, TRIM(filename), MPI_MODE_RDONLY, MPI_INFO_NULL, fh)
       call MPI_file_set_view(fh, disp, MPI_DOUBLE_COMPLEX, vel_read_type, 'native', MPI_INFO_NULL)
       call MPI_file_read_all(fh, R, 1, vel_field_type, MPI_STATUS_IGNORE)
@@ -701,7 +767,7 @@ CONTAINS
         END DO
       END IF
     END IF
-    CLOSE (100)
+    CLOSE (120)
   END SUBROUTINE read_restart_file
 
   !--------------------------------------------------------------!
@@ -745,7 +811,9 @@ CONTAINS
     character(len=40) :: istring, filename
     integer :: iPhi
 
-    !$omp target update from(V(ny-3:ny+1, 0, 0, 1:3))
+    !$omp target update from(V(ny-3:ny+1, 0, 0, 1))
+    !$omp target update from(V(ny-3:ny+1, 0, 0, 2))
+    !$omp target update from(V(ny-3:ny+1, 0, 0, 3))
 
     CALL MPI_Allreduce(cfl, runtime_global, 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD); cfl = 0; 
     IF (cflmax > 0) deltat = cflmax/runtime_global
@@ -764,9 +832,9 @@ CONTAINS
     IF (has_terminal) THEN
       WRITE (*, "(F10.4,3X,4(F11.6,3X),4(F9.4,3X),2(F9.6,3X))") &
            time,dudy(1,1),dudy(1,2),dudy(2,1),dudy(2,2),fr(1)+corrpx*fr(3),meanpx+corrpx,fr(2)+corrpz*fr(3),meanpz+corrpz,runtime_global*deltat,deltat
-      WRITE(101,*) time,dudy(1,1),dudy(1,2),dudy(2,1),dudy(2,2),fr(1)+corrpx*fr(3),meanpx+corrpx,fr(2)+corrpz*fr(3),meanpz+corrpz,runtime_global*deltat,deltat
+      WRITE(121,*) time,dudy(1,1),dudy(1,2),dudy(2,1),dudy(2,2),fr(1)+corrpx*fr(3),meanpx+corrpx,fr(2)+corrpz*fr(3),meanpz+corrpz,runtime_global*deltat,deltat
       WRITE (195, *) time, dudy(3:, 1), dudy(3:, 2), fr(4:3 + nPhi) + corrtx(:)*fr(3 + nPhi + 1:3 + 2*nPhi), corrtx + meantx
-      FLUSH (101); FLUSH (195)
+      FLUSH (121); FLUSH (195)
     END IF
     runtime_global = 0
     !Save Dati.cart.out

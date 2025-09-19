@@ -19,7 +19,7 @@ CONTAINS
   !==========================================================
   SUBROUTINE initialize(config_file, restart_file)
     USE dnsdata
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
     use omp_lib
 #endif
     IMPLICIT NONE
@@ -32,7 +32,7 @@ CONTAINS
     CALL MPI_COMM_RANK(MPI_COMM_WORLD, iproc, ierr)
     CALL MPI_COMM_SIZE(MPI_COMM_WORLD, nproc, ierr)
 
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) || defined(HAVE_HIP) 
     num_dev = omp_get_num_devices()
     dev = mod(iproc, num_dev)
 
@@ -53,7 +53,9 @@ CONTAINS
     ! Init various subroutines
 #ifdef HAVE_CUDA
     CALL init_cufft(nxd, nxB, ny, nzd, nzB, nPhi)
-#else
+#elif defined(HAVE_HIP)
+    CALL init_hipfft(nxd, nxB, ny, nzd, nzB, nPhi)
+#elif defined(HAVE_FFTW)
     CALL init_fft(VVdz, VVdx, rVVdx, nxd, nxB, ny, nzd, nzB, nPhi)
 #endif
     CALL setup_derivatives()
@@ -154,7 +156,7 @@ CONTAINS
 
 #ifdef chron
       CALL CPU_TIME(timee)
-      IF (has_terminal) WRITE (*, *) "TIME PER TIMESTEP"timee - timei
+      IF (has_terminal) WRITE (*, *) "TIME PER TIMESTEP", timee - timei
 #endif
     END DO
   END SUBROUTINE timeloop
@@ -169,7 +171,7 @@ CONTAINS
 
     IF (has_terminal) CLOSE (102)
     ! Realease memory
-#ifndef HAVE_CUDA
+#ifdef HAVE_FFTW
     CALL free_fft(VVdz, VVdx, rVVdx)
 #endif
     CALL free_memory(.TRUE.)

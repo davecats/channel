@@ -43,7 +43,7 @@ CONTAINS
     integer :: sendcount, p
 
     IF (nproc == 1) THEN
-      !$omp target teams distribute parallel do collapse(4) defaultmap(none) default(none) &
+      !$omp target teams distribute parallel do collapse(4) default(none) &
       !$omp shared(Vx, Vz) shared(ny, nzd, nx, nPhi) private(iy, iV, ix, iz)
       DO iy = 1, ny + 3
         DO iV = 1, 3 + nPhi
@@ -60,7 +60,7 @@ CONTAINS
       nField = 3 + nPhi        ! same as your iV loop upper bound
       sendcount = nxB*nzB*(ny + 3)*nField
 
-      !$omp target teams distribute parallel do collapse(5) defaultmap(none) default(none) &
+      !$omp target teams distribute parallel do collapse(5) default(none) &
       !$omp shared(Vz, sendbuf) shared(ny, nxB, nzB, nproc, nField, sendcount) private(iy, iV, ix, iz, dest, p)
       do dest = 0, nproc - 1
         do iV = 1, nField
@@ -80,7 +80,7 @@ CONTAINS
                         recvbuf, sendcount, MPI_DOUBLE_COMPLEX, MPI_COMM_WORLD, ierr)
 
       !$omp end target data
-      !$omp target teams distribute parallel do collapse(5) defaultmap(none) default(none) &
+      !$omp target teams distribute parallel do collapse(5) default(none) &
       !$omp shared(Vx, recvbuf) shared(ny, nxB, nzB, nproc, nField, sendcount) private(iy, iV, ix, iz, dest, p)
       do src = 0, nproc - 1
         do iV = 1, nField
@@ -114,7 +114,7 @@ CONTAINS
 
     ! --- single-rank short-circuit ---
     IF (nproc == 1) THEN
-      !$omp target teams distribute parallel do collapse(4) defaultmap(none) default(none) &
+      !$omp target teams distribute parallel do collapse(4) default(none) &
       !$omp shared(Vx, Vz) shared(ny, nzd, nx, nPhi) private(iy, iV, ix, iz)
       DO iy = 1, ny + 3
         DO iV = 1, 6 + 3*nPhi
@@ -130,7 +130,7 @@ CONTAINS
       nField = 6 + 3*nPhi
       sendcount = nxB*nzB*(ny + 3)*nField
 
-      !$omp target teams distribute parallel do collapse(5) defaultmap(none) default(none) &
+      !$omp target teams distribute parallel do collapse(5) default(none) &
       !$omp shared(Vx, sendbuf) shared(ny, nxB, nzB, nproc, nField, sendcount) private(iy, iV, ix, iz, dest, p)
       do dest = 0, nproc - 1
         do iV = 1, nField
@@ -150,7 +150,7 @@ CONTAINS
                         recvbuf, sendcount, MPI_DOUBLE_COMPLEX, MPI_COMM_WORLD, ierr)
       !$omp end target data
 
-      !$omp target teams distribute parallel do collapse(5) defaultmap(none) default(none) &
+      !$omp target teams distribute parallel do collapse(5) default(none) &
       !$omp shared(Vz, recvbuf) shared(ny, nxB, nzB, nproc, nField, sendcount) private(iy, iV, ix, iz, dest, p)
       do src = 0, nproc - 1
         do iV = 1, nField

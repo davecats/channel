@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(ChannelSolver LANGUAGES Fortran)
+project(ChannelSolver LANGUAGES Fortran C)
 
 # --------------------------------------------------------------------
 # CMake module path (for custom FindFFTW)
@@ -12,12 +12,6 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 find_package(MPI REQUIRED Fortran)
 
 # --------------------------------------------------------------------
-# FFTW
-# --------------------------------------------------------------------
-# Looks for FFTW with the FindFFTW.cmake module
-find_package(FFTW REQUIRED COMPONENTS DOUBLE_LIB)
-
-# --------------------------------------------------------------------
 # Sources
 # --------------------------------------------------------------------
 add_library(channel_core
@@ -27,8 +21,6 @@ add_library(channel_core
     dnsdata.f90
     driver.f90
 )
-
-target_link_libraries(channel_core PUBLIC MPI::MPI_Fortran FFTW::Double)
 
 # --------------------------------------------------------------------
 # Executable
@@ -102,6 +94,12 @@ set_tests_properties(regression_test_scalar_4rank PROPERTIES PROCESSORS 4)
 # --------------------------------------------------------------------
 if (CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cpp -O0 -malign-double -fall-intrinsics -ffree-line-length-none -g -fcheck=all -fbacktrace -Wall")
+
+    target_compile_definitions(channel_core PRIVATE HAVE_FFTW)
+    find_package(FFTW REQUIRED COMPONENTS DOUBLE_LIB)
+    target_link_libraries(channel_core PUBLIC MPI::MPI_Fortran FFTW::Double)
+
+
 elseif (CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
     find_package(CUDAToolkit REQUIRED)
 
@@ -118,4 +116,17 @@ elseif (CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
 
 elseif (CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -fpp -O0 -fp-model=precise")
+    target_compile_definitions(channel_core PRIVATE HAVE_FFTW)
+    find_package(FFTW REQUIRED COMPONENTS DOUBLE_LIB)
+    target_link_libraries(channel_core PUBLIC MPI::MPI_Fortran FFTW::Double)
+
+elseif (CMAKE_Fortran_COMPILER_ID MATCHES "Cray")
+    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -e Z -O0 -hfp0 -homp")
+
+    find_package(hipfort REQUIRED COMPONENTS hip hipfft) 
+    target_link_libraries(channel_core PRIVATE hipfort::hipfft)
+    target_compile_definitions(channel_core PRIVATE HAVE_HIP)
+
+    message(STATUS "hipfort_DIR = ${hipfort_DIR}")
+
 endif()
