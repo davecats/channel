@@ -17,17 +17,24 @@ MODULE mpi_transpose
 
   USE, intrinsic :: iso_c_binding
   USE, intrinsic :: iso_fortran_env
+#ifdef HAVE_MPI
   USE mpi_f08
+#endif 
 
   IMPLICIT NONE
 
+#ifdef HAVE_MPI
   TYPE(MPI_Comm) :: MPI_CART_COMM, MPI_COMM_X, MPI_COMM_Y
+#endif
+  complex(C_DOUBLE_COMPLEX), allocatable :: sendbuf(:), recvbuf(:)
   integer(C_INT), save :: nproc, iproc, ierr, nzd, nx
   integer(C_INT), save :: nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN, miny, maxy
   !$omp declare target(ny0, nyN)
-  complex(C_DOUBLE_COMPLEX), allocatable :: sendbuf(:), recvbuf(:)
+  
   logical, save :: has_terminal, has_average
+#ifdef HAVE_MPI
   TYPE(MPI_Datatype), save :: writeview_type, owned2write_type, vel_read_type, vel_field_type
+#endif
 
 CONTAINS
 
@@ -43,20 +50,21 @@ CONTAINS
     integer :: sendcount, p
 
     IF (nproc == 1) THEN
-      !$omp target teams distribute parallel do collapse(4) default(none) &
+      !$omp target teams distribute parallel do collapse(3) default(none) &
       !$omp shared(Vx, Vz) shared(ny, nzd, nx, nPhi) private(iy, iV, ix, iz)
-      DO iy = 1, ny + 3
-        DO iV = 1, 3 + nPhi
-          DO ix = 1, nx + 1
-            DO iz = 1, nzd
-              Vx(ix, iz, iy, iV) = Vz(iz, ix, iy, iV)
+
+      DO iV = 1, 3 + nPhi
+        DO iy = 1, ny + 3
+          DO iz = 1, nzd
+            DO ix = 1, nx + 1
+            Vx(ix, iz, iy, iV) = Vz(iz, ix, iy, iV)
             END DO
           END DO
         END DO
       END DO
 
     ELSE
-
+#ifdef HAVE_MPI
       nField = 3 + nPhi        ! same as your iV loop upper bound
       sendcount = nxB*nzB*(ny + 3)*nField
 
@@ -94,7 +102,7 @@ CONTAINS
           end do
         end do
       end do
-
+#endif
     END IF
 
   END SUBROUTINE zTOx
@@ -114,10 +122,11 @@ CONTAINS
 
     ! --- single-rank short-circuit ---
     IF (nproc == 1) THEN
-      !$omp target teams distribute parallel do collapse(4) default(none) &
+      !$omp target teams distribute parallel do collapse(3) default(none) &
       !$omp shared(Vx, Vz) shared(ny, nzd, nx, nPhi) private(iy, iV, ix, iz)
-      DO iy = 1, ny + 3
-        DO iV = 1, 6 + 3*nPhi
+     
+      DO iV = 1, 6 + 3*nPhi
+        DO iy = 1, ny + 3
           DO iz = 1, nzd
             DO ix = 1, nx + 1
               Vz(iz, ix, iy, iV) = Vx(ix, iz, iy, iV)
@@ -127,6 +136,7 @@ CONTAINS
       END DO
 
     ELSE
+#ifdef HAVE_MPI
       nField = 6 + 3*nPhi
       sendcount = nxB*nzB*(ny + 3)*nField
 
@@ -164,6 +174,7 @@ CONTAINS
           end do
         end do
       end do
+#endif
     END IF
 
   END SUBROUTINE xTOz
@@ -185,6 +196,7 @@ CONTAINS
     nx0 = iproc*(nxpp)/nproc; nxN = (iproc + 1)*(nxpp)/nproc - 1; nxB = nxN - nx0 + 1; 
     nz0 = iproc*nzd/nproc; nzN = (iproc + 1)*nzd/nproc - 1; nzB = nzN - nz0 + 1; 
     has_average = (nx0 == 0)
+#ifdef HAVE_MPI
 #ifdef mpiverbose
     DO i = 0, nproc - 1
        IF (iproc==i) WRITE(*,*) "iproc=",iproc,"nx0=",nx0," nxN=",nxN," nxB=",nxB, "nz0=",nz0," nzN=",nzN," nzB=",nzB, "ny0=", ny0, "nyN=", nyN 
@@ -221,6 +233,7 @@ CONTAINS
     array_of_starts = [miny - (ny0 - 2), 0, 0, 0] ! starting position of each component; !!! IT'S ZERO BASED AND WRT TO ARRAY IN MEMORY !!!
     CALL MPI_Type_create_subarray(ndims, array_of_sizes, array_of_subsizes, array_of_starts, MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, owned2write_type, ierror)
     CALL MPI_Type_commit(owned2write_type, ierror)
+#endif
   END SUBROUTINE init_MPI
 
 END MODULE mpi_transpose

@@ -28,9 +28,14 @@ CONTAINS
     integer :: iy, iPhi, num_dev, dev
 
     ! Init MPI
+#ifdef HAVE_MPI
     CALL MPI_INIT(ierr)
     CALL MPI_COMM_RANK(MPI_COMM_WORLD, iproc, ierr)
     CALL MPI_COMM_SIZE(MPI_COMM_WORLD, nproc, ierr)
+#else 
+    iproc = 0
+    nproc = 1
+#endif
 
 #if defined(HAVE_CUDA) || defined(HAVE_HIP) 
     num_dev = omp_get_num_devices()
@@ -175,6 +180,8 @@ CONTAINS
     CALL free_fft(VVdz, VVdx, rVVdx)
 #endif
     CALL free_memory(.TRUE.)
+#ifdef HAVE_MPI
     CALL MPI_Finalize()
+#endif
   END SUBROUTINE finalize
 END MODULE driver

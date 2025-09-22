@@ -37,9 +37,13 @@ PROGRAM regression_test
     WRITE (*, *) "Regression test PASSED, diffnorm = ", diffnorm
   ELSE
     WRITE (*, *) "Regression test FAILED, diffnorm = ", diffnorm
+#ifdef HAVE_MPI
     CALL MPI_ABORT(MPI_COMM_WORLD, 1, ierr)
+#endif
   END IF
 
   CALL free_memory(.TRUE.)
-  CALL MPI_Finalize()
+#ifdef HAVE_MPI
+    CALL MPI_Finalize()
+#endif
 END PROGRAM regression_test

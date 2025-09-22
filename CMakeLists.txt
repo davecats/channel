@@ -6,10 +6,6 @@ project(ChannelSolver LANGUAGES Fortran C)
 # --------------------------------------------------------------------
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-# --------------------------------------------------------------------
-# MPI
-# --------------------------------------------------------------------
-find_package(MPI REQUIRED Fortran)
 
 # --------------------------------------------------------------------
 # Sources
@@ -21,6 +17,17 @@ add_library(channel_core
     dnsdata.f90
     driver.f90
 )
+
+# --------------------------------------------------------------------
+# MPI
+# --------------------------------------------------------------------
+option(NOMPI "Build without MPI support (no reading / writing of files)" OFF)
+
+if(NOT NOMPI)
+    find_package(MPI REQUIRED Fortran)
+    target_compile_definitions(channel_core PRIVATE HAVE_MPI)
+    target_link_libraries(channel_core PUBLIC MPI::MPI_Fortran)
+endif()
 
 # --------------------------------------------------------------------
 # Executable
@@ -93,7 +100,7 @@ set_tests_properties(regression_test_scalar_4rank PROPERTIES PROCESSORS 4)
 # Compiler flags
 # --------------------------------------------------------------------
 
-target_link_libraries(channel_core PUBLIC MPI::MPI_Fortran)
+
 
 if (CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cpp -O0 -malign-double -fall-intrinsics -ffree-line-length-none -g -fcheck=all -fbacktrace -Wall")
@@ -124,10 +131,18 @@ elseif (CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
     target_link_libraries(channel_core PUBLIC FFTW::Double)
 
 elseif (CMAKE_Fortran_COMPILER_ID MATCHES "Cray")
-    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -e Z -O0 -hfp0 -homp")
+    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -e Z -O2 -hfp0 -homp")
 
     find_package(hipfort REQUIRED COMPONENTS hip hipfft) 
     target_link_libraries(channel_core PRIVATE hipfort::hipfft)
+    target_compile_definitions(channel_core PRIVATE HAVE_HIP)
+
+    message(STATUS "hipfort_DIR = ${hipfort_DIR}")
+elseif (CMAKE_Fortran_COMPILER_ID MATCHES "LLVMFlang")
+    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cpp -O2 -fopenmp -fopenmp -fopenmp-targets=amdgcn-amd-amdhsa --offload-arch=gfx942")
+
+    find_package(hipfort REQUIRED COMPONENTS hip hipfft)
+    target_link_libraries(channel_core PUBLIC hipfort::hipfft)
     target_compile_definitions(channel_core PRIVATE HAVE_HIP)
 
     message(STATUS "hipfort_DIR = ${hipfort_DIR}")

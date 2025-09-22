@@ -130,7 +130,7 @@ CONTAINS
     IMPLICIT NONE
     integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, ny, nPhi
     integer :: istat
-    integer, dimension(1) :: n, inembed, onembed
+    integer, dimension(1), target :: n, inembed, onembed
     integer(C_INT) :: batch, idist, odist, istride, ostride
 
     allocate (VVdz(nzd, nxB, ny + 3, 6 + 3*nPhi))
@@ -181,7 +181,11 @@ CONTAINS
   END FUNCTION fftFIT
 
   SUBROUTINE FFT(x, ny, nPhi)
+#if defined(HAVE_HIP)
+    complex(C_DOUBLE_COMPLEX), intent(inout), target :: x(:, :, :, :)
+#else
     complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, :, :)
+#endif
     integer(C_INT), intent(in) :: ny, nPhi
     integer :: i, iV, istat
 #ifdef HAVE_CUDA
@@ -206,7 +210,11 @@ CONTAINS
   END SUBROUTINE FFT
 
   SUBROUTINE IFT(x, ny, nPhi)
+#if defined(HAVE_HIP)
+    complex(C_DOUBLE_COMPLEX), intent(inout), target :: x(:, :, :, :)
+#else
     complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, :, :)
+#endif
     integer(C_INT), intent(in) :: ny, nPhi
     integer :: i, iV, istat
 #ifdef HAVE_CUDA
@@ -232,9 +240,14 @@ CONTAINS
 
   SUBROUTINE RFT(x, rx, ny, nPhi)
     IMPLICIT NONE
+#if defined(HAVE_HIP)
+    complex(C_DOUBLE_COMPLEX), target :: x(:, :, :, :)
+    real(C_DOUBLE), target :: rx(:, :, :, :)
+#else
     complex(C_DOUBLE_COMPLEX) :: x(:, :, :, :)
-    integer(C_INT), intent(in) :: ny, nPhi
     real(C_DOUBLE) :: rx(:, :, :, :)
+#endif
+    integer(C_INT), intent(in) :: ny, nPhi
     integer :: i, iV, istat
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(x, rx)
@@ -259,9 +272,14 @@ CONTAINS
 
   SUBROUTINE HFT(rx, x, ny, nPhi)
     IMPLICIT NONE
+#if defined(HAVE_HIP)
+    complex(C_DOUBLE_COMPLEX), target :: x(:, :, :, :)
+    real(C_DOUBLE), target :: rx(:, :, :, :)
+#else
     complex(C_DOUBLE_COMPLEX) :: x(:, :, :, :)
-    integer(C_INT), intent(in) :: ny, nPhi
     real(C_DOUBLE) :: rx(:, :, :, :)
+#endif
+    integer(C_INT), intent(in) :: ny, nPhi
     integer :: i, iV, istat
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(rx, x)

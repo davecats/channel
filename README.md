@@ -262,6 +262,14 @@ We use ftn here
   cmake .. -DCMAKE_Fortran_COMPILER=ftn -DCMAKE_PREFIX_PATH=$HOME/hipfort-cray
   ```
 
+Alternatively using AMD's new Fortran compiler:
+
+- Download and extract the latest drop for RHEL on [the Radeon repo](https://repo.radeon.com/rocm/misc/flang/)
+- You might need an older libffi for this to work. 
+    - You can download the `x86_64` version from [Rocky Linux](https://dl.rockylinux.org/vault/centos/8.5.2111/BaseOS/x86_64/os/Packages/)
+    - extract it using `rpm2cpio libffi-3.1-22.el8.x86_64.rpm | cpio -idmv` 
+    - export LD_LIBRARY_PATH=$(pwd)/usr/lib64:$LD_LIBRARY_PATH
+- Build using `export ROCM_AFAR_PATH=<...> && cmake .. -DCMAKE_Fortran_COMPILER=$ROCM_AFAR_PATH/bin/amdflang -DCMAKE_PREFIX_PATH=$ROCM_AFAR_PATH`
 
 
  

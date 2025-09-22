@@ -89,3 +89,5 @@ build*/
 .venv/
 !tests/data/*.out
 Runtimedata*
+x1000*
+.rocprofv3/

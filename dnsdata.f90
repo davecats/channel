@@ -539,7 +539,9 @@ CONTAINS
           CALL COMPLEXderiv(V(:, iz, ix, 2), V(:, iz, ix, 3), der, D0mat)
           temp = (ialfa(ix)*V(:, iz, ix, 3) - ibeta(iz)*V(:, iz, ix, 1))/k2(iz, ix)
           V(:, iz, ix, 3) = (ibeta(iz)*V(:, iz, ix, 3) + ialfa(ix)*V(:, iz, ix, 1))/k2(iz, ix)
-          V(:, iz, ix, 1) = temp
+          do j = ny0-2, nyN+2
+            V(j, iz, ix, 1) = temp(j)
+          end do
         END IF
       END DO
     END DO
@@ -558,12 +560,12 @@ CONTAINS
     integer :: istat
     real(C_DOUBLE), dimension(:, :, :, :), allocatable :: rVVdx2
 
-    !$omp target teams distribute parallel do collapse(4) default(none) &
+    !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp shared(V, VVdz) shared(ny, nxB, nzd, nx0, nxN, nz, nPhi) private(i,j,k,m)
-    DO i = 1, ny + 3
-      DO k = 1, nzd
+    DO m = 1, 3 + nPhi  
+      DO i = 1, ny + 3
         DO j = 1, nxB
-          DO m = 1, 3 + nPhi
+          DO k = 1, nzd
             IF (k <= nz + 1) THEN
               VVdz(k, j, i, m) = V(i - 2, k - 1, j + nx0 - 1, m)
             ELSEIF (k >= nz + 2 .AND. k <= nzd - nz) THEN
@@ -578,9 +580,9 @@ CONTAINS
     CALL IFT(VVdz, ny, nPhi)
     CALL zTOx(VVdz, VVdx, ny, nPhi)
 
-    !$omp target teams distribute parallel do collapse(4) default(none) shared(VVdx) shared(nx, nxd, nzB, ny, nPhi)
-    DO i = 1, ny + 3
-      DO iV = 1, 6 + 3*nPhi
+    !$omp target teams distribute parallel do collapse(3) default(none) shared(VVdx) shared(nx, nxd, nzB, ny, nPhi)
+    DO iV = 1, 6 + 3*nPhi
+      DO i = 1, ny + 3
         DO j = 1, nzB
           DO k = nx + 2, nxd + 1
             VVdx(k, j, i, iV) = 0.0
@@ -593,7 +595,7 @@ CONTAINS
     if (compute_cfl) THEN
       !$omp target teams distribute parallel do collapse(3) default(none) &
       !$omp private(i,j,k,tmp) reduction(max:cfl) &
-      !$omp shared(rVVdx, dx, dy, dz, ny, nxd, nzB, ny)
+      !$omp shared(rVVdx, dx, dy, dz, ny, nxd, nzB)
       do j = 1, 2*nxd
         do k = 1, nzB
           do i = 3, ny + 1
@@ -746,9 +748,10 @@ CONTAINS
     integer(C_SIZE_T) :: ix, iy, iz, io, iPhi
     integer(C_INT) :: r_nx, r_ny, r_nz
     real(C_DOUBLE) :: r_alfa0, r_beta0, r_ni, r_a, r_ymin, r_ymax
+    real(C_DOUBLE) :: rn(1:3)
+#ifdef HAVE_MPI
     INTEGER(MPI_OFFSET_KIND) :: disp = 3*C_INT + 7*C_DOUBLE
     TYPE(MPI_File) :: fh
-    real(C_DOUBLE) :: rn(1:3)
 
     OPEN (UNIT=120, FILE=TRIM(filename), access="stream", status="old", action="read", iostat=io)
     IF (io == 0) THEN
@@ -767,6 +770,7 @@ CONTAINS
         STOP
       END IF
     ELSE
+#endif
       IF (has_terminal) PRINT *, "Restart file "//filename//" not found"
       R = 0
       IF (has_terminal) WRITE (*, *) "Generating initial field..."
@@ -784,7 +788,9 @@ CONTAINS
           END DO
         END DO
       END IF
+#ifdef HAVE_MPI
     END IF
+#endif
     CLOSE (120)
   END SUBROUTINE read_restart_file
 
@@ -795,6 +801,7 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(in) :: R(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3)
     character(len=*), intent(in) :: filename
     ! mpi stuff
+#ifdef HAVE_MPI
     TYPE(MPI_File) :: fh
     INTEGER(MPI_OFFSET_KIND) :: disp
     TYPE(MPI_Status) :: status
@@ -818,7 +825,7 @@ CONTAINS
 
     ! close file
     call MPI_File_close(fh)
-
+#endif
   END SUBROUTINE save_restart_file
 
   !--------------------------------------------------------------!
@@ -832,8 +839,11 @@ CONTAINS
     !$omp target update from(V(ny-3:ny+1, 0, 0, 1))
     !$omp target update from(V(ny-3:ny+1, 0, 0, 2))
     !$omp target update from(V(ny-3:ny+1, 0, 0, 3))
-
+#ifdef HAVE_MPI
     CALL MPI_Allreduce(cfl, runtime_global, 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD); cfl = 0; 
+#else
+    runtime_global = cfl
+#endif
     IF (cflmax > 0) deltat = cflmax/runtime_global
     IF (has_average) THEN
       dudy(1, 2) = -sum(d14n(-2:2)*dreal(V(ny - 3:ny + 1, 0, 0, 1)))
