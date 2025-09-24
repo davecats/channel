@@ -263,30 +263,14 @@ CONTAINS
   END FUNCTION yintegr
 
 ! Helper for stencil with real/real combination (rD*)
-#define RDERIV(OP, f, g, k, ord) ( \
-  (dcmplx(der(iy, ord, -2)*dreal(f(iy - 2, iz, ix, g)), der(iy, ord, -2)*dreal(f(iy - 2, iz, ix, k)))) + \
-  (dcmplx(der(iy, ord, -1)*dreal(f(iy - 1, iz, ix, g)), der(iy, ord, -1)*dreal(f(iy - 1, iz, ix, k)))) + \
-  (dcmplx(der(iy, ord, 0)*dreal(f(iy, iz, ix, g)), der(iy, ord, 0)*dreal(f(iy, iz, ix, k)))) + \
-  (dcmplx(der(iy, ord, 1)*dreal(f(iy + 1, iz, ix, g)), der(iy, ord, 1)*dreal(f(iy + 1, iz, ix, k)))) + \
-  (dcmplx(der(iy, ord, 2)*dreal(f(iy + 2, iz, ix, g)), der(iy, ord, 2)*dreal(f(iy + 2, iz, ix, k)))))
-
-! Helper for stencil with real/imag combination (D*)
-#define CDERIV(OP, f, g, ord) ( \
-  (dcmplx(der(iy, ord, -2)*dreal(f(iy - 2, iz, ix, g)), der(iy, ord, -2)*dimag(f(iy - 2, iz, ix, g)))) + \
-  (dcmplx(der(iy, ord, -1)*dreal(f(iy - 1, iz, ix, g)), der(iy, ord, -1)*dimag(f(iy - 1, iz, ix, g)))) + \
-  (dcmplx(der(iy, ord, 0)*dreal(f(iy, iz, ix, g)), der(iy, ord, 0)*dimag(f(iy, iz, ix, g)))) + \
-  (dcmplx(der(iy, ord, 1)*dreal(f(iy + 1, iz, ix, g)), der(iy, ord, 1)*dimag(f(iy + 1, iz, ix, g)))) + \
-  (dcmplx(der(iy, ord, 2)*dreal(f(iy + 2, iz, ix, g)), der(iy, ord, 2)*dimag(f(iy + 2, iz, ix, g)))))
-
-#define rD0(f,g,k) RDERIV(rD0,f,g,k,0)
-#define rD1(f,g,k) RDERIV(rD1,f,g,k,1)
-#define rD2(f,g,k) RDERIV(rD2,f,g,k,2)
-#define rD4(f,g,k) RDERIV(rD4,f,g,k,3)
-
-#define D0(f,g) CDERIV(D0,f,g,0)
-#define D1(f,g) CDERIV(D1,f,g,1)
-#define D2(f,g) CDERIV(D2,f,g,2)
-#define D4(f,g) CDERIV(D4,f,g,3)
+#define rD0(f,g,k) sum(dcmplx(der(iy,0,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,0,-2:2)*dreal(f(iy-2:iy+2,iz,ix,k))))
+#define rD1(f,g,k) sum(dcmplx(der(iy,1,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,1,-2:2)*dreal(f(iy-2:iy+2,iz,ix,k))))
+#define rD2(f,g,k) sum(dcmplx(der(iy,2,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,2,-2:2)*dreal(f(iy-2:iy+2,iz,ix,k))))
+#define rD4(f,g,k) sum(dcmplx(der(iy,3,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,3,-2:2)*dreal(f(iy-2:iy+2,iz,ix,k))))
+#define D0(f,g) sum(dcmplx(der(iy,0,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,0,-2:2)*dimag(f(iy-2:iy+2,iz,ix,g))))
+#define D1(f,g) sum(dcmplx(der(iy,1,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,1,-2:2)*dimag(f(iy-2:iy+2,iz,ix,g))))
+#define D2(f,g) sum(dcmplx(der(iy,2,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,2,-2:2)*dimag(f(iy-2:iy+2,iz,ix,g))))
+#define D4(f,g) sum(dcmplx(der(iy,3,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,3,-2:2)*dimag(f(iy-2:iy+2,iz,ix,g))))
 
   !--------------------------------------------------------------!
   !---COMPLEX----- derivative in the y-direction ----------------!
