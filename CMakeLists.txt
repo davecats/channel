@@ -25,7 +25,7 @@ option(NOMPI "Build without MPI support (no reading / writing of files)" OFF)
 
 if(NOT NOMPI)
     find_package(MPI REQUIRED Fortran)
-    target_compile_definitions(channel_core PRIVATE HAVE_MPI)
+    target_compile_definitions(channel_core PUBLIC HAVE_MPI)
     target_link_libraries(channel_core PUBLIC MPI::MPI_Fortran)
 endif()
 

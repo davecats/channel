@@ -91,3 +91,6 @@ build*/
 Runtimedata*
 x1000*
 .rocprofv3/
+*.nsys-rep
+*.sqlite
+*.pftrace
