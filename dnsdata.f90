@@ -46,7 +46,7 @@ MODULE dnsdata
   real(C_DOUBLE), allocatable :: der(:, :, :)
   real(C_DOUBLE), dimension(-2:2) :: d040, d140, d240, d14m1, d24m1, d04n, d14n, d24n, d14np1, d24np1
   !$omp declare target(d14np1, d14n, d14m1, d140)
-  real(C_DOUBLE), allocatable :: D0mat(:, :), eta00mat(:, :)
+  real(C_DOUBLE), allocatable :: D0mat(:, :), etamat(:, :, :, :), eta00mat(:, :), D2vmat(:, :, :, :), phimat(:, :, :, :, :)
 #if !(defined(HAVE_CUDA) || defined(HAVE_HIP))
   !Fourier-transformable arrays (allocated in ffts.f90)
   complex(C_DOUBLE_COMPLEX), pointer, dimension(:, :, :, :) :: VVdx, VVdz
@@ -63,6 +63,7 @@ MODULE dnsdata
   complex(C_DOUBLE_COMPLEX), allocatable :: bc0(:, :, :), bcn(:, :, :)
   !Mean pressure correction
   real(C_DOUBLE), private :: corrpx = 0.d0, corrpz = 0.d0
+  complex(C_DOUBLE_COMPLEX), allocatable :: ucor(:), tcor(:, :)
   real(C_DOUBLE), dimension(:), allocatable :: corrtx, pra
   !ODE Library
   real(C_DOUBLE) :: RK1_rai(1:3) = (/120.0d0/32.0d0, 2.0d0, 0.0d0/), &
@@ -130,9 +131,12 @@ CONTAINS
     END IF
 #define newrhs(iy,iz,ix,i) memrhs(iy,iz,ix,i)
 #define imod(iy) MOD(iy+1000,5)
-    ALLOCATE (der(1:ny - 1, 0:3, -2:2), d0mat(ny0:nyN + 2, -2:2), eta00mat(ny0:nyN + 2, -2:2))
-    der = 0.0; d0mat = 0.0; eta00mat = 0.0
+    ALLOCATE(der(1:ny-1,0:3,-2:2),d0mat(ny0:nyN+2,-2:2),etamat(ny0:nyN+2, -2:2, -nz:nz, nx0:nxN))
+    ALLOCATE(eta00mat(ny0:nyN+2,-2:2),D2vmat(ny0:nyN+2, -2:2, -nz:nz, nx0:nxN))
+    ALLOCATE(phimat(ny0:nyN + 2, -2:2, 1:nPhi, -nz:nz, nx0:nxN))
+    der = 0.0; d0mat = 0.0; etamat = 0.0; eta00mat = 0.0; D2vmat = 0.0; phimat = 0.0
     allocate (corrtx(1:nPhi)); corrtx = 0.0d0
+    allocate (ucor(ny0 - 2:nyN + 2), tcor(ny0 - 2:nyN + 2, 1:nPhi))
     ALLOCATE (y(-1:ny + 1), dy(1:ny - 1))
     y = 0.0; dy = 0.0
     ALLOCATE (izd(-nz:nz), ialfa(nx0:nxN), ibeta(-nz:nz), k2(-nz:nz, nx0:nxN))
@@ -145,7 +149,7 @@ CONTAINS
     izd = (/(merge(iz, nzd + iz, iz >= 0), iz=-nz, nz)/); ialfa = (/(dcmplx(0.0d0, ix*alfa0), ix=nx0, nxN)/); 
     ibeta = (/(dcmplx(0.0d0, iz*beta0), iz=-nz, nz)/); 
     FORALL (iz=-nz:nz, ix=nx0:nxN) k2(iz, ix) = (alfa0*ix)**2.0d0 + (beta0*iz)**2.0d0
-    !$omp target enter data map(to: izd, ialfa, ibeta, k2, y, iy, rk1_rai, rk2_rai, rk3_rai)
+    !$omp target enter data map(to: izd, ialfa, ibeta, k2, y, iy, rk1_rai, rk2_rai, rk3_rai, d2vmat, etamat, ucor, tcor)
     OPEN (UNIT=195, FILE='Runtimedata.phi', ACTION='write')
     IF (solveNS .AND. has_terminal) OPEN (UNIT=121, FILE='Runtimedata', ACTION='write')
 
@@ -159,12 +163,12 @@ CONTAINS
     LOGICAL, intent(IN) :: solveNS
     !$omp target exit data map(delete: d240, d24m1, d04n, d24n, d24np1, D0mat)
     !$omp target exit data map(delete: V)
-    !$omp target exit data map(delete: memrhs, oldrhs, bc0, bcn)
-    !$omp target exit data map(delete: izd, ialfa, ibeta, k2)
+    !$omp target exit data map(delete: memrhs, oldrhs, bc0, bcn, etamat, D2vmat, phimat)
+    !$omp target exit data map(delete: izd, ialfa, ibeta, k2, ucor, tcor)
 #ifdef bodyforce
     !$omp target exit data map(delete: F)
 #endif
-    DEALLOCATE (V, der, d0mat, y, dy)
+    DEALLOCATE (V, der, d0mat, etamat, D2vmat, phimat, y, dy)
     IF (solveNS) THEN
       DEALLOCATE (memrhs, oldrhs, bc0, bcn)
       IF (has_terminal) CLOSE (UNIT=121)
@@ -389,29 +393,26 @@ CONTAINS
     IMPLICIT NONE
     real(C_DOUBLE), intent(in) :: lambda
     integer(C_INT) :: ix, iz, i, j, iPhi
-    complex(C_DOUBLE_COMPLEX) :: temp(ny0 - 2:nyN + 2)
-    complex(C_DOUBLE_COMPLEX) :: ucor(ny0 - 2:nyN + 2)
-    real(C_DOUBLE), dimension(:, :) :: etamat(ny0:nyN + 2, -2:2), D2vmat(ny0:nyN + 2, -2:2)
-
-    real(C_DOUBLE), dimension(:, :) :: phimat(ny0:nyN + 2, -2:2, 1:nPhi)
-    complex(C_DOUBLE_COMPLEX) :: tcor(ny0 - 2:nyN + 2, 1:nPhi)
-    real(C_DOUBLE), pointer :: EQ2(:, :)
+    complex(C_DOUBLE_COMPLEX) :: temp
+    
     ! bc0(iz,ix,i), bcn(iz,ix,i),                 i={1:u, 2:v, 3:w, 4:vy, 5:eta}
 
+
     !$omp target teams distribute parallel do collapse(2) default(none)  &
-    !$omp shared(V, D0mat) shared(y, bc0, bcn, der, k2, lambda, ni, ialfa, ibeta, pra) &
+    !$omp shared(V, D0mat, D2vmat, etamat, phimat) shared(y, bc0, bcn, der, k2, lambda, ni, ialfa, ibeta, pra) &
     !$omp shared(v0bc, v0m1bc, eta0bc, eta0m1bc, vnbc, vnp1bc, etanbc, etanp1bc,  phi0bc, phinbc, phi0m1bc, phinp1bc) &
     !$omp shared(nx0, nxN, nz, ny0, nyN, ny, nPhi) &
-    !$omp private(fr, corrpx, corrpz, corrtx) shared(meanflowz, meanflowx, meantb) &
-    !$omp private(ix, iz, iy, iPhi, temp, ucor, tcor, etamat, d2vmat, phimat)
+    !$omp shared(fr, corrpx, corrpz, corrtx, ucor, tcor) &
+    !$omp shared(meanflowz, meanflowx, meantb) &
+    !$omp private(ix, iz, iy, iPhi, temp) 
     DO ix = nx0, nxN
       DO iz = -nz, nz
         ! Build the linear system
         DO iy = ny0, nyN
-          D2vmat(iy, -2:2) = lambda*(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)) - OS(iy, -2:2)
-          etamat(iy, -2:2) = lambda*der(iy, 0, -2:2) - SQ(iy, -2:2)
+          D2vmat(iy, -2:2, iz, ix) = lambda*(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)) - OS(iy, -2:2)
+          etamat(iy, -2:2, iz, ix) = lambda*der(iy, 0, -2:2) - SQ(iy, -2:2)
           DO iPhi = 1, nPhi
-            phimat(iy, -2:2, iPhi) = lambda*der(iy, 0, -2:2) - pra(iPhi)*(SQ(iy, -2:2))
+            phimat(iy, -2:2, iPhi, iz, ix) = lambda*der(iy, 0, -2:2) - pra(iPhi)*(SQ(iy, -2:2))
           END DO
         END DO
 
@@ -423,16 +424,16 @@ CONTAINS
           bc0(iz, ix, 4) = -ialfa(ix)*bc0(iz, ix, 1) - ibeta(iz)*bc0(iz, ix, 3); bc0(iz, ix, 5) = ibeta(iz)*bc0(iz, ix, 1) - ialfa(ix)*bc0(iz, ix, 3)
         END IF
         bc0(iz, ix, 2) = bc0(iz, ix, 2) - v0bc(-2)*bc0(iz, ix, 4)/v0m1bc(-2)
-        CALL applybc_0(D2vmat(:, :), v0bc, v0m1bc)
-        V(1, iz, ix, 2) = V(1, iz, ix, 2) - D2vmat(1, -2)*bc0(iz, ix, 4)/v0m1bc(-2) - D2vmat(1, -1)*bc0(iz, ix, 2)/v0bc(-1)
-        V(2, iz, ix, 2) = V(2, iz, ix, 2) - D2vmat(2, -2)*bc0(iz, ix, 2)/v0bc(-1)
-        CALL applybc_0(etamat(:, :), eta0bc, eta0m1bc)
-        V(1, iz, ix, 1) = V(1, iz, ix, 1) - etamat(1, -1)*bc0(iz, ix, 5)/eta0bc(-1)
-        V(2, iz, ix, 1) = V(2, iz, ix, 1) - etamat(2, -2)*bc0(iz, ix, 5)/eta0bc(-1)
+        CALL applybc_0(D2vmat(:, :, iz, ix), v0bc, v0m1bc)
+        V(1, iz, ix, 2) = V(1, iz, ix, 2) - D2vmat(1, -2, iz, ix)*bc0(iz, ix, 4)/v0m1bc(-2) - D2vmat(1, -1, iz, ix)*bc0(iz, ix, 2)/v0bc(-1)
+        V(2, iz, ix, 2) = V(2, iz, ix, 2) - D2vmat(2, -2, iz, ix)*bc0(iz, ix, 2)/v0bc(-1)
+        CALL applybc_0(etamat(:, :, iz, ix), eta0bc, eta0m1bc)
+        V(1, iz, ix, 1) = V(1, iz, ix, 1) - etamat(1, -1, iz, ix)*bc0(iz, ix, 5)/eta0bc(-1)
+        V(2, iz, ix, 1) = V(2, iz, ix, 1) - etamat(2, -2, iz, ix)*bc0(iz, ix, 5)/eta0bc(-1)
         DO iPhi = 1, nPhi
-          CALL applybc_0(phimat(:, :, iPhi), phi0bc, phi0m1bc)
-          V(1, iz, ix, 3 + iPhi) = V(1, iz, ix, 3 + iPhi) - phimat(1, -1, iPhi)*bc0(iz, ix, 5 + iPhi)/phi0bc(-1)
-          V(2, iz, ix, 3 + iPhi) = V(2, iz, ix, 3 + iPhi) - phimat(2, -2, iPhi)*bc0(iz, ix, 5 + iPhi)/phi0bc(-1)
+          CALL applybc_0(phimat(:, :, iPhi,iz, ix), phi0bc, phi0m1bc)
+          V(1, iz, ix, 3 + iPhi) = V(1, iz, ix, 3 + iPhi) - phimat(1, -1, iPhi, iz, ix)*bc0(iz, ix, 5 + iPhi)/phi0bc(-1)
+          V(2, iz, ix, 3 + iPhi) = V(2, iz, ix, 3 + iPhi) - phimat(2, -2, iPhi, iz, ix)*bc0(iz, ix, 5 + iPhi)/phi0bc(-1)
         END DO
 
         IF (ix == 0 .AND. iz == 0) THEN
@@ -443,24 +444,24 @@ CONTAINS
           bcn(iz, ix, 4) = -ialfa(ix)*bcn(iz, ix, 1) - ibeta(iz)*bcn(iz, ix, 3); bcn(iz, ix, 5) = ibeta(iz)*bcn(iz, ix, 1) - ialfa(ix)*bcn(iz, ix, 3)
         END IF
         bcn(iz, ix, 2) = bcn(iz, ix, 2) - vnbc(2)*bcn(iz, ix, 4)/vnp1bc(2)
-        CALL applybc_n(D2vmat(:, :), vnbc, vnp1bc)
- V(ny - 1, iz, ix, 2) = V(ny - 1, iz, ix, 2) - D2vmat(ny - 1, 2)*bcn(iz, ix, 4)/vnp1bc(2) - D2vmat(ny - 1, 1)*bcn(iz, ix, 2)/vnbc(1)
-        V(ny - 2, iz, ix, 2) = V(ny - 2, iz, ix, 2) - D2vmat(ny - 2, 2)*bcn(iz, ix, 2)/vnbc(1)
-        CALL applybc_n(etamat(:, :), etanbc, etanp1bc)
-        V(ny - 1, iz, ix, 1) = V(ny - 1, iz, ix, 1) - etamat(ny - 1, 1)*bcn(iz, ix, 5)/etanbc(1)
-        V(ny - 2, iz, ix, 1) = V(ny - 2, iz, ix, 1) - etamat(ny - 2, 2)*bcn(iz, ix, 5)/etanbc(1)
+        CALL applybc_n(D2vmat(:, :, iz, ix), vnbc, vnp1bc)
+ V(ny - 1, iz, ix, 2) = V(ny - 1, iz, ix, 2) - D2vmat(ny - 1, 2, iz, ix)*bcn(iz, ix, 4)/vnp1bc(2) - D2vmat(ny - 1, 1, iz, ix)*bcn(iz, ix, 2)/vnbc(1)
+        V(ny - 2, iz, ix, 2) = V(ny - 2, iz, ix, 2) - D2vmat(ny - 2, 2, iz, ix)*bcn(iz, ix, 2)/vnbc(1)
+        CALL applybc_n(etamat(:, :, iz, ix), etanbc, etanp1bc)
+        V(ny - 1, iz, ix, 1) = V(ny - 1, iz, ix, 1) - etamat(ny - 1, 1, iz, ix)*bcn(iz, ix, 5)/etanbc(1)
+        V(ny - 2, iz, ix, 1) = V(ny - 2, iz, ix, 1) - etamat(ny - 2, 2, iz, ix)*bcn(iz, ix, 5)/etanbc(1)
         ! LU decomposition and solution of the 5-diagonal system
         DO iPhi = 1, nPhi
-          CALL applybc_n(phimat(:, :, iPhi), phinbc, phinp1bc)
-          V(ny - 1, iz, ix, 3 + iPhi) = V(ny - 1, iz, ix, 3 + iPhi) - phimat(ny - 1, 1, iPhi)*bcn(iz, ix, 5 + iPhi)/phinbc(1)
-          V(ny - 2, iz, ix, 3 + iPhi) = V(ny - 2, iz, ix, 3 + iPhi) - phimat(ny - 2, 2, iPhi)*bcn(iz, ix, 5 + iPhi)/phinbc(1)
+          CALL applybc_n(phimat(:, :, iPhi, iz, ix), phinbc, phinp1bc)
+          V(ny - 1, iz, ix, 3 + iPhi) = V(ny - 1, iz, ix, 3 + iPhi) - phimat(ny - 1, 1, iPhi, iz, ix)*bcn(iz, ix, 5 + iPhi)/phinbc(1)
+          V(ny - 2, iz, ix, 3 + iPhi) = V(ny - 2, iz, ix, 3 + iPhi) - phimat(ny - 2, 2, iPhi, iz, ix)*bcn(iz, ix, 5 + iPhi)/phinbc(1)
         END DO
-        CALL LU5decomp(D2vmat(:, :)); CALL LU5decomp(etamat(:, :))
-        CALL LeftLU5div(V(:, iz, ix, 2), D2vmat(:, :), V(:, iz, ix, 2))
-        CALL LeftLU5div(V(:, iz, ix, 1), etamat(:, :), V(:, iz, ix, 1))
+        CALL LU5decomp(D2vmat(:, :, iz, ix)); CALL LU5decomp(etamat(:, :, iz, ix))
+        CALL LeftLU5div(V(:, iz, ix, 2), D2vmat(:, :, iz, ix), V(:, iz, ix, 2))
+        CALL LeftLU5div(V(:, iz, ix, 1), etamat(:, :, iz, ix), V(:, iz, ix, 1))
         DO iPhi = 1, nPhi
-          CALL LU5decomp(phimat(:, :, iPhi))
-          CALL LeftLU5div(V(:, iz, ix, 3 + iPhi), phimat(:, :, iPhi), V(:, iz, ix, 3 + iPhi))
+          CALL LU5decomp(phimat(:, :, iPhi, iz, ix))
+          CALL LeftLU5div(V(:, iz, ix, 3 + iPhi), phimat(:, :, iPhi, iz, ix), V(:, iz, ix, 3 + iPhi))
         END DO
 
         ! Retrieve solutions at boundaries
@@ -484,7 +485,7 @@ CONTAINS
           V(:, 0, 0, 3) = dcmplx(dimag(V(:, 0, 0, 1)), 0.d0); 
           V(:, 0, 0, 1) = dcmplx(dreal(V(:, 0, 0, 1)), 0.d0); 
           ucor(ny0 - 2:ny0 - 1) = 0; ucor(ny0:nyN) = 1; ucor(nyN + 1:nyN + 2) = 0
-          CALL LeftLU5div(ucor, etamat(:, :), ucor)
+          CALL LeftLU5div(ucor, etamat(:, :, iz, ix), ucor)
           ucor(0) = -sum(ucor(1:3)*eta0bc(0:2))/eta0bc(-1)
           ucor(-1) = -sum(ucor(0:3)*eta0m1bc(-1:2))/eta0m1bc(-2)
           ucor(ny) = -sum(ucor(ny - 3:ny - 1)*etanbc(-2:0))/etanbc(1)
@@ -492,7 +493,7 @@ CONTAINS
           tcor(ny0 - 2:ny0 - 1, :) = 0; tcor(ny0:nyN, :) = 1; tcor(nyN + 1:nyN + 2, :) = 0
 
           DO iPhi = 1, nPhi
-            CALL LeftLU5div(tcor(:, iPhi), phimat(:, :, iPhi), tcor(:, iPhi))
+            CALL LeftLU5div(tcor(:, iPhi), phimat(:, :, iPhi, iz, ix), tcor(:, iPhi))
             tcor(0, iPhi) = -sum(tcor(1:3, iPhi)*phi0bc(0:2))/phi0bc(-1)
             tcor(-1, iPhi) = -sum(tcor(0:3, iPhi)*phi0m1bc(-1:2))/phi0m1bc(-2)
             tcor(ny, iPhi) = -sum(tcor(ny - 3:ny - 1, iPhi)*phinbc(-2:0))/phinbc(1)
@@ -521,10 +522,10 @@ CONTAINS
           END IF
         ELSE
           CALL COMPLEXderiv(V(:, iz, ix, 2), V(:, iz, ix, 3), der, D0mat)
-          temp = (ialfa(ix)*V(:, iz, ix, 3) - ibeta(iz)*V(:, iz, ix, 1))/k2(iz, ix)
-          V(:, iz, ix, 3) = (ibeta(iz)*V(:, iz, ix, 3) + ialfa(ix)*V(:, iz, ix, 1))/k2(iz, ix)
           do j = ny0-2, nyN+2
-            V(j, iz, ix, 1) = temp(j)
+            temp = (ialfa(ix)*V(j, iz, ix, 3) - ibeta(iz)*V(j, iz, ix, 1)) / k2(iz, ix)
+            V(j, iz, ix, 3) = (ibeta(iz)*V(j, iz, ix, 3) + ialfa(ix)*V(j, iz, ix, 1)) / k2(iz, ix)
+            V(j, iz, ix, 1) = temp
           end do
         END IF
       END DO
@@ -842,6 +843,7 @@ CONTAINS
       END DO
     END IF
     IF (has_terminal) THEN
+      !$omp target update from(fr)
       WRITE (*, "(F10.4,3X,4(F11.6,3X),4(F9.4,3X),2(F9.6,3X))") &
            time,dudy(1,1),dudy(1,2),dudy(2,1),dudy(2,2),fr(1)+corrpx*fr(3),meanpx+corrpx,fr(2)+corrpz*fr(3),meanpz+corrpz,runtime_global*deltat,deltat
       WRITE(121,*) time,dudy(1,1),dudy(1,2),dudy(2,1),dudy(2,2),fr(1)+corrpx*fr(3),meanpx+corrpx,fr(2)+corrpz*fr(3),meanpz+corrpz,runtime_global*deltat,deltat
