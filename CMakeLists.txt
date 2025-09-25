@@ -131,7 +131,7 @@ elseif (CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
     target_link_libraries(channel_core PUBLIC FFTW::Double)
 
 elseif (CMAKE_Fortran_COMPILER_ID MATCHES "Cray")
-    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -e Z -O2 -hfp0 -homp")
+    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -e Z -O2 -hfp0 -homp -lrocprofiler-sdk-roctx")
 
     find_package(hipfort REQUIRED COMPONENTS hip hipfft) 
     target_link_libraries(channel_core PRIVATE hipfort::hipfft)

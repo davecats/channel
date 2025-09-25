@@ -13,6 +13,51 @@
 
 #include "header.h"
 
+#ifdef HAVE_HIP
+module roctx
+
+    implicit none
+
+    private
+    integer :: n = 0
+
+    public :: roctxpush, roctxpop
+
+ interface
+     subroutine roctxrangepush(message) bind(c, name="roctxRangePushA")
+       use iso_c_binding,   only: c_char
+       implicit none
+       character(c_char) :: message(*)
+     end subroutine roctxrangepush
+
+     subroutine roctxrangepop() bind(c, name="roctxRangePop")
+       implicit none
+     end subroutine roctxrangepop
+
+ end interface
+
+ contains
+
+   subroutine roctxPush(name)
+      character(len=*),intent(in) :: name
+      n = n + 1
+      call roctxRangePush(name)
+   end subroutine roctxPush
+
+   subroutine roctxPop(name)
+      character(len=*),intent(in) :: name
+      n = n - 1
+      ! Print the marker name if there are more pop calls than push calls
+      if (n < 0) then
+          print *, "invalid pop for: ", name
+          return
+      endif
+      call roctxRangePop()
+   end subroutine roctxPop
+
+end module
+#endif
+
 MODULE mpi_transpose
 
   USE, intrinsic :: iso_c_binding
@@ -21,7 +66,8 @@ MODULE mpi_transpose
   USE mpi_f08
 #endif 
 #if defined(HAVE_HIP)
-    use omp_lib
+  use omp_lib
+  use roctx
 #endif
 
   IMPLICIT NONE
@@ -74,7 +120,9 @@ CONTAINS
 #ifdef HAVE_MPI
       nField = 3 + nPhi        ! same as your iV loop upper bound
       sendcount = nxB*nzB*(ny + 3)*nField
-
+#ifdef HAVE_HIP
+      call roctxpush("zTOx prepare" // c_null_char)   
+#endif
       !$omp target teams distribute parallel do collapse(5) default(none) &
       !$omp shared(Vz, sendbuf) shared(ny, nxB, nzB, nproc, nField, sendcount) private(iy, iV, ix, iz, dest, p)
       do dest = 0, nproc - 1
@@ -90,6 +138,10 @@ CONTAINS
         end do
       end do
 
+#ifdef HAVE_HIP
+      call roctxpop("zTOx prepare" // c_null_char)
+      call roctxpush("zTOx MPI" // c_null_char)   
+#endif
 #ifndef HAVE_HIP
       !$omp target data use_device_ptr(sendbuf, recvbuf)
 #endif
@@ -98,6 +150,12 @@ CONTAINS
 #ifndef HAVE_HIP
       !$omp end target data
 #endif
+
+#ifdef HAVE_HIP
+      call roctxpop("zTOx MPI" // c_null_char)
+      call roctxpush("zTOx after" // c_null_char)
+#endif
+
       !$omp target teams distribute parallel do collapse(5) default(none) &
       !$omp shared(Vx, recvbuf) shared(ny, nxB, nzB, nproc, nField, sendcount) private(iy, iV, ix, iz, dest, p)
       do src = 0, nproc - 1
@@ -112,6 +170,9 @@ CONTAINS
           end do
         end do
       end do
+#ifdef HAVE_HIP
+      call roctxpop("zTOx after" // c_null_char)
+#endif 
 #endif
     END IF
 
@@ -150,6 +211,9 @@ CONTAINS
       nField = 6 + 3*nPhi
       sendcount = nxB*nzB*(ny + 3)*nField
 
+#ifdef HAVE_HIP
+      call roctxpush("xTOz prepare" // c_null_char)   
+#endif
       !$omp target teams distribute parallel do collapse(5) default(none) &
       !$omp shared(Vx, sendbuf) shared(ny, nxB, nzB, nproc, nField, sendcount) private(iy, iV, ix, iz, dest, p)
       do dest = 0, nproc - 1
@@ -165,6 +229,11 @@ CONTAINS
         end do
       end do
 
+#ifdef HAVE_HIP
+      call roctxpop("xTOz prepare" // c_null_char)
+      call roctxpush("xTOz MPI" // c_null_char)   
+#endif
+
 #ifndef HAVE_HIP
       !$omp target data use_device_ptr(sendbuf, recvbuf)
 #endif
@@ -172,6 +241,10 @@ CONTAINS
                         recvbuf, sendcount, MPI_DOUBLE_COMPLEX, MPI_COMM_WORLD, ierr)
 #ifndef HAVE_HIP
       !$omp end target data
+#endif
+#ifdef HAVE_HIP
+      call roctxpop("xTOz MPI" // c_null_char)
+      call roctxpush("xTOz after" // c_null_char)   
 #endif
 
       !$omp target teams distribute parallel do collapse(5) default(none) &
@@ -188,6 +261,9 @@ CONTAINS
           end do
         end do
       end do
+#ifdef HAVE_HIP
+      call roctxpop("zTOx after" // c_null_char)
+#endif
 #endif
     END IF
 
