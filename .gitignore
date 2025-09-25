@@ -94,3 +94,6 @@ x1000*
 *.nsys-rep
 *.sqlite
 *.pftrace
+x1001*
+*.i
+*.csv

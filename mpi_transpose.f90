@@ -20,13 +20,20 @@ MODULE mpi_transpose
 #ifdef HAVE_MPI
   USE mpi_f08
 #endif 
+#if defined(HAVE_HIP)
+    use omp_lib
+#endif
 
   IMPLICIT NONE
 
 #ifdef HAVE_MPI
   TYPE(MPI_Comm) :: MPI_CART_COMM, MPI_COMM_X, MPI_COMM_Y
 #endif
+#if defined(HAVE_HIP)
+  complex(C_DOUBLE_COMPLEX), pointer:: sendbuf(:), recvbuf(:)
+#else
   complex(C_DOUBLE_COMPLEX), allocatable :: sendbuf(:), recvbuf(:)
+#endif
   integer(C_INT), save :: nproc, iproc, ierr, nzd, nx
   integer(C_INT), save :: nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN, miny, maxy
   !$omp declare target(ny0, nyN)
@@ -83,11 +90,14 @@ CONTAINS
         end do
       end do
 
+#ifndef HAVE_HIP
       !$omp target data use_device_ptr(sendbuf, recvbuf)
+#endif
       call MPI_Alltoall(sendbuf, sendcount, MPI_DOUBLE_COMPLEX, &
                         recvbuf, sendcount, MPI_DOUBLE_COMPLEX, MPI_COMM_WORLD, ierr)
-
+#ifndef HAVE_HIP
       !$omp end target data
+#endif
       !$omp target teams distribute parallel do collapse(5) default(none) &
       !$omp shared(Vx, recvbuf) shared(ny, nxB, nzB, nproc, nField, sendcount) private(iy, iV, ix, iz, dest, p)
       do src = 0, nproc - 1
@@ -155,10 +165,14 @@ CONTAINS
         end do
       end do
 
+#ifndef HAVE_HIP
       !$omp target data use_device_ptr(sendbuf, recvbuf)
+#endif
       call MPI_Alltoall(sendbuf, sendcount, MPI_DOUBLE_COMPLEX, &
                         recvbuf, sendcount, MPI_DOUBLE_COMPLEX, MPI_COMM_WORLD, ierr)
+#ifndef HAVE_HIP
       !$omp end target data
+#endif
 
       !$omp target teams distribute parallel do collapse(5) default(none) &
       !$omp shared(Vz, recvbuf) shared(ny, nxB, nzB, nproc, nField, sendcount) private(iy, iV, ix, iz, dest, p)
@@ -186,6 +200,8 @@ CONTAINS
     integer, parameter :: ndims = 4
     integer :: i
     integer :: array_of_sizes(ndims), array_of_subsizes(ndims), array_of_starts(ndims), ierror
+    type(c_ptr) :: sendptr, recvptr
+    integer(c_size_t) :: sendsize, recvsize
     ! Define which process write on screen
     has_terminal = (iproc == 0)
     ! Calculate domain division in wall-normal direction
@@ -211,10 +227,23 @@ CONTAINS
       CALL MPI_Abort(MPI_COMM_WORLD, 1, ierror)
     end if
 
-    ! Allocate buffers for transposes
-    ALLOCATE (sendbuf(nproc*nxB*nzB*(ny + 3)*(6 + 3*nPhi))); sendbuf = 0
-    ALLOCATE (recvbuf(nproc*nxB*nzB*(ny + 3)*(6 + 3*nPhi))); recvbuf = 0
+    sendsize = nproc*nxB*nzB*(ny + 3)*(6 + 3*nPhi)
+    recvsize= nproc*nxB*nzB*(ny + 3)*(6 + 3*nPhi)
+
+    ! Allocate buffers for transposes*int(16, c_size_t)
+#if defined(HAVE_HIP)
+    ! On HIP with HSA_XNACK=1, the use_device_ptr statements around the MPI calls are ignored.
+    ! Hence, MPI does a CPU mpi copy! So we need to allocate it explicity on the device.
+    sendptr = omp_target_alloc(sendsize*int(16, c_size_t), omp_get_default_device())
+    recvptr = omp_target_alloc(recvsize*int(16, c_size_t), omp_get_default_device())
+    call c_f_pointer(sendptr, sendbuf, [sendsize])
+    call c_f_pointer(recvptr, recvbuf, [recvsize])
+#else
+    ALLOCATE (sendbuf(sendsize)); sendbuf = 0
+    ALLOCATE (recvbuf(recvsize)); recvbuf = 0
     !$omp target enter data map(alloc: sendbuf, recvbuf)
+#endif
+    
     ! For READING VELOCITY, SETTING VIEW: datatype that maps velocity on disk to memory (it differs from writing: halo cells are read twice!)
     CALL MPI_Type_create_subarray(ndims, [ny+3, 2*nz+1, nxpp, 3+nPhi], [nyN-ny0+5, 2*nz+1, nxB, 3+nPhi], [ny0-1,0,nx0,0], MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, vel_read_type, ierror)
     CALL MPI_Type_commit(vel_read_type, ierror)
