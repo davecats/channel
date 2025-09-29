@@ -39,7 +39,6 @@ MODULE ffts
   type(c_ptr) :: hip_pFFT, hip_pIFT, hip_pRFT, hip_pHFT
 #endif
 
-
 CONTAINS
 
 #ifdef HAVE_FFTW
@@ -97,14 +96,14 @@ CONTAINS
     !FFTs plans
     istat = cufftCreate(cu_pIFT)
     istat = cufftSetAutoAllocation(cu_pIFT, 0)
-    istat = cufftPlan1d(cu_pIFT, nzd, CUFFT_Z2Z, (3 + nPhi)*(ny + 3)*nxB)
+    istat = cufftPlan1d(cu_pIFT, nzd, CUFFT_Z2Z, (ny + 3)*nxB)
 
     istat = cufftCreate(cu_pFFT)
     istat = cufftSetAutoAllocation(cu_pFFT, 0)
-    istat = cufftPlan1d(cu_pFFT, nzd, CUFFT_Z2Z, (6 + 3*nPhi)*(ny + 3)*nxB)
+    istat = cufftPlan1d(cu_pFFT, nzd, CUFFT_Z2Z, (ny + 3)*nxB)
 
     n(1) = 2*nxd            ! length
-    batch = nzB*(3 + nPhi)*(ny + 3)
+    batch = nzB*(ny + 3)
     istride = 1                  ! contiguous along x
     ostride = 1
     idist = nxd + 1            ! distance between consecutive complex transforms
@@ -120,7 +119,7 @@ CONTAINS
     istat = cufftCreate(cu_pHFT)
     istat = cufftSetAutoAllocation(cu_pHFT, 0)
     istat = cufftPlanMany(cu_pHFT, 1, n, onembed, ostride, odist, &
-                          inembed, istride, idist, CUFFT_D2Z, nzB*(6 + 3*nPhi)*(ny + 3))
+                          inembed, istride, idist, CUFFT_D2Z, nzB*(ny + 3))
 
   END SUBROUTINE init_cufft
 #elif defined(HAVE_HIP)
@@ -141,14 +140,14 @@ CONTAINS
     !FFTs plans
     istat = hipfftCreate(hip_pIFT)
     istat = hipfftSetAutoAllocation(hip_pIFT, 0)
-    istat = hipfftPlan1d(hip_pIFT, nzd, HIPFFT_Z2Z, (3 + nPhi)*(ny + 3)*nxB)
+    istat = hipfftPlan1d(hip_pIFT, nzd, HIPFFT_Z2Z, (ny + 3)*nxB)
 
     istat = hipfftCreate(hip_pFFT)
     istat = hipfftSetAutoAllocation(hip_pFFT, 0)
-    istat = hipfftPlan1d(hip_pFFT, nzd, HIPFFT_Z2Z, (6 + 3*nPhi)*(ny + 3)*nxB)
+    istat = hipfftPlan1d(hip_pFFT, nzd, HIPFFT_Z2Z, (ny + 3)*nxB)
 
     n(1) = 2*nxd            ! length
-    batch = nzB*(3 + nPhi)*(ny + 3)
+    batch = nzB*(ny + 3)
     istride = 1                  ! contiguous along x
     ostride = 1
     idist = nxd + 1            ! distance between consecutive complex transforms
@@ -164,11 +163,10 @@ CONTAINS
     istat = hipfftCreate(hip_pHFT)
     istat = hipfftSetAutoAllocation(hip_pHFT, 0)
     istat = hipfftPlanMany(hip_pHFT, int(1, c_int), c_loc(n), c_loc(onembed), ostride, odist, &
-                     c_loc(inembed), istride, idist, HIPFFT_D2Z, int(nzB*(6 + 3*nPhi)*(ny + 3), c_int))
+                           c_loc(inembed), istride, idist, HIPFFT_D2Z, int(nzB*(ny + 3), c_int))
 
   END SUBROUTINE init_hipfft
 #endif
-
 
   LOGICAL FUNCTION fftFIT(i) result(isFIT)
     integer(C_INT), intent(in) :: i
@@ -180,124 +178,116 @@ CONTAINS
     isFIT = ((j == 1) .OR. (j == 3))
   END FUNCTION fftFIT
 
-  SUBROUTINE FFT(x, ny, nPhi)
+  SUBROUTINE FFT(x, ny)
 #if defined(HAVE_HIP)
-    complex(C_DOUBLE_COMPLEX), intent(inout), target :: x(:, :, :, :)
+    complex(C_DOUBLE_COMPLEX), intent(inout), target :: x(:, :, :)
 #else
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, :, :)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, :)
 #endif
-    integer(C_INT), intent(in) :: ny, nPhi
-    integer :: i, iV, istat
+    integer(C_INT), intent(in) :: ny
+    integer :: i, istat
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(x)
     istat = cudaDeviceSynchronize()
-    istat = cufftExecZ2Z(cu_pFFT, x(1, 1, 1, 1), x(1, 1, 1, 1), CUFFT_FORWARD)
+    istat = cufftExecZ2Z(cu_pFFT, x(1, 1, 1), x(1, 1, 1), CUFFT_FORWARD)
     istat = cudaDeviceSynchronize()
     !$omp end target data
 #elif defined(HAVE_HIP)
     !$omp target data use_device_addr(x)
     istat = hipDeviceSynchronize()
-    istat = hipfftExecZ2Z(hip_pFFT, c_loc(x(1, 1, 1, 1)), c_loc(x(1, 1, 1, 1)), HIPFFT_FORWARD)
+    istat = hipfftExecZ2Z(hip_pFFT, c_loc(x(1, 1, 1)), c_loc(x(1, 1, 1)), HIPFFT_FORWARD)
     istat = hipDeviceSynchronize()
     !$omp end target data
 #elif defined(HAVE_FFTW)
     DO i = 1, ny + 3
-      DO iV = 1, 6 + 3*nPhi
-        CALL fftw_execute_dft(pFFT, x(:, :, i, iV), x(:, :, i, iV)); 
-      END DO
-    END do
+      CALL fftw_execute_dft(pFFT, x(:, :, i), x(:, :, i)); 
+    END DO
 #endif
   END SUBROUTINE FFT
 
-  SUBROUTINE IFT(x, ny, nPhi)
+  SUBROUTINE IFT(x, ny)
 #if defined(HAVE_HIP)
-    complex(C_DOUBLE_COMPLEX), intent(inout), target :: x(:, :, :, :)
+    complex(C_DOUBLE_COMPLEX), intent(inout), target :: x(:, :, :)
 #else
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, :, :)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, :)
 #endif
-    integer(C_INT), intent(in) :: ny, nPhi
-    integer :: i, iV, istat
+    integer(C_INT), intent(in) :: ny
+    integer :: i, istat
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(x)
     istat = cudaDeviceSynchronize()
-    istat = cufftExecZ2Z(cu_pIFT, x(1, 1, 1, 1), x(1, 1, 1, 1), CUFFT_INVERSE)
+    istat = cufftExecZ2Z(cu_pIFT, x(1, 1, 1), x(1, 1, 1), CUFFT_INVERSE)
     istat = cudaDeviceSynchronize()
     !$omp end target data
 #elif defined(HAVE_HIP)
     !$omp target data use_device_addr(x)
     istat = hipDeviceSynchronize()
-    istat = hipfftExecZ2Z(hip_pIFT, c_loc(x(1, 1, 1, 1)), c_loc(x(1, 1, 1, 1)), HIPFFT_INVERSE)
+    istat = hipfftExecZ2Z(hip_pIFT, c_loc(x(1, 1, 1)), c_loc(x(1, 1, 1)), HIPFFT_INVERSE)
     istat = hipDeviceSynchronize()
     !$omp end target data
 #elif defined(HAVE_FFTW)
     DO i = 1, ny + 3
-      DO iV = 1, 3 + nPhi
-        CALL fftw_execute_dft(pIFT, x(:, :, i, iV), x(:, :, i, iV))
-      END DO
+      CALL fftw_execute_dft(pIFT, x(:, :, i), x(:, :, i))
     END DO
 #endif
   END SUBROUTINE IFT
 
-  SUBROUTINE RFT(x, rx, ny, nPhi)
+  SUBROUTINE RFT(x, rx, ny)
     IMPLICIT NONE
 #if defined(HAVE_HIP)
-    complex(C_DOUBLE_COMPLEX), target :: x(:, :, :, :)
-    real(C_DOUBLE), target :: rx(:, :, :, :)
+    complex(C_DOUBLE_COMPLEX), target :: x(:, :, :)
+    real(C_DOUBLE), target :: rx(:, :, :)
 #else
-    complex(C_DOUBLE_COMPLEX) :: x(:, :, :, :)
-    real(C_DOUBLE) :: rx(:, :, :, :)
+    complex(C_DOUBLE_COMPLEX) :: x(:, :, :)
+    real(C_DOUBLE) :: rx(:, :, :)
 #endif
-    integer(C_INT), intent(in) :: ny, nPhi
-    integer :: i, iV, istat
+    integer(C_INT), intent(in) :: ny
+    integer :: i, istat
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(x, rx)
     istat = cudaDeviceSynchronize()
-    istat = cufftExecZ2D(cu_pRFT, x(1, 1, 1, 1), rx(1, 1, 1, 1))
+    istat = cufftExecZ2D(cu_pRFT, x(1, 1, 1), rx(1, 1, 1))
     istat = cudaDeviceSynchronize()
     !$omp end target data
 #elif defined(HAVE_HIP)
     !$omp target data use_device_addr(x, rx)
     istat = hipDeviceSynchronize()
-    istat = hipfftExecZ2D(hip_pRFT, c_loc(x(1, 1, 1, 1)), c_loc(rx(1, 1, 1, 1)))
+    istat = hipfftExecZ2D(hip_pRFT, c_loc(x(1, 1, 1)), c_loc(rx(1, 1, 1)))
     istat = hipDeviceSynchronize()
     !$omp end target data
 #elif defined(HAVE_FFTW)
     DO i = 1, ny + 3
-      DO iV = 1, 3 + nPhi
-        CALL fftw_execute_dft_c2r(pRFT, x(:, :, i, iV), rx(:, :, i, iV))
-      END DO
+      CALL fftw_execute_dft_c2r(pRFT, x(:, :, i), rx(:, :, i))
     END DO
 #endif
   END SUBROUTINE RFT
 
-  SUBROUTINE HFT(rx, x, ny, nPhi)
+  SUBROUTINE HFT(rx, x, ny)
     IMPLICIT NONE
 #if defined(HAVE_HIP)
-    complex(C_DOUBLE_COMPLEX), target :: x(:, :, :, :)
-    real(C_DOUBLE), target :: rx(:, :, :, :)
+    complex(C_DOUBLE_COMPLEX), target :: x(:, :, :)
+    real(C_DOUBLE), target :: rx(:, :, :)
 #else
-    complex(C_DOUBLE_COMPLEX) :: x(:, :, :, :)
-    real(C_DOUBLE) :: rx(:, :, :, :)
+    complex(C_DOUBLE_COMPLEX) :: x(:, :, :)
+    real(C_DOUBLE) :: rx(:, :, :)
 #endif
-    integer(C_INT), intent(in) :: ny, nPhi
-    integer :: i, iV, istat
+    integer(C_INT), intent(in) :: ny
+    integer :: i, istat
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(rx, x)
     istat = cudaDeviceSynchronize()
-    istat = cufftExecD2Z(cu_pHFT, rx(1, 1, 1, 1), x(1, 1, 1, 1))
+    istat = cufftExecD2Z(cu_pHFT, rx(1, 1, 1), x(1, 1, 1))
     istat = cudaDeviceSynchronize()
     !$omp end target data
 #elif defined(HAVE_HIP)
     !$omp target data use_device_addr(rx, x)
     istat = hipDeviceSynchronize()
-    istat = hipfftExecD2Z(hip_pHFT, c_loc(rx(1, 1, 1, 1)), c_loc(x(1, 1, 1, 1)))
+    istat = hipfftExecD2Z(hip_pHFT, c_loc(rx(1, 1, 1)), c_loc(x(1, 1, 1)))
     istat = hipDeviceSynchronize()
     !$omp end target data
 #elif defined(HAVE_FFTW)
     DO i = 1, ny + 3
-      DO iV = 1, 6 + 3*nPhi
-        CALL fftw_execute_dft_r2c(pHFT, rx(:, :, i, iV), x(:, :, i, iV)); 
-      END DO
+      CALL fftw_execute_dft_r2c(pHFT, rx(:, :, i), x(:, :, i)); 
     END DO
 #endif
   END SUBROUTINE HFT

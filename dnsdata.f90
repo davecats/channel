@@ -46,7 +46,7 @@ MODULE dnsdata
   real(C_DOUBLE), allocatable :: der(:, :, :)
   real(C_DOUBLE), dimension(-2:2) :: d040, d140, d240, d14m1, d24m1, d04n, d14n, d24n, d14np1, d24np1
   !$omp declare target(d14np1, d14n, d14m1, d140)
-  real(C_DOUBLE), allocatable :: D0mat(:, :), etamat(:, :, :, :), eta00mat(:, :), D2vmat(:, :, :, :), phimat(:, :, :, :, :)
+  real(C_DOUBLE), allocatable :: D0mat(:, :), linsolve_mat(:, :, :, :), eta00mat(:, :)
 #if !(defined(HAVE_CUDA) || defined(HAVE_HIP))
   !Fourier-transformable arrays (allocated in ffts.f90)
   complex(C_DOUBLE_COMPLEX), pointer, dimension(:, :, :, :) :: VVdx, VVdz
@@ -131,10 +131,9 @@ CONTAINS
     END IF
 #define newrhs(iy,iz,ix,i) memrhs(iy,iz,ix,i)
 #define imod(iy) MOD(iy+1000,5)
-    ALLOCATE(der(1:ny-1,0:3,-2:2),d0mat(ny0:nyN+2,-2:2),etamat(ny0:nyN+2, -2:2, -nz:nz, nx0:nxN))
-    ALLOCATE(eta00mat(ny0:nyN+2,-2:2),D2vmat(ny0:nyN+2, -2:2, -nz:nz, nx0:nxN))
-    ALLOCATE(phimat(ny0:nyN + 2, -2:2, 1:nPhi, -nz:nz, nx0:nxN))
-    der = 0.0; d0mat = 0.0; etamat = 0.0; eta00mat = 0.0; D2vmat = 0.0; phimat = 0.0
+    ALLOCATE (der(1:ny - 1, 0:3, -2:2), d0mat(ny0:nyN + 2, -2:2), linsolve_mat(ny0:nyN + 2, -2:2, -nz:nz, nx0:nxN))
+    ALLOCATE (eta00mat(ny0:nyN + 2, -2:2))
+    der = 0.0; d0mat = 0.0; linsolve_mat = 0.0; eta00mat = 0.0
     allocate (corrtx(1:nPhi)); corrtx = 0.0d0
     allocate (ucor(ny0 - 2:nyN + 2), tcor(ny0 - 2:nyN + 2, 1:nPhi))
     ALLOCATE (y(-1:ny + 1), dy(1:ny - 1))
@@ -149,7 +148,7 @@ CONTAINS
     izd = (/(merge(iz, nzd + iz, iz >= 0), iz=-nz, nz)/); ialfa = (/(dcmplx(0.0d0, ix*alfa0), ix=nx0, nxN)/); 
     ibeta = (/(dcmplx(0.0d0, iz*beta0), iz=-nz, nz)/); 
     FORALL (iz=-nz:nz, ix=nx0:nxN) k2(iz, ix) = (alfa0*ix)**2.0d0 + (beta0*iz)**2.0d0
-    !$omp target enter data map(to: izd, ialfa, ibeta, k2, y, iy, rk1_rai, rk2_rai, rk3_rai, d2vmat, etamat, ucor, tcor)
+    !$omp target enter data map(to: izd, ialfa, ibeta, k2, y, iy, rk1_rai, rk2_rai, rk3_rai, linsolve_mat, ucor, tcor)
     OPEN (UNIT=195, FILE='Runtimedata.phi', ACTION='write')
     IF (solveNS .AND. has_terminal) OPEN (UNIT=121, FILE='Runtimedata', ACTION='write')
 
@@ -163,12 +162,12 @@ CONTAINS
     LOGICAL, intent(IN) :: solveNS
     !$omp target exit data map(delete: d240, d24m1, d04n, d24n, d24np1, D0mat)
     !$omp target exit data map(delete: V)
-    !$omp target exit data map(delete: memrhs, oldrhs, bc0, bcn, etamat, D2vmat, phimat)
+    !$omp target exit data map(delete: memrhs, oldrhs, bc0, bcn, linsolve_mat)
     !$omp target exit data map(delete: izd, ialfa, ibeta, k2, ucor, tcor)
 #ifdef bodyforce
     !$omp target exit data map(delete: F)
 #endif
-    DEALLOCATE (V, der, d0mat, etamat, D2vmat, phimat, y, dy)
+    DEALLOCATE (V, der, d0mat, linsolve_mat, y, dy)
     IF (solveNS) THEN
       DEALLOCATE (memrhs, oldrhs, bc0, bcn)
       IF (has_terminal) CLOSE (UNIT=121)
@@ -218,6 +217,7 @@ CONTAINS
   !--------------- Set-up the boundary conditions ---------------!
   SUBROUTINE setup_boundary_conditions()
     IMPLICIT NONE
+    integer :: ix, iz
     ! Bottom wall
     v0bc = d040; v0m1bc = d140; eta0bc = d040
     eta0m1bc = der(1, 3, :)
@@ -243,6 +243,32 @@ CONTAINS
     etanbc(-2:1) = etanbc(-2:1) - etanbc(2)*etanp1bc(-2:1)/etanp1bc(2)
     phinbc(-2:1) = phinbc(-2:1) - phinbc(2)*phinp1bc(-2:1)/phinp1bc(2)
     !$omp target enter data map(to: v0bc, v0m1bc, vnbc, vnp1bc, eta0bc, eta0m1bc, etanbc, etanp1bc, phinbc, phi0bc, phi0m1bc, phinp1bc)
+
+    !precompute bc0 and bcn
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(bc0, bcn, ialfa, ibeta, v0bc, v0m1bc, vnbc, vnp1bc, nx0, nxN, nz) &
+    !$omp private(ix, iz)
+    DO ix = nx0, nxN
+      DO iz = -nz, nz
+        IF (ix == 0 .AND. iz == 0) THEN
+          bc0(iz, ix, 1) = 0
+          bc0(iz, ix, 4) = 0
+          bc0(iz, ix, 5) = dcmplx(dreal(bc0(iz, ix, 1)) - dimag(bc0(iz, ix, 3)), dimag(bc0(iz, ix, 1)) + dreal(bc0(iz, ix, 3)))
+        ELSE
+          bc0(iz, ix, 4) = -ialfa(ix)*bc0(iz, ix, 1) - ibeta(iz)*bc0(iz, ix, 3); bc0(iz, ix, 5) = ibeta(iz)*bc0(iz, ix, 1) - ialfa(ix)*bc0(iz, ix, 3)
+        END IF
+        bc0(iz, ix, 2) = bc0(iz, ix, 2) - v0bc(-2)*bc0(iz, ix, 4)/v0m1bc(-2)
+
+        IF (ix == 0 .AND. iz == 0) THEN
+          bcn(iz, ix, 2) = 0
+          bcn(iz, ix, 4) = 0
+          bcn(iz, ix, 5) = dcmplx(dreal(bcn(iz, ix, 1)) - dimag(bcn(iz, ix, 3)), dimag(bcn(iz, ix, 1)) + dreal(bcn(iz, ix, 3)))
+        ELSE
+          bcn(iz, ix, 4) = -ialfa(ix)*bcn(iz, ix, 1) - ibeta(iz)*bcn(iz, ix, 3); bcn(iz, ix, 5) = ibeta(iz)*bcn(iz, ix, 1) - ialfa(ix)*bcn(iz, ix, 3)
+        END IF
+        bcn(iz, ix, 2) = bcn(iz, ix, 2) - vnbc(2)*bcn(iz, ix, 4)/vnp1bc(2)
+      END DO
+    END DO
   END SUBROUTINE setup_boundary_conditions
 
   !--------------------------------------------------------------!
@@ -394,118 +420,83 @@ CONTAINS
     real(C_DOUBLE), intent(in) :: lambda
     integer(C_INT) :: ix, iz, i, j, iPhi
     complex(C_DOUBLE_COMPLEX) :: temp
-    
-    ! bc0(iz,ix,i), bcn(iz,ix,i),                 i={1:u, 2:v, 3:w, 4:vy, 5:eta}
 
-
-    !$omp target teams distribute parallel do collapse(2) default(none)  &
-    !$omp shared(V, D0mat, D2vmat, etamat, phimat) shared(y, bc0, bcn, der, k2, lambda, ni, ialfa, ibeta, pra) &
-    !$omp shared(v0bc, v0m1bc, eta0bc, eta0m1bc, vnbc, vnp1bc, etanbc, etanp1bc,  phi0bc, phinbc, phi0m1bc, phinp1bc) &
-    !$omp shared(nx0, nxN, nz, ny0, nyN, ny, nPhi) &
-    !$omp shared(fr, corrpx, corrpz, corrtx, ucor, tcor) &
-    !$omp shared(meanflowz, meanflowx, meantb) &
-    !$omp private(ix, iz, iy, iPhi, temp) 
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(V, linsolve_mat, bc0, bcn, der, lambda, ni, ny, k2, ny0, nyN, nx0, nxN, nz, v0bc, v0m1bc, vnbc, vnp1bc) &
+    !$omp private(ix, iz, iy)
     DO ix = nx0, nxN
       DO iz = -nz, nz
-        ! Build the linear system
         DO iy = ny0, nyN
-          D2vmat(iy, -2:2, iz, ix) = lambda*(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)) - OS(iy, -2:2)
-          etamat(iy, -2:2, iz, ix) = lambda*der(iy, 0, -2:2) - SQ(iy, -2:2)
-          DO iPhi = 1, nPhi
-            phimat(iy, -2:2, iPhi, iz, ix) = lambda*der(iy, 0, -2:2) - pra(iPhi)*(SQ(iy, -2:2))
-          END DO
+          linsolve_mat(iy, -2:2, iz, ix) = lambda*(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)) - OS(iy, -2:2)
         END DO
 
-        IF (ix == 0 .AND. iz == 0) THEN
-          bc0(iz, ix, 1) = 0
-          bc0(iz, ix, 4) = 0
-          bc0(iz, ix, 5) = dcmplx(dreal(bc0(iz, ix, 1)) - dimag(bc0(iz, ix, 3)), dimag(bc0(iz, ix, 1)) + dreal(bc0(iz, ix, 3)))
-        ELSE
-          bc0(iz, ix, 4) = -ialfa(ix)*bc0(iz, ix, 1) - ibeta(iz)*bc0(iz, ix, 3); bc0(iz, ix, 5) = ibeta(iz)*bc0(iz, ix, 1) - ialfa(ix)*bc0(iz, ix, 3)
-        END IF
-        bc0(iz, ix, 2) = bc0(iz, ix, 2) - v0bc(-2)*bc0(iz, ix, 4)/v0m1bc(-2)
-        CALL applybc_0(D2vmat(:, :, iz, ix), v0bc, v0m1bc)
-        V(1, iz, ix, 2) = V(1, iz, ix, 2) - D2vmat(1, -2, iz, ix)*bc0(iz, ix, 4)/v0m1bc(-2) - D2vmat(1, -1, iz, ix)*bc0(iz, ix, 2)/v0bc(-1)
-        V(2, iz, ix, 2) = V(2, iz, ix, 2) - D2vmat(2, -2, iz, ix)*bc0(iz, ix, 2)/v0bc(-1)
-        CALL applybc_0(etamat(:, :, iz, ix), eta0bc, eta0m1bc)
-        V(1, iz, ix, 1) = V(1, iz, ix, 1) - etamat(1, -1, iz, ix)*bc0(iz, ix, 5)/eta0bc(-1)
-        V(2, iz, ix, 1) = V(2, iz, ix, 1) - etamat(2, -2, iz, ix)*bc0(iz, ix, 5)/eta0bc(-1)
-        DO iPhi = 1, nPhi
-          CALL applybc_0(phimat(:, :, iPhi,iz, ix), phi0bc, phi0m1bc)
-          V(1, iz, ix, 3 + iPhi) = V(1, iz, ix, 3 + iPhi) - phimat(1, -1, iPhi, iz, ix)*bc0(iz, ix, 5 + iPhi)/phi0bc(-1)
-          V(2, iz, ix, 3 + iPhi) = V(2, iz, ix, 3 + iPhi) - phimat(2, -2, iPhi, iz, ix)*bc0(iz, ix, 5 + iPhi)/phi0bc(-1)
-        END DO
+        CALL applybc_0(linsolve_mat(:, :, iz, ix), v0bc, v0m1bc)
+        V(1, iz, ix, 2) = V(1, iz, ix, 2) - linsolve_mat(1, -2, iz, ix)*bc0(iz, ix, 4)/v0m1bc(-2) - linsolve_mat(1, -1, iz, ix)*bc0(iz, ix, 2)/v0bc(-1)
+        V(2, iz, ix, 2) = V(2, iz, ix, 2) - linsolve_mat(2, -2, iz, ix)*bc0(iz, ix, 2)/v0bc(-1)
 
-        IF (ix == 0 .AND. iz == 0) THEN
-          bcn(iz, ix, 2) = 0
-          bcn(iz, ix, 4) = 0
-          bcn(iz, ix, 5) = dcmplx(dreal(bcn(iz, ix, 1)) - dimag(bcn(iz, ix, 3)), dimag(bcn(iz, ix, 1)) + dreal(bcn(iz, ix, 3)))
-        ELSE
-          bcn(iz, ix, 4) = -ialfa(ix)*bcn(iz, ix, 1) - ibeta(iz)*bcn(iz, ix, 3); bcn(iz, ix, 5) = ibeta(iz)*bcn(iz, ix, 1) - ialfa(ix)*bcn(iz, ix, 3)
-        END IF
-        bcn(iz, ix, 2) = bcn(iz, ix, 2) - vnbc(2)*bcn(iz, ix, 4)/vnp1bc(2)
-        CALL applybc_n(D2vmat(:, :, iz, ix), vnbc, vnp1bc)
- V(ny - 1, iz, ix, 2) = V(ny - 1, iz, ix, 2) - D2vmat(ny - 1, 2, iz, ix)*bcn(iz, ix, 4)/vnp1bc(2) - D2vmat(ny - 1, 1, iz, ix)*bcn(iz, ix, 2)/vnbc(1)
-        V(ny - 2, iz, ix, 2) = V(ny - 2, iz, ix, 2) - D2vmat(ny - 2, 2, iz, ix)*bcn(iz, ix, 2)/vnbc(1)
-        CALL applybc_n(etamat(:, :, iz, ix), etanbc, etanp1bc)
-        V(ny - 1, iz, ix, 1) = V(ny - 1, iz, ix, 1) - etamat(ny - 1, 1, iz, ix)*bcn(iz, ix, 5)/etanbc(1)
-        V(ny - 2, iz, ix, 1) = V(ny - 2, iz, ix, 1) - etamat(ny - 2, 2, iz, ix)*bcn(iz, ix, 5)/etanbc(1)
-        ! LU decomposition and solution of the 5-diagonal system
-        DO iPhi = 1, nPhi
-          CALL applybc_n(phimat(:, :, iPhi, iz, ix), phinbc, phinp1bc)
-          V(ny - 1, iz, ix, 3 + iPhi) = V(ny - 1, iz, ix, 3 + iPhi) - phimat(ny - 1, 1, iPhi, iz, ix)*bcn(iz, ix, 5 + iPhi)/phinbc(1)
-          V(ny - 2, iz, ix, 3 + iPhi) = V(ny - 2, iz, ix, 3 + iPhi) - phimat(ny - 2, 2, iPhi, iz, ix)*bcn(iz, ix, 5 + iPhi)/phinbc(1)
-        END DO
-        CALL LU5decomp(D2vmat(:, :, iz, ix)); CALL LU5decomp(etamat(:, :, iz, ix))
-        CALL LeftLU5div(V(:, iz, ix, 2), D2vmat(:, :, iz, ix), V(:, iz, ix, 2))
-        CALL LeftLU5div(V(:, iz, ix, 1), etamat(:, :, iz, ix), V(:, iz, ix, 1))
-        DO iPhi = 1, nPhi
-          CALL LU5decomp(phimat(:, :, iPhi, iz, ix))
-          CALL LeftLU5div(V(:, iz, ix, 3 + iPhi), phimat(:, :, iPhi, iz, ix), V(:, iz, ix, 3 + iPhi))
-        END DO
+        CALL applybc_n(linsolve_mat(:, :, iz, ix), vnbc, vnp1bc)
+        V(ny - 1, iz, ix, 2) = V(ny - 1, iz, ix, 2) - linsolve_mat(ny - 1, 2, iz, ix)*bcn(iz, ix, 4)/vnp1bc(2) - linsolve_mat(ny - 1, 1, iz, ix)*bcn(iz, ix, 2)/vnbc(1)
+        V(ny - 2, iz, ix, 2) = V(ny - 2, iz, ix, 2) - linsolve_mat(ny - 2, 2, iz, ix)*bcn(iz, ix, 2)/vnbc(1)
 
-        ! Retrieve solutions at boundaries
+        CALL LU5decomp(linsolve_mat(:, :, iz, ix)); 
+        CALL LeftLU5div(V(:, iz, ix, 2), linsolve_mat(:, :, iz, ix), V(:, iz, ix, 2))
+
         V(0, iz, ix, 2) = (bc0(iz, ix, 2) - sum(V(1:3, iz, ix, 2)*v0bc(0:2)))/v0bc(-1)
         V(-1, iz, ix, 2) = (bc0(iz, ix, 4) - sum(V(0:3, iz, ix, 2)*v0m1bc(-1:2)))/v0m1bc(-2)
-        V(0, iz, ix, 1) = (bc0(iz, ix, 5) - sum(V(1:3, iz, ix, 1)*eta0bc(0:2)))/eta0bc(-1)
-        V(-1, iz, ix, 1) = -sum(V(0:3, iz, ix, 1)*eta0m1bc(-1:2))/eta0m1bc(-2)
         V(ny, iz, ix, 2) = (bcn(iz, ix, 2) - sum(V(ny - 3:ny - 1, iz, ix, 2)*vnbc(-2:0)))/vnbc(1)
         V(ny + 1, iz, ix, 2) = (bcn(iz, ix, 4) - sum(V(ny - 3:ny, iz, ix, 2)*vnp1bc(-2:1)))/vnp1bc(2)
-        V(ny, iz, ix, 1) = (bcn(iz, ix, 5) - sum(V(ny - 3:ny - 1, iz, ix, 1)*etanbc(-2:0)))/etanbc(1)
-        V(ny + 1, iz, ix, 1) = -sum(V(ny - 3:ny, iz, ix, 1)*etanp1bc(-2:1))/etanp1bc(2)
-        DO iPhi = 1, nPhi
-          V(0, iz, ix, 3 + iPhi) = (bc0(iz, ix, 5 + iPhi) - sum(V(1:3, iz, ix, 3 + iPhi)*phi0bc(0:2)))/phi0bc(-1)
-          V(-1, iz, ix, 3 + iPhi) = -sum(V(0:3, iz, ix, 3 + iPhi)*phi0m1bc(-1:2))/phi0m1bc(-2)
-          V(ny, iz, ix, 3 + iPhi) = (bcn(iz, ix, 5 + iPhi) - sum(V(ny - 3:ny - 1, iz, ix, 3 + iPhi)*phinbc(-2:0)))/phinbc(1)
-          V(ny + 1, iz, ix, 3 + iPhi) = -sum(V(ny - 3:ny, iz, ix, 3 + iPhi)*phinp1bc(-2:1))/phinp1bc(2)
+      END DO
+    END DO
+
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(V, linsolve_mat, bc0, bcn, der, k2, ny, ni, lambda, ny0, nyN, nx0, nxN, nz, eta0bc, eta0m1bc, etanbc, etanp1bc) &
+    !$omp private(ix, iz, iy)
+    DO ix = nx0, nxN
+      DO iz = -nz, nz
+        DO iy = ny0, nyN
+          linsolve_mat(iy, -2:2, iz, ix) = lambda*der(iy, 0, -2:2) - SQ(iy, -2:2)
         END DO
 
+        CALL applybc_0(linsolve_mat(:, :, iz, ix), eta0bc, eta0m1bc)
+        V(1, iz, ix, 1) = V(1, iz, ix, 1) - linsolve_mat(1, -1, iz, ix)*bc0(iz, ix, 5)/eta0bc(-1)
+        V(2, iz, ix, 1) = V(2, iz, ix, 1) - linsolve_mat(2, -2, iz, ix)*bc0(iz, ix, 5)/eta0bc(-1)
+
+        CALL applybc_n(linsolve_mat(:, :, iz, ix), etanbc, etanp1bc)
+        V(ny - 1, iz, ix, 1) = V(ny - 1, iz, ix, 1) - linsolve_mat(ny - 1, 1, iz, ix)*bcn(iz, ix, 5)/etanbc(1)
+        V(ny - 2, iz, ix, 1) = V(ny - 2, iz, ix, 1) - linsolve_mat(ny - 2, 2, iz, ix)*bcn(iz, ix, 5)/etanbc(1)
+
+        CALL LU5decomp(linsolve_mat(:, :, iz, ix))
+        CALL LeftLU5div(V(:, iz, ix, 1), linsolve_mat(:, :, iz, ix), V(:, iz, ix, 1))
+
+        V(0, iz, ix, 1) = (bc0(iz, ix, 5) - sum(V(1:3, iz, ix, 1)*eta0bc(0:2)))/eta0bc(-1)
+        V(-1, iz, ix, 1) = -sum(V(0:3, iz, ix, 1)*eta0m1bc(-1:2))/eta0m1bc(-2)
+        V(ny, iz, ix, 1) = (bcn(iz, ix, 5) - sum(V(ny - 3:ny - 1, iz, ix, 1)*etanbc(-2:0)))/etanbc(1)
+        V(ny + 1, iz, ix, 1) = -sum(V(ny - 3:ny, iz, ix, 1)*etanp1bc(-2:1))/etanp1bc(2)
+      END DO
+    END DO
+
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(ny, ny0, nyN, nz, nx0, nxN) &
+    !$omp shared(V, bc0, bcn, v0bc, v0m1bc, eta0bc, eta0m1bc, vnbc, vnp1bc, etanbc, etanp1bc, linsolve_mat) &
+    !$omp shared(D0mat, der, k2, ialfa, ibeta, y, fr, ucor, meanflowx, meanflowz, corrpx, corrpz) &
+    !$omp private(ix, iz, j, temp)
+    DO ix = nx0, nxN
+      DO iz = -nz, nz
         ! Correct flow rate
         IF (ix == 0 .AND. iz == 0) THEN
           V(:, 0, 0, 3) = dcmplx(dimag(V(:, 0, 0, 1)), 0.d0); 
           V(:, 0, 0, 1) = dcmplx(dreal(V(:, 0, 0, 1)), 0.d0); 
           ucor(ny0 - 2:ny0 - 1) = 0; ucor(ny0:nyN) = 1; ucor(nyN + 1:nyN + 2) = 0
-          CALL LeftLU5div(ucor, etamat(:, :, iz, ix), ucor)
+          !linsolve_mat contains etamat
+          CALL LeftLU5div(ucor, linsolve_mat(:, :, iz, ix), ucor)
           ucor(0) = -sum(ucor(1:3)*eta0bc(0:2))/eta0bc(-1)
           ucor(-1) = -sum(ucor(0:3)*eta0m1bc(-1:2))/eta0m1bc(-2)
           ucor(ny) = -sum(ucor(ny - 3:ny - 1)*etanbc(-2:0))/etanbc(1)
           ucor(ny + 1) = -sum(ucor(ny - 3:ny)*etanp1bc(-2:1))/etanp1bc(2)
-          tcor(ny0 - 2:ny0 - 1, :) = 0; tcor(ny0:nyN, :) = 1; tcor(nyN + 1:nyN + 2, :) = 0
 
-          DO iPhi = 1, nPhi
-            CALL LeftLU5div(tcor(:, iPhi), phimat(:, :, iPhi, iz, ix), tcor(:, iPhi))
-            tcor(0, iPhi) = -sum(tcor(1:3, iPhi)*phi0bc(0:2))/phi0bc(-1)
-            tcor(-1, iPhi) = -sum(tcor(0:3, iPhi)*phi0m1bc(-1:2))/phi0m1bc(-2)
-            tcor(ny, iPhi) = -sum(tcor(ny - 3:ny - 1, iPhi)*phinbc(-2:0))/phinbc(1)
-            tcor(ny + 1, iPhi) = -sum(tcor(ny - 3:ny, iPhi)*phinp1bc(-2:1))/phinp1bc(2)
-          END DO
           fr(1) = yintegr(V(:, 0, 0, 1), y)
           fr(2) = yintegr(V(:, 0, 0, 3), y)
           fr(3) = yintegr(ucor, y)
-          DO iPhi = 1, nPhi
-            fr(3 + iPhi) = yintegr(V(:, 0, 0, 3 + iPhi), y); 
-            fr(3 + nPhi + iPhi) = yintegr(tcor(:, iPhi), y); 
-          END DO
           IF (abs(meanflowx) > 1.0d-7) THEN
             corrpx = (meanflowx - fr(1))/fr(3)
             V(:, 0, 0, 1) = dcmplx(dreal(V(:, 0, 0, 1)) + corrpx*dreal(ucor), dimag(V(:, 0, 0, 1)))
@@ -514,23 +505,78 @@ CONTAINS
             corrpz = (meanflowz - fr(2))/fr(3)
             V(:, 0, 0, 3) = dcmplx(dreal(V(:, 0, 0, 3)) + corrpz*dreal(ucor), dimag(V(:, 0, 0, 3)))
           END IF
-          IF (abs(meantb) > 1.0d-7) THEN
-            DO iPhi = 1, nPhi
-              corrtx(iPhi) = (meantb - fr(3 + iPhi))/fr(3 + nPhi + iPhi)
-         V(:, 0, 0, 3 + iPhi) = dcmplx(dreal(V(:, 0, 0, 3 + iPhi)) + corrtx(iPhi)*dreal(tcor(:, iPhi)), dimag(V(:, 0, 0, 3 + iPhi)))
-            END DO
-          END IF
         ELSE
           CALL COMPLEXderiv(V(:, iz, ix, 2), V(:, iz, ix, 3), der, D0mat)
-          do j = ny0-2, nyN+2
-            temp = (ialfa(ix)*V(j, iz, ix, 3) - ibeta(iz)*V(j, iz, ix, 1)) / k2(iz, ix)
-            V(j, iz, ix, 3) = (ibeta(iz)*V(j, iz, ix, 3) + ialfa(ix)*V(j, iz, ix, 1)) / k2(iz, ix)
+          do j = ny0 - 2, nyN + 2
+            temp = (ialfa(ix)*V(j, iz, ix, 3) - ibeta(iz)*V(j, iz, ix, 1))/k2(iz, ix)
+            V(j, iz, ix, 3) = (ibeta(iz)*V(j, iz, ix, 3) + ialfa(ix)*V(j, iz, ix, 1))/k2(iz, ix)
             V(j, iz, ix, 1) = temp
           end do
         END IF
       END DO
     END DO
   END SUBROUTINE linsolve
+
+  SUBROUTINE linsolve_scalar(lambda, iPhi)
+    IMPLICIT NONE
+    integer(C_INT), intent(in) :: iPhi
+    real(C_DOUBLE), intent(in) :: lambda
+    integer(C_INT) :: ix, iz, i, j
+    complex(C_DOUBLE_COMPLEX) :: temp
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(V, linsolve_mat, bc0, bcn, der, lambda, pra, ni, k2, ny, ny0, nyN, nx0, nxN, nz, phi0bc, phi0m1bc, phinbc, phinp1bc, iPhi) &
+    !$omp private(ix, iz, iy)
+    DO ix = nx0, nxN
+      DO iz = -nz, nz
+        DO iy = ny0, nyN
+          linsolve_mat(iy, -2:2, iz, ix) = lambda*der(iy, 0, -2:2) - pra(iPhi)*(SQ(iy, -2:2))
+        END DO
+
+        CALL applybc_0(linsolve_mat(:, :, iz, ix), phi0bc, phi0m1bc)
+        V(1, iz, ix, 3 + iPhi) = V(1, iz, ix, 3 + iPhi) - linsolve_mat(1, -1, iz, ix)*bc0(iz, ix, 5 + iPhi)/phi0bc(-1)
+        V(2, iz, ix, 3 + iPhi) = V(2, iz, ix, 3 + iPhi) - linsolve_mat(2, -2, iz, ix)*bc0(iz, ix, 5 + iPhi)/phi0bc(-1)
+
+        CALL applybc_n(linsolve_mat(:, :, iz, ix), phinbc, phinp1bc)
+        V(ny - 1, iz, ix, 3 + iPhi) = V(ny - 1, iz, ix, 3 + iPhi) - linsolve_mat(ny - 1, 1, iz, ix)*bcn(iz, ix, 5 + iPhi)/phinbc(1)
+        V(ny - 2, iz, ix, 3 + iPhi) = V(ny - 2, iz, ix, 3 + iPhi) - linsolve_mat(ny - 2, 2, iz, ix)*bcn(iz, ix, 5 + iPhi)/phinbc(1)
+
+        CALL LU5decomp(linsolve_mat(:, :, iz, ix))
+        CALL LeftLU5div(V(:, iz, ix, 3 + iPhi), linsolve_mat(:, :, iz, ix), V(:, iz, ix, 3 + iPhi))
+
+        V(0, iz, ix, 3 + iPhi) = (bc0(iz, ix, 5 + iPhi) - sum(V(1:3, iz, ix, 3 + iPhi)*phi0bc(0:2)))/phi0bc(-1)
+        V(-1, iz, ix, 3 + iPhi) = -sum(V(0:3, iz, ix, 3 + iPhi)*phi0m1bc(-1:2))/phi0m1bc(-2)
+        V(ny, iz, ix, 3 + iPhi) = (bcn(iz, ix, 5 + iPhi) - sum(V(ny - 3:ny - 1, iz, ix, 3 + iPhi)*phinbc(-2:0)))/phinbc(1)
+        V(ny + 1, iz, ix, 3 + iPhi) = -sum(V(ny - 3:ny, iz, ix, 3 + iPhi)*phinp1bc(-2:1))/phinp1bc(2)
+      END DO
+    END do
+
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(ny, ny0, nyN, nz, nx0, nxN, nPhi) &
+    !$omp shared(V, bc0, bcn, phi0bc, phi0m1bc, phinbc, phinp1bc,linsolve_mat, tcor, y, fr, corrtx, meantb, iPhi) &
+    !$omp private(ix, iz, temp)
+    DO ix = nx0, nxN
+      DO iz = -nz, nz
+        ! Correct flow rate
+        IF (ix == 0 .AND. iz == 0) THEN
+          tcor(ny0 - 2:ny0 - 1, :) = 0
+          tcor(ny0:nyN, :) = 1
+          tcor(nyN + 1:nyN + 2, :) = 0
+
+          CALL LeftLU5div(tcor(:, iPhi), linsolve_mat(:, :, iz, ix), tcor(:, iPhi))
+          tcor(0, iPhi) = -sum(tcor(1:3, iPhi)*phi0bc(0:2))/phi0bc(-1)
+          tcor(-1, iPhi) = -sum(tcor(0:3, iPhi)*phi0m1bc(-1:2))/phi0m1bc(-2)
+          tcor(ny, iPhi) = -sum(tcor(ny - 3:ny - 1, iPhi)*phinbc(-2:0))/phinbc(1)
+          tcor(ny + 1, iPhi) = -sum(tcor(ny - 3:ny, iPhi)*phinp1bc(-2:1))/phinp1bc(2)
+          fr(3 + iPhi) = yintegr(V(:, 0, 0, 3 + iPhi), y); 
+          fr(3 + nPhi + iPhi) = yintegr(tcor(:, iPhi), y); 
+          IF (abs(meantb) > 1.0d-7) THEN
+            corrtx(iPhi) = (meantb - fr(3 + iPhi))/fr(3 + nPhi + iPhi)
+         V(:, 0, 0, 3 + iPhi) = dcmplx(dreal(V(:, 0, 0, 3 + iPhi)) + corrtx(iPhi)*dreal(tcor(:, iPhi)), dimag(V(:, 0, 0, 3 + iPhi)))
+          END IF
+        END IF
+      END DO
+    END DO
+  END SUBROUTINE linsolve_scalar
 
   !--------------------------------------------------------------!
   !------------------------ convolutions ------------------------!
@@ -545,9 +591,9 @@ CONTAINS
     integer :: istat
     real(C_DOUBLE), dimension(:, :, :, :), allocatable :: rVVdx2
 
-    !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(V, VVdz) shared(ny, nxB, nzd, nx0, nxN, nz, nPhi) private(i,j,k,m)
-    DO m = 1, 3 + nPhi  
+    DO m = 1, 3 + nPhi
+      !$omp target teams distribute parallel do collapse(3) default(none) &
+      !$omp shared(V, VVdz) shared(ny, nxB, nzd, nx0, nxN, nz, m) private(i,j,k)
       DO i = 1, ny + 3
         DO j = 1, nxB
           DO k = 1, nzd
@@ -561,22 +607,22 @@ CONTAINS
           END DO
         END DO
       END DO
-    END DO
-    CALL IFT(VVdz, ny, nPhi)
-    CALL zTOx(VVdz, VVdx, ny, nPhi)
 
-    !$omp target teams distribute parallel do collapse(3) default(none) shared(VVdx) shared(nx, nxd, nzB, ny, nPhi)
-    DO iV = 1, 6 + 3*nPhi
+      CALL IFT(VVdz(:, :, :, m), ny)
+      CALL zTOx(VVdz(:, :, :, m), VVdx(:, :, :, m), ny)
+
+      !$omp target teams distribute parallel do collapse(3) default(none) shared(VVdx) shared(nx, nxd, nzB, ny, nPhi, m)
       DO i = 1, ny + 3
         DO j = 1, nzB
           DO k = nx + 2, nxd + 1
-            VVdx(k, j, i, iV) = 0.0
+            VVdx(k, j, i, m) = 0.0
           END DO
         END DO
       END DO
+
+      CALL RFT(VVdx(:, :, :, m), rVVdx(:, :, :, m), ny)
     END DO
 
-    CALL RFT(VVdx, rVVdx, ny, nPhi)
     if (compute_cfl) THEN
       !$omp target teams distribute parallel do collapse(3) default(none) &
       !$omp private(i,j,k,tmp) reduction(max:cfl) &
@@ -593,32 +639,45 @@ CONTAINS
 
     !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp shared(rVVdx) shared(nxd, nzB, ny, factor, nPhi) private(a, b, c, iPhi)
-    DO i = 1, ny + 3
-      DO j = 1, nzB
-        DO k = 1, 2*nxd
-          !Reduce memory transactions by using temporaries
-          a = rVVdx(k, j, i, 1)
-          b = rVVdx(k, j, i, 2)
-          c = rVVdx(k, j, i, 3)
+    DO iphi = 1, nPhi
+      DO i = 1, ny + 3
+        DO j = 1, nzB
+          DO k = 1, 2*nxd
+            a = rVVdx(k, j, i, 1)
+            b = rVVdx(k, j, i, 2)
+            c = rVVdx(k, j, i, 3)
 
-          DO iphi = 1, nPhi
             rVVdx(k, j, i, 4 + 3*iPhi) = a*rVVdx(k, j, i, 3 + iPhi)*factor
             rVVdx(k, j, i, 5 + 3*iPhi) = b*rVVdx(k, j, i, 3 + iPhi)*factor
             rVVdx(k, j, i, 6 + 3*iPhi) = c*rVVdx(k, j, i, 3 + iPhi)*factor
           END DO
-
-          rVVdx(k, j, i, 4) = a*b*factor
-          rVVdx(k, j, i, 5) = b*c*factor
-          rVVdx(k, j, i, 6) = a*c*factor
-          rVVdx(k, j, i, 1) = a*a*factor
-          rVVdx(k, j, i, 2) = b*b*factor
-          rVVdx(k, j, i, 3) = c*c*factor
         END DO
       END DO
     END DO
-    CALL HFT(rVVdx, VVdx, ny, nPhi)
-    CALL xTOz(VVdx, VVdz, ny, nPhi)
-    CALL FFT(VVdz, ny, nPhi)
+
+    !$omp target teams distribute parallel do collapse(3) default(none) &
+    !$omp shared(rVVdx) shared(nxd, nzB, ny, factor, nPhi) private(a, b, c, iPhi)
+    DO i = 1, ny + 3
+      DO j = 1, nzB
+        DO k = 1, 2*nxd
+          a = rVVdx(k, j, i, 1)
+          b = rVVdx(k, j, i, 2)
+          c = rVVdx(k, j, i, 3)
+
+          rVVdx(k, j, i, 1) = a*a*factor
+          rVVdx(k, j, i, 2) = b*b*factor
+          rVVdx(k, j, i, 3) = c*c*factor
+          rVVdx(k, j, i, 4) = a*b*factor
+          rVVdx(k, j, i, 5) = b*c*factor
+          rVVdx(k, j, i, 6) = c*a*factor
+        END DO
+      END DO
+    END DO
+    DO iV = 1, 6 + 3*nPhi
+      CALL HFT(rVVdx(:, :, :, iV), VVdx(:, :, :, iV), ny)
+      CALL xTOz(VVdx(:, :, :, iV), VVdz(:, :, :, iV), ny)
+      CALL FFT(VVdz(:, :, :, iV), ny)
+    END DO
   END SUBROUTINE convolutions
 
   !--------------------------------------------------------------!
@@ -626,14 +685,30 @@ CONTAINS
   ! (u,v,w) = (1,2,3)
   ! (uu,vv,ww,uv,vw,uw) = (1,2,3,4,5,6)
 #define timescheme(rhs,old,unkn,impl,expl) rhs=ODE(1)*(unkn)/deltat+(impl)+ODE(2)*(expl)-ODE(3)*(old); old=expl
-#define DD(f,k) ( der(iy,f,-2)*VVdz(izd(iz)+1,ix+1-nx0,im2,k)+der(iy,f,-1)*VVdz(izd(iz)+1,ix+1-nx0,im1,k)+der(iy,f,0)*VVdz(izd(iz)+1,ix+1-nx0,i0,k)+ \
-  der(iy, f, 1)*VVdz(izd(iz) + 1, ix + 1 - nx0, i1, k) + der(iy, f, 2)*VVdz(izd(iz) + 1, ix + 1 - nx0, i2, k))
+#define timescheme_accum(rhs,old,expl) rhs = rhs + ODE(2)*(expl); old = old + expl
+#define DD(f,k) ( der(iy,f,-2)*VVdz(izd(iz)+1,ix+1-nx0,iy,k)+ \
+  der(iy, f, -1)*VVdz(izd(iz) + 1, ix + 1 - nx0, iy + 1, k) + \
+  der(iy, f, 0)*VVdz(izd(iz) + 1, ix + 1 - nx0, iy + 2, k) + \
+  der(iy, f, 1)*VVdz(izd(iz) + 1, ix + 1 - nx0, iy + 3, k) + \
+  der(iy, f, 2)*VVdz(izd(iz) + 1, ix + 1 - nx0, iy + 4, k))
+#define ACCUM_D2V(expl) \
+  timescheme_accum(newrhs(iy, iz, ix, 2), oldrhs(iy, iz, ix, 2), (expl))
+
+#define ACCUM_ETA_UW(rhsu, rhsw) \
+  ACCUM_ETA_UW2(ibeta(iz)*(rhsu) - ialfa(ix)*(rhsw), dcmplx(dreal((rhsu)), dreal((rhsw))))
+
+#define ACCUM_ETA_UW2(expl_general, expl_mean) \
+  if (ix == 0 .AND. iz == 0) then; \
+    timescheme_accum(newrhs(iy, iz, ix, 1), oldrhs(iy, iz, ix, 1), (expl_mean)); \
+  else; \
+    timescheme_accum(newrhs(iy, iz, ix, 1), oldrhs(iy, iz, ix, 1), (expl_general)); \
+  end if
   SUBROUTINE buildrhs(ODE, compute_cfl)
     IMPLICIT NONE
     logical, intent(in) :: compute_cfl
     real(C_DOUBLE), intent(in) :: ODE(1:3)
     integer(C_INT) :: iy, iz, ix, i, im2, im1, i0, i1, i2, k, iPhi
-    complex(C_DOUBLE_COMPLEX) :: rhsu, rhsv, rhsw, rhst, DD0_6, DD1_6, expl, tmp
+    complex(C_DOUBLE_COMPLEX) :: rhsu, rhsw, rhst, expl, tmp, unkn
 #ifdef bodyforce
     iy = 1; F(-1:0, :, :, :) = 0
     DO iz = -nz, nz
@@ -655,60 +730,209 @@ CONTAINS
 
     CALL convolutions(compute_cfl)
 
+    ! contribution known a-priori
     !$omp target teams distribute parallel do collapse(3) default(none)  &
-    !$omp private(rhsu, rhsv, rhsw, rhst, DD0_6, DD1_6, expl) private(iz, ix, iy, im2, im1, i0, i1, i2, tmp, k) &
-    !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(der, k2, izd) shared(memrhs, oldrhs) shared(meanpx, meanpz, ni, deltat, ode) &
-    !$omp shared(vvdz, v, pra, nPhi)
+    !$omp private(rhsu, rhsw, expl) private(iz, ix, iy, tmp, k, unkn) &
+    !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) shared(meanpx, meanpz, ni, deltat, ode) &
+    !$omp shared(vvdz, v, pra)
     DO iz = -nz, nz
-    DO ix = nx0, nxN
-    DO iy = 1, ny - 1
-      im2 = iy; im1 = iy + 1; i0 = iy + 2; i1 = iy + 3; i2 = iy + 4; 
-      DD0_6 = DD(0, 6); DD1_6 = DD(1, 6); 
-      rhsu = -ialfa(ix)*DD(0, 1) - DD(1, 4) - ibeta(iz)*DD0_6
-      rhsv = -ialfa(ix)*DD(0, 4) - DD(1, 2) - ibeta(iz)*DD(0, 5)
-      rhsw = -ialfa(ix)*DD0_6 - DD(1, 5) - ibeta(iz)*DD(0, 3)
-      expl = (ialfa(ix)*(ialfa(ix)*DD(1, 1) + DD(2, 4) + ibeta(iz)*DD1_6) + &
-              ibeta(iz)*(ialfa(ix)*DD1_6 + DD(2, 5) + ibeta(iz)*DD(1, 3)) - k2(iz, ix)*rhsv &
+      DO ix = nx0, nxN
+        DO iy = 1, ny - 1
+
+          rhsu = 0.0; rhsw = 0.0; expl = 0.0
+          unkn = D2(V, 2) - k2(iz, ix)*D0(V, 2)
+          tmp = 0.0
+          DO k = -2, 2
+            tmp = tmp + OS(iy, k)*V(iy + k, iz, ix, 2)
+          END DO
+
+          !initialize D2v
+          newrhs(iy, iz, ix, 2) = ODE(1)*unkn/deltat + tmp - ODE(3)*oldrhs(iy, iz, ix, 2)
+          oldrhs(iy, iz, ix, 2) = 0.0
+
+          IF (ix == 0 .AND. iz == 0) THEN
+            unkn = rD0(V, 1, 3)
+            tmp = ni*rD2(V, 1, 3)
+          ELSE
+            tmp = 0.0
+            DO k = -2, 2
+              tmp = tmp + SQ(iy, k)*(ibeta(iz)*V(iy + k, iz, ix, 1) - ialfa(ix)*V(iy + k, iz, ix, 3))
+            END DO
+            unkn = ibeta(iz)*D0(V, 1) - ialfa(ix)*D0(V, 3)
+          END IF
+          !initialize eta
+          newrhs(iy, iz, ix, 1) = ODE(1)*unkn/deltat + tmp - ODE(3)*oldrhs(iy, iz, ix, 1)
+          oldrhs(iy, iz, ix, 1) = 0.0
+
+          if (ix == 0 .AND. iz == 0) then
+            timescheme_accum(newrhs(iy, iz, ix, 1), oldrhs(iy, iz, ix, 1), dcmplx(meanpx, meanpz))
+          end if
 #ifdef bodyforce
-              - k2(iz, ix)*D0(F, 2) - ialfa(ix)*D1(F, 1) - ibeta(iz)*D1(F, 3) &
+          ACCUM_D2V(-k2(iz, ix)*D0(F, 2) - ialfa(ix)*D1(F, 1) - ibeta(iz)*D1(F, 3))
+          ACCUM_ETA_UW2(ibeta(iz)*D0(F, 1) - ialfa(ix)*D0(F, 3), rD0(F, 1, 3))
 #endif
-              )
-      tmp = 0.0
-      DO k = -2, 2
-        tmp = tmp + OS(iy, k)*V(iy + k, iz, ix, 2)
-      END DO
-      timescheme(newrhs(iy, iz, ix, 2), oldrhs(iy, iz, ix, 2), D2(V, 2) - k2(iz, ix)*D0(V, 2), tmp, expl); !(D2v)
-      IF (ix == 0 .AND. iz == 0) THEN
-        expl = (dcmplx(dreal(rhsu) + meanpx, dreal(rhsw) + meanpz) &
-#ifdef bodyforce
-                + rD0(F, 1, 3) &
-#endif
-                )
-        timescheme(newrhs(iy, 0, 0, 1), oldrhs(iy, 0, 0, 1), rD0(V, 1, 3), ni*rD2(V, 1, 3), expl)!(Ubar, Wbar)
-      ELSE
-        expl = (ibeta(iz)*rhsu - ialfa(ix)*rhsw &
-#ifdef bodyforce
-                + ibeta(iz)*D0(F, 1) - ialfa(ix)*D0(F, 3) &
-#endif
-                )
-        tmp = 0.0
-        DO k = -2, 2
-          tmp = tmp + SQ(iy, k)*(ibeta(iz)*V(iy + k, iz, ix, 1) - ialfa(ix)*V(iy + k, iz, ix, 3))
+        end do
+      end do
+    end do
+
+    !initialize phi
+    DO iPhi = 1, nPhi
+      !$omp target teams distribute parallel do collapse(3) default(none)  &
+      !$omp private(tmp, iz, ix, iy, k, unkn) &
+      !$omp shared(nz, nx0, nxN, ny, pra, V, memrhs, ode, deltat, oldrhs, iphi, der, k2, ni)
+      DO iz = -nz, nz
+        DO ix = nx0, nxN
+          DO iy = 1, ny - 1
+            tmp = 0.0
+            DO k = -2, 2
+              tmp = tmp + SQ(iy, k)*V(iy + k, iz, ix, 3 + iPhi)
+            END DO
+            unkn = D0(V, 3 + iPhi)
+            newrhs(iy, iz, ix, 2 + iPhi) = ODE(1)*unkn/deltat + tmp*pra(iPhi) - ODE(3)*oldrhs(iy, iz, ix, 2 + iPhi)
+            oldrhs(iy, iz, ix, 2 + iPhi) = 0.0
+          END DO
         END DO
-        timescheme(newrhs(iy, iz, ix, 1), oldrhs(iy, iz, ix, 1), ibeta(iz)*D0(V, 1) - ialfa(ix)*D0(V, 3), tmp, expl) !(eta)
-      END IF
-      DO iPhi = 1, nPhi
-        rhst = -ialfa(ix)*DD(0, 6 + 3*(iPhi - 1) + 1) &
-               - DD(1, 6 + 3*(iPhi - 1) + 2) - ibeta(iz)*DD(0, 6 + 3*(iPhi - 1) + 3)
-        tmp = 0.0
-        DO k = -2, 2
-          tmp = tmp + SQ(iy, k)*V(iy + k, iz, ix, 3 + iPhi)
-        END DO
-        timescheme(newrhs(iy, iz, ix, 2 + iPhi), oldrhs(iy, iz, ix, 2 + iPhi), D0(V, 3 + iPhi), pra(iPhi)*tmp, rhst) !(Phi)
       END DO
     END DO
+
+    !contribution from VVdz(:,:,:,1)
+    !$omp target teams distribute parallel do collapse(3) default(none)  &
+    !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
+    !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(der) shared(memrhs, oldrhs, izd, ode) shared(vvdz)
+    DO iz = -nz, nz
+      DO ix = nx0, nxN
+        DO iy = 1, ny - 1
+
+          rhsu = -ialfa(ix)*DD(0, 1); rhsw = 0.0
+          expl = ialfa(ix)*ialfa(ix)*DD(1, 1)
+
+          ACCUM_D2V(expl)
+          ACCUM_ETA_UW(rhsu, rhsw)
+        END DO
+      END DO
     END DO
+
+    !contribution from VVdz(:,:,:,2)
+    !$omp target teams distribute parallel do collapse(3) default(none)  &
+    !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
+    !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(der) shared(memrhs, oldrhs, izd, ode, k2) shared(vvdz)
+    DO iz = -nz, nz
+      DO ix = nx0, nxN
+        DO iy = 1, ny - 1
+
+          expl = DD(1, 2)*k2(iz, ix)
+          ACCUM_D2V(expl)
+        END DO
+      END DO
     END DO
+
+    !contribution from VVdz(:,:,:,3)
+    !$omp target teams distribute parallel do collapse(3) default(none)  &
+    !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
+    !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(der) shared(memrhs, oldrhs, izd, ode, k2) shared(vvdz)
+    DO iz = -nz, nz
+      DO ix = nx0, nxN
+        DO iy = 1, ny - 1
+          rhsw = -ibeta(iz)*DD(0, 3); rhsu = 0.0
+          expl = ibeta(iz)*ibeta(iz)*DD(1, 3)
+
+          ACCUM_D2V(expl)
+          ACCUM_ETA_UW(rhsu, rhsw)
+        END DO
+      END DO
+    END DO
+
+    !contribution from VVdz(:,:,:,4)
+    !$omp target teams distribute parallel do collapse(3) default(none)  &
+    !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
+    !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(der) shared(memrhs, oldrhs, izd, ode, k2) shared(vvdz)
+    DO iz = -nz, nz
+      DO ix = nx0, nxN
+        DO iy = 1, ny - 1
+
+          rhsu = -DD(1, 4); rhsw = 0.0
+          expl = ialfa(ix)*DD(2, 4) + ialfa(ix)*DD(0, 4)*k2(iz, ix)
+
+          ACCUM_D2V(expl)
+          ACCUM_ETA_UW(rhsu, rhsw)
+        END DO
+      END DO
+    END DO
+
+    !contribution from VVdz(:,:,:,5)
+    !$omp target teams distribute parallel do collapse(3) default(none)  &
+    !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
+    !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(der) shared(memrhs, oldrhs, izd, ode, k2) shared(vvdz)
+    DO iz = -nz, nz
+      DO ix = nx0, nxN
+        DO iy = 1, ny - 1
+
+          ! contribution from VVdz(:,:,:,5)
+          rhsw = -DD(1, 5); rhsu = 0.0
+          expl = ibeta(iz)*DD(2, 5) + ibeta(iz)*DD(0, 5)*k2(iz, ix)
+
+          ACCUM_D2V(expl)
+          ACCUM_ETA_UW(rhsu, rhsw)
+        END DO
+      END DO
+    END DO
+
+    !contribution from VVdz(:,:,:,6)
+    !$omp target teams distribute parallel do collapse(3) default(none)  &
+    !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
+    !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(der) shared(memrhs, oldrhs, izd, ode, k2) shared(vvdz)
+    DO iz = -nz, nz
+      DO ix = nx0, nxN
+        DO iy = 1, ny - 1
+
+          rhsu = -ibeta(iz)*DD(0, 6)
+          rhsw = -ialfa(ix)*DD(0, 6)
+          expl = 2*ialfa(ix)*ibeta(iz)*DD(1, 6)
+
+          ACCUM_D2V(expl)
+          ACCUM_ETA_UW(rhsu, rhsw)
+
+        END DO
+      END DO
+    END DO
+
+    DO iPhi = 1, nPhi
+      !$omp target teams distribute parallel do collapse(3) default(none)  &
+      !$omp private(rhst, iz, ix, iy) &
+      !$omp shared(nz, nx0, nxN, ny, ialfa, memrhs, ode, der, oldrhs, iphi, vvdz, izd)
+      DO iz = -nz, nz
+        DO ix = nx0, nxN
+          DO iy = 1, ny - 1
+            rhst = -ialfa(ix)*DD(0, 6 + 3*(iPhi - 1) + 1)
+            timescheme_accum(newrhs(iy, iz, ix, 2 + iPhi), oldrhs(iy, iz, ix, 2 + iPhi), rhst)
+          END DO
+        END DO
+      END DO
+      !$omp target teams distribute parallel do collapse(3) default(none)  &
+      !$omp private(rhst, iz, ix, iy) &
+      !$omp shared(nz, nx0, nxN, ny, memrhs, ode, der, oldrhs, iphi, vvdz, izd)
+      DO iz = -nz, nz
+        DO ix = nx0, nxN
+          DO iy = 1, ny - 1
+
+            rhst = -DD(1, 6 + 3*(iPhi - 1) + 2)
+            timescheme_accum(newrhs(iy, iz, ix, 2 + iPhi), oldrhs(iy, iz, ix, 2 + iPhi), rhst)
+          END DO
+        END DO
+      END DO
+      !$omp target teams distribute parallel do collapse(3) default(none)  &
+      !$omp private(rhst, iz, ix, iy) &
+      !$omp shared(nz, nx0, nxN, ny, ibeta,memrhs, ode, der, oldrhs, iphi, vvdz, izd)
+      DO iz = -nz, nz
+        DO ix = nx0, nxN
+          DO iy = 1, ny - 1
+            rhst = -ibeta(iz)*DD(0, 6 + 3*(iPhi - 1) + 3)
+            timescheme_accum(newrhs(iy, iz, ix, 2 + iPhi), oldrhs(iy, iz, ix, 2 + iPhi), rhst)
+          END DO
+        END DO
+      END DO
+    END DO
+
     !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp shared(memrhs, V) shared(nz, nx0, nxN, ny, nPhi) private(iy, ix, iz)
     DO iz = -nz, nz

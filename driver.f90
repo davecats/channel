@@ -32,12 +32,12 @@ CONTAINS
     CALL MPI_INIT(ierr)
     CALL MPI_COMM_RANK(MPI_COMM_WORLD, iproc, ierr)
     CALL MPI_COMM_SIZE(MPI_COMM_WORLD, nproc, ierr)
-#else 
+#else
     iproc = 0
     nproc = 1
 #endif
 
-#if defined(HAVE_CUDA) || defined(HAVE_HIP) 
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
     num_dev = omp_get_num_devices()
     dev = mod(iproc, num_dev)
 
@@ -145,16 +145,25 @@ CONTAINS
       time = time + 2.0/RK1_rai(1)*deltat
       CALL buildrhs(RK1_rai, .FALSE.)
       CALL linsolve(RK1_rai(1)/deltat)
+      do iPhi = 1, nPhi
+        CALL linsolve_scalar(RK1_rai(1)/deltat, iPhi)
+      end do
 
       ! Solve (RK3 - Step2)
       time = time + 2.0/RK2_rai(1)*deltat
       CALL buildrhs(RK2_rai, .FALSE.)
       CALL linsolve(RK2_rai(1)/deltat)
+      do iPhi = 1, nPhi
+        CALL linsolve_scalar(RK2_rai(1)/deltat, iPhi)
+      end do
 
       ! Solve (RK3 - Step3)
       time = time + 2.0/RK3_rai(1)*deltat
       CALL buildrhs(RK3_rai, .TRUE.)
       CALL linsolve(RK3_rai(1)/deltat)
+      do iPhi = 1, nPhi
+        CALL linsolve_scalar(RK3_rai(1)/deltat, iPhi)
+      end do
 
       ! Write runtime file
       CALL outstats()
