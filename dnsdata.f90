@@ -292,16 +292,29 @@ CONTAINS
     END DO
   END FUNCTION yintegr
 
-! Helper for stencil with real/real combination (rD*)
-#define rD0(f,g,k) sum(dcmplx(der(iy,0,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,0,-2:2)*dreal(f(iy-2:iy+2,iz,ix,k))))
-#define rD1(f,g,k) sum(dcmplx(der(iy,1,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,1,-2:2)*dreal(f(iy-2:iy+2,iz,ix,k))))
-#define rD2(f,g,k) sum(dcmplx(der(iy,2,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,2,-2:2)*dreal(f(iy-2:iy+2,iz,ix,k))))
-#define rD4(f,g,k) sum(dcmplx(der(iy,3,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,3,-2:2)*dreal(f(iy-2:iy+2,iz,ix,k))))
-#define D0(f,g) sum(dcmplx(der(iy,0,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,0,-2:2)*dimag(f(iy-2:iy+2,iz,ix,g))))
-#define D1(f,g) sum(dcmplx(der(iy,1,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,1,-2:2)*dimag(f(iy-2:iy+2,iz,ix,g))))
-#define D2(f,g) sum(dcmplx(der(iy,2,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,2,-2:2)*dimag(f(iy-2:iy+2,iz,ix,g))))
-#define D4(f,g) sum(dcmplx(der(iy,3,-2:2)*dreal(f(iy-2:iy+2,iz,ix,g)) ,der(iy,3,-2:2)*dimag(f(iy-2:iy+2,iz,ix,g))))
+#define RD_MASTER(f,g,k,ord) ( \
+      der(iy,ord,-2)*dcmplx(dreal(f(iy-2,iz,ix,g)), dreal(f(iy-2,iz,ix,k))) + \
+      der(iy,ord,-1)*dcmplx(dreal(f(iy-1,iz,ix,g)), dreal(f(iy-1,iz,ix,k))) + \
+      der(iy,ord, 0)*dcmplx(dreal(f(iy  ,iz,ix,g)), dreal(f(iy  ,iz,ix,k))) + \
+      der(iy,ord, 1)*dcmplx(dreal(f(iy+1,iz,ix,g)), dreal(f(iy+1,iz,ix,k))) + \
+      der(iy,ord, 2)*dcmplx(dreal(f(iy+2,iz,ix,g)), dreal(f(iy+2,iz,ix,k))) )
 
+#define rD0(f,g,k) RD_MASTER(f,g,k,0)
+#define rD1(f,g,k) RD_MASTER(f,g,k,1)
+#define rD2(f,g,k) RD_MASTER(f,g,k,2)
+#define rD4(f,g,k) RD_MASTER(f,g,k,3)
+
+#define D_MASTER(f,g,ord) ( \
+      der(iy,ord,-2)*f(iy-2,iz,ix,g) + \
+      der(iy,ord,-1)*f(iy-1,iz,ix,g) + \
+      der(iy,ord, 0)*f(iy  ,iz,ix,g) + \
+      der(iy,ord, 1)*f(iy+1,iz,ix,g) + \
+      der(iy,ord, 2)*f(iy+2,iz,ix,g) )
+
+#define D0(f,g) D_MASTER(f,g,0)
+#define D1(f,g) D_MASTER(f,g,1)
+#define D2(f,g) D_MASTER(f,g,2)
+#define D4(f,g) D_MASTER(f,g,3)
   !--------------------------------------------------------------!
   !---COMPLEX----- derivative in the y-direction ----------------!
 #ifdef HAVE_CUDA
@@ -637,9 +650,10 @@ CONTAINS
       end do
     END IF
 
-    !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(rVVdx) shared(nxd, nzB, ny, factor, nPhi) private(a, b, c, iPhi)
+    
     DO iphi = 1, nPhi
+      !$omp target teams distribute parallel do collapse(3) default(none) &
+      !$omp shared(rVVdx) shared(nxd, nzB, ny, factor, iPhi) private(a, b, c)
       DO i = 1, ny + 3
         DO j = 1, nzB
           DO k = 1, 2*nxd
@@ -732,14 +746,12 @@ CONTAINS
 
     ! contribution known a-priori
     !$omp target teams distribute parallel do collapse(3) default(none)  &
-    !$omp private(rhsu, rhsw, expl) private(iz, ix, iy, tmp, k, unkn) &
+    !$omp private(iz, ix, iy, tmp, k, unkn) &
     !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) shared(meanpx, meanpz, ni, deltat, ode) &
     !$omp shared(vvdz, v, pra)
     DO iz = -nz, nz
       DO ix = nx0, nxN
         DO iy = 1, ny - 1
-
-          rhsu = 0.0; rhsw = 0.0; expl = 0.0
           unkn = D2(V, 2) - k2(iz, ix)*D0(V, 2)
           tmp = 0.0
           DO k = -2, 2
@@ -749,7 +761,17 @@ CONTAINS
           !initialize D2v
           newrhs(iy, iz, ix, 2) = ODE(1)*unkn/deltat + tmp - ODE(3)*oldrhs(iy, iz, ix, 2)
           oldrhs(iy, iz, ix, 2) = 0.0
+        END DO
+      END DO
+    END DO
 
+    !$omp target teams distribute parallel do collapse(3) default(none)  &
+    !$omp private(iz, ix, iy, tmp, k, unkn) &
+    !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) shared(meanpx, meanpz, ni, deltat, ode) &
+    !$omp shared(vvdz, v, pra)
+    DO iz = -nz, nz
+      DO ix = nx0, nxN
+        DO iy = 1, ny - 1
           IF (ix == 0 .AND. iz == 0) THEN
             unkn = rD0(V, 1, 3)
             tmp = ni*rD2(V, 1, 3)
@@ -763,6 +785,17 @@ CONTAINS
           !initialize eta
           newrhs(iy, iz, ix, 1) = ODE(1)*unkn/deltat + tmp - ODE(3)*oldrhs(iy, iz, ix, 1)
           oldrhs(iy, iz, ix, 1) = 0.0
+        END DO
+      END DO
+    END DO
+
+    !$omp target teams distribute parallel do collapse(3) default(none)  &
+    !$omp private(rhsu, rhsw, expl) private(iz, ix, iy, tmp, k, unkn) &
+    !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) shared(meanpx, meanpz, ni, deltat, ode) &
+    !$omp shared(vvdz, v, pra)
+    DO iz = -nz, nz
+      DO ix = nx0, nxN
+        DO iy = 1, ny - 1
 
           if (ix == 0 .AND. iz == 0) then
             timescheme_accum(newrhs(iy, iz, ix, 1), oldrhs(iy, iz, ix, 1), dcmplx(meanpx, meanpz))
