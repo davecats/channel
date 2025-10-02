@@ -185,11 +185,14 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(out) :: recv(:)
     complex(C_DOUBLE_COMPLEX), intent(in)  :: send(:)
     type(MPI_Request), intent(inout) :: request
-
+#ifndef HAVE_HIP
     !$omp target data use_device_ptr(send, recv)
+#endif
     call MPI_IALLTOALL(send, sendcount, MPI_DOUBLE_COMPLEX, &
                        recv, sendcount, MPI_DOUBLE_COMPLEX, MPI_COMM_WORLD, request, ierr)
+#ifndef HAVE_HIP
     !$omp end target data
+#endif
 
   END SUBROUTINE alltoall
 
@@ -237,8 +240,8 @@ CONTAINS
     ! Hence, MPI does a CPU mpi copy! So we need to allocate it explicity on the device.
     sendptr = omp_target_alloc(sendsize*int(16*(6 + 3*nPhi), c_size_t), omp_get_default_device())
     recvptr = omp_target_alloc(recvsize*int(16*(6 + 3*nPhi), c_size_t), omp_get_default_device())
-    call c_f_pointer(sendptr, sendbuf, [sendsize, 6 + 3*nPhi])
-    call c_f_pointer(recvptr, recvbuf, [recvsize, 6 + 3*nPhi])
+    call c_f_pointer(sendptr, sendbuf, [sendsize, int(6 + 3*nPhi, c_size_t)])
+    call c_f_pointer(recvptr, recvbuf, [recvsize, int(6 + 3*nPhi, c_size_t)])
 #else
     ALLOCATE (sendbuf(sendsize, 6 + 3*nPhi)); sendbuf = 0
     ALLOCATE (recvbuf(recvsize, 6 + 3*nPhi)); recvbuf = 0
