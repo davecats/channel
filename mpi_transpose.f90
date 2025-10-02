@@ -16,44 +16,44 @@
 #ifdef HAVE_HIP
 module roctx
 
-    implicit none
+  implicit none
 
-    private
-    integer :: n = 0
+  private
+  integer :: n = 0
 
-    public :: roctxpush, roctxpop
+  public :: roctxpush, roctxpop
 
- interface
-     subroutine roctxrangepush(message) bind(c, name="roctxRangePushA")
-       use iso_c_binding,   only: c_char
-       implicit none
-       character(c_char) :: message(*)
-     end subroutine roctxrangepush
+  interface
+    subroutine roctxrangepush(message) bind(c, name="roctxRangePushA")
+      use iso_c_binding, only: c_char
+      implicit none
+      character(c_char) :: message(*)
+    end subroutine roctxrangepush
 
-     subroutine roctxrangepop() bind(c, name="roctxRangePop")
-       implicit none
-     end subroutine roctxrangepop
+    subroutine roctxrangepop() bind(c, name="roctxRangePop")
+      implicit none
+    end subroutine roctxrangepop
 
- end interface
+  end interface
 
- contains
+contains
 
-   subroutine roctxPush(name)
-      character(len=*),intent(in) :: name
-      n = n + 1
-      call roctxRangePush(name)
-   end subroutine roctxPush
+  subroutine roctxPush(name)
+    character(len=*), intent(in) :: name
+    n = n + 1
+    call roctxRangePush(name)
+  end subroutine roctxPush
 
-   subroutine roctxPop(name)
-      character(len=*),intent(in) :: name
-      n = n - 1
-      ! Print the marker name if there are more pop calls than push calls
-      if (n < 0) then
-          print *, "invalid pop for: ", name
-          return
-      endif
-      call roctxRangePop()
-   end subroutine roctxPop
+  subroutine roctxPop(name)
+    character(len=*), intent(in) :: name
+    n = n - 1
+    ! Print the marker name if there are more pop calls than push calls
+    if (n < 0) then
+      print *, "invalid pop for: ", name
+      return
+    end if
+    call roctxRangePop()
+  end subroutine roctxPop
 
 end module
 #endif
@@ -64,7 +64,7 @@ MODULE mpi_transpose
   USE, intrinsic :: iso_fortran_env
 #ifdef HAVE_MPI
   USE mpi_f08
-#endif 
+#endif
 #if defined(HAVE_HIP)
   use omp_lib
   use roctx
@@ -76,12 +76,12 @@ MODULE mpi_transpose
   TYPE(MPI_Comm) :: MPI_CART_COMM, MPI_COMM_X, MPI_COMM_Y
 #endif
 #if defined(HAVE_HIP)
-  complex(C_DOUBLE_COMPLEX), pointer:: sendbuf(:), recvbuf(:)
+  complex(C_DOUBLE_COMPLEX), pointer:: sendbuf(:, :), recvbuf(:, :)
 #else
-  complex(C_DOUBLE_COMPLEX), allocatable :: sendbuf(:), recvbuf(:)
+  complex(C_DOUBLE_COMPLEX), allocatable :: sendbuf(:, :), recvbuf(:, :)
 #endif
   integer(C_INT), save :: nproc, iproc, ierr, nzd, nx
-  integer(C_INT), save :: nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN, miny, maxy
+  integer(C_INT), save :: nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN, miny, maxy, sendcount
   !$omp declare target(ny0, nyN)
 
   logical, save :: has_terminal, has_average
@@ -91,170 +91,107 @@ MODULE mpi_transpose
 
 CONTAINS
 
-  !-------------- Transpose: Z to X --------------!
-  !-----------------------------------------------!
-  SUBROUTINE zTOx(Vz, Vx, ny)
-    IMPLICIT NONE
-    complex(C_DOUBLE_COMPLEX), intent(inout)  :: Vz(1:, 1:, :)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: Vx(1:, 1:, :)
-    integer(C_INT), intent(in) :: ny
-    integer(C_SIZE_T) :: iy, ix, iz, dest, src
-    integer :: sendcount, p
-
-    IF (nproc == 1) THEN
-      !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(Vx, Vz) shared(ny, nzd, nx) private(iy, ix, iz)
-
-      DO iy = 1, ny + 3
-        DO iz = 1, nzd
-          DO ix = 1, nx + 1
-            Vx(ix, iz, iy) = Vz(iz, ix, iy)
-          END DO
-        END DO
-      END DO
-
-    ELSE
-#ifdef HAVE_MPI
-      sendcount = nxB*nzB*(ny + 3)
-
-#ifdef HAVE_HIP
-      call roctxpush("zTOx prepare" // c_null_char)   
-#endif
-
-      !$omp target teams distribute parallel do collapse(4) default(none) &
-      !$omp shared(Vz, sendbuf) shared(ny, nxB, nzB, nproc, sendcount) private(iy, ix, iz, dest, p)
-      do dest = 0, nproc - 1
-        do iy = 1, ny + 3
-          do ix = 1, nxB
-            do iz = 1, nzB
-              p = dest*sendcount + iz + (nzB*(ix - 1)) + (nzB*nxB*(iy - 1))
-              sendbuf(p) = Vz(dest*nzB + iz, ix, iy)
-            end do
-          end do
-        end do
-      end do
-
-#ifdef HAVE_HIP
-      call roctxpop("zTOx prepare" // c_null_char)
-      call roctxpush("zTOx MPI" // c_null_char)   
-#endif
-#ifndef HAVE_HIP
-      !$omp target data use_device_ptr(sendbuf, recvbuf)
-#endif
-      call MPI_Alltoall(sendbuf, sendcount, MPI_DOUBLE_COMPLEX, &
-                        recvbuf, sendcount, MPI_DOUBLE_COMPLEX, MPI_COMM_WORLD, ierr)
-#ifndef HAVE_HIP
-      !$omp end target data
-#endif
-
-#ifdef HAVE_HIP
-      call roctxpop("zTOx MPI" // c_null_char)
-      call roctxpush("zTOx after" // c_null_char)
-#endif
-
-      !$omp target teams distribute parallel do collapse(4) default(none) &
-      !$omp shared(Vx, recvbuf) shared(ny, nxB, nzB, nproc, sendcount) private(iy, ix, iz, src, p)
-      do src = 0, nproc - 1
-        do iy = 1, ny + 3
-          do ix = 1, nxB
-            do iz = 1, nzB
-              p = src*sendcount + iz + (nzB*(ix - 1)) + (nzB*nxB*(iy - 1))
-              Vx(ix + src*nxB, iz, iy) = recvbuf(p)
-            end do
-          end do
-        end do
-      end do
-#ifdef HAVE_HIP
-      call roctxpop("zTOx after" // c_null_char)
-#endif 
-#endif
-    END IF
-
-  END SUBROUTINE zTOx
-
-  !-------------- Transpose: X to Z --------------!
-  !-----------------------------------------------!
-  SUBROUTINE xTOz(Vx, Vz, ny)
+  SUBROUTINE pack_zTOx(Vz, send, ny)
     use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
     implicit none
+    complex(C_DOUBLE_COMPLEX), intent(in)  :: Vz(1:, 1:, :)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: send(:)
+    integer(C_INT), intent(in)  :: ny
+    integer(C_SIZE_T) :: iy, ix, iz, dest, p
 
-    complex(C_DOUBLE_COMPLEX), intent(out) :: Vz(1:, 1:, :)
+    !$omp target teams distribute parallel do collapse(4) default(none) &
+    !$omp shared(Vz, send) shared(ny, nxB, nzB, nproc, sendcount) private(iy, ix, iz, dest, p)
+    do dest = 0, nproc - 1
+      do iy = 1, ny + 3
+        do ix = 1, nxB
+          do iz = 1, nzB
+            p = dest*sendcount + iz + (nzB*(ix - 1)) + (nzB*nxB*(iy - 1))
+            send(p) = Vz(dest*nzB + iz, ix, iy)
+          end do
+        end do
+      end do
+    end do
+
+  END SUBROUTINE pack_zTOx
+
+  SUBROUTINE unpack_zTOx(recv, Vx, ny)
+    use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
+    implicit none
+    complex(C_DOUBLE_COMPLEX), intent(in)  :: recv(:)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: Vx(1:, 1:, :)
+    integer(C_INT), intent(in)  :: ny
+    integer(C_SIZE_T) :: iy, ix, iz, src, p
+
+    !$omp target teams distribute parallel do collapse(4) default(none) &
+    !$omp shared(Vx, recv) shared(ny, nxB, nzB, nproc, sendcount) private(iy, ix, iz, src, p)
+    do src = 0, nproc - 1
+      do iy = 1, ny + 3
+        do ix = 1, nxB
+          do iz = 1, nzB
+            p = src*sendcount + iz + (nzB*(ix - 1)) + (nzB*nxB*(iy - 1))
+            Vx(ix + src*nxB, iz, iy) = recv(p)
+          end do
+        end do
+      end do
+    end do
+  END SUBROUTINE unpack_zTOx
+
+  SUBROUTINE pack_xTOz(Vx, send, ny)
+    use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
+    implicit none
     complex(C_DOUBLE_COMPLEX), intent(in)  :: Vx(1:, 1:, :)
-    integer(C_INT), intent(in) :: ny
-    integer(C_SIZE_T) :: iy, ix, iz, dest, src
-    integer :: nField
-    integer :: sendcount, p
+    complex(C_DOUBLE_COMPLEX), intent(out) :: send(:)
+    integer(C_INT), intent(in)  :: ny
+    integer(C_SIZE_T) :: iy, ix, iz, dest, p
 
-    ! --- single-rank short-circuit ---
-    IF (nproc == 1) THEN
-      !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(Vx, Vz) shared(ny, nzd, nx) private(iy, ix, iz)
-
-      DO iy = 1, ny + 3
-        DO iz = 1, nzd
-          DO ix = 1, nx + 1
-            Vz(iz, ix, iy) = Vx(ix, iz, iy)
-          END DO
-        END DO
-      END DO
-
-    ELSE
-#ifdef HAVE_MPI
-      sendcount = nxB*nzB*(ny + 3)
-
-#ifdef HAVE_HIP
-      call roctxpush("xTOz prepare" // c_null_char)   
-#endif
-      !$omp target teams distribute parallel do collapse(4) default(none) &
-      !$omp shared(Vx, sendbuf) shared(ny, nxB, nzB, nproc, sendcount) private(iy, ix, iz, dest, p)
-      do dest = 0, nproc - 1
-        do iy = 1, ny + 3
-          do iz = 1, nzB
-            do ix = 1, nxB
-              p = dest*sendcount + ix + (nxB*(iz - 1)) + (nxB*nzB*(iy - 1))
-              sendbuf(p) = Vx(dest*nxB + ix, iz, iy)
-            end do
+    !$omp target teams distribute parallel do collapse(4) default(none) &
+    !$omp shared(Vx, send) shared(ny, nxB, nzB, nproc, sendcount) private(iy, ix, iz, dest, p)
+    do dest = 0, nproc - 1
+      do iy = 1, ny + 3
+        do iz = 1, nzB
+          do ix = 1, nxB
+            p = dest*sendcount + ix + (nxB*(iz - 1)) + (nxB*nzB*(iy - 1))
+            send(p) = Vx(dest*nxB + ix, iz, iy)
           end do
         end do
       end do
+    end do
+  END SUBROUTINE pack_xTOz
 
-#ifdef HAVE_HIP
-      call roctxpop("xTOz prepare" // c_null_char)
-      call roctxpush("xTOz MPI" // c_null_char)   
-#endif
+  SUBROUTINE unpack_xTOz(recv, Vz, ny)
+    use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
+    implicit none
+    complex(C_DOUBLE_COMPLEX), intent(in)  :: recv(:)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: Vz(1:, 1:, :)
+    integer(C_INT), intent(in)  :: ny
+    integer(C_SIZE_T) :: iy, ix, iz, src, p
 
-#ifndef HAVE_HIP
-      !$omp target data use_device_ptr(sendbuf, recvbuf)
-#endif
-      call MPI_Alltoall(sendbuf, sendcount, MPI_DOUBLE_COMPLEX, &
-                        recvbuf, sendcount, MPI_DOUBLE_COMPLEX, MPI_COMM_WORLD, ierr)
-#ifndef HAVE_HIP
-      !$omp end target data
-#endif
-#ifdef HAVE_HIP
-      call roctxpop("xTOz MPI" // c_null_char)
-      call roctxpush("xTOz after" // c_null_char)   
-#endif
-
-      !$omp target teams distribute parallel do collapse(4) default(none) &
-      !$omp shared(Vz, recvbuf) shared(ny, nxB, nzB, nproc, sendcount) private(iy, ix, iz, src, p)
-      do src = 0, nproc - 1
-        do iy = 1, ny + 3
-          do iz = 1, nzB
-            do ix = 1, nxB
-              p = src*sendcount + ix + (nxB*(iz - 1)) + (nxB*nzB*(iy - 1))
-              Vz(iz + src*nzB, ix, iy) = recvbuf(p)
-            end do
+    !$omp target teams distribute parallel do collapse(4) default(none) &
+    !$omp shared(Vz, recv) shared(ny, nxB, nzB, nproc, sendcount) private(iy, ix, iz, src, p)
+    do src = 0, nproc - 1
+      do iy = 1, ny + 3
+        do iz = 1, nzB
+          do ix = 1, nxB
+            p = src*sendcount + ix + (nxB*(iz - 1)) + (nxB*nzB*(iy - 1))
+            Vz(iz + src*nzB, ix, iy) = recv(p)
           end do
         end do
       end do
-#ifdef HAVE_HIP
-      call roctxpop("zTOx after" // c_null_char)
-#endif
-#endif
-    END IF
+    end do
+  END SUBROUTINE unpack_xTOz
 
-  END SUBROUTINE xTOz
+  SUBROUTINE alltoall(send, recv, request)
+    IMPLICIT NONE
+    complex(C_DOUBLE_COMPLEX), intent(out) :: recv(:)
+    complex(C_DOUBLE_COMPLEX), intent(in)  :: send(:)
+    type(MPI_Request), intent(inout) :: request
+
+    !$omp target data use_device_ptr(send, recv)
+    call MPI_IALLTOALL(send, sendcount, MPI_DOUBLE_COMPLEX, &
+                       recv, sendcount, MPI_DOUBLE_COMPLEX, MPI_COMM_WORLD, request, ierr)
+    !$omp end target data
+
+  END SUBROUTINE alltoall
 
   !------- Divide the problem in 1D slices -------!
   !-----------------------------------------------!
@@ -283,7 +220,7 @@ CONTAINS
     END DO
     FLUSH (output_unit)
 #endif
-    if (int(nproc, 8)*int(nxB, 8)*int(nzB, 8)*int(ny + 3, 8)*int(6 + 3*nPhi, 8) > huge(0_C_INT)) then
+    if (int(nproc, 8)*int(nxB, 8)*int(nzB, 8)*int(ny + 3, 8) > huge(0_C_INT)) then
       if (has_terminal) then
         print *, "Error: problem too large for MPI transpose (integer overflow). Try to increase the number of processes."
       end if
@@ -292,20 +229,22 @@ CONTAINS
     sendsize = nproc*nxB*nzB*(ny + 3)
     recvsize = nproc*nxB*nzB*(ny + 3)
 
+    sendcount = nxB*nzB*(ny + 3)
+
     ! Allocate buffers for transposes*int(16, c_size_t)
 #if defined(HAVE_HIP)
     ! On HIP with HSA_XNACK=1, the use_device_ptr statements around the MPI calls are ignored.
     ! Hence, MPI does a CPU mpi copy! So we need to allocate it explicity on the device.
-    sendptr = omp_target_alloc(sendsize*int(16, c_size_t), omp_get_default_device())
-    recvptr = omp_target_alloc(recvsize*int(16, c_size_t), omp_get_default_device())
-    call c_f_pointer(sendptr, sendbuf, [sendsize])
-    call c_f_pointer(recvptr, recvbuf, [recvsize])
+    sendptr = omp_target_alloc(sendsize*int(16*(6 + 3*nPhi), c_size_t), omp_get_default_device())
+    recvptr = omp_target_alloc(recvsize*int(16*(6 + 3*nPhi), c_size_t), omp_get_default_device())
+    call c_f_pointer(sendptr, sendbuf, [sendsize, 6 + 3*nPhi])
+    call c_f_pointer(recvptr, recvbuf, [recvsize, 6 + 3*nPhi])
 #else
-    ALLOCATE (sendbuf(sendsize)); sendbuf = 0
-    ALLOCATE (recvbuf(recvsize)); recvbuf = 0
+    ALLOCATE (sendbuf(sendsize, 6 + 3*nPhi)); sendbuf = 0
+    ALLOCATE (recvbuf(recvsize, 6 + 3*nPhi)); recvbuf = 0
     !$omp target enter data map(alloc: sendbuf, recvbuf)
 #endif
-    
+
     ! For READING VELOCITY, SETTING VIEW: datatype that maps velocity on disk to memory (it differs from writing: halo cells are read twice!)
     CALL MPI_Type_create_subarray(ndims, [ny+3, 2*nz+1, nxpp, 3+nPhi], [nyN-ny0+5, 2*nz+1, nxB, 3+nPhi], [ny0-1,0,nx0,0], MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, vel_read_type, ierror)
     CALL MPI_Type_commit(vel_read_type, ierror)

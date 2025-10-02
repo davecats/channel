@@ -95,7 +95,8 @@ CONTAINS
     ! Compute CFL
     if (deltat == 0.0) deltat = 1.0
     !$omp target update to(V)
-    CALL convolutions(.TRUE.)
+    CALL transform_to_physical()
+    call compute_cfl()
     print *, "CFL", deltat, cfl
     ! Compute flow rate
     IF (has_average) THEN
@@ -111,7 +112,7 @@ CONTAINS
   SUBROUTINE timeloop()
     USE dnsdata
     IMPLICIT NONE
-    integer:: iPhi, ix, iz
+    integer:: iPhi, ix, iz, i, ic
 #ifdef chron
     REAL timei, timee
 #endif
@@ -141,28 +142,27 @@ CONTAINS
       ! Increment number of steps
       istep = istep + 1
 
-      ! Solve (RK3 - Step1)
-      time = time + 2.0/RK1_rai(1)*deltat
-      CALL buildrhs(RK1_rai, .FALSE.)
-      CALL linsolve(RK1_rai(1)/deltat)
-      do iPhi = 1, nPhi
-        CALL linsolve_scalar(RK1_rai(1)/deltat, iPhi)
-      end do
+      ! Loop over sub timestep
+      do i = 1, 3
+        time = time + 2.0/RK_rai(1, i)*deltat
+        CALL transform_to_physical()
 
-      ! Solve (RK3 - Step2)
-      time = time + 2.0/RK2_rai(1)*deltat
-      CALL buildrhs(RK2_rai, .FALSE.)
-      CALL linsolve(RK2_rai(1)/deltat)
-      do iPhi = 1, nPhi
-        CALL linsolve_scalar(RK2_rai(1)/deltat, iPhi)
-      end do
+        if (i .eq. 3) THEN
+          call compute_cfl
+        END IF
 
-      ! Solve (RK3 - Step3)
-      time = time + 2.0/RK3_rai(1)*deltat
-      CALL buildrhs(RK3_rai, .TRUE.)
-      CALL linsolve(RK3_rai(1)/deltat)
-      do iPhi = 1, nPhi
-        CALL linsolve_scalar(RK3_rai(1)/deltat, iPhi)
+        !only depends on data from the previous substep, updates V(:, :, :, 1:2) and oldrhs(:, :, :, 1:2)
+        !can be done in parallel to FFTs
+        CALL buildrhs_prepare(RK_rai(:, i))
+
+        CALL transform_back_and_build_rhs(RK_rai(:, i))
+
+        !depends on V(:, :, :, 1:2), updates V(:, :, :, 1:3)
+        CALL linsolve(RK_rai(1, i)/deltat)
+        do iPhi = 1, nPhi
+          !depends on (V(:, :, :, 3+iPhi), updates V(:, :, :, 3+iPhi)
+          CALL linsolve_scalar(RK_rai(1, i)/deltat, iPhi)
+        end do
       end do
 
       ! Write runtime file
