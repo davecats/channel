@@ -238,13 +238,13 @@ CONTAINS
 #if defined(HAVE_HIP)
     ! On HIP with HSA_XNACK=1, the use_device_ptr statements around the MPI calls are ignored.
     ! Hence, MPI does a CPU mpi copy! So we need to allocate it explicity on the device.
-    sendptr = omp_target_alloc(sendsize*int(16*(6 + 3*nPhi), c_size_t), omp_get_default_device())
-    recvptr = omp_target_alloc(recvsize*int(16*(6 + 3*nPhi), c_size_t), omp_get_default_device())
-    call c_f_pointer(sendptr, sendbuf, [sendsize, int(6 + 3*nPhi, c_size_t)])
-    call c_f_pointer(recvptr, recvbuf, [recvsize, int(6 + 3*nPhi, c_size_t)])
+    sendptr = omp_target_alloc(sendsize*int(16*(2), c_size_t), omp_get_default_device())
+    recvptr = omp_target_alloc(recvsize*int(16*(2), c_size_t), omp_get_default_device())
+    call c_f_pointer(sendptr, sendbuf, [sendsize, int(2, c_size_t)])
+    call c_f_pointer(recvptr, recvbuf, [recvsize, int(2, c_size_t)])
 #else
-    ALLOCATE (sendbuf(sendsize, 6 + 3*nPhi)); sendbuf = 0
-    ALLOCATE (recvbuf(recvsize, 6 + 3*nPhi)); recvbuf = 0
+    ALLOCATE (sendbuf(sendsize, 2)); sendbuf = 0
+    ALLOCATE (recvbuf(recvsize, 2)); recvbuf = 0
     !$omp target enter data map(alloc: sendbuf, recvbuf)
 #endif
 

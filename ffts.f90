@@ -27,7 +27,7 @@ MODULE ffts
 
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
   complex(C_DOUBLE_COMPLEX), dimension(:, :, :, :), allocatable :: VVdz, VVdx
-  real(C_DOUBLE), dimension(:, :, :, :), allocatable :: rVVdx
+  real(C_DOUBLE), dimension(:, :, :, :), allocatable :: rVVdx, products
 #elif defined(HAVE_FFTW)
   INCLUDE 'fftw3.f03'
   integer, save        :: plan_type = FFTW_PATIENT
@@ -62,12 +62,12 @@ CONTAINS
     sn(2) = ny + 3
     sn(1) = 6 + 3*nPhi
     !Allocate aligned memory
-    ptrVVdz = fftw_alloc_complex(int(nxB*nzd*sn(1)*sn(2), C_SIZE_T))
+    ptrVVdz = fftw_alloc_complex(int(nxB*nzd*2*sn(2), C_SIZE_T))
     ptrVVdx = fftw_alloc_complex(int((nxd + 1)*nzB*sn(1)*sn(2), C_SIZE_T))
 
     !Convert C to F pointer
-    CALL c_f_pointer(ptrVVdz, VVdz, [nzd, nxB, sn(2), sn(1)]); 
-    CALL c_f_pointer(ptrVVdx, VVdx, [nxd + 1, nzB, sn(2), sn(1)])
+    CALL c_f_pointer(ptrVVdz, VVdz, [nzd, nxB, 2, sn(1)]); 
+    CALL c_f_pointer(ptrVVdx, VVdx, [nxd + 1, nzB, 2, sn(1)])
     CALL c_f_pointer(ptrVVdx, rVVdx, [2*(nxd + 1), nzB, sn(2), sn(1)])
 
     !$omp target enter data map(to: VVdz)
@@ -88,10 +88,11 @@ CONTAINS
     integer, dimension(1) :: n, inembed, onembed
     integer :: batch, idist, odist, istride, ostride
 
-    allocate (VVdz(nzd, nxB, ny + 3, 6 + 3*nPhi))
-    allocate (VVdx(nxd + 1, nzB, ny + 3, 6 + 3*nPhi))
-    allocate (rVVdx(2*(nxd + 1), nzB, ny + 3, 6 + 3*nPhi))
-    !$omp target enter data map(to: VVdz, VVdx, rVVdx)
+    allocate (VVdz(nzd, nxB, ny + 3, 2))
+    allocate (VVdx(nxd + 1, nzB, ny + 3, 2))
+    allocate (rVVdx(2*(nxd + 1), nzB, ny + 3, 3 + nPhi))
+    allocate (products(2*(nxd + 1), nzB, ny + 3, 2))
+    !$omp target enter data map(to: VVdz, VVdx, rVVdx, products)
 
     !FFTs plans
     istat = cufftCreate(cu_pIFT)
@@ -132,10 +133,11 @@ CONTAINS
     integer, dimension(1), target :: n, inembed, onembed
     integer(C_INT) :: batch, idist, odist, istride, ostride
 
-    allocate (VVdz(nzd, nxB, ny + 3, 6 + 3*nPhi))
-    allocate (VVdx(nxd + 1, nzB, ny + 3, 6 + 3*nPhi))
-    allocate (rVVdx(2*(nxd + 1), nzB, ny + 3, 6 + 3*nPhi))
-    !$omp target enter data map(to: VVdz, VVdx, rVVdx)
+    allocate (VVdz(nzd, nxB, ny + 3, 2))
+    allocate (VVdx(nxd + 1, nzB, ny + 3, 2))
+    allocate (rVVdx(2*(nxd + 1), nzB, ny + 3, 3 + nPhi))
+    allocate (products(2*(nxd + 1), nzB, ny + 3, 2))
+    !$omp target enter data map(to: VVdz, VVdx, rVVdx, products)
 
     !FFTs plans
     istat = hipfftCreate(hip_pIFT)

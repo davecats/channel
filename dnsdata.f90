@@ -46,14 +46,17 @@ MODULE dnsdata
   real(C_DOUBLE), allocatable :: der(:, :, :)
   real(C_DOUBLE), dimension(-2:2) :: d040, d140, d240, d14m1, d24m1, d04n, d14n, d24n, d14np1, d24np1
   !$omp declare target(d14np1, d14n, d14m1, d140)
-  real(C_DOUBLE), allocatable :: D0mat(:, :), linsolve_mat(:, :, :, :), eta00mat(:, :)
+  real(C_DOUBLE), allocatable :: D0mat(:, :), eta00mat(:, :)
+  real(C_DOUBLE), target, allocatable ::  ws(:)
+  real(C_DOUBLE), pointer :: linsolve_mat(:, :, :, :)
+  complex(C_DOUBLE_COMPLEX), pointer :: memrhs(:, :, :, :)
 #if !(defined(HAVE_CUDA) || defined(HAVE_HIP))
   !Fourier-transformable arrays (allocated in ffts.f90)
   complex(C_DOUBLE_COMPLEX), pointer, dimension(:, :, :, :) :: VVdx, VVdz
   real(C_DOUBLE), pointer, dimension(:, :, :, :) :: rVVdx
 #endif
   !Solution
-  complex(C_DOUBLE_COMPLEX), allocatable :: memrhs(:, :, :, :), oldrhs(:, :, :, :)
+  complex(C_DOUBLE_COMPLEX), allocatable :: oldrhs(:, :, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable :: V(:, :, :, :)
 #ifdef bodyforce
   complex(C_DOUBLE_COMPLEX), allocatable :: F(:, :, :, :)
@@ -127,15 +130,19 @@ CONTAINS
     !$omp target enter data map(to: F)
 #endif
     IF (solveNS) then
-      ALLOCATE(memrhs(1:ny-1,-nz:nz,nx0:nxN,1:2+nPhi),oldrhs(1:ny-1,-nz:nz,nx0:nxN,1:2+nPhi),bc0(-nz:nz,nx0:nxN,1:5+nPhi),bcn(-nz:nz,nx0:nxN,1:5+nPhi)); 
-      memrhs = 0.0; oldrhs = 0.0; bc0 = 0.0; bcn = 0.0
-      !$omp target enter data map(to: memrhs, oldrhs, bc0, bcn)
+      ALLOCATE (memrhs(1:ny - 1, -nz:nz, nx0:nxN, 1:2 + nPhi), &
+                oldrhs(1:ny - 1, -nz:nz, nx0:nxN, 1:2 + nPhi), &
+                bc0(-nz:nz, nx0:nxN, 1:5 + nPhi), &
+                bcn(-nz:nz, nx0:nxN, 1:5 + nPhi), &
+                linsolve_mat(ny0:nyN + 2, -2:2, -nz:nz, nx0:nxN)); 
+      memrhs = 0.0; oldrhs = 0.0; bc0 = 0.0; bcn = 0.0; linsolve_mat = 0.0
+      !$omp target enter data map(to: memrhs, linsolve_mat, oldrhs, bc0, bcn)
     END IF
 #define newrhs(iy,iz,ix,i) memrhs(iy,iz,ix,i)
 #define imod(iy) MOD(iy+1000,5)
-    ALLOCATE (der(1:ny - 1, 0:3, -2:2), d0mat(ny0:nyN + 2, -2:2), linsolve_mat(ny0:nyN + 2, -2:2, -nz:nz, nx0:nxN))
+    ALLOCATE (der(1:ny - 1, 0:3, -2:2), d0mat(ny0:nyN + 2, -2:2))
     ALLOCATE (eta00mat(ny0:nyN + 2, -2:2))
-    der = 0.0; d0mat = 0.0; linsolve_mat = 0.0; eta00mat = 0.0
+    der = 0.0; d0mat = 0.0; eta00mat = 0.0
     allocate (corrtx(1:nPhi)); corrtx = 0.0d0
     allocate (ucor(ny0 - 2:nyN + 2), tcor(ny0 - 2:nyN + 2, 1:nPhi))
     ALLOCATE (y(-1:ny + 1), dy(1:ny - 1))
@@ -150,7 +157,7 @@ CONTAINS
     izd = (/(merge(iz, nzd + iz, iz >= 0), iz=-nz, nz)/); ialfa = (/(dcmplx(0.0d0, ix*alfa0), ix=nx0, nxN)/); 
     ibeta = (/(dcmplx(0.0d0, iz*beta0), iz=-nz, nz)/); 
     FORALL (iz=-nz:nz, ix=nx0:nxN) k2(iz, ix) = (alfa0*ix)**2.0d0 + (beta0*iz)**2.0d0
-    !$omp target enter data map(to: izd, ialfa, ibeta, k2, y, iy, rk_rai, linsolve_mat, ucor, tcor)
+    !$omp target enter data map(to: izd, ialfa, ibeta, k2, y, iy, rk_rai, ucor, tcor)
     OPEN (UNIT=195, FILE='Runtimedata.phi', ACTION='write')
     IF (solveNS .AND. has_terminal) OPEN (UNIT=121, FILE='Runtimedata', ACTION='write')
 
@@ -596,39 +603,39 @@ CONTAINS
   !--------------------------------------------------------------!
   !------------------------ convolutions ------------------------!
 
-  SUBROUTINE assemble_vvdz(m)
+  SUBROUTINE assemble_vvdz(m, to)
     IMPLICIT NONE
     integer(C_INT) :: iy
     integer(C_INT) :: i, j, k
-    integer(C_INT), intent(in) :: m
+    integer(C_INT), intent(in) :: m, to
     !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(V, VVdz) shared(ny, nxB, nzd, nx0, nxN, nz, m) private(i,j,k)
+    !$omp shared(V, VVdz) shared(ny, nxB, nzd, nx0, nxN, nz, m, to) private(i,j,k)
     DO i = 1, ny + 3
       DO j = 1, nxB
         DO k = 1, nzd
           IF (k <= nz + 1) THEN
-            VVdz(k, j, i, m) = V(i - 2, k - 1, j + nx0 - 1, m)
+            VVdz(k, j, i, to) = V(i - 2, k - 1, j + nx0 - 1, m)
           ELSEIF (k >= nz + 2 .AND. k <= nzd - nz) THEN
-            VVdz(k, j, i, m) = 0.0
+            VVdz(k, j, i, to) = 0.0
           ELSE
-            VVdz(k, j, i, m) = V(i - 2, k - nzd - 1, j + nx0 - 1, m)
+            VVdz(k, j, i, to) = V(i - 2, k - nzd - 1, j + nx0 - 1, m)
           END IF
         END DO
       END DO
     END DO
   END SUBROUTINE assemble_vvdz
 
-  SUBROUTINE zero_vvdx_hft(m)
+  SUBROUTINE zero_vvdx_hft(to)
     IMPLICIT NONE
     integer(C_INT) :: iy
     integer(C_INT) :: i, j, k
-    integer(C_INT), intent(in) :: m
+    integer(C_INT), intent(in) :: to
     !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(VVdx) shared(nx, nxd, nzB, ny, m) private(i,j,k)
+    !$omp shared(VVdx) shared(nx, nxd, nzB, ny, to) private(i,j,k)
     DO i = 1, ny + 3
       DO j = 1, nzB
         DO k = nx + 2, nxd + 1
-          VVdx(k, j, i, m) = 0.0
+          VVdx(k, j, i, to) = 0.0
         END DO
       END DO
     END DO
@@ -651,9 +658,9 @@ CONTAINS
     end do
   END SUBROUTINE compute_cfl
 
-  SUBROUTINE build_products(m)
+  SUBROUTINE build_products(m, to)
     IMPLICIT NONE
-    integer(C_INT), intent(in) :: m
+    integer(C_INT), intent(in) :: m, to
     integer(C_INT) :: iPhi, component, first, second
     integer(C_INT) :: i, j, k
     real(C_DOUBLE) :: a, b
@@ -662,11 +669,11 @@ CONTAINS
       iPhi = (m - 4)/3
       component = mod(m - 4, 3) + 1
       !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(rVVdx) shared(nxd, nzB, ny, factor, iPhi, iPhi, component)
+      !$omp shared(rVVdx, products) shared(nxd, nzB, ny, factor, iPhi, iPhi, component, to)
       DO i = 1, ny + 3
         DO j = 1, nzB
           DO k = 1, 2*nxd
-            rVVdx(k, j, i, 6 + 3*(iPhi - 1) + component) = rVVdx(k, j, i, component)*rVVdx(k, j, i, 3 + iPhi)*factor
+            products(k, j, i, to) = rVVdx(k, j, i, component)*rVVdx(k, j, i, 3 + iPhi)*factor
           END DO
         END DO
       END DO
@@ -674,24 +681,24 @@ CONTAINS
       first = mod(m - 1, 3) + 1
       second = mod(m, 3) + 1
       !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(rVVdx) shared(nxd, nzB, ny, factor, first, second, m) private(a, b)
+      !$omp shared(rVVdx, products) shared(nxd, nzB, ny, factor, first, second, m, to) private(a, b)
       DO i = 1, ny + 3
         DO j = 1, nzB
           DO k = 1, 2*nxd
             a = rVVdx(k, j, i, first)
             b = rVVdx(k, j, i, second)
-            rVVdx(k, j, i, m) = a*b*factor
+            products(k, j, i, to) = a*b*factor
           END DO
         END DO
       END DO
     else ! cases 1, 2, 3
       !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(rVVdx) shared(nxd, nzB, ny, factor, m) private(a)
+      !$omp shared(rVVdx, products) shared(nxd, nzB, ny, factor, m, to) private(a)
       DO i = 1, ny + 3
         DO j = 1, nzB
           DO k = 1, 2*nxd
             a = rVVdx(k, j, i, m)
-            rVVdx(k, j, i, m) = a*a*factor
+            products(k, j, i, to) = a*a*factor
           END DO
         END DO
       END DO
@@ -700,55 +707,59 @@ CONTAINS
 
   SUBROUTINE transform_to_physical()
     IMPLICIT NONE
-    integer(C_INT) ::  m, mm1
+    integer(C_INT) ::  m, mm1, to, from
     type(MPI_Request), dimension(:) :: requests(3 + nPhi)
     type(MPI_Status)  :: status
 
     DO m = 1, 3 + nPhi + 1
       mm1 = m - 1
       if (m <= 3 + nPhi) then
+        to = mod(m - 1, 2) + 1
         !assemble, pack and post nonblocking alltoall
-        CALL assemble_vvdz(m)
-        CALL IFT(VVdz(:, :, :, m), ny)
-        call pack_zTOx(VVdz(:, :, :, m), sendbuf(:, m), ny)
-        call alltoall(sendbuf(:, m), recvbuf(:, m), requests(m))
+        CALL assemble_vvdz(m, to)
+        CALL IFT(VVdz(:, :, :, to), ny)
+        call pack_zTOx(VVdz(:, :, :, to), sendbuf(:, to), ny)
+        call alltoall(sendbuf(:, to), recvbuf(:, to), requests(m))
       end if
       if (m > 1) then
-        !wait on the previous step, unpack, and fft
+        from = mod(mm1 - 1, 2) + 1
+        !wait on the previous step to complete, unpack, and fft
         CALL MPI_WAIT(requests(mm1), status, ierr)
-        CALL unpack_zTOx(recvbuf(:, mm1), VVdx(:, :, :, mm1), ny)
-        CALL zero_vvdx_hft(mm1)
-        CALL RFT(VVdx(:, :, :, mm1), rVVdx(:, :, :, mm1), ny)
+        CALL unpack_zTOx(recvbuf(:, from), VVdx(:, :, :, from), ny)
+        CALL zero_vvdx_hft(from)
+        CALL RFT(VVdx(:, :, :, from), rVVdx(:, :, :, mm1), ny)
       end if
     END DO
   END SUBROUTINE transform_to_physical
 
   SUBROUTINE transform_back_and_build_rhs(ODE)
     IMPLICIT NONE
-    integer(C_INT) ::  m, mp1
+    integer(C_INT) ::  m, mp1, to, from
     real(C_DOUBLE), intent(in) :: ODE(1:3)
     type(MPI_Request), dimension(:) :: requests(6 + 3*nPhi)
     type(MPI_Status)  :: status
 
     ! Reverse pass to build rVVdx
-    DO m = 6 + 3*nPhi, 0, -1
+    do m = 6 + 3*nPhi, 0, -1
       mp1 = m + 1
       if (m >= 1) then
+        to = mod(m - 1, 2) + 1
         ! Build, HFT, pack and post nonblocking alltoall
-        CALL build_products(m)
-        CALL HFT(rVVdx(:, :, :, m), VVdx(:, :, :, m), ny)
-        call pack_xTOz(VVdx(:, :, :, m), sendbuf(:, m), ny)
-        call alltoall(sendbuf(:, m), recvbuf(:, m), requests(m))
+        call build_products(m, to)
+        call HFT(products(:, :, :, to), VVdx(:, :, :, to), ny)
+        call pack_xTOz(VVdx(:, :, :, to), sendbuf(:, to), ny)
+        call alltoall(sendbuf(:, to), recvbuf(:, to), requests(m))
       end if
 
       if (m < 6 + 3*nPhi) then
-        ! Wait on the previous step, unpack, and fft
-        CALL MPI_WAIT(requests(mp1), status, ierr)
-        call unpack_xTOz(recvbuf(:, mp1), VVdz(:, :, :, mp1), ny)
-        CALL FFT(VVdz(:, :, :, mp1), ny)
-        CALL buildrhs(ODE, mp1)
+        from = mod(mp1 - 1, 2) + 1
+        ! Wait on the previous step to complete, unpack, and fft
+        call MPI_WAIT(requests(mp1), status, ierr)
+        call unpack_xTOz(recvbuf(:, from), VVdz(:, :, :, from), ny)
+        call FFT(VVdz(:, :, :, from), ny)
+        call buildrhs(ODE, mp1, from)
       end if
-    END DO
+    end do
   END SUBROUTINE transform_back_and_build_rhs
 
   !--------------------------------------------------------------!
@@ -898,10 +909,10 @@ CONTAINS
 
   END SUBROUTINE buildrhs_prepare
 
-  SUBROUTINE buildrhs(ODE, component)
+  SUBROUTINE buildrhs(ODE, component, from)
     IMPLICIT NONE
     real(C_DOUBLE), intent(in) :: ODE(1:3)
-    integer(C_INT), intent(in) :: component
+    integer(C_INT), intent(in) :: component, from
     integer(C_INT) :: iy, iz, ix, i, iPhi
     complex(C_DOUBLE_COMPLEX) :: rhsu, rhsw, rhst, expl, tmp, unkn
 
@@ -909,13 +920,13 @@ CONTAINS
     CASE (1)
       !$omp target teams distribute parallel do collapse(3) default(none)  &
       !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
-      !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode) shared(vvdz)
+      !$omp shared(nz, nx0, nxN, ny, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode) shared(vvdz)
       DO iz = -nz, nz
         DO ix = nx0, nxN
           DO iy = 1, ny - 1
 
-            rhsu = -ialfa(ix)*DD(0, 1); rhsw = 0.0
-            expl = ialfa(ix)*ialfa(ix)*DD(1, 1)
+            rhsu = -ialfa(ix)*DD(0, from); rhsw = 0.0
+            expl = ialfa(ix)*ialfa(ix)*DD(1, from)
 
             ACCUM_D2V(V, expl)
             ACCUM_ETA_UW(V, rhsu, rhsw)
@@ -926,12 +937,12 @@ CONTAINS
       !contribution from VVdz(:,:,:,2)
       !$omp target teams distribute parallel do collapse(3) default(none)  &
       !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
-      !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
+      !$omp shared(nz, nx0, nxN, ny, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
       DO iz = -nz, nz
         DO ix = nx0, nxN
           DO iy = 1, ny - 1
 
-            expl = DD(1, 2)*k2(iz, ix)
+            expl = DD(1, from)*k2(iz, ix)
             ACCUM_D2V(V, expl)
           END DO
         END DO
@@ -940,12 +951,12 @@ CONTAINS
       !contribution from VVdz(:,:,:,3)
       !$omp target teams distribute parallel do collapse(3) default(none)  &
       !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
-      !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
+      !$omp shared(nz, nx0, nxN, ny, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
       DO iz = -nz, nz
         DO ix = nx0, nxN
           DO iy = 1, ny - 1
-            rhsw = -ibeta(iz)*DD(0, 3); rhsu = 0.0
-            expl = ibeta(iz)*ibeta(iz)*DD(1, 3)
+            rhsw = -ibeta(iz)*DD(0, from); rhsu = 0.0
+            expl = ibeta(iz)*ibeta(iz)*DD(1, from)
 
             ACCUM_D2V(V, expl)
             ACCUM_ETA_UW(V, rhsu, rhsw)
@@ -956,13 +967,13 @@ CONTAINS
       !contribution from VVdz(:,:,:,4)
       !$omp target teams distribute parallel do collapse(3) default(none)  &
       !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
-      !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
+      !$omp shared(nz, nx0, nxN, ny, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
       DO iz = -nz, nz
         DO ix = nx0, nxN
           DO iy = 1, ny - 1
 
-            rhsu = -DD(1, 4); rhsw = 0.0
-            expl = ialfa(ix)*DD(2, 4) + ialfa(ix)*DD(0, 4)*k2(iz, ix)
+            rhsu = -DD(1, from); rhsw = 0.0
+            expl = ialfa(ix)*DD(2, from) + ialfa(ix)*DD(0, from)*k2(iz, ix)
 
             ACCUM_D2V(V, expl)
             ACCUM_ETA_UW(V, rhsu, rhsw)
@@ -973,14 +984,14 @@ CONTAINS
       !contribution from VVdz(:,:,:,5)
       !$omp target teams distribute parallel do collapse(3) default(none)  &
       !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
-      !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
+      !$omp shared(nz, nx0, nxN, ny, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
       DO iz = -nz, nz
         DO ix = nx0, nxN
           DO iy = 1, ny - 1
 
             ! contribution from VVdz(:,:,:,5)
-            rhsw = -DD(1, 5); rhsu = 0.0
-            expl = ibeta(iz)*DD(2, 5) + ibeta(iz)*DD(0, 5)*k2(iz, ix)
+            rhsw = -DD(1, from); rhsu = 0.0
+            expl = ibeta(iz)*DD(2, from) + ibeta(iz)*DD(0, from)*k2(iz, ix)
 
             ACCUM_D2V(V, expl)
             ACCUM_ETA_UW(V, rhsu, rhsw)
@@ -991,14 +1002,14 @@ CONTAINS
       !contribution from VVdz(:,:,:,6)
       !$omp target teams distribute parallel do collapse(3) default(none)  &
       !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
-      !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
+      !$omp shared(nz, nx0, nxN, ny, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
       DO iz = -nz, nz
         DO ix = nx0, nxN
           DO iy = 1, ny - 1
 
-            rhsu = -ibeta(iz)*DD(0, 6)
-            rhsw = -ialfa(ix)*DD(0, 6)
-            expl = 2*ialfa(ix)*ibeta(iz)*DD(1, 6)
+            rhsu = -ibeta(iz)*DD(0, from)
+            rhsw = -ialfa(ix)*DD(0, from)
+            expl = 2*ialfa(ix)*ibeta(iz)*DD(1, from)
 
             ACCUM_D2V(V, expl)
             ACCUM_ETA_UW(V, rhsu, rhsw)
@@ -1012,11 +1023,11 @@ CONTAINS
       CASE (1)
         !$omp target teams distribute parallel do collapse(3) default(none)  &
         !$omp private(rhst, iz, ix, iy) &
-        !$omp shared(nz, nx0, nxN, ny, ialfa, V, ode, der, oldrhs, iphi, vvdz, izd)
+        !$omp shared(nz, nx0, nxN, ny, ialfa, V, ode, der, oldrhs, iphi, vvdz, izd, from)
         DO iz = -nz, nz
           DO ix = nx0, nxN
             DO iy = 1, ny - 1
-              rhst = -ialfa(ix)*DD(0, 6 + 3*(iPhi - 1) + 1)
+              rhst = -ialfa(ix)*DD(0, from)
               timescheme_accum(V(iy, iz, ix, 3 + iPhi), oldrhs(iy, iz, ix, 2 + iPhi), rhst)
             END DO
           END DO
@@ -1024,12 +1035,12 @@ CONTAINS
       CASE (2)
         !$omp target teams distribute parallel do collapse(3) default(none)  &
         !$omp private(rhst, iz, ix, iy) &
-        !$omp shared(nz, nx0, nxN, ny, V, ode, der, oldrhs, iphi, vvdz, izd)
+        !$omp shared(nz, nx0, nxN, ny, V, ode, der, oldrhs, iphi, vvdz, izd, from)
         DO iz = -nz, nz
           DO ix = nx0, nxN
             DO iy = 1, ny - 1
 
-              rhst = -DD(1, 6 + 3*(iPhi - 1) + 2)
+              rhst = -DD(1, from)
               timescheme_accum(V(iy, iz, ix, 3 + iPhi), oldrhs(iy, iz, ix, 2 + iPhi), rhst)
             END DO
           END DO
@@ -1037,11 +1048,11 @@ CONTAINS
       CASE (3)
         !$omp target teams distribute parallel do collapse(3) default(none)  &
         !$omp private(rhst, iz, ix, iy) &
-        !$omp shared(nz, nx0, nxN, ny, ibeta,V, ode, der, oldrhs, iphi, vvdz, izd)
+        !$omp shared(nz, nx0, nxN, ny, ibeta,V, ode, der, oldrhs, iphi, vvdz, izd, from)
         DO iz = -nz, nz
           DO ix = nx0, nxN
             DO iy = 1, ny - 1
-              rhst = -ibeta(iz)*DD(0, 6 + 3*(iPhi - 1) + 3)
+              rhst = -ibeta(iz)*DD(0, from)
               timescheme_accum(V(iy, iz, ix, 3 + iPhi), oldrhs(iy, iz, ix, 2 + iPhi), rhst)
             END DO
           END DO
