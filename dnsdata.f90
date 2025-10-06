@@ -138,18 +138,24 @@ CONTAINS
     IMPLICIT NONE
     INTEGER(C_INT) :: ix, iz
     logical, intent(IN) :: solveNS
-    ALLOCATE (V(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3 + nPhi)); V = 0
+    ALLOCATE (V(int(ny0 - 2, 8):int(nyN + 2, 8), int(-nz, 8):int(nz, 8), int(nx0, 8):int(nxN, 8), int(1, 8):int(3 + nPhi, 8))); V = 0
     !$omp target enter data map(to: V)
 #ifdef bodyforce
-    ALLOCATE (F(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3)); F = 0
+    ALLOCATE (F(int(ny0 - 2,8):int(nyN + 2,8), int(-nz,8):int(nz,8), int(nx0,8):int(nxN,8), int(1,8):int(3,8)))
+    F = 0
     !$omp target enter data map(to: F)
 #endif
     IF (solveNS) then
-      ALLOCATE (memrhs(1:ny - 1, -nz:nz, nx0:nxN, 1:2 + nPhi), &
-                oldrhs(1:ny - 1, -nz:nz, nx0:nxN, 1:2 + nPhi), &
-                bc0(-nz:nz, nx0:nxN, 1:5 + nPhi), &
-                bcn(-nz:nz, nx0:nxN, 1:5 + nPhi), &
-                linsolve_mat(ny0:nyN + 2, -2:2, -nz:nz, nx0:nxN)); 
+      ALLOCATE (memrhs(int(1,8):int(ny - 1,8), int(-nz,8):int(nz,8), &
+                      int(nx0,8):int(nxN,8), int(1,8):int(2 + nPhi,8)), &
+              oldrhs(int(1,8):int(ny - 1,8), int(-nz,8):int(nz,8), &
+                      int(nx0,8):int(nxN,8), int(1,8):int(2 + nPhi,8)), &
+              bc0(int(-nz,8):int(nz,8), int(nx0,8):int(nxN,8), &
+                  int(1,8):int(5 + nPhi,8)), &
+              bcn(int(-nz,8):int(nz,8), int(nx0,8):int(nxN,8), &
+                  int(1,8):int(5 + nPhi,8)), &
+              linsolve_mat(int(ny0,8):int(nyN + 2,8), int(-2,8):int(2,8), &
+                           int(-nz,8):int(nz,8), int(nx0,8):int(nxN,8)))
       memrhs = 0.0; oldrhs = 0.0; bc0 = 0.0; bcn = 0.0; linsolve_mat = 0.0
       !$omp target enter data map(to: memrhs, linsolve_mat, oldrhs, bc0, bcn)
     END IF

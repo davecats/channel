@@ -95,10 +95,10 @@ CONTAINS
 
     nflds = merge(2, 1, overlapping)
 
-    allocate (VVdz(nzd, nxB, ny + 3, nflds))
-    allocate (VVdx(nxd + 1, nzB, ny + 3, nflds))
-    allocate (rVVdx(2*(nxd + 1), nzB, ny + 3, 3 + nPhi))
-    allocate (products(2*(nxd + 1), nzB, ny + 3, nflds))
+    allocate (VVdz(int(nzd, 8), int(nxB, 8), int(ny + 3, 8), int(nflds, 8)))
+    allocate (VVdx(int(nxd + 1, 8), int(nzB, 8), int(ny + 3, 8), int(nflds, 8)))
+    allocate (rVVdx(int(2*(nxd + 1), 8), int(nzB, 8), int(ny + 3, 8), int(3 + nPhi, 8)))
+    allocate (products(int(2*(nxd + 1), 8), int(nzB, 8), int(ny + 3, 8), int(nflds, 8)))
     !$omp target enter data map(to: VVdz, VVdx, rVVdx, products)
 
     !FFTs plans
@@ -140,13 +140,14 @@ CONTAINS
     integer :: istat
     integer, dimension(1), target :: n, inembed, onembed
     integer(C_INT) :: batch, idist, odist, istride, ostride
+    integer :: nflds
 
     nflds = merge(2, 1, overlapping)
 
-    allocate (VVdz(nzd, nxB, ny + 3, nflds))
-    allocate (VVdx(nxd + 1, nzB, ny + 3, nflds))
-    allocate (rVVdx(2*(nxd + 1), nzB, ny + 3, 3 + nPhi))
-    allocate (products(2*(nxd + 1), nzB, ny + 3, nflds))
+    allocate (VVdz(int(nzd, 8), int(nxB, 8), int(ny + 3, 8), int(nflds, 8)))
+    allocate (VVdx(int(nxd + 1, 8), int(nzB, 8), int(ny + 3, 8), int(nflds, 8)))
+    allocate (rVVdx(int(2*(nxd + 1), 8), int(nzB, 8), int(ny + 3, 8), int(3 + nPhi, 8)))
+    allocate (products(int(2*(nxd + 1), 8), int(nzB, 8), int(ny + 3, 8), int(nflds, 8)))
     !$omp target enter data map(to: VVdz, VVdx, rVVdx, products)
 
     !FFTs plans
