@@ -52,16 +52,16 @@ CONTAINS
 
     CALL read_dnsin(config_file)
     deltat_from_dnsin = deltat
-    CALL init_MPI(nx + 1, nz, ny, nxd + 1, nzd, nPhi)
+    CALL init_MPI(nx + 1, nz, ny, nxd + 1, nzd, nPhi, overlapping)
     CALL init_memory(.TRUE.)
 
     ! Init various subroutines
 #ifdef HAVE_CUDA
-    CALL init_cufft(nxd, nxB, ny, nzd, nzB, nPhi)
+    CALL init_cufft(nxd, nxB, ny, nzd, nzB, nPhi, overlapping)
 #elif defined(HAVE_HIP)
-    CALL init_hipfft(nxd, nxB, ny, nzd, nzB, nPhi)
+    CALL init_hipfft(nxd, nxB, ny, nzd, nzB, nPhi, overlapping)
 #elif defined(HAVE_FFTW)
-    CALL init_fft(VVdz, VVdx, rVVdx, nxd, nxB, ny, nzd, nzB, nPhi)
+    CALL init_fft(VVdz, VVdx, rVVdx, nxd, nxB, ny, nzd, nzB, nPhi, overlapping)
 #endif
     CALL setup_derivatives()
     CALL setup_boundary_conditions()
@@ -90,6 +90,8 @@ CONTAINS
       WRITE (*, "(A,F11.6,A,F11.6)") "   meanflowx =", meanflowx, "   meanflowz =", meanflowz
       WRITE (*, "(A,I6,A,L1)") "   nsteps =", nstep, "   time_from_restart =", time_from_restart
       WRITE (*, *) " "
+
+      print *, "Overlapping communication and computation:", overlapping
     END IF
 
     ! Compute CFL

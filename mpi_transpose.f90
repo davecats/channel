@@ -198,8 +198,9 @@ CONTAINS
 
   !------- Divide the problem in 1D slices -------!
   !-----------------------------------------------!
-  SUBROUTINE init_MPI(nxpp, nz, ny, nxd, nzd, nPhi)
+  SUBROUTINE init_MPI(nxpp, nz, ny, nxd, nzd, nPhi, overlapping)
     integer(C_INT), intent(in)  :: nxpp, nz, ny, nxd, nzd, nPhi
+    logical, intent(in) :: overlapping
     integer, parameter :: ndims = 4
     integer :: i
     integer :: array_of_sizes(ndims), array_of_subsizes(ndims), array_of_starts(ndims), ierror
@@ -238,13 +239,13 @@ CONTAINS
 #if defined(HAVE_HIP)
     ! On HIP with HSA_XNACK=1, the use_device_ptr statements around the MPI calls are ignored.
     ! Hence, MPI does a CPU mpi copy! So we need to allocate it explicity on the device.
-    sendptr = omp_target_alloc(sendsize*int(16*(2), c_size_t), omp_get_default_device())
-    recvptr = omp_target_alloc(recvsize*int(16*(2), c_size_t), omp_get_default_device())
-    call c_f_pointer(sendptr, sendbuf, [sendsize, int(2, c_size_t)])
-    call c_f_pointer(recvptr, recvbuf, [recvsize, int(2, c_size_t)])
+    sendptr = omp_target_alloc(sendsize*int(16*merge(2, 1, overlapping), c_size_t), omp_get_default_device())
+    recvptr = omp_target_alloc(recvsize*int(16*merge(2, 1, overlapping), c_size_t), omp_get_default_device())
+    call c_f_pointer(sendptr, sendbuf, [sendsize, int(merge(2, 1, overlapping), c_size_t)])
+    call c_f_pointer(recvptr, recvbuf, [recvsize, int(merge(2, 1, overlapping), c_size_t)])
 #else
-    ALLOCATE (sendbuf(sendsize, 2)); sendbuf = 0
-    ALLOCATE (recvbuf(recvsize, 2)); recvbuf = 0
+    ALLOCATE (sendbuf(sendsize, merge(2, 1, overlapping))); sendbuf = 0
+    ALLOCATE (recvbuf(recvsize, merge(2, 1, overlapping))); recvbuf = 0
     !$omp target enter data map(alloc: sendbuf, recvbuf)
 #endif
 

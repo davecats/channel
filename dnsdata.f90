@@ -80,6 +80,7 @@ MODULE dnsdata
   real(C_DOUBLE), dimension(:), allocatable :: fr
   !Restart file
   character(len=40) :: fname
+  logical :: overlapping
 
 CONTAINS
 
@@ -90,6 +91,8 @@ CONTAINS
     logical :: i
     integer :: iPhi
     CHARACTER(len=*), INTENT(IN) :: filename
+    character(len=16) :: env_value
+    integer :: status, length
     OPEN (15, file=filename)
     READ (15, *) nx, ny, nz; READ (15, *) alfa0, beta0; nxd = 3*(nx + 1)/2; nzd = 3*nz
     !$omp target update to(ny)
@@ -115,6 +118,18 @@ CONTAINS
     READ (15, *) nstep
     CLOSE (15)
     dx = PI/(alfa0*nxd); dz = 2.0d0*PI/(beta0*nzd); factor = 1.0d0/(2.0d0*nxd*nzd)
+    call get_environment_variable("CHANNEL_OVERLAPPING", env_value, length, status)
+    overlapping = .false.
+    if (status == 0) then
+      select case (adjustl(trim(env_value(:length))))
+      case ("1", "true", "TRUE", "yes", "YES", "on", "ON")
+        overlapping = .true.
+      case ("0", "false", "FALSE", "no", "NO", "off", "OFF")
+        overlapping = .false.
+      case default
+        print *, "Warning: invalid value for CHANNEL_OVERLAPPING:", trim(env_value(:length))
+      end select
+    end if
   END SUBROUTINE read_dnsin
 
   !--------------------------------------------------------------!
@@ -707,23 +722,26 @@ CONTAINS
 
   SUBROUTINE transform_to_physical()
     IMPLICIT NONE
-    integer(C_INT) ::  m, mm1, to, from
+    integer(C_INT) ::  m, to, from, mm1
     type(MPI_Request), dimension(:) :: requests(3 + nPhi)
     type(MPI_Status)  :: status
+    DO m = 1, MERGE(3 + nPhi + 1, 3 + nPhi, overlapping)
 
-    DO m = 1, 3 + nPhi + 1
-      mm1 = m - 1
+      ! Compute indices depending on overlap mode
+      mm1 = MERGE(m - 1, m, overlapping)
+      to = MERGE(mod(m - 1, 2) + 1, 1, overlapping)
+      from = MERGE(mod(mm1 - 1, 2) + 1, 1, overlapping)
+
+      ! Step 1: assemble, pack, post alltoall (only if in range)
       if (m <= 3 + nPhi) then
-        to = mod(m - 1, 2) + 1
-        !assemble, pack and post nonblocking alltoall
         CALL assemble_vvdz(m, to)
         CALL IFT(VVdz(:, :, :, to), ny)
-        call pack_zTOx(VVdz(:, :, :, to), sendbuf(:, to), ny)
-        call alltoall(sendbuf(:, to), recvbuf(:, to), requests(m))
+        CALL pack_zTOx(VVdz(:, :, :, to), sendbuf(:, to), ny)
+        CALL alltoall(sendbuf(:, to), recvbuf(:, to), requests(m))
       end if
-      if (m > 1) then
-        from = mod(mm1 - 1, 2) + 1
-        !wait on the previous step to complete, unpack, and fft
+
+      ! Step 2: wait, unpack, FFT (depending on overlap)
+      if (MERGE(m > 1, .true., overlapping)) then
         CALL MPI_WAIT(requests(mm1), status, ierr)
         CALL unpack_zTOx(recvbuf(:, from), VVdx(:, :, :, from), ny)
         CALL zero_vvdx_hft(from)
@@ -734,32 +752,36 @@ CONTAINS
 
   SUBROUTINE transform_back_and_build_rhs(ODE)
     IMPLICIT NONE
-    integer(C_INT) ::  m, mp1, to, from
+    integer(C_INT) ::  m, mm1, to, from
     real(C_DOUBLE), intent(in) :: ODE(1:3)
     type(MPI_Request), dimension(:) :: requests(6 + 3*nPhi)
     type(MPI_Status)  :: status
 
     ! Reverse pass to build rVVdx
-    do m = 6 + 3*nPhi, 0, -1
-      mp1 = m + 1
-      if (m >= 1) then
-        to = mod(m - 1, 2) + 1
-        ! Build, HFT, pack and post nonblocking alltoall
+    DO m = 1, MERGE(6 + 3*nPhi + 1, 6 + 3*nPhi, overlapping)
+
+      ! Buffer indices depend on overlap mode
+
+      mm1 = MERGE(m - 1, m, overlapping)
+      to = MERGE(mod(m - 1, 2) + 1, 1, overlapping)
+      from = MERGE(mod(m, 2) + 1, 1, overlapping)
+
+      ! Step 1: Build, HFT, pack, and post alltoall
+      if (m <= 6 + 3*nPhi) then
         call build_products(m, to)
         call HFT(products(:, :, :, to), VVdx(:, :, :, to), ny)
         call pack_xTOz(VVdx(:, :, :, to), sendbuf(:, to), ny)
         call alltoall(sendbuf(:, to), recvbuf(:, to), requests(m))
       end if
 
-      if (m < 6 + 3*nPhi) then
-        from = mod(mp1 - 1, 2) + 1
-        ! Wait on the previous step to complete, unpack, and fft
-        call MPI_WAIT(requests(mp1), status, ierr)
+      ! Step 2: Wait, unpack, FFT, and build RHS
+      if (MERGE(m > 1, .true., overlapping)) then
+        call MPI_WAIT(requests(mm1), status, ierr)
         call unpack_xTOz(recvbuf(:, from), VVdz(:, :, :, from), ny)
         call FFT(VVdz(:, :, :, from), ny)
-        call buildrhs(ODE, mp1, from)
+        call buildrhs(ODE, mm1, from)
       end if
-    end do
+    END DO
   END SUBROUTINE transform_back_and_build_rhs
 
   !--------------------------------------------------------------!

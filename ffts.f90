@@ -42,10 +42,11 @@ MODULE ffts
 CONTAINS
 
 #ifdef HAVE_FFTW
-  SUBROUTINE init_fft(VVdz, VVdx, rVVdx, nxd, nxB, ny, nzd, nzB, nPhi, odd_n_real, s)
+  SUBROUTINE init_fft(VVdz, VVdx, rVVdx, nxd, nxB, ny, nzd, nzB, nPhi, overlapping, odd_n_real, s)
     integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, ny, nPhi
     complex(C_DOUBLE_COMPLEX), pointer, dimension(:, :, :, :), intent(out) :: VVdx, VVdz
     real(C_DOUBLE), pointer, dimension(:, :, :, :), intent(out) :: rVVdx
+    logical, intent(in) :: overlapping
     logical, optional, intent(in) :: odd_n_real
     integer, dimension(2), optional :: s
     integer, dimension(2) :: sn = 6
@@ -59,15 +60,17 @@ CONTAINS
     end if
     if (present(s)) sn = s
 
+    nflds = merge(2, 1, overlapping)
+
     sn(2) = ny + 3
     sn(1) = 6 + 3*nPhi
     !Allocate aligned memory
-    ptrVVdz = fftw_alloc_complex(int(nxB*nzd*2*sn(2), C_SIZE_T))
+    ptrVVdz = fftw_alloc_complex(int(nxB*nzd*nflds*sn(2), C_SIZE_T))
     ptrVVdx = fftw_alloc_complex(int((nxd + 1)*nzB*sn(1)*sn(2), C_SIZE_T))
 
     !Convert C to F pointer
-    CALL c_f_pointer(ptrVVdz, VVdz, [nzd, nxB, 2, sn(1)]); 
-    CALL c_f_pointer(ptrVVdx, VVdx, [nxd + 1, nzB, 2, sn(1)])
+    CALL c_f_pointer(ptrVVdz, VVdz, [nzd, nxB, nflds, sn(1)]); 
+    CALL c_f_pointer(ptrVVdx, VVdx, [nxd + 1, nzB, nflds, sn(1)])
     CALL c_f_pointer(ptrVVdx, rVVdx, [2*(nxd + 1), nzB, sn(2), sn(1)])
 
     !$omp target enter data map(to: VVdz)
@@ -80,18 +83,22 @@ CONTAINS
                                   VVdx(:, :, 1, 1), n_x + 1, 1, (nxd + 1), plan_type)
   END SUBROUTINE init_fft
 #elif defined HAVE_CUDA
-  SUBROUTINE init_cufft(nxd, nxB, ny, nzd, nzB, nPhi)
+  SUBROUTINE init_cufft(nxd, nxB, ny, nzd, nzB, nPhi, overlapping)
     use cufft
     IMPLICIT NONE
     integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, ny, nPhi
+    logical, intent(in) :: overlapping
     integer :: istat
     integer, dimension(1) :: n, inembed, onembed
     integer :: batch, idist, odist, istride, ostride
+    integer :: nflds
 
-    allocate (VVdz(nzd, nxB, ny + 3, 2))
-    allocate (VVdx(nxd + 1, nzB, ny + 3, 2))
+    nflds = merge(2, 1, overlapping)
+
+    allocate (VVdz(nzd, nxB, ny + 3, nflds))
+    allocate (VVdx(nxd + 1, nzB, ny + 3, nflds))
     allocate (rVVdx(2*(nxd + 1), nzB, ny + 3, 3 + nPhi))
-    allocate (products(2*(nxd + 1), nzB, ny + 3, 2))
+    allocate (products(2*(nxd + 1), nzB, ny + 3, nflds))
     !$omp target enter data map(to: VVdz, VVdx, rVVdx, products)
 
     !FFTs plans
@@ -124,19 +131,22 @@ CONTAINS
 
   END SUBROUTINE init_cufft
 #elif defined(HAVE_HIP)
-  SUBROUTINE init_hipfft(nxd, nxB, ny, nzd, nzB, nPhi)
+  SUBROUTINE init_hipfft(nxd, nxB, ny, nzd, nzB, nPhi, overlapping)
     use hipfort
     use hipfort_hipfft
     IMPLICIT NONE
     integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, ny, nPhi
+    logical, intent(in) :: overlapping
     integer :: istat
     integer, dimension(1), target :: n, inembed, onembed
     integer(C_INT) :: batch, idist, odist, istride, ostride
 
-    allocate (VVdz(nzd, nxB, ny + 3, 2))
-    allocate (VVdx(nxd + 1, nzB, ny + 3, 2))
+    nflds = merge(2, 1, overlapping)
+
+    allocate (VVdz(nzd, nxB, ny + 3, nflds))
+    allocate (VVdx(nxd + 1, nzB, ny + 3, nflds))
     allocate (rVVdx(2*(nxd + 1), nzB, ny + 3, 3 + nPhi))
-    allocate (products(2*(nxd + 1), nzB, ny + 3, 2))
+    allocate (products(2*(nxd + 1), nzB, ny + 3, nflds))
     !$omp target enter data map(to: VVdz, VVdx, rVVdx, products)
 
     !FFTs plans
