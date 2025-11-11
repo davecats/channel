@@ -1,13 +1,13 @@
-251       250     257                    ! nx, ny, nz
-0.25       1.0                            ! alfa0 beta0  
-9085                                    ! ni
-1.66       0.0    2.0                     ! a, ymin, ymax
+5         16    8                    ! nx, ny, nz
+0.5       1.0                            ! alfa0 beta0  
+12431                                    ! ni
+1.5       0.0    2.0                     ! a, ymin, ymax
 0.0       0.0                            ! meanpx, meanpz
 2.0       0.0                            ! meanflowx meanflowz
 0.0       2.0                            ! meantx,meantb 
 0.0       0.0    0.0         0.0         ! u0 uN t0 tn
-0
+2
 0.5 2                                      ! pr(1:nPhi)
 0.0       1.0    0.0                     ! deltat, cflmax, time
 30       -1      7000        .TRUE.      ! dt_field, dt_save, t_max, time_from_restart
-5                                        ! nstep
+3                                        ! nstep

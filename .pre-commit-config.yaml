@@ -1,0 +1,10 @@
+repos:
+  - repo: local
+    hooks:
+      - id: fprettify
+        name: fprettify
+        entry: fprettify -i 2 -w 2
+        language: python
+        types: [fortran]
+        additional_dependencies: [fprettify]
+        files: '\.f90$|\.fypp$'
