@@ -185,47 +185,6 @@ CONTAINS
     allocate (fr(3 + 2*nPhi)); fr = 0.0
   END SUBROUTINE init_memory
 
-  !-------------------------------------------------------------------------------------!
-  !--------------- Move cursor to correct instant in time in Runtimedata ---------------!
-  SUBROUTINE get_record(threshold)
-  IMPLICIT NONE
-    REAL(C_DOUBLE), INTENT(IN) :: threshold
-    REAL(C_DOUBLE) :: selectime,a,b,c,d,e,f,g,h,i,curr_dt
-    INTEGER :: negative_if_eof = 0 
-    LOGICAL :: threshold_reached=.FALSE.
-    IF (has_terminal) THEN
-      DO WHILE (.NOT. threshold_reached .AND. negative_if_eof >= 0)
-        READ(101,*,IOSTAT=negative_if_eof) selectime,a,b,c,d,e,f,g,h,i,curr_dt
-        threshold_reached = ABS(selectime - threshold) < (0.5*curr_dt)
-      END DO
-      IF (negative_if_eof >= 0) THEN
-        BACKSPACE(101)
-        PRINT *, 'In Runtimedata: starting from time', selectime
-        deltat = curr_dt ! this is only executed by machine WITH TERMINAL!
-      ELSE
-        PRINT *, ''
-        PRINT *, '###############'
-        PRINT *, '#   WARNING   #'
-        PRINT *, '###############'
-        PRINT *, 'No instant of time matching restart file has been found in Runtimedata.'
-        PRINT *, ''
-        WRITE(101,*) ''
-#ifdef warnings_are_fatal
-        WRITE(*,*) 'Stopping!'
-        STOP
-#endif
-        CALL wanna_continue()
-        PRINT *, 'Skipping one line and appending.'
-      END IF
-    END IF
-
-    ! Broadcast deltat of machine with terminal to the remaining ones.
-    ! This is not always needed, but it is if the deltat = curr_dt
-    ! instruction above has been executed.
-    CALL MPI_bcast(deltat,1,MPI_DOUBLE_PRECISION,0,MPI_COMM_WORLD) ! iproc == 0 has terminal
-
-  END SUBROUTINE get_record
-
   !--------------------------------------------------------------!
   !--------------- Deallocate memory for solution ---------------!
   SUBROUTINE free_memory(solveNS)
@@ -244,14 +203,6 @@ CONTAINS
       IF (has_terminal) CLOSE (UNIT=121)
     END IF
   END SUBROUTINE free_memory
-
-  !--------------------------------------------------------------!
-  !---------------------- Define body force ---------------------!
-#ifdef bodyforce
-#include BODYFORCE_MODULES
-! select your bodyforce here from folder body_forces
-! notice that you also need to uncomment the flag in header.h
-#endif
 
   !--------------------------------------------------------------!
   !--------------- Set-up the compact derivatives ---------------!
@@ -1152,7 +1103,6 @@ CONTAINS
 #ifdef HAVE_MPI
     INTEGER(MPI_OFFSET_KIND) :: disp = 3*C_INT + 7*C_DOUBLE
     TYPE(MPI_File) :: fh
-    real(C_DOUBLE) :: rn(1:3)
 
     OPEN (UNIT=120, FILE=TRIM(filename), access="stream", status="old", action="read", iostat=io)
     IF (io == 0) THEN
@@ -1195,103 +1145,6 @@ CONTAINS
     CLOSE (120)
   END SUBROUTINE read_restart_file
 
-#ifdef ibm
-  !--------------------------------------------------------------!
-  !---------------------- read_body_file ------------------------! 
-  SUBROUTINE read_body_file(filename,R)
-    real(C_DOUBLE), intent(INOUT) :: R(1:,1:,ny0-2:,1:)
-    character(len=40), intent(IN) :: filename
-    integer(C_SIZE_T) :: iV,nV,ix,iy,iz,io,nxB_t,nx_t,nz_t,ny_t,iproc_t,br=8,bc=16,b1=1,b7=7,b3=3
-    integer(C_SIZE_T) :: pos
-    nV=SIZE(R,4)
-    OPEN(UNIT=100,FILE=TRIM(filename),access="stream",status="old",action="read",iostat=io)
-    nx_t=2*nxd; ny_t=ny+3; nz_t=nzd; nV=SIZE(R,4)
-    IF (io==0) THEN
-      IF (has_terminal) WRITE(*,*) "Reading "//TRIM(ADJUSTL(filename))//" ..."
-       DO iV=1,nV
-        DO iy=ny0-2,nyN+2
-          DO iz=nz0,nzN
-              pos=b1+br*(INT(iV-1,C_SIZE_T))*nx_t*nz_t*ny_t + &
-                     br*(INT(iy+1,C_SIZE_T))*nx_t*nz_t + &
-                     br*(INT(iz,  C_SIZE_T))*nx_t
-              READ(100,POS=pos) R(:,iz-nz0+1,iy,iV)
-          END DO
-        END DO
-       END DO
-      CLOSE(100)
-    ELSE
-      IF (has_terminal) WRITE(*,*) TRIM(ADJUSTL(filename)) // " not loaded: file does not exist"
-    END IF
-  END SUBROUTINE read_body_file
-
-  !--------------------------------------------------------------!
-  !---------------------- save_body_file ------------------------! 
-  SUBROUTINE save_body_file(filename,R)
-    real(C_DOUBLE), intent(IN) :: R(1:,1:,ny0-2:,1:)
-    character(len=40), intent(IN) :: filename
-    integer(C_SIZE_T) :: iV,nV,ix,iy,iz,io,i,nxB_t,nx_t,nz_t,ny_t,iproc_t,br=8,bc=16,b1=1,b7=7,b3=3
-    integer(C_SIZE_T) :: pos
-    nV=SIZE(R,4)
-    DO i=0,nproc-1
-      IF (i==iproc) THEN
-      OPEN(UNIT=100,FILE=TRIM(filename),access="stream",action="write")
-      nx_t=2*nxd; ny_t=ny+3; nz_t=nzd
-        IF (has_terminal) WRITE(*,*) "Writing "//TRIM(ADJUSTL(filename))//" ..."
-        DO iV=1,nV
-          DO iy=ny0-2,nyN+2
-            DO iz=nz0,nzN
-                pos=b1+br*(INT(iV-1,C_SIZE_T))*nx_t*nz_t*ny_t + &
-                       br*(INT(iy+1,C_SIZE_T))*nx_t*nz_t + &
-                       br*(INT(iz,  C_SIZE_T))*nx_t
-                WRITE(100,POS=pos) R(:,iz-nz0+1,iy,iV)
-            END DO
-          END DO
-        END DO
-        CLOSE(100)
-      END IF
-      CALL MPI_Barrier(MPI_COMM_WORLD)
-    END DO
-  END SUBROUTINE save_body_file
-
-!  !--------------------------------------------------------------!
-!  !------------------ define where the body is ------------------!
-!  PURE FUNCTION InBody(ix,iz,iy)
-!     integer(C_INT), intent(in) :: ix,iz,iy
-!     integer(C_INT) :: InBody
-!     InBody = MERGE(1,0,( MOD(iz-1,nzd/8) < MAX(0,16-NINT(16*MERGE(ymax-y(iy),y(iy),y(iy)>1)/0.2)) ) ) 
-!  END FUNCTION InBody
-#endif
-
-#ifdef convvel
-  !--------------------------------------------------------------!
-  !-------------------- save_convvel_file -----------------------! 
-  SUBROUTINE save_convvel_file(filename,R)
-    real(C_DOUBLE), intent(IN) :: R(1:,1:,ny0-2:,1:)
-    character(len=40), intent(IN) :: filename
-    integer(C_SIZE_T) :: iV,nV,ix,iy,iz,io,i,nxB_t,nx_t,nz_t,ny_t,iproc_t,br=8,bc=16,b1=1,b7=7,b3=3
-    integer(C_SIZE_T) :: pos
-    nV=SIZE(R,4)
-    DO i=0,nproc-1
-      IF (i==iproc) THEN
-        OPEN(UNIT=100,FILE=TRIM(filename),access="stream",action="write")
-        nx_t=nx+1; ny_t=ny+3; nz_t=nzd
-        DO iV=1,nV
-          DO iy=miny,maxy
-            DO ix=nx0,nxN
-              pos=b1+br*(INT(iV-1,C_SIZE_T))*nx_t*nz_t*ny_t + &
-                     br*(INT(iy+1,C_SIZE_T))*nx_t*nz_t + &
-                     br*(INT(ix,C_SIZE_T))*nz_t
-              WRITE(100,POS=pos) R(:,ix-nx0+1,iy,iV)
-            END DO
-          END DO
-         END DO
-         CLOSE(100)
-      END IF
-      CALL MPI_Barrier(MPI_COMM_WORLD)
-    END DO
-  END SUBROUTINE save_convvel_file
-#endif
-
   !--------------------------------------------------------------!
   !-------------------- save_restart_file -----------------------!
   SUBROUTINE save_restart_file(filename, R)
@@ -1325,7 +1178,6 @@ CONTAINS
     call MPI_File_close(fh)
 #endif
   END SUBROUTINE save_restart_file
-
 
   !--------------------------------------------------------------!
   !------------------------- outstats ---------------------------!
