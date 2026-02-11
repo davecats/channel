@@ -9,8 +9,11 @@
 #define useFFTfit
 
 ! Scalar equations
-#define nPhi 1
+#define nPhi 3
 !#define phiNeumann
+
+! Scalar forcing
+!#define homogeneousHeatSource
 
 ! half or full channel
 !#define halfchannel

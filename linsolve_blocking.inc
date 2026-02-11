@@ -131,12 +131,14 @@
               corrpz = (meanflowz-fr(2))/fr(3)
               V(:,0,0,3)=dcmplx(dreal(V(:,0,0,3))+corrpz*dreal(ucor),dimag(V(:,0,0,3)))
             END IF
+#ifdef homogeneousHeatSource
             IF (abs(meantb)>1.0d-7) THEN
 	      DO iPhi=1,nPhi
                 corrtx(iPhi) = (meantb-fr(3+iPhi))/fr(3+nPhi+iPhi)
                 V(:,0,0,3+iPhi)=dcmplx(dreal(V(:,0,0,3+iPhi))+corrtx(iPhi)*dreal(tcor(:,iPhi)),dimag(V(:,0,0,3+iPhi)))
               END DO
             END IF
+#endif 
             IF (CPI) THEN
               SELECT CASE (CPI_type)
                  CASE (0)

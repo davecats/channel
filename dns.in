@@ -7,8 +7,9 @@
 2.0       0.0                            ! meanflowx meanflowz
 0.0       2.0                            ! meantx,meantb 
 0.0       0.0    0.0         0.0         ! u0 uN t0 tn
-1.0                                      ! pr(1:nPhi)
+0.025     0.71   1.0                     ! pr(1:nPhi)
+.FALSE.					 ! isoflux
 0.0       1.0    0.0                     ! deltat, cflmax, time
-5        -1     1200        .FALSE.      ! dt_field, dt_save, t_max, time_from_restart
+5         -1     2000        .TRUE.      ! dt_field, dt_save, t_max, time_from_restart
 999999                                   ! nstep
 1                                        ! npy (no. processes y)

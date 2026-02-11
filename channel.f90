@@ -52,7 +52,8 @@ PROGRAM channel
   CALL read_restart_file(fname,V)
   ! move cursor to desired record
   IF (time_from_restart .AND. rtd_exists) THEN
-    CALL get_record(time)
+    CALL get_record(time,4*nPhi,195)
+    CALL get_record(time,9,101)
   ELSE IF (.NOT. time_from_restart) THEN
     CALL read_dnsin()
   END IF
@@ -126,21 +127,31 @@ END IF
       bc0(0,0)%u=u0; bcn(0,0)%u=uN
     END IF
     DO iPhi=1,nPhi
-       DO ix=nx0,nxN
-         DO iz=-nz,nz
-            ! Neumann, but explicit
-            ! bc0(iz,ix)%phi(iPhi)=(-sum(d140(-2:2)*V(-1:3,iz,ix,3+iPhi))+d140(-1)*V(0,iz,ix,3+iPhi))/d140(-1)
-            ! bcn(iz,ix)%phi(iPhi)=(-sum(d14n(-2:2)*V(ny-3:ny+1,iz,ix,3+iPhi))+d14n(1)*V(ny,iz,ix,3+iPhi))/d14n(1)
-            ! Dirichlet
-            IF (ix==0 .and. iz==0) THEN 
-              bc0(iz,ix)%phi(iPhi)=t0
-              bcn(iz,ix)%phi(iPhi)=tn
-            ELSE 
-              bc0(iz,ix)%phi=0
-              bcn(iz,ix)%phi=0
-            END IF
-         END DO 
-       END DO
+       IF (isoflux) THEN ! Neumann, but explicit
+              DO ix=nx0,nxN
+		 DO iz=-nz,nz
+		    IF (ix==0 .and. iz==0) THEN 
+		      bc0(iz,ix)%phi(iPhi)=(t0-sum(d140(-2:2)*V(-1:3,iz,ix,3+iPhi))+d140(-1)*V(0,iz,ix,3+iPhi))/d140(-1)
+		      bcn(iz,ix)%phi(iPhi)=(-tn-sum(d14n(-2:2)*V(ny-3:ny+1,iz,ix,3+iPhi))+d14n(1)*V(ny,iz,ix,3+iPhi))/d14n(1)
+		    ELSE 
+		      bc0(iz,ix)%phi(iPhi)=(-sum(d140(-2:2)*V(-1:3,iz,ix,3+iPhi))+d140(-1)*V(0,iz,ix,3+iPhi))/d140(-1)
+		      bcn(iz,ix)%phi(iPhi)=(-sum(d14n(-2:2)*V(ny-3:ny+1,iz,ix,3+iPhi))+d14n(1)*V(ny,iz,ix,3+iPhi))/d14n(1)
+		    END IF
+		 END DO 
+	       END DO
+       ELSE 		! Dirichlet
+              DO ix=nx0,nxN
+		 DO iz=-nz,nz
+		    IF (ix==0 .and. iz==0) THEN 
+		      bc0(iz,ix)%phi(iPhi)=t0
+		      bcn(iz,ix)%phi(iPhi)=tn
+		    ELSE 
+		      bc0(iz,ix)%phi=0
+		      bcn(iz,ix)%phi=0
+		    END IF
+		 END DO 
+	       END DO
+       END IF 
     END DO 
     ! Increment number of steps
     istep=istep+1

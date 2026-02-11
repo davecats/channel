@@ -27,6 +27,7 @@ MODULE dnsdata
   integer(C_INT) :: ny,nz,nxd
   real(C_DOUBLE) :: alfa0,beta0,ni,a,ymin,ymax,deltat,cflmax,time,time0=0,dt_field,dt_save,t_max,gamma
   real(C_DOUBLE) :: pr(1:nPhi)
+  logical        :: isoflux 
   real(C_DOUBLE) :: u0,uN,t0,tn
   logical :: CPI
   integer(C_INT) :: CPI_type
@@ -119,6 +120,7 @@ MODULE dnsdata
     READ(15, *) meanpx, meanpz; READ(15, *) meanflowx, meanflowz; READ(15, *) meantx, meantb
     READ(15, *) u0,uN,t0,tN
     READ(15, *) pr(1:nPhi); DO iPhi=1,nPhi; pr(iPhi)=1/pr(iPhi); END DO
+    READ(15, *) isoflux
     READ(15, *) deltat, cflmax, time
     READ(15, *) dt_field, dt_save, t_max, time_from_restart
     READ(15, *) nstep
@@ -160,12 +162,12 @@ MODULE dnsdata
     izd=(/(merge(iz,nzd+iz,iz>=0),iz=-nz,nz)/);     ialfa=(/(dcmplx(0.0d0,ix*alfa0),ix=nx0,nxN)/);
     ibeta=(/(dcmplx(0.0d0,iz*beta0),iz=-nz,nz)/); 
     FORALL  (iz=-nz:nz,ix=nx0:nxN) k2(iz,ix)=(alfa0*ix)**2.0d0+(beta0*iz)**2.0d0
-    OPEN(UNIT=195,FILE='Runtimedata.phi',ACTION='write')
-    INQUIRE(FILE="Runtimedata", EXIST=rtd_exists)
+    INQUIRE(FILE="Runtimedata.phi", EXIST=rtd_exists)
     IF (solveNS .AND. has_terminal) THEN
       IF (time_from_restart .AND. rtd_exists) THEN
         WRITE(*,*) 'Found existing Runtimedata...'
         OPEN(UNIT=101,FILE='Runtimedata',ACTION='readwrite')
+        OPEN(UNIT=195,FILE='Runtimedata.phi',ACTION='readwrite')
       ELSE
         IF (time_from_restart) THEN
           WRITE(*,*) 'Runtimedata not found...'
@@ -177,26 +179,33 @@ MODULE dnsdata
         END IF
         WRITE(*,*) 'Creating new Runtimedata.'
         OPEN(UNIT=101,FILE='Runtimedata',ACTION='write')
+        OPEN(UNIT=195,FILE='Runtimedata.phi',ACTION='write')
       END IF
     END IF
   END SUBROUTINE init_memory
 
   !-------------------------------------------------------------------------------------!
   !--------------- Move cursor to correct instant in time in Runtimedata ---------------!
-  SUBROUTINE get_record(threshold)
+  SUBROUTINE get_record(threshold,nCols,fh)
   IMPLICIT NONE
+    INTEGER(C_INT), INTENT(IN) :: nCols
+    INTEGER(C_INT), INTENT(IN) :: fh
     REAL(C_DOUBLE), INTENT(IN) :: threshold
-    REAL(C_DOUBLE) :: selectime,a,b,c,d,e,f,g,h,i,curr_dt
-    INTEGER :: negative_if_eof = 0 
-    LOGICAL :: threshold_reached=.FALSE.
+    REAL(C_DOUBLE) :: selectime,cols(1:nCols),curr_dt
+    INTEGER :: negative_if_eof  
+    LOGICAL :: threshold_reached
+    CHARACTER(len=40)  :: filename
+    negative_if_eof = 0
+    threshold_reached = .FALSE.
     IF (has_terminal) THEN
+      INQUIRE(UNIT=fh, NAME=filename)
       DO WHILE (.NOT. threshold_reached .AND. negative_if_eof >= 0)
-        READ(101,*,IOSTAT=negative_if_eof) selectime,a,b,c,d,e,f,g,h,i,curr_dt
+        READ(fh,*,IOSTAT=negative_if_eof) selectime,cols,curr_dt
         threshold_reached = ABS(selectime - threshold) < (0.5*curr_dt)
       END DO
       IF (negative_if_eof >= 0) THEN
-        BACKSPACE(101)
-        PRINT *, 'In Runtimedata: starting from time', selectime
+        BACKSPACE(fh)
+        PRINT *, 'In ', filename,' : starting from time', selectime
         deltat = curr_dt ! this is only executed by machine WITH TERMINAL!
       ELSE
         PRINT *, ''
@@ -205,7 +214,7 @@ MODULE dnsdata
         PRINT *, '###############'
         PRINT *, 'No instant of time matching restart file has been found in Runtimedata.'
         PRINT *, ''
-        WRITE(101,*) ''
+        WRITE(fh,*) ''
 #ifdef warnings_are_fatal
         WRITE(*,*) 'Stopping!'
         STOP
@@ -230,6 +239,7 @@ MODULE dnsdata
     IF (solveNS) THEN
       DEALLOCATE(memrhs,oldrhs,bc0,bcn)
       IF (has_terminal) CLOSE(UNIT=101)
+      IF (has_terminal) CLOSE(UNIT=195)
     END IF
   END SUBROUTINE free_memory
 
@@ -621,6 +631,11 @@ MODULE dnsdata
     real(C_DOUBLE), intent(in) :: ODE(1:3)
     integer(C_INT) :: iy,iz,ix,i,im2,im1,i0,i1,i2,iPhi
     complex(C_DOUBLE_COMPLEX) :: rhsu,rhsv,rhsw,rhst,DD0_6,DD1_6,expl
+    real(C_DOUBLE) :: Ubm1
+#ifndef homogenenousHeatSource
+    CALL MPI_Bcast(fr,3,MPI_DOUBLE_PRECISION,0,MPI_COMM_WORLD)
+    Ubm1 = (ymax-ymin)/(fr(1)+corrpx*fr(3)) 
+#endif
 #ifdef bodyforce
     IF (first) THEN 
         iy=1; F(-1:0,:,:,:)=0
@@ -669,7 +684,10 @@ MODULE dnsdata
               timescheme(newrhs(iy,iz,ix)%eta, oldrhs(iy,iz,ix)%eta,ibeta(iz)*D0(V,1)-ialfa(ix)*D0(V,3),sum(SQ(iy,-2:2)*[ibeta(iz)*V(iy-2:iy+2,iz,ix,1)-ialfa(ix)*V(iy-2:iy+2,iz,ix,3)]),expl) !(eta)
             END IF
             DO iPhi=1,nPhi
-                rhst=-ialfa(ix)*DD(d0,6+3*(iPhi-1)+1)-DD(d1,6+3*(iPhi-1)+2)-ibeta(iz)*DD(d0,6+3*(iPhi-1)+3)
+                rhst=-ialfa(ix)*DD(d0,6+3*(iPhi-1)+1)-DD(d1,6+3*(iPhi-1)+2)-ibeta(iz)*DD(d0,6+3*(iPhi-1)+3) + meantx
+#ifndef homogeneousHeatSource
+                rhst = rhst + V(iy,iz,ix,1)*Ubm1
+#endif
                 timescheme(newrhs(iy,iz,ix)%phi(iPhi), oldrhs(iy,iz,ix)%phi(iPhi),D0(V,3+iPhi),pr(iPhi)*sum(SQ(iy,-2:2)*V(iy-2:iy+2,iz,ix,3+iPhi)),rhst) !(Phi)
             END DO
         END DO
@@ -717,21 +735,13 @@ MODULE dnsdata
         IF (has_terminal) PRINT *, nx, ny, nz, alfa0, beta0, ni, a, ymin, ymax
         STOP
       END IF
-      DO iPhi=1,nPhi
-         R(:,:,:,3+iPhi)=0
-         IF (has_average) THEN
-            DO CONCURRENT (iy=ny0-2:nyN+2)
-              R(iy,0,0,3+iPhi)=3*0.5*y(iy)*(2-y(iy))
-            END DO
-         END IF
-      END DO
     ELSE
       CLOSE(100)
       R=0
       IF (has_terminal) WRITE(*,*) "Generating initial field..."
       DO iy=ny0-2,nyN+2; DO ix=nx0,nxN; DO iz=-nz,nz
           CALL RANDOM_NUMBER(rn)
-          R(iy,iz,ix,1) = 0.00*EXP(dcmplx(0,rn(1)-0.5));  R(iy,iz,ix,2) = 0.00*EXP(dcmplx(0,rn(2)-0.5));  R(iy,iz,ix,3) = 0.00*EXP(dcmplx(0,rn(3)-0.5));
+          R(iy,iz,ix,1) = 0.000154*EXP(dcmplx(0,rn(1)-0.5));  R(iy,iz,ix,2) = 0.000154*EXP(dcmplx(0,rn(2)-0.5));  R(iy,iz,ix,3) = 0.000154*EXP(dcmplx(0,rn(3)-0.5));
       END DO;        END DO;        END DO
       IF (has_average) THEN
         DO CONCURRENT (iy=ny0-2:nyN+2)
@@ -911,7 +921,7 @@ MODULE dnsdata
      WRITE(*,"(F10.4,3X,4(F11.6,3X),4(F9.4,3X),2(F9.6,3X))") &
            time,dudy(1,1),dudy(1,2),dudy(2,1),dudy(2,2),fr(1)+corrpx*fr(3),meanpx+corrpx,fr(2)+corrpz*fr(3),meanpz+corrpz,runtime_global*deltat,deltat
      WRITE(101,*) time,dudy(1,1),dudy(1,2),dudy(2,1),dudy(2,2),fr(1)+corrpx*fr(3),meanpx+corrpx,fr(2)+corrpz*fr(3),meanpz+corrpz,runtime_global*deltat,deltat
-     WRITE(195,*) time,dudy(3:,1),dudy(3:,2),fr(4:3+nPhi)+corrtx(:)*fr(3+nPhi+1:3+2*nPhi),corrtx+meantx
+     WRITE(195,*) time,dudy(3:,1),dudy(3:,2),fr(4:3+nPhi)+corrtx(:)*fr(3+nPhi+1:3+2*nPhi),corrtx+meantx,deltat
      FLUSH(101); FLUSH(195)
    END IF
    runtime_global=0
