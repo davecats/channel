@@ -693,6 +693,14 @@ MODULE dnsdata
       call MPI_file_set_view(fh, disp, MPI_DOUBLE_COMPLEX, vel_read_type, 'native', MPI_INFO_NULL)
       call MPI_file_read_all(fh, R, 1, vel_field_type, MPI_STATUS_IGNORE)
       call MPI_file_close(fh)
+      IF (r_nx /= nx .OR. r_ny /= ny .OR. r_nz /= nz .OR. r_alfa0 /= alfa0 .OR. r_beta0 /= beta0 .OR. r_ni /= ni .OR. r_a /= a .OR. r_ymin /= ymin .OR. r_ymax /= ymax) THEN
+        IF (has_terminal) PRINT *, "ERROR: mismatch in metadata between restart file and dns.in. Stopping."
+        IF (has_terminal) PRINT *, "From .out file:"
+        IF (has_terminal) PRINT *, r_nx, r_ny, r_nz, r_alfa0, r_beta0, r_ni, r_a, r_ymin, r_ymax
+        IF (has_terminal) PRINT *, "From dns.in:"
+        IF (has_terminal) PRINT *, nx, ny, nz, alfa0, beta0, ni, a, ymin, ymax
+        STOP
+      END IF
     ELSE
       CLOSE(100)
       R=0
@@ -708,14 +716,6 @@ MODULE dnsdata
           !V(iy,0,0,1)=y(iy)-1
         END DO
       END IF
-    END IF
-    IF (r_nx /= nx .OR. r_ny /= ny .OR. r_nz /= nz .OR. r_alfa0 /= alfa0 .OR. r_beta0 /= beta0 .OR. r_ni /= ni .OR. r_a /= a .OR. r_ymin /= ymin .OR. r_ymax /= ymax) THEN
-      IF (has_terminal) PRINT *, "ERROR: mismatch in metadata between restart file and dns.in. Stopping."
-      IF (has_terminal) PRINT *, "From .out file:"
-      IF (has_terminal) PRINT *, r_nx, r_ny, r_nz, r_alfa0, r_beta0, r_ni, r_a, r_ymin, r_ymax
-      IF (has_terminal) PRINT *, "From dns.in:"
-      IF (has_terminal) PRINT *, nx, ny, nz, alfa0, beta0, ni, a, ymin, ymax
-      STOP
     END IF
   END SUBROUTINE read_restart_file
 
