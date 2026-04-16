@@ -1,6 +1,5 @@
 # channel
-
-<img align="left" src="https://github.com/davecats/channel/blob/master/cover_title.png">
+<img align="left" src="https://github.com/davecats/channel/blob/master/cover_title.png" width="48">
 
 > [Required dependencies](#dependencies)<br/>
 > [Download and compile](#compile)<br/>
