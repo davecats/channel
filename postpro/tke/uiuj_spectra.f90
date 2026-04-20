@@ -336,8 +336,6 @@ integer(MPI_OFFSET_KIND) :: offset
         close(15)
     end if
 
-    ! FIN QUI
-
     ! write to disk
     currfname = "uiuj_spectra.bin"
     call MPI_File_open(MPI_COMM_WORLD, trim(currfname), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
@@ -357,10 +355,10 @@ integer(MPI_OFFSET_KIND) :: offset
         CALL MPI_File_set_view(fh, offset, MPI_DOUBLE_PRECISION, profiles_write_type, 'native', MPI_INFO_NULL)
         CALL MPI_File_write_all(fh, uiujprofiles, 1, profiles_inmem_type, MPI_STATUS_IGNORE)
 
-        ! write convs data
-        offset = offset + ( int(ny+3,MPI_OFFSET_KIND) * 60_MPI_OFFSET_KIND * sizeof(uiujprofiles(1,1,1)) ) ! DON'T DO SIZEOF(uiujprofiles)! Program is PARALLEL!!!
-        CALL MPI_File_set_view(fh, offset, MPI_DOUBLE_PRECISION, convs_write_type, 'native', MPI_INFO_NULL)
-        CALL MPI_File_write_all(fh, convs, 1, convs_inmem_type, MPI_STATUS_IGNORE)
+        ! write convs data - NOT IMPLEMENTED YET!
+        !offset = offset + ( int(ny+3,MPI_OFFSET_KIND) * 60_MPI_OFFSET_KIND * sizeof(uiujprofiles(1,1,1)) ) ! DON'T DO SIZEOF(uiujprofiles)! Program is PARALLEL!!!
+        !CALL MPI_File_set_view(fh, offset, MPI_DOUBLE_PRECISION, convs_write_type, 'native', MPI_INFO_NULL)
+        !CALL MPI_File_write_all(fh, convs, 1, convs_inmem_type, MPI_STATUS_IGNORE)
 
     call MPI_File_close(fh)
 
@@ -545,7 +543,7 @@ contains !----------------------------------------------------------------------
             print *, ""
             print *, "This program is meant to be used on plane channels."
             print *, ""
-            print *, "Results are output to uiuj_spectra/uiuj_spectra.bin."
+            print *, "Results are output to uiuj_spectra.bin. Input (dns.in) is read from parent folder."
             print *, ""
             print *, "Mean TKE budget terms are calculated as:"
             print *, "INST    --> dK/dt"
