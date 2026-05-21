@@ -31,6 +31,7 @@ MODULE ffts
 #elif defined(HAVE_FFTW)
   INCLUDE 'fftw3.f03'
   integer, save        :: plan_type = FFTW_PATIENT
+  real(C_DOUBLE), dimension(:, :, :, :), pointer :: products
   TYPE(C_PTR), save    :: pFFT, pIFT, pRFT, pHFT, ptrVVdx, ptrVVdz, ptrFdx, ptrFdz
 #endif
 #ifdef HAVE_CUDA
@@ -52,6 +53,7 @@ CONTAINS
     integer, dimension(2) :: sn = 6
 
     integer(C_INT), dimension(1) :: n_z, n_x, rn_x
+    integer :: nflds
     n_z = [nzd]; n_x = [nxd]; rn_x = [2*nxd]; 
     if (present(odd_n_real)) then
       ! notice: odd_n_real is basically .FALSE. by default
@@ -66,12 +68,14 @@ CONTAINS
     sn(1) = 6 + 3*nPhi
     !Allocate aligned memory
     ptrVVdz = fftw_alloc_complex(int(nxB*nzd*nflds*sn(2), C_SIZE_T))
-    ptrVVdx = fftw_alloc_complex(int((nxd + 1)*nzB*sn(1)*sn(2), C_SIZE_T))
+    ptrVVdx = fftw_alloc_complex(int((nxd + 1)*nzB*nflds*sn(2), C_SIZE_T))
+    ptrFdx = fftw_alloc_real(int(2*(nxd + 1)*nzB*(3 + nPhi)*sn(2), C_SIZE_T))
 
     !Convert C to F pointer
-    CALL c_f_pointer(ptrVVdz, VVdz, [nzd, nxB, nflds, sn(1)]); 
-    CALL c_f_pointer(ptrVVdx, VVdx, [nxd + 1, nzB, nflds, sn(1)])
-    CALL c_f_pointer(ptrVVdx, rVVdx, [2*(nxd + 1), nzB, sn(2), sn(1)])
+    CALL c_f_pointer(ptrVVdz, VVdz, [nzd, nxB, sn(2), nflds]); 
+    CALL c_f_pointer(ptrVVdx, VVdx, [nxd + 1, nzB, sn(2), nflds])
+    CALL c_f_pointer(ptrFdx, rVVdx, [2*(nxd + 1), nzB, sn(2), 3 + nPhi])
+    allocate (products(2*(nxd + 1), nzB, sn(2), nflds))
 
     !$omp target enter data map(to: VVdz)
     !FFTs plans
@@ -310,7 +314,8 @@ CONTAINS
     real(C_DOUBLE), pointer, dimension(:, :, :, :), intent(out) :: rVVdx
 
     !$omp target exit data map(from: VVdz)
-    CALL fftw_free(ptrVVdx); CALL fftw_free(ptrVVdz); 
+    if (associated(products)) deallocate (products)
+    CALL fftw_free(ptrFdx); CALL fftw_free(ptrVVdx); CALL fftw_free(ptrVVdz); 
   END SUBROUTINE free_fft
 #endif
 

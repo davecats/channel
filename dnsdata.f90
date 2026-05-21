@@ -173,7 +173,7 @@ CONTAINS
     ibeta = (/(dcmplx(0.0d0, iz*beta0), iz=-nz, nz)/); 
     FORALL (iz=-nz:nz, ix=nx0:nxN) k2(iz, ix) = (alfa0*ix)**2.0d0 + (beta0*iz)**2.0d0
     !$omp target enter data map(to: izd, ialfa, ibeta, k2, y, iy, rk_rai, ucor, tcor)
-    OPEN (UNIT=195, FILE='Runtimedata.phi', ACTION='write')
+    IF (solveNS) OPEN (UNIT=195, FILE='Runtimedata.phi', ACTION='write')
     IF (solveNS .AND. has_terminal) OPEN (UNIT=121, FILE='Runtimedata', ACTION='write')
 
     allocate (fr(3 + 2*nPhi)); fr = 0.0
@@ -186,14 +186,15 @@ CONTAINS
     LOGICAL, intent(IN) :: solveNS
     !$omp target exit data map(delete: d240, d24m1, d04n, d24n, d24np1, D0mat)
     !$omp target exit data map(delete: V)
-    !$omp target exit data map(delete: memrhs, oldrhs, bc0, bcn, linsolve_mat)
     !$omp target exit data map(delete: izd, ialfa, ibeta, k2, ucor, tcor)
 #ifdef bodyforce
     !$omp target exit data map(delete: F)
 #endif
-    DEALLOCATE (V, der, d0mat, linsolve_mat, y, dy)
+    DEALLOCATE (V, der, d0mat, y, dy)
     IF (solveNS) THEN
-      DEALLOCATE (memrhs, oldrhs, bc0, bcn)
+      !$omp target exit data map(delete: memrhs, oldrhs, bc0, bcn, linsolve_mat)
+      DEALLOCATE (memrhs, oldrhs, bc0, bcn, linsolve_mat)
+      CLOSE (UNIT=195)
       IF (has_terminal) CLOSE (UNIT=121)
     END IF
   END SUBROUTINE free_memory
