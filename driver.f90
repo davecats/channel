@@ -89,6 +89,10 @@ CONTAINS
       WRITE (*, "(A,F11.6,A,F11.6)") "   meanpx =", meanpx, "      meanpz =", meanpz
       WRITE (*, "(A,F11.6,A,F11.6)") "   meanflowx =", meanflowx, "   meanflowz =", meanflowz
       WRITE (*, "(A,I6,A,L1)") "   nsteps =", nstep, "   time_from_restart =", time_from_restart
+      WRITE (*, *) "NUM_SCALARS", nPhi, "PRANDTL NUMBERS:"
+      do iPhi = 1, nPhi
+        write (*, '(F10.4)') 1/pra(iPhi)
+      end do
       WRITE (*, *) " "
 
       print *, "Overlapping communication and computation:", overlapping

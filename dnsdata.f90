@@ -1122,12 +1122,14 @@ CONTAINS
       IF (has_terminal) WRITE (*, *) "Generating initial field..."
       DO iy = ny0 - 2, nyN + 2; DO ix = nx0, nxN; DO iz = -nz, nz
           CALL RANDOM_NUMBER(rn)
-          !R(iy,iz,ix,1) = 0.0001*EXP(dcmplx(0,rn(1)-0.5));  R(iy,iz,ix,2) = 0.0001*EXP(dcmplx(0,rn(2)-0.5));  R(iy,iz,ix,3) = 0.0001*EXP(dcmplx(0,rn(3)-0.5));
+          R(iy, iz, ix, 1) = 0.0000554*EXP(dcmplx(0, rn(1) - 0.5)); R(iy, iz, ix, 2) = 0.0000554*EXP(dcmplx(0, rn(2) - 0.5)); R(iy, iz, ix, 3) = 0.0000554*EXP(dcmplx(0, rn(3) - 0.5)); 
+          !!R(iy,iz,ix,1) = 0.0001*EXP(dcmplx(0,rn(1)-0.5));  R(iy,iz,ix,2) = 0.0001*EXP(dcmplx(0,rn(2)-0.5));  R(iy,iz,ix,3) = 0.0001*EXP(dcmplx(0,rn(3)-0.5));
         END DO; END DO; END DO
       IF (has_average) THEN
         DO iy = ny0 - 2, nyN + 2
-          R(iy, 0, 0, 1) = 3*0.5*y(iy)*(2 - y(iy)) + 0.01*SIN(8*y(iy)*2*PI)/ni
-          R(iy, 0, 0, 1) = y(iy)*(2 - y(iy))*3.d0/2.d0 + 0.001*SIN(8*y(iy)*2*PI); 
+          R(iy, 0, 0, 1) = 3*0.5*y(iy)*(2 - y(iy))
+          !R(iy, 0, 0, 1) = 3*0.5*y(iy)*(2 - y(iy)) + 0.01*SIN(8*y(iy)*2*PI)/ni
+          !R(iy, 0, 0, 1) = y(iy)*(2 - y(iy))*3.d0/2.d0 + 0.001*SIN(8*y(iy)*2*PI);
           !V(iy,0,0,1)=y(iy)-1
           DO iPhi = 1, nPhi
             R(iy, 0, 0, 3 + iPhi) = 3*0.5*y(iy)*(2 - y(iy))
@@ -1144,7 +1146,7 @@ CONTAINS
   !-------------------- save_restart_file -----------------------!
   SUBROUTINE save_restart_file(filename, R)
     IMPLICIT NONE
-    complex(C_DOUBLE_COMPLEX), intent(in) :: R(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: R(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3 + nPhi)
     character(len=*), intent(in) :: filename
     ! mpi stuff
 #ifdef HAVE_MPI
