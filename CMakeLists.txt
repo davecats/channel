@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(ChannelSolver LANGUAGES Fortran C)
 
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
 # --------------------------------------------------------------------
 # CMake module path (for custom FindFFTW)
 # --------------------------------------------------------------------
@@ -35,6 +37,9 @@ endif()
 # --------------------------------------------------------------------
 add_executable(channel ${SOURCES} channel.f90)
 target_link_libraries(channel PRIVATE channel_core)
+
+add_executable(post_pressure post_pressure.f90)
+target_link_libraries(post_pressure PRIVATE channel_core)
 
 # --------------------------------------------------------------------
 # Tests
@@ -119,6 +124,16 @@ add_test(NAME regression_test_scalar_4rank
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
 set_tests_properties(regression_test_scalar_4rank PROPERTIES PROCESSORS 4)
+
+set(POST_PRESSURE_NPROCS 1)
+set(POST_PRESSURE_EXE ${CMAKE_CURRENT_BINARY_DIR}/post_pressure)
+configure_file(cmake/run_post_pressure_test.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/run_post_pressure_test.cmake @ONLY)
+
+add_test(NAME post_pressure_1rank
+    COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_BINARY_DIR}/run_post_pressure_test.cmake
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(post_pressure_1rank PROPERTIES PROCESSORS 1)
 
 # --------------------------------------------------------------------
 # Compiler flags
