@@ -97,3 +97,8 @@ x1000*
 x1001*
 *.i
 *.csv
+
+fri*
+*-cpl.sh
+
+!tests/poisson/Dati.cart.35.out

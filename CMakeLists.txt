@@ -47,6 +47,9 @@ target_link_libraries(test_regression PRIVATE channel_core)
 add_executable(test_regression_scalar test_regression_scalar.f90)
 target_link_libraries(test_regression_scalar PRIVATE channel_core)
 
+add_executable(test_pressure_dpdy test_pressure_dpdy.f90)
+target_link_libraries(test_pressure_dpdy PRIVATE channel_core)
+
 # Add a CTest target
 enable_testing()
 
@@ -74,8 +77,28 @@ add_test(NAME regression_test_4rank
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
 set_tests_properties(regression_test_4rank PROPERTIES PROCESSORS 4)
-
-add_test(NAME regression_test_scalar_1rank
+ 
+ add_test(NAME pressure_dpdy_1rank
+    COMMAND ${MPIEXEC_EXECUTABLE}
+            ${MPIEXEC_NUMPROC_FLAG} 1
+            ${MPIEXEC_PREFLAGS}
+            $<TARGET_FILE:test_pressure_dpdy>
+            ${MPIEXEC_POSTFLAGS}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(pressure_dpdy_1rank PROPERTIES PROCESSORS 1 WILL_FAIL TRUE)
+ 
+ add_test(NAME pressure_dpdy_2rank
+    COMMAND ${MPIEXEC_EXECUTABLE}
+            ${MPIEXEC_NUMPROC_FLAG} 2
+            ${MPIEXEC_PREFLAGS}
+            $<TARGET_FILE:test_pressure_dpdy>
+            ${MPIEXEC_POSTFLAGS}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(pressure_dpdy_2rank PROPERTIES PROCESSORS 2 WILL_FAIL TRUE)
+ 
+ add_test(NAME regression_test_scalar_1rank
     COMMAND ${MPIEXEC_EXECUTABLE}
             ${MPIEXEC_NUMPROC_FLAG} 1
             ${MPIEXEC_PREFLAGS}

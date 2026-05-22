@@ -422,9 +422,9 @@ CONTAINS
   !- Left LU division of a banded matrix -!
   !---------------------------------------!
 #ifdef HAVE_CUDA
-  !$omp declare target(LeftLU5div)
+  !$omp declare target(LeftLU5Backsub)
 #endif
-  SUBROUTINE LeftLU5div(x, A, b)
+  SUBROUTINE LeftLU5Backsub(x, A, b)
     complex(C_DOUBLE_COMPLEX), intent(out) :: x(-2:)
     complex(C_DOUBLE_COMPLEX), intent(in) :: b(-2:)
     real(C_DOUBLE), intent(in)  :: A(0:, -2:)
@@ -432,27 +432,42 @@ CONTAINS
     HI1 = SIZE(A, 1) - 1
     HI2 = SIZE(A, 2) - 3
 
-    ! initialise x with rhs
-
     DO i = LBOUND(x, 1), UBOUND(x, 1)
       x(i) = b(i)
     END DO
 
-    ! backward substitution
     DO i = HI1 - HI2, 0, -1
       x(i) = x(i) - (A(i, 1)*x(i + 1) + A(i, 2)*x(i + 2))
       x(i) = x(i)*A(i, 0)
     END DO
+  END SUBROUTINE LeftLU5Backsub
 
-    ! forward substitution
+#ifdef HAVE_CUDA
+  !$omp declare target(LeftLU5Forwardsub)
+#endif
+  SUBROUTINE LeftLU5Forwardsub(x, A)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(-2:)
+    real(C_DOUBLE), intent(in)  :: A(0:, -2:)
+    integer(C_INT) :: HI1, i
+    HI1 = SIZE(A, 1) - 1
+
     DO i = 0, HI1
       x(i) = x(i) - (A(i, -2)*x(i - 2) + A(i, -1)*x(i - 1))
     END DO
+  END SUBROUTINE LeftLU5Forwardsub
 
+#ifdef HAVE_CUDA
+  !$omp declare target(LeftLU5div)
+#endif
+  SUBROUTINE LeftLU5div(x, A, b)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: x(-2:)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: b(-2:)
+    real(C_DOUBLE), intent(in)  :: A(0:, -2:)
+
+    CALL LeftLU5Backsub(x, A, b)
+    CALL LeftLU5Forwardsub(x, A)
   END SUBROUTINE LeftLU5div
 
-  !--------------------------------------------------------------!
-  !------------------- solve the linear system  -----------------!
   SUBROUTINE linsolve(lambda)
     IMPLICIT NONE
     real(C_DOUBLE), intent(in) :: lambda
