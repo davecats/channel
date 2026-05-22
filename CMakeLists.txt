@@ -15,6 +15,7 @@ add_library(channel_core
     mpi_transpose.f90
     ffts.f90
     dnsdata.f90
+    pressure_output.f90
     driver.f90
 )
 
@@ -86,7 +87,7 @@ set_tests_properties(regression_test_4rank PROPERTIES PROCESSORS 4)
             ${MPIEXEC_POSTFLAGS}
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
-set_tests_properties(pressure_dpdy_1rank PROPERTIES PROCESSORS 1 WILL_FAIL TRUE)
+set_tests_properties(pressure_dpdy_1rank PROPERTIES PROCESSORS 1)
  
  add_test(NAME pressure_dpdy_2rank
     COMMAND ${MPIEXEC_EXECUTABLE}
@@ -96,7 +97,7 @@ set_tests_properties(pressure_dpdy_1rank PROPERTIES PROCESSORS 1 WILL_FAIL TRUE)
             ${MPIEXEC_POSTFLAGS}
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
-set_tests_properties(pressure_dpdy_2rank PROPERTIES PROCESSORS 2 WILL_FAIL TRUE)
+set_tests_properties(pressure_dpdy_2rank PROPERTIES PROCESSORS 2)
  
  add_test(NAME regression_test_scalar_1rank
     COMMAND ${MPIEXEC_EXECUTABLE}

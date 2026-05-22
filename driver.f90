@@ -19,6 +19,7 @@ CONTAINS
   !==========================================================
   SUBROUTINE initialize(config_file, restart_file)
     USE dnsdata
+    USE pressure_output
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
     use omp_lib
 #endif
@@ -66,6 +67,7 @@ CONTAINS
     CALL setup_derivatives()
     CALL setup_boundary_conditions()
     CALL read_restart_file(restart_file, V)
+    CALL init_pressure_output()
 
     ! Field number (for output)
     ifield = FLOOR((time + 0.5*deltat)/dt_field)
@@ -183,6 +185,7 @@ CONTAINS
 
   SUBROUTINE finalize()
     USE dnsdata
+    USE pressure_output
     IMPLICIT NONE
     CHARACTER(len=40) :: end_filename
 
@@ -190,6 +193,7 @@ CONTAINS
     end_filename = "Dati.cart.out"; CALL save_restart_file(end_filename, V)
 
     IF (has_terminal) CLOSE (102)
+    CALL free_pressure_output()
     ! Realease memory
 #ifdef HAVE_FFTW
     CALL free_fft(VVdz, VVdx, rVVdx)
