@@ -144,14 +144,19 @@ CONTAINS
     ALLOCATE (F(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3)); F = 0
     !$omp target enter data map(to: F)
 #endif
+    ALLOCATE (bc0(-nz:nz, nx0:nxN, 1:5 + nPhi), &
+              bcn(-nz:nz, nx0:nxN, 1:5 + nPhi))
+    bc0 = 0.0
+    bcn = 0.0
+    !$omp target enter data map(to: bc0, bcn)
     IF (solveNS) then
       ALLOCATE (memrhs(1:ny - 1, -nz:nz, nx0:nxN, 1:2 + nPhi), &
                 oldrhs(1:ny - 1, -nz:nz, nx0:nxN, 1:2 + nPhi), &
-                bc0(-nz:nz, nx0:nxN, 1:5 + nPhi), &
-                bcn(-nz:nz, nx0:nxN, 1:5 + nPhi), &
-                linsolve_mat(ny0:nyN + 2, -2:2, -nz:nz, nx0:nxN)); 
-      memrhs = 0.0; oldrhs = 0.0; bc0 = 0.0; bcn = 0.0; linsolve_mat = 0.0
-      !$omp target enter data map(to: memrhs, linsolve_mat, oldrhs, bc0, bcn)
+                linsolve_mat(ny0:nyN + 2, -2:2, -nz:nz, nx0:nxN))
+      memrhs = 0.0
+      oldrhs = 0.0
+      linsolve_mat = 0.0
+      !$omp target enter data map(to: memrhs, linsolve_mat, oldrhs)
     END IF
 #define newrhs(iy,iz,ix,i) memrhs(iy,iz,ix,i)
 #define imod(iy) MOD(iy+1000,5)
@@ -191,9 +196,11 @@ CONTAINS
     !$omp target exit data map(delete: F)
 #endif
     DEALLOCATE (V, der, d0mat, y, dy)
+    !$omp target exit data map(delete: bc0, bcn)
+    DEALLOCATE (bc0, bcn)
     IF (solveNS) THEN
-      !$omp target exit data map(delete: memrhs, oldrhs, bc0, bcn, linsolve_mat)
-      DEALLOCATE (memrhs, oldrhs, bc0, bcn, linsolve_mat)
+      !$omp target exit data map(delete: memrhs, oldrhs, linsolve_mat)
+      DEALLOCATE (memrhs, oldrhs, linsolve_mat)
       CLOSE (UNIT=195)
       IF (has_terminal) CLOSE (UNIT=121)
     END IF

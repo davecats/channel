@@ -26,7 +26,7 @@ PROGRAM post_pressure
     stop 1
   end if
 
-  call initialize(config_file, trim(restart_files(1)))
+  call initialize(config_file, trim(restart_files(1)), .FALSE.)
 
   allocate (p(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
   allocate (dpdy(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
@@ -55,7 +55,7 @@ PROGRAM post_pressure
 #ifdef HAVE_FFTW
   call free_fft(VVdz, VVdx, rVVdx)
 #endif
-  call free_memory(.TRUE.)
+  call free_memory(.FALSE.)
 #ifdef HAVE_MPI
   call MPI_Finalize()
 #endif

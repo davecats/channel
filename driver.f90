@@ -17,7 +17,7 @@ MODULE driver
 
 CONTAINS
   !==========================================================
-  SUBROUTINE initialize(config_file, restart_file)
+  SUBROUTINE initialize(config_file, restart_file, solveNS)
     USE dnsdata
     USE pressure_output
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
@@ -25,8 +25,13 @@ CONTAINS
 #endif
     IMPLICIT NONE
     CHARACTER(len=*), INTENT(IN) :: config_file, restart_file
+    LOGICAL, OPTIONAL, INTENT(IN) :: solveNS
     REAL(C_DOUBLE) :: deltat_from_dnsin
     integer :: iy, iPhi, num_dev, dev
+    logical :: run_solver
+
+    run_solver = .true.
+    if (present(solveNS)) run_solver = solveNS
 
     ! Init MPI
 #ifdef HAVE_MPI
@@ -54,7 +59,7 @@ CONTAINS
     CALL read_dnsin(config_file)
     deltat_from_dnsin = deltat
     CALL init_MPI(nx + 1, nz, ny, nxd + 1, nzd, nPhi, overlapping)
-    CALL init_memory(.TRUE.)
+    CALL init_memory(run_solver)
 
     ! Init various subroutines
 #ifdef HAVE_CUDA
@@ -67,6 +72,9 @@ CONTAINS
     CALL setup_derivatives()
     CALL setup_boundary_conditions()
     CALL read_restart_file(restart_file, V)
+    if (.not. run_solver) then
+      !$omp target update to(V)
+    end if
     CALL init_pressure_output()
 
     ! Field number (for output)
@@ -100,20 +108,22 @@ CONTAINS
       print *, "Overlapping communication and computation:", overlapping
     END IF
 
-    ! Compute CFL
-    if (deltat == 0.0) deltat = 1.0
-    !$omp target update to(V)
-    CALL transform_to_physical()
-    call compute_cfl()
-    print *, "CFL", deltat, cfl
-    ! Compute flow rate
-    IF (has_average) THEN
-      fr(1) = yintegr(V(:, 0, 0, 1), y); fr(2) = yintegr(V(:, 0, 0, 3), y); 
-      DO iPhi = 1, nPhi
-        fr(3 + iPhi) = yintegr(V(:, 0, 0, 3 + iPhi), y)
-      END DO
-    END IF
-    CALL outstats()
+    if (run_solver) then
+      ! Compute CFL
+      if (deltat == 0.0) deltat = 1.0
+      !$omp target update to(V)
+      CALL transform_to_physical()
+      call compute_cfl()
+      print *, "CFL", deltat, cfl
+      ! Compute flow rate
+      IF (has_average) THEN
+        fr(1) = yintegr(V(:, 0, 0, 1), y); fr(2) = yintegr(V(:, 0, 0, 3), y); 
+        DO iPhi = 1, nPhi
+          fr(3 + iPhi) = yintegr(V(:, 0, 0, 3 + iPhi), y)
+        END DO
+      END IF
+      CALL outstats()
+    end if
   END SUBROUTINE initialize
 
   !==========================================================

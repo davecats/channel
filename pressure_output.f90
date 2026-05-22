@@ -440,8 +440,8 @@ CONTAINS
     integer(C_INT) :: ix, iz, iy
 
     !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(src0, src1, p, der, k2, d140, d240, d24n, V, ni, ialfa, ibeta, ny, ny0, nyN, nx0, nxN, nz) &
-    !$omp private(ix, iz, iy, pmat, eqm1, eq0, eqnp1, sol_solve)
+    !$omp shared(src0, src1, p, der, ny, ny0, nyN, nx0, nxN, nz) &
+    !$omp private(ix, iz, iy)
     do ix = nx0, nxN
       do iz = -nz, nz
         do iy = ny0, nyN
