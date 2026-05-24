@@ -2,6 +2,7 @@ program test_convvelo_stats
   use, intrinsic :: iso_c_binding
   use, intrinsic :: ieee_arithmetic
   use dnsdata
+  use convvelo, only: init_convvelo, reset_convvelo_stats, acc_convvelo_stats, convvelo_stats, free_convvelo
   use pressure_output
   use driver
   implicit none
@@ -12,87 +13,74 @@ program test_convvelo_stats
   integer(C_INT), parameter :: n_velocity_fields = 33
   integer(C_INT), parameter :: n_scalar_fields = 10
 
-  complex(C_DOUBLE_COMPLEX), allocatable :: convvelo(:, :, :, :)
   integer(C_INT) :: i_field, i_phi, nfail, global_nfail
   real(C_DOUBLE) :: tol
-
-  ! This is a placeholder regression harness for the online convvelo
-  ! statistics. The future accumulation entry points are sketched below and
-  ! the computed storage is kept local to this test until the implementation
-  ! exists in the solver.
 
   tol = 1.0d-12
   nfail = 0
 
   call initialize(config_file, restart_in)
-  allocate (convvelo(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, n_velocity_fields + nPhi*n_scalar_fields))
-  convvelo = (0.0d0, 0.0d0)
-
-  ! Future entry points:
-  ! call reset_convvelo_stats()
-  ! call read_restart_file("tests/convvelo/Dati.cart.39.out", V)
-  ! call acc_convvelo_stats()
-  ! call read_restart_file("tests/convvelo/Dati.cart.40.out", V)
-  ! call acc_convvelo_stats()
-  ! call read_restart_file("tests/convvelo/Dati.cart.41.out", V)
-  ! call acc_convvelo_stats()
-
+  call init_convvelo()
+  call reset_convvelo_stats()
   call read_restart_file("tests/convvelo/Dati.cart.39.out", V)
+  call acc_convvelo_stats()
   call read_restart_file("tests/convvelo/Dati.cart.40.out", V)
+  call acc_convvelo_stats()
   call read_restart_file("tests/convvelo/Dati.cart.41.out", V)
+  call acc_convvelo_stats()
 
   i_field = 0
 
-  call compare_field("u_cross_u", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("u_cross_dyu", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("u_cross_v", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("u_cross_dyv", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("u_cross_w", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("u_cross_dyw", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("u_cross_dyyu", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("u_cross_u", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("u_cross_dyu", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("u_cross_v", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("u_cross_dyv", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("u_cross_w", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("u_cross_dyw", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("u_cross_dyyu", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
 
-  call compare_field("v_cross_u", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("v_cross_dyu", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("v_cross_v", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("v_cross_dyv", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("v_cross_w", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("v_cross_dyw", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("v_cross_dyyv", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("v_cross_u", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("v_cross_dyu", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("v_cross_v", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("v_cross_dyv", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("v_cross_w", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("v_cross_dyw", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("v_cross_dyyv", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
 
-  call compare_field("w_cross_u", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("w_cross_dyu", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("w_cross_v", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("w_cross_dyv", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("w_cross_w", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("w_cross_dyw", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("w_cross_dyyw", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("w_cross_u", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("w_cross_dyu", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("w_cross_v", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("w_cross_dyv", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("w_cross_w", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("w_cross_dyw", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("w_cross_dyyw", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
 
-  call compare_field("u_cross_p", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("v_cross_dpdy", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("w_cross_p", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("u_cross_p", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("v_cross_dpdy", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("w_cross_p", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
 
-  call compare_field("u_cross_uu", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("u_cross_uw", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("v_cross_uv", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("v_cross_vw", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("w_cross_uw", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("w_cross_ww", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("u_cross_uu", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("u_cross_uw", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("v_cross_uv", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("v_cross_vw", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("w_cross_uw", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("w_cross_ww", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
 
-  call compare_field("u_cross_dyuv", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("v_cross_dyvv", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
-  call compare_field("w_cross_dyvw", convvelo(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("u_cross_dyuv", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("v_cross_dyvv", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
+  call compare_field("w_cross_dyvw", convvelo_stats(:, :, :, i_field + 1), i_field, tol, nfail); i_field = i_field + 1
 
   do i_phi = 1, nPhi
-    call compare_scalar_field("t_theta_theta", convvelo, i_phi, 0, tol, nfail)
-    call compare_scalar_field("t_theta_u", convvelo, i_phi, 1, tol, nfail)
-    call compare_scalar_field("t_theta_v", convvelo, i_phi, 2, tol, nfail)
-    call compare_scalar_field("t_theta_w", convvelo, i_phi, 3, tol, nfail)
-    call compare_scalar_field("t_theta_thetau", convvelo, i_phi, 4, tol, nfail)
-    call compare_scalar_field("t_theta_thetaw", convvelo, i_phi, 5, tol, nfail)
-    call compare_scalar_field("t_theta_dyytheta", convvelo, i_phi, 6, tol, nfail)
-    call compare_scalar_field("t_theta_dythetav", convvelo, i_phi, 7, tol, nfail)
-    call compare_scalar_field("t_theta_dytheta", convvelo, i_phi, 8, tol, nfail)
-    call compare_scalar_field("t_theta_dyv", convvelo, i_phi, 9, tol, nfail)
+    call compare_scalar_field("t_theta_theta", convvelo_stats, i_phi, 0, tol, nfail)
+    call compare_scalar_field("t_theta_u", convvelo_stats, i_phi, 1, tol, nfail)
+    call compare_scalar_field("t_theta_v", convvelo_stats, i_phi, 2, tol, nfail)
+    call compare_scalar_field("t_theta_w", convvelo_stats, i_phi, 3, tol, nfail)
+    call compare_scalar_field("t_theta_thetau", convvelo_stats, i_phi, 4, tol, nfail)
+    call compare_scalar_field("t_theta_thetaw", convvelo_stats, i_phi, 5, tol, nfail)
+    call compare_scalar_field("t_theta_dyytheta", convvelo_stats, i_phi, 6, tol, nfail)
+    call compare_scalar_field("t_theta_dythetav", convvelo_stats, i_phi, 7, tol, nfail)
+    call compare_scalar_field("t_theta_dytheta", convvelo_stats, i_phi, 8, tol, nfail)
+    call compare_scalar_field("t_theta_dyv", convvelo_stats, i_phi, 9, tol, nfail)
   end do
 
   global_nfail = nfail
@@ -115,7 +103,7 @@ program test_convvelo_stats
   end if
 
   call free_pressure_output()
-  deallocate (convvelo)
+  call free_convvelo()
   call free_memory(.true.)
 #ifdef HAVE_MPI
   call MPI_Finalize()

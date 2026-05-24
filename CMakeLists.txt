@@ -17,6 +17,7 @@ add_library(channel_core
     mpi_transpose.f90
     ffts.f90
     dnsdata.f90
+    convvelo.f90
     pressure_output.f90
     driver.f90
 )
@@ -55,6 +56,9 @@ target_link_libraries(test_regression_scalar PRIVATE channel_core)
 
 add_executable(test_pressure_dpdy test_pressure_dpdy.f90)
 target_link_libraries(test_pressure_dpdy PRIVATE channel_core)
+
+add_executable(test_convvelo_stats test_convvelo_stats.f90)
+target_link_libraries(test_convvelo_stats PRIVATE channel_core)
 
 # Add a CTest target
 enable_testing()
@@ -104,7 +108,7 @@ set_tests_properties(pressure_dpdy_1rank PROPERTIES PROCESSORS 1)
 )
 set_tests_properties(pressure_dpdy_2rank PROPERTIES PROCESSORS 2)
 
-add_test(NAME convvelo_stats_xfail_1rank
+add_test(NAME convvelo_stats_1rank
     COMMAND ${MPIEXEC_EXECUTABLE}
             ${MPIEXEC_NUMPROC_FLAG} 1
             ${MPIEXEC_PREFLAGS}
@@ -112,7 +116,7 @@ add_test(NAME convvelo_stats_xfail_1rank
             ${MPIEXEC_POSTFLAGS}
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
-set_tests_properties(convvelo_stats_xfail_1rank PROPERTIES PROCESSORS 1 WILL_FAIL TRUE)
+set_tests_properties(convvelo_stats_1rank PROPERTIES PROCESSORS 1)
  
  add_test(NAME regression_test_scalar_1rank
     COMMAND ${MPIEXEC_EXECUTABLE}
