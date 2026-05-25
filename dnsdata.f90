@@ -81,6 +81,13 @@ MODULE dnsdata
   !Restart file
   character(len=40) :: fname
   logical :: overlapping
+  logical :: convvelo_enabled = .false.
+  logical :: convvelo_write_full_fields = .true.
+  real(C_DOUBLE) :: convvelo_t_start = 0.0d0
+  real(C_DOUBLE) :: convvelo_dt_compute = -1.0d0
+  real(C_DOUBLE) :: convvelo_dt_write = -1.0d0
+  character(len=16) :: convvelo_output_mode = "full"
+  character(len=256) :: convvelo_output_file = "raw_statistics.bin"
 
 CONTAINS
 
@@ -90,7 +97,9 @@ CONTAINS
     IMPLICIT NONE
     logical :: i
     integer :: iPhi
+    integer :: io
     CHARACTER(len=*), INTENT(IN) :: filename
+    character(len=512) :: convvelo_line
     character(len=16) :: env_value
     integer :: status, length
     OPEN (15, file=filename)
@@ -116,6 +125,50 @@ CONTAINS
     READ (15, *) deltat, cflmax, time
     READ (15, *) dt_field, dt_save, t_max, time_from_restart
     READ (15, *) nstep
+
+    convvelo_enabled = .false.
+    convvelo_write_full_fields = .true.
+    convvelo_t_start = time
+    convvelo_dt_compute = -1.0d0
+    convvelo_dt_write = -1.0d0
+    convvelo_output_mode = "full"
+    convvelo_output_file = "raw_statistics.bin"
+
+    READ (15, '(A)', iostat=io) convvelo_line
+    if (io == 0 .and. len_trim(convvelo_line) > 0) then
+      read (convvelo_line, *, iostat=io) convvelo_enabled
+      if (io /= 0) then
+        error stop "read_dnsin: could not parse optional convection velocity control line"
+      end if
+
+      if (convvelo_enabled) then
+        read (convvelo_line, *, iostat=io) convvelo_enabled, convvelo_output_mode, &
+          convvelo_t_start, convvelo_dt_compute, convvelo_dt_write, convvelo_output_file
+        if (io /= 0) then
+          error stop "read_dnsin: convection velocity line must be 'enabled mode t_start dt_compute dt_write output_file'"
+        end if
+
+        select case (adjustl(trim(convvelo_output_mode)))
+        case ("full", "FULL", "Full")
+          convvelo_write_full_fields = .true.
+          convvelo_output_mode = "full"
+          if (len_trim(convvelo_output_file) == 0) convvelo_output_file = "raw_statistics.bin"
+        case ("minimal", "MINIMAL", "Minimal")
+          convvelo_write_full_fields = .false.
+          convvelo_output_mode = "minimal"
+          if (len_trim(convvelo_output_file) == 0) convvelo_output_file = "convvelo_minimal.bin"
+        case default
+          error stop "read_dnsin: convvelo_output_mode must be 'full' or 'minimal'"
+        end select
+
+        convvelo_output_file = adjustl(trim(convvelo_output_file))
+
+        if (convvelo_dt_compute <= 0.0d0) then
+          error stop "read_dnsin: convvelo_dt_compute must be > 0 when convection velocity output is enabled"
+        end if
+      end if
+    end if
+
     CLOSE (15)
     dx = PI/(alfa0*nxd); dz = 2.0d0*PI/(beta0*nzd); factor = 1.0d0/(2.0d0*nxd*nzd)
     call get_environment_variable("CHANNEL_OVERLAPPING", env_value, length, status)
@@ -205,6 +258,12 @@ CONTAINS
       IF (has_terminal) CLOSE (UNIT=121)
     END IF
   END SUBROUTINE free_memory
+
+  SUBROUTINE sync_velocity_to_device()
+    IMPLICIT NONE
+
+    !$omp target update to(V)
+  END SUBROUTINE sync_velocity_to_device
 
   !--------------------------------------------------------------!
   !--------------- Set-up the compact derivatives ---------------!

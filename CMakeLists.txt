@@ -57,8 +57,11 @@ target_link_libraries(test_regression_scalar PRIVATE channel_core)
 add_executable(test_pressure_dpdy test_pressure_dpdy.f90)
 target_link_libraries(test_pressure_dpdy PRIVATE channel_core)
 
-add_executable(test_convvelo_stats test_convvelo_stats.f90)
+add_executable(test_convvelo_stats test_convvelo_utils.f90 test_convvelo_stats.f90)
 target_link_libraries(test_convvelo_stats PRIVATE channel_core)
+
+add_executable(test_convvelo_runtime test_convvelo_utils.f90 test_convvelo_runtime.f90)
+target_link_libraries(test_convvelo_runtime PRIVATE channel_core)
 
 # Add a CTest target
 enable_testing()
@@ -117,6 +120,26 @@ add_test(NAME convvelo_stats_1rank
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
 set_tests_properties(convvelo_stats_1rank PROPERTIES PROCESSORS 1)
+
+add_test(NAME convvelo_runtime_1rank
+    COMMAND ${MPIEXEC_EXECUTABLE}
+            ${MPIEXEC_NUMPROC_FLAG} 1
+            ${MPIEXEC_PREFLAGS}
+            $<TARGET_FILE:test_convvelo_runtime> full
+            ${MPIEXEC_POSTFLAGS}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(convvelo_runtime_1rank PROPERTIES PROCESSORS 1)
+
+add_test(NAME convvelo_runtime_minimal_1rank
+    COMMAND ${MPIEXEC_EXECUTABLE}
+            ${MPIEXEC_NUMPROC_FLAG} 1
+            ${MPIEXEC_PREFLAGS}
+            $<TARGET_FILE:test_convvelo_runtime> minimal
+            ${MPIEXEC_POSTFLAGS}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(convvelo_runtime_minimal_1rank PROPERTIES PROCESSORS 1)
  
  add_test(NAME regression_test_scalar_1rank
     COMMAND ${MPIEXEC_EXECUTABLE}

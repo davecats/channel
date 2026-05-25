@@ -19,6 +19,7 @@ CONTAINS
   !==========================================================
   SUBROUTINE initialize(config_file, restart_file, solveNS)
     USE dnsdata
+    USE convvelo
     USE pressure_output
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
     use omp_lib
@@ -76,6 +77,10 @@ CONTAINS
       !$omp target update to(V)
     end if
     CALL init_pressure_output()
+    if (convvelo_enabled) then
+      call init_convvelo()
+      call reset_convvelo_stats()
+    end if
 
     ! Field number (for output)
     ifield = FLOOR((time + 0.5*deltat)/dt_field)
@@ -106,6 +111,11 @@ CONTAINS
       WRITE (*, *) " "
 
       print *, "Overlapping communication and computation:", overlapping
+      if (convvelo_enabled) then
+        print *, "Convection velocity output:", trim(convvelo_output_mode), "file =", trim(convvelo_output_file)
+        print *, "Convection velocity sampling starts at", convvelo_t_start, &
+          "compute every", convvelo_dt_compute, "write every", convvelo_dt_write
+      end if
     END IF
 
     if (run_solver) then
@@ -129,6 +139,7 @@ CONTAINS
   !==========================================================
   SUBROUTINE timeloop()
     USE dnsdata
+    USE convvelo
     IMPLICIT NONE
     integer:: iPhi, ix, iz, i, ic
 #ifdef chron
@@ -183,6 +194,19 @@ CONTAINS
         end do
       end do
 
+      if (convvelo_enabled) then
+        if (crossed_convvelo_interval(convvelo_dt_compute, convvelo_t_start)) then
+          call update_convvelo_component_means()
+          call acc_convvelo_stats()
+        end if
+
+        if (convvelo_dt_write > 0.0d0) then
+          if (convvelo_has_pending_output() .and. crossed_convvelo_interval(convvelo_dt_write, convvelo_t_start)) then
+            call write_convvelo_output(trim(convvelo_output_file), convvelo_write_full_fields)
+          end if
+        end if
+      end if
+
       ! Write runtime file
       CALL outstats()
 
@@ -195,6 +219,7 @@ CONTAINS
 
   SUBROUTINE finalize()
     USE dnsdata
+    USE convvelo
     USE pressure_output
     IMPLICIT NONE
     CHARACTER(len=40) :: end_filename
@@ -203,6 +228,12 @@ CONTAINS
     end_filename = "Dati.cart.out"; CALL save_restart_file(end_filename, V)
 
     IF (has_terminal) CLOSE (102)
+    if (convvelo_enabled) then
+      if (convvelo_has_pending_output()) then
+        call write_convvelo_output(trim(convvelo_output_file), convvelo_write_full_fields)
+      end if
+      call free_convvelo()
+    end if
     CALL free_pressure_output()
     ! Realease memory
 #ifdef HAVE_FFTW
@@ -213,4 +244,18 @@ CONTAINS
     CALL MPI_Finalize()
 #endif
   END SUBROUTINE finalize
+
+  logical function crossed_convvelo_interval(period, t_start)
+    use, intrinsic :: iso_c_binding, only: C_DOUBLE
+    use dnsdata, only: time, deltat
+    implicit none
+    real(C_DOUBLE), intent(in) :: period, t_start
+
+    crossed_convvelo_interval = .false.
+    if (period <= 0.0d0) return
+    if (time + 0.5d0*deltat < t_start) return
+
+    crossed_convvelo_interval = floor((time + 0.5d0*deltat - t_start)/period) > &
+                                floor((time - 0.5d0*deltat - t_start)/period)
+  end function crossed_convvelo_interval
 END MODULE driver

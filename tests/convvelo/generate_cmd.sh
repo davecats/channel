@@ -12,5 +12,5 @@ mpirun -n 1 ../../build/post_pressure
 for file in *.dat; do
     mv "$file" "${file%.dat}.fld"
 done
-python3 /net/istmrhea/Data/jonaneuh/2026_convvelo/export_scalar_raw_statistics.py .
+../../.venv/bin/python ../../export_scalar_raw_statistics.py .
 rm *.fld
