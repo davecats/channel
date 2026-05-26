@@ -21,6 +21,7 @@ MODULE dnsdata
   ! der(iy,i,j),                                 i={0:d0, 1:d1, 2:d2, 3:d4}, j={-2:2}
 
   USE, intrinsic :: iso_c_binding
+  USE config
   USE rbmat
   USE mpi_transpose
   USE ffts
@@ -81,12 +82,6 @@ MODULE dnsdata
   !Restart file
   character(len=40) :: fname
   logical :: overlapping
-  logical :: convvelo_enabled = .false.
-  logical :: convvelo_write_full_fields = .true.
-  real(C_DOUBLE) :: convvelo_t_start = 0.0d0
-  real(C_DOUBLE) :: convvelo_dt_compute = -1.0d0
-  real(C_DOUBLE) :: convvelo_dt_write = -1.0d0
-  character(len=16) :: convvelo_output_mode = "full"
 
   public :: get_solver_memory_estimate, sync_velocity_to_device
 
@@ -94,78 +89,64 @@ CONTAINS
 
   !--------------------------------------------------------------!
   !---------------------- Read input files ----------------------!
-  SUBROUTINE read_dnsin(filename)
+  SUBROUTINE read_dnsin(cfg)
     IMPLICIT NONE
     logical :: i
     integer :: iPhi
-    integer :: io
-    CHARACTER(len=*), INTENT(IN) :: filename
-    character(len=512) :: convvelo_line
+    type(ini_config), intent(in) :: cfg
     character(len=16) :: env_value
+    integer(C_INT) :: nstep_in
     integer :: status, length
-    OPEN (15, file=filename)
-    READ (15, *) nx, ny, nz; READ (15, *) alfa0, beta0; nxd = 3*(nx + 1)/2; nzd = 3*nz
+
+    call require_integer(cfg, "mesh", "nx", nx)
+    call require_integer(cfg, "mesh", "ny", ny)
+    call require_integer(cfg, "mesh", "nz", nz)
+    call require_real(cfg, "mesh", "alfa0", alfa0)
+    call require_real(cfg, "mesh", "beta0", beta0)
+    nxd = 3*(nx + 1)/2
+    nzd = 3*nz
     !$omp target update to(ny)
 #ifdef useFFTfit
     i = fftFIT(nxd); DO WHILE (.NOT. i); nxd = nxd + 1; i = fftFIT(nxd); END DO
     i = fftFIT(nzd); DO WHILE (.NOT. i); nzd = nzd + 1; i = fftFIT(nzd); END DO
 #endif
-    READ (15, *) ni; 
-    READ (15, *) a, ymin, ymax; ni = 1/ni
-    READ (15, *) meanpx, meanpz
-    READ (15, *) meanflowx, meanflowz
-    READ (15, *) meantx, meantb
-    READ (15, *) u0, uN, t0, tN
-    READ (15, *) nPhi
+
+    call require_real(cfg, "velocity", "ni", ni)
+    call require_real(cfg, "mesh", "stretching", a)
+    call require_real(cfg, "mesh", "ymin", ymin)
+    call require_real(cfg, "mesh", "ymax", ymax)
+    ni = 1/ni
+    call require_real(cfg, "velocity", "meanpx", meanpx)
+    call require_real(cfg, "velocity", "meanpz", meanpz)
+    call require_real(cfg, "velocity", "meanflowx", meanflowx)
+    call require_real(cfg, "velocity", "meanflowz", meanflowz)
+    call require_real(cfg, "velocity", "u0", u0)
+    call require_real(cfg, "velocity", "un", uN)
+
+    call require_integer(cfg, "scalars", "nphi", nPhi)
+    call require_real(cfg, "scalars", "meantx", meantx)
+    call require_real(cfg, "scalars", "meantb", meantb)
+    call require_real(cfg, "scalars", "t0", t0)
+    call require_real(cfg, "scalars", "tn", tN)
     allocate (pra(nPhi))
-    READ (15, *) pra(1:nPhi)
-    DO iPhi = 1, nPhi
-      pra(iPhi) = 1/pra(iPhi)
-    END DO
-    !$omp target enter data map(to: pra)
-    READ (15, *) deltat, cflmax, time
-    READ (15, *) dt_field, dt_save, t_max, time_from_restart
-    READ (15, *) nstep
-
-    convvelo_enabled = .false.
-    convvelo_write_full_fields = .true.
-    convvelo_t_start = time
-    convvelo_dt_compute = -1.0d0
-    convvelo_dt_write = -1.0d0
-    convvelo_output_mode = "full"
-
-    READ (15, '(A)', iostat=io) convvelo_line
-    if (io == 0 .and. len_trim(convvelo_line) > 0) then
-      read (convvelo_line, *, iostat=io) convvelo_enabled
-      if (io /= 0) then
-        error stop "read_dnsin: could not parse optional convection velocity control line"
-      end if
-
-      if (convvelo_enabled) then
-        read (convvelo_line, *, iostat=io) convvelo_enabled, convvelo_output_mode, &
-          convvelo_t_start, convvelo_dt_compute, convvelo_dt_write
-        if (io /= 0) then
-          error stop "read_dnsin: convection velocity line must be 'enabled mode t_start dt_compute dt_write'"
-        end if
-
-        select case (adjustl(trim(convvelo_output_mode)))
-        case ("full", "FULL", "Full")
-          convvelo_write_full_fields = .true.
-          convvelo_output_mode = "full"
-        case ("minimal", "MINIMAL", "Minimal")
-          convvelo_write_full_fields = .false.
-          convvelo_output_mode = "minimal"
-        case default
-          error stop "read_dnsin: convvelo_output_mode must be 'full' or 'minimal'"
-        end select
-
-        if (convvelo_dt_compute <= 0.0d0) then
-          error stop "read_dnsin: convvelo_dt_compute must be > 0 when convection velocity output is enabled"
-        end if
-      end if
+    if (nPhi > 0) then
+      call require_real_vector(cfg, "scalars", "pr", pra(1:nPhi))
+      DO iPhi = 1, nPhi
+        pra(iPhi) = 1/pra(iPhi)
+      END DO
     end if
+    !$omp target enter data map(to: pra)
 
-    CLOSE (15)
+    call require_real(cfg, "timestepping", "deltat", deltat)
+    call require_real(cfg, "timestepping", "cflmax", cflmax)
+    call require_real(cfg, "timestepping", "time", time)
+    call require_real(cfg, "timestepping", "dt_field", dt_field)
+    call require_real(cfg, "timestepping", "dt_save", dt_save)
+    call require_real(cfg, "timestepping", "t_max", t_max)
+    call require_logical(cfg, "timestepping", "time_from_restart", time_from_restart)
+    call require_integer(cfg, "timestepping", "nstep", nstep_in)
+    nstep = int(nstep_in, C_SIZE_T)
+
     dx = PI/(alfa0*nxd); dz = 2.0d0*PI/(beta0*nzd); factor = 1.0d0/(2.0d0*nxd*nzd)
     call get_environment_variable("CHANNEL_OVERLAPPING", env_value, length, status)
     overlapping = .false.

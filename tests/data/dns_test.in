@@ -1,13 +1,35 @@
-5         16    8                    ! nx, ny, nz
-0.5       1.0                            ! alfa0 beta0  
-12431                                    ! ni
-1.5       0.0    2.0                     ! a, ymin, ymax
-0.0       0.0                            ! meanpx, meanpz
-2.0       0.0                            ! meanflowx meanflowz
-0.0       2.0                            ! meantx,meantb 
-0.0       0.0    0.0         0.0         ! u0 uN t0 tn
-0                                        ! nPhi
-                                         ! pr(1:nPhi)
-0.0       1.0    0.0                     ! deltat, cflmax, time
-30       -1      7000        .TRUE.      ! dt_field, dt_save, t_max, time_from_restart
-2                                  ! nstep
+[mesh]
+nx = 5
+ny = 16
+nz = 8
+alfa0 = 0.5
+beta0 = 1.0
+stretching = 1.5
+ymin = 0.0
+ymax = 2.0
+
+[velocity]
+ni = 12431
+meanpx = 0.0
+meanpz = 0.0
+meanflowx = 2.0
+meanflowz = 0.0
+u0 = 0.0
+uN = 0.0
+
+[scalars]
+nPhi = 0
+meantx = 0.0
+meantb = 2.0
+t0 = 0.0
+tN = 0.0
+
+[timestepping]
+deltat = 0.0
+cflmax = 1.0
+time = 0.0
+dt_field = 30
+dt_save = -1
+t_max = 7000
+time_from_restart = true
+nstep = 2

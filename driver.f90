@@ -18,8 +18,9 @@ MODULE driver
 CONTAINS
   !==========================================================
   SUBROUTINE initialize(config_file, restart_file, solveNS)
+    use config, only: ini_config, read_ini_file
     USE dnsdata
-    USE convvelo, only: init_convvelo_runtime, get_convvelo_memory_estimate
+    USE convvelo, only: init_convvelo_runtime, get_convvelo_memory_estimate, configure_convvelo
     USE ffts, only: get_fft_memory_estimate
 #ifdef HAVE_CUDA
     USE ffts, only: init_cufft
@@ -35,6 +36,7 @@ CONTAINS
     IMPLICIT NONE
     CHARACTER(len=*), INTENT(IN) :: config_file, restart_file
     LOGICAL, OPTIONAL, INTENT(IN) :: solveNS
+    type(ini_config) :: cfg
     REAL(C_DOUBLE) :: deltat_from_dnsin
     real(C_DOUBLE) :: total_mib
     integer(C_INT64_T) :: solver_floats, fft_floats, pressure_floats, convvelo_floats
@@ -67,7 +69,9 @@ CONTAINS
     !$omp end target
 #endif
 
-    CALL read_dnsin(config_file)
+    call read_ini_file(config_file, cfg)
+    CALL read_dnsin(cfg)
+    call configure_convvelo(cfg)
     deltat_from_dnsin = deltat
     CALL init_MPI(nx + 1, nz, ny, nxd + 1, nzd, nPhi, overlapping)
     call get_solver_memory_estimate(run_solver, solver_floats)

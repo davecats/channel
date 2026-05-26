@@ -3,9 +3,9 @@
 module convvelo
 
   use, intrinsic :: iso_c_binding
+  use config, only: ini_config, has_section, get_string, get_real, lower
   use dnsdata, only: V, nPhi, nz, ny, der, nxd, izd, factor, iproc, D0mat, d240, d24m1, d24n, d24np1, &
-                     COMPLEXderiv, LeftLU5div, convvelo_enabled, convvelo_write_full_fields, has_terminal, &
-                     convvelo_t_start, convvelo_dt_compute, convvelo_dt_write, &
+                     COMPLEXderiv, LeftLU5div, has_terminal, &
                      time, deltat
   use pressure_output, only: compute_poisson, compute_dpdy
   use mpi_transpose, only: ny0, nyN, nx0, nxN, nxB, nzB, nx, has_average, ierr, sendbuf, recvbuf, &
@@ -56,11 +56,17 @@ module convvelo
 
   logical, save :: convvelo_initialized = .false.
   logical, save :: convvelo_dirty = .false.
+  logical, save, public :: convvelo_enabled = .false.
+  logical, save :: convvelo_write_full_fields = .true.
   integer(C_INT), save, public :: n_convvelo_velocity_fields = 0
   integer(C_INT), save, public :: n_convvelo_scalar_fields = 0
   integer(C_INT), save, public :: n_convvelo_fields = 0
   integer(C_INT64_T), save :: n_convvelo_profile_slots = 0_C_INT64_T
   integer(C_INT64_T), save :: convvelo_last_write_index = -1_C_INT64_T
+  real(C_DOUBLE), save :: convvelo_t_start = 0.0d0
+  real(C_DOUBLE), save :: convvelo_dt_compute = -1.0d0
+  real(C_DOUBLE), save :: convvelo_dt_write = -1.0d0
+  character(len=16), save :: convvelo_output_mode = "full"
   integer(C_INT), allocatable, save :: convvelo_velocity_field_ids(:)
   integer(C_INT), allocatable, save :: convvelo_scalar_field_ids(:)
   integer(C_INT), allocatable, save :: convvelo_field_map(:)
@@ -79,8 +85,49 @@ module convvelo
   public :: acc_convvelo_stats, convvelo_has_pending_output
   public :: init_convvelo_runtime, advance_convvelo_runtime, finalize_convvelo_runtime
   public :: get_convvelo_memory_estimate, write_convvelo_raw_stats
+  public :: configure_convvelo
 
 contains
+
+  subroutine configure_convvelo(cfg)
+    implicit none
+    type(ini_config), intent(in) :: cfg
+    logical :: found
+    character(len=16) :: convvelo_mode
+
+    convvelo_enabled = .false.
+    convvelo_write_full_fields = .true.
+    convvelo_t_start = time
+    convvelo_dt_compute = -1.0d0
+    convvelo_dt_write = -1.0d0
+    convvelo_output_mode = "full"
+
+    convvelo_enabled = has_section(cfg, "convvelo")
+
+    if (.not. convvelo_enabled) return
+
+    convvelo_mode = convvelo_output_mode
+    call get_string(cfg, "convvelo", "output_mode", convvelo_mode, found)
+    if (found) convvelo_output_mode = trim(convvelo_mode)
+    call get_real(cfg, "convvelo", "t_start", convvelo_t_start, found)
+    call get_real(cfg, "convvelo", "dt_compute", convvelo_dt_compute, found)
+    call get_real(cfg, "convvelo", "dt_write", convvelo_dt_write, found)
+
+    select case (lower(adjustl(trim(convvelo_output_mode))))
+    case ("full")
+      convvelo_write_full_fields = .true.
+      convvelo_output_mode = "full"
+    case ("minimal")
+      convvelo_write_full_fields = .false.
+      convvelo_output_mode = "minimal"
+    case default
+      error stop "configure_convvelo: convvelo_output_mode must be 'full' or 'minimal'"
+    end select
+
+    if (convvelo_dt_compute <= 0.0d0) then
+      error stop "configure_convvelo: convvelo_dt_compute must be > 0 when convection velocity output is enabled"
+    end if
+  end subroutine configure_convvelo
 
   subroutine get_convvelo_memory_estimate(n_floats)
     implicit none

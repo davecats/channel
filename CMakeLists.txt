@@ -13,6 +13,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 # Sources
 # --------------------------------------------------------------------
 add_library(channel_core
+    config.f90
     rbmat.f90
     mpi_transpose.f90
     ffts.f90

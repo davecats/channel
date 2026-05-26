@@ -1,7 +1,7 @@
 program test_convvelo_runtime
   use, intrinsic :: iso_c_binding
   use dnsdata
-  use convvelo, only: free_convvelo, convvelo_has_pending_output, write_convvelo_raw_stats
+  use convvelo, only: free_convvelo, convvelo_has_pending_output, write_convvelo_raw_stats, convvelo_enabled
   use pressure_output
   use driver
   use test_convvelo_utils
