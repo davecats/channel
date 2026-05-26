@@ -1,9 +1,7 @@
 program test_convvelo_runtime
   use, intrinsic :: iso_c_binding
   use dnsdata
-  use convvelo, only: free_convvelo, n_convvelo_velocity_fields, n_convvelo_scalar_fields, &
-                      n_convvelo_velocity_fields_minimal, n_convvelo_scalar_fields_minimal, &
-                      write_convvelo_output, convvelo_has_pending_output
+  use convvelo, only: free_convvelo, convvelo_has_pending_output, write_convvelo_raw_stats
   use pressure_output
   use driver
   use test_convvelo_utils
@@ -27,31 +25,32 @@ program test_convvelo_runtime
   select case (trim(mode))
   case ("full")
     config_file = "tests/convvelo/dns_runtime.in"
-    generated_file = "convvelo_runtime.bin"
+    generated_file = "tests/convvelo/raw_statistics.bin"
   case ("minimal")
     config_file = "tests/convvelo/dns_runtime_minimal.in"
-    generated_file = "convvelo_runtime_minimal.bin"
+    generated_file = "tests/convvelo/convvelo_runtime_minimal.bin"
   case default
     write (*, *) "Unknown convvelo runtime mode: ", trim(mode)
     stop 2
   end select
 
   call initialize(trim(config_file), "tests/data/start_field_scalar.out")
-  allocate (mean_profiles(ny0 - 2:nyN + 2, 1 + nPhi))
+  allocate (mean_profiles(ny0 - 2:nyN + 2, 3 + nPhi))
   allocate (generated(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
   call timeloop()
   if (convvelo_enabled .and. convvelo_has_pending_output()) then
-    call write_convvelo_output(trim(convvelo_output_file), convvelo_write_full_fields)
+    call write_convvelo_raw_stats(trim(convvelo_output_file))
   end if
 
   call compute_reference_mean_profiles(mean_profiles)
-  call compare_profile_to_expected("mean_u", trim(generated_file), 0_C_INT, mean_profiles(:, 1), mean_tol, nfail)
-  do i_phi = 1, nPhi
-    write (full_name, '(A,"[phi=",I0,"]")') "mean_theta", i_phi
-    call compare_profile_to_expected(trim(full_name), trim(generated_file), i_phi, mean_profiles(:, 1 + i_phi), mean_tol, nfail)
-  end do
-
   if (trim(mode) == "full") then
+    call compare_profile_to_expected("mean_u", trim(generated_file), 0_C_INT, mean_profiles(:, 1), mean_tol, nfail)
+    call compare_profile_to_expected("mean_v", trim(generated_file), 1_C_INT, mean_profiles(:, 2), mean_tol, nfail)
+    call compare_profile_to_expected("mean_w", trim(generated_file), 2_C_INT, mean_profiles(:, 3), mean_tol, nfail)
+    do i_phi = 1, nPhi
+      write (full_name, '(A,"[phi=",I0,"]")') "mean_theta", i_phi
+      call compare_profile_to_expected(trim(full_name), trim(generated_file), 2_C_INT + i_phi, mean_profiles(:, 3 + i_phi), mean_tol, nfail)
+    end do
     do i_field = 1, n_convvelo_velocity_fields
       call read_full_field(trim(generated_file), i_field - 1, generated)
       call compare_field_to_reference(trim(velocity_field_names(i_field)), generated, i_field - 1, field_tol, nfail)
@@ -66,6 +65,13 @@ program test_convvelo_runtime
     end do
     call finish_convvelo_test("Integrated convvelo regression PASSED", "Integrated convvelo regression FAILED, failing fields = ", nfail)
   else
+    call compare_profile_to_expected("mean_v", trim(generated_file), 1_C_INT, mean_profiles(:, 2), mean_tol, nfail)
+    call compare_profile_to_expected("mean_w", trim(generated_file), 2_C_INT, mean_profiles(:, 3), mean_tol, nfail)
+    call compare_profile_to_expected("mean_u", trim(generated_file), 0_C_INT, mean_profiles(:, 1), mean_tol, nfail)
+    do i_phi = 1, nPhi
+      write (full_name, '(A,"[phi=",I0,"]")') "mean_theta", i_phi
+      call compare_profile_to_expected(trim(full_name), trim(generated_file), 2_C_INT + i_phi, mean_profiles(:, 3 + i_phi), mean_tol, nfail)
+    end do
     do i_field = 1, n_convvelo_velocity_fields_minimal
       call read_minimal_field(trim(generated_file), i_field - 1, generated)
       call compare_field_to_reference( &

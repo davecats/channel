@@ -11,4 +11,4 @@
 0.0       1.0    0.0                ! deltat, cflmax, time
 1         -1      7000   .TRUE.     ! dt_field, dt_save, t_max, time_from_restart
 10                                   ! nstep
-.TRUE.   minimal   39.0   1.0   -1.0   convvelo_runtime_minimal.bin
+.TRUE.   minimal   39.0   1.0   -1.0

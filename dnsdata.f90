@@ -89,6 +89,8 @@ MODULE dnsdata
   character(len=16) :: convvelo_output_mode = "full"
   character(len=256) :: convvelo_output_file = "raw_statistics.bin"
 
+  public :: get_solver_memory_estimate, sync_velocity_to_device
+
 CONTAINS
 
   !--------------------------------------------------------------!
@@ -143,25 +145,23 @@ CONTAINS
 
       if (convvelo_enabled) then
         read (convvelo_line, *, iostat=io) convvelo_enabled, convvelo_output_mode, &
-          convvelo_t_start, convvelo_dt_compute, convvelo_dt_write, convvelo_output_file
+          convvelo_t_start, convvelo_dt_compute, convvelo_dt_write
         if (io /= 0) then
-          error stop "read_dnsin: convection velocity line must be 'enabled mode t_start dt_compute dt_write output_file'"
+          error stop "read_dnsin: convection velocity line must be 'enabled mode t_start dt_compute dt_write'"
         end if
 
         select case (adjustl(trim(convvelo_output_mode)))
         case ("full", "FULL", "Full")
           convvelo_write_full_fields = .true.
           convvelo_output_mode = "full"
-          if (len_trim(convvelo_output_file) == 0) convvelo_output_file = "raw_statistics.bin"
+          convvelo_output_file = "raw_statistics.bin"
         case ("minimal", "MINIMAL", "Minimal")
           convvelo_write_full_fields = .false.
           convvelo_output_mode = "minimal"
-          if (len_trim(convvelo_output_file) == 0) convvelo_output_file = "convvelo_minimal.bin"
+          convvelo_output_file = "convvelo_minimal.bin"
         case default
           error stop "read_dnsin: convvelo_output_mode must be 'full' or 'minimal'"
         end select
-
-        convvelo_output_file = adjustl(trim(convvelo_output_file))
 
         if (convvelo_dt_compute <= 0.0d0) then
           error stop "read_dnsin: convvelo_dt_compute must be > 0 when convection velocity output is enabled"
@@ -236,6 +236,33 @@ CONTAINS
 
     allocate (fr(3 + 2*nPhi)); fr = 0.0
   END SUBROUTINE init_memory
+
+  SUBROUTINE get_solver_memory_estimate(solveNS, n_floats)
+    IMPLICIT NONE
+    logical, intent(in) :: solveNS
+    integer(C_INT64_T), intent(out) :: n_floats
+    integer(C_INT64_T) :: spectral_planes, bc_planes, linear_planes
+    integer(C_INT64_T) :: sendcount64, nbufs
+
+    spectral_planes = int(nyN - ny0 + 5, C_INT64_T)*int(2*nz + 1, C_INT64_T)*int(nxN - nx0 + 1, C_INT64_T)
+    bc_planes = int(2*nz + 1, C_INT64_T)*int(nxN - nx0 + 1, C_INT64_T)*int(5 + nPhi, C_INT64_T)
+    linear_planes = int(ny - 1, C_INT64_T)*int(2*nz + 1, C_INT64_T)*int(nxN - nx0 + 1, C_INT64_T)*int(2 + nPhi, C_INT64_T)
+    sendcount64 = int(nxB, C_INT64_T)*int(nzB, C_INT64_T)*int(ny + 3, C_INT64_T)
+    nbufs = int(merge(2, 1, overlapping), C_INT64_T)
+
+    n_floats = 0_C_INT64_T
+    n_floats = n_floats + 2_C_INT64_T*spectral_planes*int(3 + nPhi, C_INT64_T)
+#ifdef bodyforce
+    n_floats = n_floats + 2_C_INT64_T*spectral_planes*3_C_INT64_T
+#endif
+    n_floats = n_floats + 4_C_INT64_T*bc_planes
+    if (solveNS) then
+      n_floats = n_floats + 4_C_INT64_T*linear_planes
+      n_floats = n_floats + 2_C_INT64_T*5_C_INT64_T*int(nyN - ny0 + 3, C_INT64_T)* &
+                 int(2*nz + 1, C_INT64_T)*int(nxN - nx0 + 1, C_INT64_T)
+    end if
+    n_floats = n_floats + 4_C_INT64_T*sendcount64*int(nproc, C_INT64_T)*nbufs
+  END SUBROUTINE get_solver_memory_estimate
 
   !--------------------------------------------------------------!
   !--------------- Deallocate memory for solution ---------------!

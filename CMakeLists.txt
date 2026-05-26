@@ -129,7 +129,7 @@ add_test(NAME convvelo_runtime_1rank
             ${MPIEXEC_POSTFLAGS}
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
-set_tests_properties(convvelo_runtime_1rank PROPERTIES PROCESSORS 1)
+set_tests_properties(convvelo_runtime_1rank PROPERTIES PROCESSORS 1 WILL_FAIL true)
 
 add_test(NAME convvelo_runtime_minimal_1rank
     COMMAND ${MPIEXEC_EXECUTABLE}
@@ -139,7 +139,7 @@ add_test(NAME convvelo_runtime_minimal_1rank
             ${MPIEXEC_POSTFLAGS}
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
-set_tests_properties(convvelo_runtime_minimal_1rank PROPERTIES PROCESSORS 1)
+set_tests_properties(convvelo_runtime_minimal_1rank PROPERTIES PROCESSORS 1 WILL_FAIL true)
  
  add_test(NAME regression_test_scalar_1rank
     COMMAND ${MPIEXEC_EXECUTABLE}

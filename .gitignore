@@ -104,3 +104,4 @@ fri*
 !tests/poisson/Dati.cart.35.out
 tests/convvelo/*.bin
 tests/convvelo/*.in
+**/*.zarr

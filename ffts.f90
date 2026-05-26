@@ -42,6 +42,22 @@ MODULE ffts
 
 CONTAINS
 
+  subroutine get_fft_memory_estimate(nxd, nxB, ny, nzd, nzB, nPhi, overlapping, n_floats)
+    implicit none
+    integer(C_INT), intent(in) :: nxd, nxB, ny, nzd, nzB, nPhi
+    logical, intent(in) :: overlapping
+    integer(C_INT64_T), intent(out) :: n_floats
+    integer(C_INT64_T) :: nflds
+
+    nflds = int(merge(2, 1, overlapping), C_INT64_T)
+
+    n_floats = 0_C_INT64_T
+    n_floats = n_floats + 2_C_INT64_T*int(nzd, C_INT64_T)*int(nxB, C_INT64_T)*int(ny + 3, C_INT64_T)*nflds
+    n_floats = n_floats + 2_C_INT64_T*int(nxd + 1, C_INT64_T)*int(nzB, C_INT64_T)*int(ny + 3, C_INT64_T)*nflds
+    n_floats = n_floats + int(2*(nxd + 1), C_INT64_T)*int(nzB, C_INT64_T)*int(ny + 3, C_INT64_T)*int(3 + nPhi, C_INT64_T)
+    n_floats = n_floats + int(2*(nxd + 1), C_INT64_T)*int(nzB, C_INT64_T)*int(ny + 3, C_INT64_T)*nflds
+  end subroutine get_fft_memory_estimate
+
 #ifdef HAVE_FFTW
   SUBROUTINE init_fft(VVdz, VVdx, rVVdx, nxd, nxB, ny, nzd, nzB, nPhi, overlapping, odd_n_real, s)
     integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, ny, nPhi
@@ -144,6 +160,7 @@ CONTAINS
     integer :: istat
     integer, dimension(1), target :: n, inembed, onembed
     integer(C_INT) :: batch, idist, odist, istride, ostride
+    integer :: nflds
 
     nflds = merge(2, 1, overlapping)
 
@@ -320,4 +337,3 @@ CONTAINS
 #endif
 
 END MODULE ffts
-

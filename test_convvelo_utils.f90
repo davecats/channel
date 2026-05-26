@@ -2,8 +2,6 @@ module test_convvelo_utils
   use, intrinsic :: iso_c_binding
   use, intrinsic :: ieee_arithmetic
   use dnsdata
-  use convvelo, only: n_convvelo_velocity_fields, n_convvelo_scalar_fields, &
-                      n_convvelo_velocity_fields_minimal, n_convvelo_scalar_fields_minimal
 #ifdef HAVE_MPI
   use mpi_f08
 #endif
@@ -15,6 +13,10 @@ module test_convvelo_utils
   character(len=*), parameter, public :: convvelo_reference_snapshots(3) = [character(len=32) :: &
                            "tests/convvelo/Dati.cart.39.out", "tests/convvelo/Dati.cart.40.out", "tests/convvelo/Dati.cart.41.out" &
                                                                             ]
+  integer(C_INT), parameter, public :: n_convvelo_velocity_fields = 33
+  integer(C_INT), parameter, public :: n_convvelo_scalar_fields = 10
+  integer(C_INT), parameter, public :: n_convvelo_velocity_fields_minimal = 20
+  integer(C_INT), parameter, public :: n_convvelo_scalar_fields_minimal = 9
 
   character(len=32), parameter, public :: velocity_field_names(n_convvelo_velocity_fields) = [character(len=32) :: &
                                "u_cross_u", "u_cross_dyu", "u_cross_v", "u_cross_dyv", "u_cross_w", "u_cross_dyw", "u_cross_dyyu", &
@@ -24,8 +26,8 @@ module test_convvelo_utils
                                                         "w_cross_uw", "w_cross_ww", "u_cross_dyuv", "v_cross_dyvv", "w_cross_dyvw" &
                                                                                               ]
   character(len=32), parameter, public :: scalar_field_names(n_convvelo_scalar_fields) = [character(len=32) :: &
-                                                         "t_theta_theta", "t_theta_u", "t_theta_v", "t_theta_w", "t_theta_thetau", &
-                                        "t_theta_thetaw", "t_theta_dyytheta", "t_theta_dythetav", "t_theta_dytheta", "t_theta_dyv" &
+                                                                 "t_cross_t", "t_cross_u", "t_cross_v", "t_cross_w", "t_cross_tu", &
+                                                        "t_cross_tw", "t_cross_dyyt", "t_cross_dytv", "t_cross_dyt", "t_cross_dyv" &
                                                                                           ]
 
   ! Minimal mode stores only the reduced zero-crossflow subset.
@@ -37,9 +39,10 @@ module test_convvelo_utils
                                                                      "u_cross_dyuv", "v_cross_dyvv", "w_cross_dyvw", "u_cross_dyv" &
                                                                                                               ]
   character(len=32), parameter, public :: minimal_scalar_field_names(n_convvelo_scalar_fields_minimal) = [character(len=32) :: &
-                                                         "t_theta_theta", "t_theta_u", "t_theta_v", "t_theta_w", "t_theta_thetau", &
-                                                           "t_theta_thetaw", "t_theta_dyytheta", "t_theta_dythetav", "t_theta_dyv" &
+                                                                 "t_cross_t", "t_cross_u", "t_cross_v", "t_cross_w", "t_cross_tu", &
+                                                                       "t_cross_tw", "t_cross_dyyt", "t_cross_dytv", "t_cross_dyv" &
                                                                                                           ]
+  integer(C_INT), parameter :: n_convvelo_profile_header_slots = 3
 
   public :: compare_field_to_reference
   public :: compare_profile_to_expected
@@ -80,15 +83,17 @@ contains
 
   subroutine compute_reference_mean_profiles(mean_profiles)
     implicit none
-    complex(C_DOUBLE_COMPLEX), intent(out) :: mean_profiles(ny0 - 2:nyN + 2, 1 + nPhi)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: mean_profiles(ny0 - 2:nyN + 2, 3 + nPhi)
     integer(C_INT) :: i_snapshot, i_phi
 
     mean_profiles = (0.0d0, 0.0d0)
     do i_snapshot = 1, size(convvelo_reference_snapshots)
       call read_restart_file(convvelo_reference_snapshots(i_snapshot), V)
       mean_profiles(:, 1) = mean_profiles(:, 1) + V(:, 0, 0, 1)
+      mean_profiles(:, 2) = mean_profiles(:, 2) + V(:, 0, 0, 2)
+      mean_profiles(:, 3) = mean_profiles(:, 3) + V(:, 0, 0, 3)
       do i_phi = 1, nPhi
-        mean_profiles(:, 1 + i_phi) = mean_profiles(:, 1 + i_phi) + V(:, 0, 0, 3 + i_phi)
+        mean_profiles(:, 3 + i_phi) = mean_profiles(:, 3 + i_phi) + V(:, 0, 0, 3 + i_phi)
       end do
     end do
     mean_profiles = mean_profiles/dble(size(convvelo_reference_snapshots))
@@ -263,7 +268,7 @@ contains
 
     profile_bytes = int(16, C_INT64_T)*int(ny + 3, C_INT64_T)
     field_bytes = int(16, C_INT64_T)*int(ny + 3, C_INT64_T)*int(2*nz + 1, C_INT64_T)*int(nx + 1, C_INT64_T)
-    pos_bytes = int(1 + nPhi, C_INT64_T)*profile_bytes + int(field_index, C_INT64_T)*field_bytes + 1_C_INT64_T
+    pos_bytes = int(n_convvelo_profile_header_slots + nPhi, C_INT64_T)*profile_bytes + int(field_index, C_INT64_T)*field_bytes + 1_C_INT64_T
 
     open (unit=94, file=filename, form='unformatted', access='stream', status='old', action='read', iostat=io)
     if (io /= 0) then
@@ -284,7 +289,7 @@ contains
 
     profile_bytes = int(16, C_INT64_T)*int(ny + 3, C_INT64_T)
     field_bytes = int(16, C_INT64_T)*int(ny + 3, C_INT64_T)*int(2*nz + 1, C_INT64_T)*int(nx + 1, C_INT64_T)
-    pos_bytes = int(1 + nPhi, C_INT64_T)*profile_bytes + int(field_index, C_INT64_T)*field_bytes + 1_C_INT64_T
+    pos_bytes = int(n_convvelo_profile_header_slots + nPhi, C_INT64_T)*profile_bytes + int(field_index, C_INT64_T)*field_bytes + 1_C_INT64_T
 
     open (unit=96, file=filename, form='unformatted', access='stream', status='old', action='read', iostat=io)
     if (io /= 0) then

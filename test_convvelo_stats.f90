@@ -1,9 +1,7 @@
 program test_convvelo_stats
   use, intrinsic :: iso_c_binding
   use dnsdata
-  use convvelo, only: init_convvelo, reset_convvelo_stats, acc_convvelo_stats, convvelo_stats, free_convvelo, &
-                      sync_convvelo_output_to_host, &
-                      n_convvelo_velocity_fields, n_convvelo_scalar_fields
+  use convvelo, only: init_convvelo, reset_convvelo_stats, acc_convvelo_stats, convvelo_stats, free_convvelo
   use pressure_output
   use driver
   use test_convvelo_utils
@@ -31,7 +29,7 @@ program test_convvelo_stats
   call read_restart_file("tests/convvelo/Dati.cart.41.out", V)
   call sync_velocity_to_device()
   call acc_convvelo_stats()
-  call sync_convvelo_output_to_host()
+  !$omp target update from(convvelo_stats)
 
   do i_field = 1, n_convvelo_velocity_fields
     call compare_field_to_reference(trim(velocity_field_names(i_field)), convvelo_stats(:, :, :, i_field), i_field - 1, tol, nfail)

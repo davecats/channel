@@ -19,8 +19,16 @@ CONTAINS
   !==========================================================
   SUBROUTINE initialize(config_file, restart_file, solveNS)
     USE dnsdata
-    USE convvelo
-    USE pressure_output
+    USE convvelo, only: init_convvelo_runtime, get_convvelo_memory_estimate
+    USE ffts, only: get_fft_memory_estimate
+#ifdef HAVE_CUDA
+    USE ffts, only: init_cufft
+#elif defined(HAVE_HIP)
+    USE ffts, only: init_hipfft
+#else
+    USE ffts, only: init_fft, free_fft
+#endif
+    USE pressure_output, only: init_pressure_output, free_pressure_output, get_pressure_memory_estimate
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
     use omp_lib
 #endif
@@ -28,6 +36,8 @@ CONTAINS
     CHARACTER(len=*), INTENT(IN) :: config_file, restart_file
     LOGICAL, OPTIONAL, INTENT(IN) :: solveNS
     REAL(C_DOUBLE) :: deltat_from_dnsin
+    real(C_DOUBLE) :: total_mib
+    integer(C_INT64_T) :: solver_floats, fft_floats, pressure_floats, convvelo_floats
     integer :: iy, iPhi, num_dev, dev
     logical :: run_solver
 
@@ -60,6 +70,20 @@ CONTAINS
     CALL read_dnsin(config_file)
     deltat_from_dnsin = deltat
     CALL init_MPI(nx + 1, nz, ny, nxd + 1, nzd, nPhi, overlapping)
+    call get_solver_memory_estimate(run_solver, solver_floats)
+    call get_fft_memory_estimate(nxd, nxB, ny, nzd, nzB, nPhi, overlapping, fft_floats)
+    call get_pressure_memory_estimate(pressure_floats)
+    call get_convvelo_memory_estimate(convvelo_floats)
+    if (has_terminal) then
+      write (*, *) "Estimated memory per rank before allocation:"
+      call print_memory_line("Solver", solver_floats)
+      call print_memory_line("FFT", fft_floats)
+      call print_memory_line("Pressure", pressure_floats)
+      call print_memory_line("Convvelo", convvelo_floats)
+      total_mib = floats_to_mib(solver_floats + fft_floats + pressure_floats + convvelo_floats)
+      write (*, '(A,F12.3,A)') "  Total      : device=", total_mib, " MiB"
+      write (*, *) " "
+    end if
     CALL init_memory(run_solver)
 
     ! Init various subroutines
@@ -77,10 +101,7 @@ CONTAINS
       !$omp target update to(V)
     end if
     CALL init_pressure_output()
-    if (convvelo_enabled) then
-      call init_convvelo()
-      call reset_convvelo_stats()
-    end if
+    call init_convvelo_runtime()
 
     ! Field number (for output)
     ifield = FLOOR((time + 0.5*deltat)/dt_field)
@@ -111,11 +132,6 @@ CONTAINS
       WRITE (*, *) " "
 
       print *, "Overlapping communication and computation:", overlapping
-      if (convvelo_enabled) then
-        print *, "Convection velocity output:", trim(convvelo_output_mode), "file =", trim(convvelo_output_file)
-        print *, "Convection velocity sampling starts at", convvelo_t_start, &
-          "compute every", convvelo_dt_compute, "write every", convvelo_dt_write
-      end if
     END IF
 
     if (run_solver) then
@@ -139,7 +155,7 @@ CONTAINS
   !==========================================================
   SUBROUTINE timeloop()
     USE dnsdata
-    USE convvelo
+    USE convvelo, only: advance_convvelo_runtime
     IMPLICIT NONE
     integer:: iPhi, ix, iz, i, ic
 #ifdef chron
@@ -194,18 +210,7 @@ CONTAINS
         end do
       end do
 
-      if (convvelo_enabled) then
-        if (crossed_convvelo_interval(convvelo_dt_compute, convvelo_t_start)) then
-          call update_convvelo_component_means()
-          call acc_convvelo_stats()
-        end if
-
-        if (convvelo_dt_write > 0.0d0) then
-          if (convvelo_has_pending_output() .and. crossed_convvelo_interval(convvelo_dt_write, convvelo_t_start)) then
-            call write_convvelo_output(trim(convvelo_output_file), convvelo_write_full_fields)
-          end if
-        end if
-      end if
+      call advance_convvelo_runtime()
 
       ! Write runtime file
       CALL outstats()
@@ -219,7 +224,7 @@ CONTAINS
 
   SUBROUTINE finalize()
     USE dnsdata
-    USE convvelo
+    USE convvelo, only: finalize_convvelo_runtime
     USE pressure_output
     IMPLICIT NONE
     CHARACTER(len=40) :: end_filename
@@ -228,12 +233,7 @@ CONTAINS
     end_filename = "Dati.cart.out"; CALL save_restart_file(end_filename, V)
 
     IF (has_terminal) CLOSE (102)
-    if (convvelo_enabled) then
-      if (convvelo_has_pending_output()) then
-        call write_convvelo_output(trim(convvelo_output_file), convvelo_write_full_fields)
-      end if
-      call free_convvelo()
-    end if
+    call finalize_convvelo_runtime()
     CALL free_pressure_output()
     ! Realease memory
 #ifdef HAVE_FFTW
@@ -245,17 +245,23 @@ CONTAINS
 #endif
   END SUBROUTINE finalize
 
-  logical function crossed_convvelo_interval(period, t_start)
-    use, intrinsic :: iso_c_binding, only: C_DOUBLE
-    use dnsdata, only: time, deltat
+  subroutine print_memory_line(label, n_floats)
+    use, intrinsic :: iso_c_binding, only: C_INT64_T, C_DOUBLE
     implicit none
-    real(C_DOUBLE), intent(in) :: period, t_start
+    character(len=*), intent(in) :: label
+    integer(C_INT64_T), intent(in) :: n_floats
+    real(C_DOUBLE) :: total_mib
 
-    crossed_convvelo_interval = .false.
-    if (period <= 0.0d0) return
-    if (time + 0.5d0*deltat < t_start) return
+    total_mib = floats_to_mib(n_floats)
+    write (*, '(A,": device=",F12.3,A)') "  "//trim(label), total_mib, " MiB"
+  end subroutine print_memory_line
 
-    crossed_convvelo_interval = floor((time + 0.5d0*deltat - t_start)/period) > &
-                                floor((time - 0.5d0*deltat - t_start)/period)
-  end function crossed_convvelo_interval
+  real(C_DOUBLE) function floats_to_mib(n_floats)
+    use, intrinsic :: iso_c_binding, only: C_INT64_T, C_DOUBLE
+    implicit none
+    integer(C_INT64_T), intent(in) :: n_floats
+
+    floats_to_mib = 8.0d0*real(n_floats, C_DOUBLE)/(1024.0d0*1024.0d0)
+  end function floats_to_mib
+
 END MODULE driver

@@ -4,7 +4,9 @@ module convvelo
 
   use, intrinsic :: iso_c_binding
   use dnsdata, only: V, nPhi, nz, ny, der, nxd, izd, factor, iproc, D0mat, d240, d24m1, d24n, d24np1, &
-                     COMPLEXderiv, LeftLU5div
+                     COMPLEXderiv, LeftLU5div, convvelo_enabled, convvelo_write_full_fields, has_terminal, &
+                     convvelo_t_start, convvelo_dt_compute, convvelo_dt_write, convvelo_output_file, &
+                     time, deltat
   use pressure_output, only: compute_poisson, compute_dpdy
   use mpi_transpose, only: ny0, nyN, nx0, nxN, nxB, nzB, nx, has_average, ierr, sendbuf, recvbuf, &
                            pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, nzd
@@ -22,77 +24,45 @@ module convvelo
 
   private
 
-  integer(C_INT), parameter, public :: n_convvelo_velocity_fields = 33
-  integer(C_INT), parameter, public :: n_convvelo_scalar_fields = 10
-  integer(C_INT), parameter, public :: n_convvelo_velocity_fields_minimal = 20
-  integer(C_INT), parameter, public :: n_convvelo_scalar_fields_minimal = 9
+  integer(C_INT), parameter :: n_convvelo_velocity_fields_total = 33
+  integer(C_INT), parameter :: n_convvelo_scalar_fields_total = 10
+  integer(C_INT), parameter :: n_convvelo_velocity_fields_minimal_total = 20
+  integer(C_INT), parameter :: n_convvelo_scalar_fields_minimal_total = 9
+  integer(C_INT), parameter :: n_convvelo_profile_fields = 4
   integer(C_INT), parameter :: i_u = 1
   integer(C_INT), parameter :: i_v = 2
   integer(C_INT), parameter :: i_w = 3
-  integer(C_INT), parameter :: i_u_cross_u = 1
-  integer(C_INT), parameter :: i_u_cross_dyu = 2
-  integer(C_INT), parameter :: i_u_cross_v = 3
-  integer(C_INT), parameter :: i_u_cross_dyv = 4
-  integer(C_INT), parameter :: i_u_cross_w = 5
-  integer(C_INT), parameter :: i_u_cross_dyw = 6
-  integer(C_INT), parameter :: i_u_cross_dyyu = 7
-  integer(C_INT), parameter :: i_v_cross_u = 8
-  integer(C_INT), parameter :: i_v_cross_dyu = 9
-  integer(C_INT), parameter :: i_v_cross_v = 10
-  integer(C_INT), parameter :: i_v_cross_dyv = 11
-  integer(C_INT), parameter :: i_v_cross_w = 12
-  integer(C_INT), parameter :: i_v_cross_dyw = 13
-  integer(C_INT), parameter :: i_v_cross_dyyv = 14
-  integer(C_INT), parameter :: i_w_cross_u = 15
-  integer(C_INT), parameter :: i_w_cross_dyu = 16
-  integer(C_INT), parameter :: i_w_cross_v = 17
-  integer(C_INT), parameter :: i_w_cross_dyv = 18
-  integer(C_INT), parameter :: i_w_cross_w = 19
-  integer(C_INT), parameter :: i_w_cross_dyw = 20
-  integer(C_INT), parameter :: i_w_cross_dyyw = 21
-  integer(C_INT), parameter :: i_u_cross_p = 22
-  integer(C_INT), parameter :: i_v_cross_dpdy = 23
-  integer(C_INT), parameter :: i_w_cross_p = 24
-  integer(C_INT), parameter :: i_u_cross_uu = 25
-  integer(C_INT), parameter :: i_u_cross_uw = 26
-  integer(C_INT), parameter :: i_v_cross_uv = 27
-  integer(C_INT), parameter :: i_v_cross_vw = 28
-  integer(C_INT), parameter :: i_w_cross_uw = 29
-  integer(C_INT), parameter :: i_w_cross_ww = 30
-  integer(C_INT), parameter :: i_u_cross_dyuv = 31
-  integer(C_INT), parameter :: i_v_cross_dyvv = 32
-  integer(C_INT), parameter :: i_w_cross_dyvw = 33
-  integer(C_INT), parameter :: i_t_theta_theta = 1
-  integer(C_INT), parameter :: i_t_theta_u = 2
-  integer(C_INT), parameter :: i_t_theta_v = 3
-  integer(C_INT), parameter :: i_t_theta_w = 4
-  integer(C_INT), parameter :: i_t_theta_thetau = 5
-  integer(C_INT), parameter :: i_t_theta_thetaw = 6
-  integer(C_INT), parameter :: i_t_theta_dyytheta = 7
-  integer(C_INT), parameter :: i_t_theta_dythetav = 8
-  integer(C_INT), parameter :: i_t_theta_dytheta = 9
-  integer(C_INT), parameter :: i_t_theta_dyv = 10
-  integer(C_INT), parameter :: i_prod_uu = 1
-  integer(C_INT), parameter :: i_prod_vv = 2
-  integer(C_INT), parameter :: i_prod_ww = 3
-  integer(C_INT), parameter :: i_prod_uv = 4
-  integer(C_INT), parameter :: i_prod_vw = 5
-  integer(C_INT), parameter :: i_prod_uw = 6
-  integer(C_INT), parameter :: minimal_velocity_fields(n_convvelo_velocity_fields_minimal) = [ &
-                               i_u_cross_u, i_u_cross_v, i_v_cross_v, i_w_cross_w, &
-                               i_u_cross_p, i_v_cross_dpdy, i_w_cross_p, &
-                               i_u_cross_uu, i_u_cross_uw, i_v_cross_uv, i_v_cross_vw, i_w_cross_uw, i_w_cross_ww, &
-                               i_u_cross_dyyu, i_v_cross_dyyv, i_w_cross_dyyw, &
-                               i_u_cross_dyuv, i_v_cross_dyvv, i_w_cross_dyvw, i_u_cross_dyv &
-                               ]
-  integer(C_INT), parameter :: minimal_scalar_fields(n_convvelo_scalar_fields_minimal) = [ &
-                               i_t_theta_theta, i_t_theta_u, i_t_theta_v, i_t_theta_w, &
-                               i_t_theta_thetau, i_t_theta_thetaw, i_t_theta_dyytheta, i_t_theta_dythetav, i_t_theta_dyv &
-                               ]
+  character(len=32), parameter :: velocity_field_names(n_convvelo_velocity_fields_total) = [character(len=32) :: &
+                               "u_cross_u", "u_cross_dyu", "u_cross_v", "u_cross_dyv", "u_cross_w", "u_cross_dyw", "u_cross_dyyu", &
+                               "v_cross_u", "v_cross_dyu", "v_cross_v", "v_cross_dyv", "v_cross_w", "v_cross_dyw", "v_cross_dyyv", &
+                               "w_cross_u", "w_cross_dyu", "w_cross_v", "w_cross_dyv", "w_cross_w", "w_cross_dyw", "w_cross_dyyw", &
+                                 "u_cross_p", "v_cross_dpdy", "w_cross_p", "u_cross_uu", "u_cross_uw", "v_cross_uv", "v_cross_vw", &
+                                                         "w_cross_uw", "w_cross_ww", "u_cross_dyuv", "v_cross_dyvv", "w_cross_dyvw"]
+  character(len=32), parameter :: scalar_field_names(n_convvelo_scalar_fields_total) = [character(len=32) :: &
+                                                                 "t_cross_t", "t_cross_u", "t_cross_v", "t_cross_w", "t_cross_tu", &
+                                                         "t_cross_tw", "t_cross_dyyt", "t_cross_dytv", "t_cross_dyt", "t_cross_dyv"]
+  character(len=32), parameter :: minimal_velocity_field_names(n_convvelo_velocity_fields_minimal_total) = [character(len=32) :: &
+                                                                               "u_cross_u", "u_cross_v", "v_cross_v", "w_cross_w", &
+                                                                                         "u_cross_p", "v_cross_dpdy", "w_cross_p", &
+                                               "u_cross_uu", "u_cross_uw", "v_cross_uv", "v_cross_vw", "w_cross_uw", "w_cross_ww", &
+                                                                                   "u_cross_dyyu", "v_cross_dyyv", "w_cross_dyyw", &
+                                                                      "u_cross_dyuv", "v_cross_dyvv", "w_cross_dyvw", "u_cross_dyv"]
+  character(len=32), parameter :: minimal_scalar_field_names(n_convvelo_scalar_fields_minimal_total) = [character(len=32) :: &
+                                                                               "t_cross_t", "t_cross_u", "t_cross_v", "t_cross_w", &
+                                                          "t_cross_tu", "t_cross_tw", "t_cross_dyyt", "t_cross_dytv", "t_cross_dyv"]
+  character(len=16), parameter :: convvelo_profile_field_names(n_convvelo_profile_fields) = [character(len=16) :: &
+                                                                                             "mean_u", "mean_v", "mean_w", "mean_t"]
 
   logical, save :: convvelo_initialized = .false.
   logical, save :: convvelo_dirty = .false.
+  integer(C_INT), save, public :: n_convvelo_velocity_fields = 0
+  integer(C_INT), save, public :: n_convvelo_scalar_fields = 0
   integer(C_INT), save, public :: n_convvelo_fields = 0
+  integer(C_INT64_T), save :: n_convvelo_profile_slots = 0_C_INT64_T
+  integer(C_INT64_T), save :: convvelo_last_write_index = -1_C_INT64_T
+  integer(C_INT), allocatable, save :: convvelo_velocity_field_ids(:)
+  integer(C_INT), allocatable, save :: convvelo_scalar_field_ids(:)
+  integer(C_INT), allocatable, save :: convvelo_field_map(:)
   integer(C_INT64_T), save :: n_mean_samples = 0_C_INT64_T
 
   complex(C_DOUBLE_COMPLEX), allocatable, save, public :: convvelo_stats(:, :, :, :)
@@ -104,17 +74,44 @@ module convvelo
   integer(C_INT64_T), allocatable, save :: n_field_samples(:)
 
   public :: init_convvelo, reset_convvelo_stats, update_convvelo_component_means, free_convvelo
-  public :: start_convvelo_field, finish_convvelo_field
-  public :: acc_convvelo_stats, write_convvelo_output, convvelo_has_pending_output, sync_convvelo_output_to_host
+  public :: finish_convvelo_field
+  public :: acc_convvelo_stats, convvelo_has_pending_output
+  public :: init_convvelo_runtime, advance_convvelo_runtime, finalize_convvelo_runtime
+  public :: get_convvelo_memory_estimate, write_convvelo_raw_stats
 
 contains
+
+  subroutine get_convvelo_memory_estimate(n_floats)
+    implicit none
+    integer(C_INT64_T), intent(out) :: n_floats
+    integer(C_INT64_T) :: local_y, spectral_planes, real_planes, n_fields
+
+    if (.not. convvelo_enabled) then
+      n_floats = 0_C_INT64_T
+      return
+    end if
+
+    local_y = int(nyN - ny0 + 5, C_INT64_T)
+    spectral_planes = local_y*int(2*nz + 1, C_INT64_T)*int(nxN - nx0 + 1, C_INT64_T)
+    real_planes = int(2*(nxd + 1), C_INT64_T)*int(nzB, C_INT64_T)*int(ny + 3, C_INT64_T)
+    if (convvelo_write_full_fields) then
+      n_fields = int(n_convvelo_velocity_fields_total + nPhi*n_convvelo_scalar_fields_total, C_INT64_T)
+    else
+      n_fields = int(n_convvelo_velocity_fields_minimal_total + nPhi*n_convvelo_scalar_fields_minimal_total, C_INT64_T)
+    end if
+
+    n_floats = 0_C_INT64_T
+    n_floats = n_floats + 2_C_INT64_T*spectral_planes*n_fields
+    n_floats = n_floats + 2_C_INT64_T*spectral_planes
+    n_floats = n_floats + 3_C_INT64_T*real_planes
+  end subroutine get_convvelo_memory_estimate
 
   subroutine init_convvelo()
     implicit none
 
     if (convvelo_initialized) return
 
-    n_convvelo_fields = n_convvelo_velocity_fields + nPhi*n_convvelo_scalar_fields
+    call init_convvelo_field_layout()
 
     allocate (convvelo_stats(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, n_convvelo_fields))
     allocate (convvelo_work(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
@@ -135,21 +132,79 @@ contains
     !$omp target enter data map(to: convvelo_stats, convvelo_work, component_means, convvelo_real0, convvelo_real1, convvelo_real_prod)
 
     n_mean_samples = 0_C_INT64_T
+    convvelo_last_write_index = -1_C_INT64_T
     convvelo_dirty = .false.
     convvelo_initialized = .true.
   end subroutine init_convvelo
 
+  subroutine init_convvelo_field_layout()
+    implicit none
+    integer(C_INT) :: i, raw_field_index
+
+    if (allocated(convvelo_velocity_field_ids)) deallocate (convvelo_velocity_field_ids)
+    if (allocated(convvelo_scalar_field_ids)) deallocate (convvelo_scalar_field_ids)
+    if (allocated(convvelo_field_map)) deallocate (convvelo_field_map)
+
+    if (convvelo_write_full_fields) then
+      allocate (convvelo_velocity_field_ids(n_convvelo_velocity_fields_total))
+      allocate (convvelo_scalar_field_ids(n_convvelo_scalar_fields_total))
+      convvelo_velocity_field_ids = [(i, i=1, n_convvelo_velocity_fields_total)]
+      convvelo_scalar_field_ids = [(i, i=1, n_convvelo_scalar_fields_total)]
+    else
+      allocate (convvelo_velocity_field_ids(n_convvelo_velocity_fields_minimal_total))
+      allocate (convvelo_scalar_field_ids(n_convvelo_scalar_fields_minimal_total))
+      do i = 1, size(convvelo_velocity_field_ids)
+        convvelo_velocity_field_ids(i) = field_name_index(minimal_velocity_field_names(i), velocity_field_names, "velocity")
+      end do
+      do i = 1, size(convvelo_scalar_field_ids)
+        convvelo_scalar_field_ids(i) = field_name_index(minimal_scalar_field_names(i), scalar_field_names, "scalar")
+      end do
+    end if
+
+    n_convvelo_velocity_fields = size(convvelo_velocity_field_ids)
+    n_convvelo_scalar_fields = size(convvelo_scalar_field_ids)
+    n_convvelo_fields = n_convvelo_velocity_fields + nPhi*n_convvelo_scalar_fields
+    allocate (convvelo_field_map(n_convvelo_velocity_fields_total + nPhi*n_convvelo_scalar_fields_total))
+    convvelo_field_map = 0_C_INT
+
+    do i = 1, size(convvelo_velocity_field_ids)
+      convvelo_field_map(convvelo_velocity_field_ids(i)) = i
+    end do
+    do i = 1, nPhi
+      do raw_field_index = 1, size(convvelo_scalar_field_ids)
+        convvelo_field_map(n_convvelo_velocity_fields_total + (i - 1)*n_convvelo_scalar_fields_total + convvelo_scalar_field_ids(raw_field_index)) = &
+          size(convvelo_velocity_field_ids) + (i - 1)*size(convvelo_scalar_field_ids) + raw_field_index
+      end do
+    end do
+
+    n_convvelo_profile_slots = int(3 + nPhi, C_INT64_T)
+  end subroutine init_convvelo_field_layout
+
   subroutine reset_convvelo_stats()
     implicit none
+    integer(C_INT) :: field_index, iy, iz, ix, ic
 
     if (.not. convvelo_initialized) return
 
-    call zero_convvelo_stats()
-    call zero_convvelo_work()
-    call zero_component_means()
-    call zero_real_buffer(convvelo_real0)
-    call zero_real_buffer(convvelo_real1)
-    call zero_real_buffer(convvelo_real_prod)
+    !$omp target teams distribute parallel do collapse(4) &
+    !$omp shared(convvelo_stats, n_convvelo_fields, ny0, nyN, nx0, nxN, nz) private(field_index, ix, iz, iy)
+    do field_index = 1, n_convvelo_fields
+      do ix = nx0, nxN
+        do iz = -nz, nz
+          do iy = ny0 - 2, nyN + 2
+            convvelo_stats(iy, iz, ix, field_index) = (0.0d0, 0.0d0)
+          end do
+        end do
+      end do
+    end do
+
+    !$omp target teams distribute parallel do collapse(2) &
+    !$omp shared(component_means, ny0, nyN, nPhi) private(ic, iy)
+    do ic = 1, 3 + nPhi
+      do iy = ny0 - 2, nyN + 2
+        component_means(iy, ic) = (0.0d0, 0.0d0)
+      end do
+    end do
     n_field_samples = 0_C_INT64_T
 
     n_mean_samples = 0_C_INT64_T
@@ -207,92 +262,86 @@ contains
 
   subroutine acc_convvelo_stats()
     implicit none
-    integer(C_INT) :: iPhi, scalar_component, scalar_offset
+    integer(C_INT) :: iPhi, scalar_component
 
     if (.not. convvelo_initialized) call init_convvelo()
-    call accumulate_cross_components(i_u_cross_u, i_u, i_u)
-    call accumulate_cross_derivative(i_u_cross_dyu, i_u, i_u, 1)
-    call accumulate_cross_components(i_u_cross_v, i_u, i_v)
-    call accumulate_cross_derivative(i_u_cross_dyv, i_u, i_v, 1)
-    call accumulate_cross_components(i_u_cross_w, i_u, i_w)
-    call accumulate_cross_derivative(i_u_cross_dyw, i_u, i_w, 1)
-    call accumulate_cross_derivative(i_u_cross_dyyu, i_u, i_u, 2)
+    call accumulate_cross_components(field_name_index("u_cross_u", velocity_field_names, "velocity"), i_u, i_u)
+    call accumulate_cross_derivative(field_name_index("u_cross_dyu", velocity_field_names, "velocity"), i_u, i_u, 1)
+    call accumulate_cross_components(field_name_index("u_cross_v", velocity_field_names, "velocity"), i_u, i_v)
+    call accumulate_cross_derivative(field_name_index("u_cross_dyv", velocity_field_names, "velocity"), i_u, i_v, 1)
+    call accumulate_cross_components(field_name_index("u_cross_w", velocity_field_names, "velocity"), i_u, i_w)
+    call accumulate_cross_derivative(field_name_index("u_cross_dyw", velocity_field_names, "velocity"), i_u, i_w, 1)
+    call accumulate_cross_derivative(field_name_index("u_cross_dyyu", velocity_field_names, "velocity"), i_u, i_u, 2)
 
-    call accumulate_cross_components(i_v_cross_u, i_v, i_u)
-    call accumulate_cross_derivative(i_v_cross_dyu, i_v, i_u, 1)
-    call accumulate_cross_components(i_v_cross_v, i_v, i_v)
-    call accumulate_cross_derivative(i_v_cross_dyv, i_v, i_v, 1)
-    call accumulate_cross_components(i_v_cross_w, i_v, i_w)
-    call accumulate_cross_derivative(i_v_cross_dyw, i_v, i_w, 1)
-    call accumulate_cross_derivative(i_v_cross_dyyv, i_v, i_v, 2)
+    call accumulate_cross_components(field_name_index("v_cross_u", velocity_field_names, "velocity"), i_v, i_u)
+    call accumulate_cross_derivative(field_name_index("v_cross_dyu", velocity_field_names, "velocity"), i_v, i_u, 1)
+    call accumulate_cross_components(field_name_index("v_cross_v", velocity_field_names, "velocity"), i_v, i_v)
+    call accumulate_cross_derivative(field_name_index("v_cross_dyv", velocity_field_names, "velocity"), i_v, i_v, 1)
+    call accumulate_cross_components(field_name_index("v_cross_w", velocity_field_names, "velocity"), i_v, i_w)
+    call accumulate_cross_derivative(field_name_index("v_cross_dyw", velocity_field_names, "velocity"), i_v, i_w, 1)
+    call accumulate_cross_derivative(field_name_index("v_cross_dyyv", velocity_field_names, "velocity"), i_v, i_v, 2)
 
-    call accumulate_cross_components(i_w_cross_u, i_w, i_u)
-    call accumulate_cross_derivative(i_w_cross_dyu, i_w, i_u, 1)
-    call accumulate_cross_components(i_w_cross_v, i_w, i_v)
-    call accumulate_cross_derivative(i_w_cross_dyv, i_w, i_v, 1)
-    call accumulate_cross_components(i_w_cross_w, i_w, i_w)
-    call accumulate_cross_derivative(i_w_cross_dyw, i_w, i_w, 1)
-    call accumulate_cross_derivative(i_w_cross_dyyw, i_w, i_w, 2)
+    call accumulate_cross_components(field_name_index("w_cross_u", velocity_field_names, "velocity"), i_w, i_u)
+    call accumulate_cross_derivative(field_name_index("w_cross_dyu", velocity_field_names, "velocity"), i_w, i_u, 1)
+    call accumulate_cross_components(field_name_index("w_cross_v", velocity_field_names, "velocity"), i_w, i_v)
+    call accumulate_cross_derivative(field_name_index("w_cross_dyv", velocity_field_names, "velocity"), i_w, i_v, 1)
+    call accumulate_cross_components(field_name_index("w_cross_w", velocity_field_names, "velocity"), i_w, i_w)
+    call accumulate_cross_derivative(field_name_index("w_cross_dyw", velocity_field_names, "velocity"), i_w, i_w, 1)
+    call accumulate_cross_derivative(field_name_index("w_cross_dyyw", velocity_field_names, "velocity"), i_w, i_w, 2)
 
     do iPhi = 1, nPhi
-      scalar_component = scalar_component_index(iPhi)
-      scalar_offset = n_convvelo_velocity_fields + (iPhi - 1)*n_convvelo_scalar_fields
-      call accumulate_cross_components(scalar_offset + i_t_theta_theta, scalar_component, scalar_component)
-      call accumulate_cross_components(scalar_offset + i_t_theta_u, scalar_component, i_u)
-      call accumulate_cross_components(scalar_offset + i_t_theta_v, scalar_component, i_v)
-      call accumulate_cross_components(scalar_offset + i_t_theta_w, scalar_component, i_w)
-      call accumulate_cross_product_field(scalar_offset + i_t_theta_thetau, scalar_component, scalar_product_case(i_u, iPhi))
-      call accumulate_cross_product_field(scalar_offset + i_t_theta_thetaw, scalar_component, scalar_product_case(i_w, iPhi))
-      call accumulate_cross_derivative(scalar_offset + i_t_theta_dyytheta, scalar_component, scalar_component, 2)
-call accumulate_cross_product_derivative_field(scalar_offset + i_t_theta_dythetav, scalar_component, scalar_product_case(i_v, iPhi))
-      call accumulate_cross_derivative(scalar_offset + i_t_theta_dytheta, scalar_component, scalar_component, 1)
-      call accumulate_cross_derivative(scalar_offset + i_t_theta_dyv, scalar_component, i_v, 1)
+      scalar_component = i_w + iPhi
+      call accumulate_cross_components(raw_scalar_field_index(iPhi, "t_cross_t"), scalar_component, scalar_component)
+      call accumulate_cross_components(raw_scalar_field_index(iPhi, "t_cross_u"), scalar_component, i_u)
+      call accumulate_cross_components(raw_scalar_field_index(iPhi, "t_cross_v"), scalar_component, i_v)
+      call accumulate_cross_components(raw_scalar_field_index(iPhi, "t_cross_w"), scalar_component, i_w)
+      call accumulate_cross_product_field(raw_scalar_field_index(iPhi, "t_cross_tu"), scalar_component, scalar_component, i_u)
+      call accumulate_cross_product_field(raw_scalar_field_index(iPhi, "t_cross_tw"), scalar_component, scalar_component, i_w)
+      call accumulate_cross_derivative(raw_scalar_field_index(iPhi, "t_cross_dyyt"), scalar_component, scalar_component, 2)
+      call accumulate_cross_product_derivative_field(raw_scalar_field_index(iPhi, "t_cross_dytv"), scalar_component, scalar_component, i_v)
+      call accumulate_cross_derivative(raw_scalar_field_index(iPhi, "t_cross_dyt"), scalar_component, scalar_component, 1)
+      call accumulate_cross_derivative(raw_scalar_field_index(iPhi, "t_cross_dyv"), scalar_component, i_v, 1)
     end do
-    call accumulate_cross_product_field(i_u_cross_uu, i_u, i_prod_uu)
-    call accumulate_cross_product_field(i_u_cross_uw, i_u, i_prod_uw)
-    call accumulate_cross_product_field(i_v_cross_uv, i_v, i_prod_uv)
-    call accumulate_cross_product_field(i_v_cross_vw, i_v, i_prod_vw)
-    call accumulate_cross_product_field(i_w_cross_uw, i_w, i_prod_uw)
-    call accumulate_cross_product_field(i_w_cross_ww, i_w, i_prod_ww)
-    call accumulate_cross_product_derivative_field(i_u_cross_dyuv, i_u, i_prod_uv)
-    call accumulate_cross_product_derivative_field(i_v_cross_dyvv, i_v, i_prod_vv)
-    call accumulate_cross_product_derivative_field(i_w_cross_dyvw, i_w, i_prod_vw)
+    call accumulate_cross_product_field(field_name_index("u_cross_uu", velocity_field_names, "velocity"), i_u, i_u, i_u)
+    call accumulate_cross_product_field(field_name_index("u_cross_uw", velocity_field_names, "velocity"), i_u, i_u, i_w)
+    call accumulate_cross_product_field(field_name_index("v_cross_uv", velocity_field_names, "velocity"), i_v, i_u, i_v)
+    call accumulate_cross_product_field(field_name_index("v_cross_vw", velocity_field_names, "velocity"), i_v, i_v, i_w)
+    call accumulate_cross_product_field(field_name_index("w_cross_uw", velocity_field_names, "velocity"), i_w, i_u, i_w)
+    call accumulate_cross_product_field(field_name_index("w_cross_ww", velocity_field_names, "velocity"), i_w, i_w, i_w)
+   call accumulate_cross_product_derivative_field(field_name_index("u_cross_dyuv", velocity_field_names, "velocity"), i_u, i_u, i_v)
+   call accumulate_cross_product_derivative_field(field_name_index("v_cross_dyvv", velocity_field_names, "velocity"), i_v, i_v, i_v)
+   call accumulate_cross_product_derivative_field(field_name_index("w_cross_dyvw", velocity_field_names, "velocity"), i_w, i_v, i_w)
 
-    call accumulate_cross_pressure(i_u_cross_p, i_u, .false.)
-    call accumulate_cross_pressure(i_v_cross_dpdy, i_v, .true.)
-    call accumulate_cross_pressure(i_w_cross_p, i_w, .false.)
+    call accumulate_cross_pressure(field_name_index("u_cross_p", velocity_field_names, "velocity"), i_u, .false.)
+    call accumulate_cross_pressure(field_name_index("v_cross_dpdy", velocity_field_names, "velocity"), i_v, .true.)
+    call accumulate_cross_pressure(field_name_index("w_cross_p", velocity_field_names, "velocity"), i_w, .false.)
   end subroutine acc_convvelo_stats
-
-  subroutine start_convvelo_field()
-    implicit none
-
-    if (.not. convvelo_initialized) call init_convvelo()
-
-    call zero_convvelo_work()
-  end subroutine start_convvelo_field
 
   subroutine finish_convvelo_field(field_index)
     implicit none
 
     integer(C_INT), intent(in) :: field_index
+    integer(C_INT) :: storage_index
     real(C_DOUBLE) :: old_weight, new_weight
     integer(C_INT) :: ix, iy, iz
 
     if (.not. convvelo_initialized) call init_convvelo()
-    if (field_index < 1 .or. field_index > n_convvelo_fields) then
+    if (field_index < 1 .or. field_index > size(convvelo_field_map)) then
       error stop "finish_convvelo_field: field_index out of range"
     end if
+    storage_index = convvelo_field_map(field_index)
+    if (storage_index == 0) return
 
-    n_field_samples(field_index) = n_field_samples(field_index) + 1_C_INT64_T
-    old_weight = dble(n_field_samples(field_index) - 1_C_INT64_T)/dble(n_field_samples(field_index))
-    new_weight = 1.0d0/dble(n_field_samples(field_index))
+    n_field_samples(storage_index) = n_field_samples(storage_index) + 1_C_INT64_T
+    old_weight = dble(n_field_samples(storage_index) - 1_C_INT64_T)/dble(n_field_samples(storage_index))
+    new_weight = 1.0d0/dble(n_field_samples(storage_index))
     !$omp target teams distribute parallel do collapse(3) &
-    !$omp shared(convvelo_stats, convvelo_work, field_index, old_weight, new_weight, ny0, nyN, nz, nx0, nxN) private(ix, iz, iy)
+    !$omp shared(convvelo_stats, convvelo_work, storage_index, old_weight, new_weight, ny0, nyN, nz, nx0, nxN) private(ix, iz, iy)
     do ix = nx0, nxN
       do iz = -nz, nz
         do iy = ny0 - 2, nyN + 2
-          convvelo_stats(iy, iz, ix, field_index) = old_weight*convvelo_stats(iy, iz, ix, field_index) + &
-                                                    new_weight*convvelo_work(iy, iz, ix)
+          convvelo_stats(iy, iz, ix, storage_index) = old_weight*convvelo_stats(iy, iz, ix, storage_index) + &
+                                                      new_weight*convvelo_work(iy, iz, ix)
         end do
       end do
     end do
@@ -317,9 +366,8 @@ call accumulate_cross_product_derivative_field(scalar_offset + i_t_theta_dytheta
   subroutine apply_dy_to_work(component_index)
     implicit none
     integer(C_INT), intent(in) :: component_index
-    integer(C_INT) :: iz, ix
+    integer(C_INT) :: iy, iz, ix
 
-    call zero_convvelo_work()
     !$omp target teams distribute parallel do collapse(2) default(none) &
     !$omp shared(V, convvelo_work, component_index, der, D0mat, nx0, nxN, nz) private(ix, iz)
     do ix = nx0, nxN
@@ -334,7 +382,6 @@ call accumulate_cross_product_derivative_field(scalar_offset + i_t_theta_dytheta
     integer(C_INT), intent(in) :: component_index
     integer(C_INT) :: iy, iz, ix
 
-    call zero_convvelo_work()
     !$omp target teams distribute parallel do collapse(2) &
     !$omp shared(convvelo_work, V, component_index, d240, d24m1, d24n, d24np1, der, D0mat, ny0, nyN, ny, nx0, nxN, nz) private(ix, iz, iy)
     do ix = nx0, nxN
@@ -430,25 +477,6 @@ call accumulate_cross_product_derivative_field(scalar_offset + i_t_theta_dytheta
     call RFT(VVdx(:, :, :, 1), rx, ny)
   end subroutine spectral_field_to_real_x
 
-  subroutine accumulate_scaled_product(dst, lhs, rhs, scale)
-    implicit none
-    real(C_DOUBLE), intent(inout) :: dst(2*(nxd + 1), nzB, ny + 3)
-    real(C_DOUBLE), intent(in) :: lhs(2*(nxd + 1), nzB, ny + 3)
-    real(C_DOUBLE), intent(in) :: rhs(2*(nxd + 1), nzB, ny + 3)
-    real(C_DOUBLE), intent(in) :: scale
-    integer(C_INT) :: iy, iz, ix
-
-    !$omp target teams distribute parallel do collapse(3) &
-    !$omp shared(dst, lhs, rhs, scale, nxd, nzB, ny) private(iy, iz, ix)
-    do iy = 1, ny + 3
-      do iz = 1, nzB
-        do ix = 1, 2*nxd
-          dst(ix, iz, iy) = dst(ix, iz, iy) + scale*lhs(ix, iz, iy)*rhs(ix, iz, iy)
-        end do
-      end do
-    end do
-  end subroutine accumulate_scaled_product
-
   subroutine real_x_to_spectral_field(rx, field)
     implicit none
     real(C_DOUBLE), intent(in) :: rx(2*(nxd + 1), nzB, ny + 3)
@@ -492,6 +520,7 @@ call accumulate_cross_product_derivative_field(scalar_offset + i_t_theta_dytheta
     implicit none
     integer(C_INT), intent(in) :: field_index, lhs_component, rhs_component
 
+    if (.not. convvelo_field_requested(field_index)) return
     call load_component_to_work(rhs_component)
     call multiply_work_by_conjugate(lhs_component)
     call finish_convvelo_field(field_index)
@@ -501,6 +530,7 @@ call accumulate_cross_product_derivative_field(scalar_offset + i_t_theta_dytheta
     implicit none
     integer(C_INT), intent(in) :: field_index, lhs_component, rhs_component, derivative_order
 
+    if (.not. convvelo_field_requested(field_index)) return
     select case (derivative_order)
     case (1)
       call apply_dy_to_work(rhs_component)
@@ -519,6 +549,7 @@ call accumulate_cross_product_derivative_field(scalar_offset + i_t_theta_dytheta
     integer(C_INT), intent(in) :: field_index, lhs_component
     logical, intent(in) :: use_dpdy
 
+    if (.not. convvelo_field_requested(field_index)) return
     if (use_dpdy) then
       call compute_dpdy(convvelo_work)
     else
@@ -528,46 +559,45 @@ call accumulate_cross_product_derivative_field(scalar_offset + i_t_theta_dytheta
     call finish_convvelo_field(field_index)
   end subroutine accumulate_cross_pressure
 
-  subroutine accumulate_cross_product_field(field_index, lhs_component, product_case)
+  subroutine accumulate_cross_product_field(field_index, lhs_component, rhs0, rhs1)
     implicit none
-    integer(C_INT), intent(in) :: field_index, lhs_component, product_case
-    integer(C_INT) :: rhs0, rhs1
+    integer(C_INT), intent(in) :: field_index, lhs_component, rhs0, rhs1
 
-    call decode_product_case(product_case, rhs0, rhs1, "accumulate_cross_product_field")
+    if (.not. convvelo_field_requested(field_index)) return
     call build_cross_product_work(rhs0, rhs1)
     call multiply_work_by_conjugate(lhs_component)
     call finish_convvelo_field(field_index)
   end subroutine accumulate_cross_product_field
 
-  subroutine accumulate_cross_product_derivative_field(field_index, lhs_component, product_case)
+  subroutine accumulate_cross_product_derivative_field(field_index, lhs_component, rhs0, rhs1)
     implicit none
-    integer(C_INT), intent(in) :: field_index, lhs_component, product_case
+    integer(C_INT), intent(in) :: field_index, lhs_component, rhs0, rhs1
 
-    call build_cross_product_work_from_case(product_case)
+    if (.not. convvelo_field_requested(field_index)) return
+    call build_cross_product_work(rhs0, rhs1)
     call apply_dy_to_existing_work()
     call multiply_work_by_conjugate(lhs_component)
     call finish_convvelo_field(field_index)
   end subroutine accumulate_cross_product_derivative_field
 
-  subroutine build_cross_product_work_from_case(product_case)
-    implicit none
-    integer(C_INT), intent(in) :: product_case
-    integer(C_INT) :: rhs0, rhs1
-
-    call decode_product_case(product_case, rhs0, rhs1, "build_cross_product_work")
-    call build_cross_product_work(rhs0, rhs1)
-  end subroutine build_cross_product_work_from_case
-
   subroutine build_cross_product_work(rhs0, rhs1)
     implicit none
     integer(C_INT), intent(in) :: rhs0, rhs1
+    integer(C_INT) :: iy, iz, ix
 
     call load_convvelo_field_to_zbuf(rhs0)
     call spectral_field_to_real_x(convvelo_real0)
     call load_convvelo_field_to_zbuf(rhs1)
     call spectral_field_to_real_x(convvelo_real1)
-    call zero_real_buffer(convvelo_real_prod)
-    call accumulate_scaled_product(convvelo_real_prod, convvelo_real0, convvelo_real1, factor)
+    !$omp target teams distribute parallel do collapse(3) &
+    !$omp shared(convvelo_real_prod, convvelo_real0, convvelo_real1, factor, nxd, nzB, ny) private(ix, iz, iy)
+    do iy = 1, ny + 3
+      do iz = 1, nzB
+        do ix = 1, 2*(nxd + 1)
+          convvelo_real_prod(ix, iz, iy) = factor*convvelo_real0(ix, iz, iy)*convvelo_real1(ix, iz, iy)
+        end do
+      end do
+    end do
     call real_x_to_spectral_field(convvelo_real_prod, convvelo_work)
   end subroutine build_cross_product_work
 
@@ -586,67 +616,6 @@ call accumulate_cross_product_derivative_field(scalar_offset + i_t_theta_dytheta
     end do
   end subroutine apply_dy_to_existing_work
 
-  subroutine zero_convvelo_work()
-    implicit none
-    integer(C_INT) :: iy, iz, ix
-
-    !$omp target teams distribute parallel do collapse(3) &
-    !$omp shared(convvelo_work, ny0, nyN, nx0, nxN, nz) private(ix, iz, iy)
-    do ix = nx0, nxN
-      do iz = -nz, nz
-        do iy = ny0 - 2, nyN + 2
-          convvelo_work(iy, iz, ix) = (0.0d0, 0.0d0)
-        end do
-      end do
-    end do
-  end subroutine zero_convvelo_work
-
-  subroutine zero_convvelo_stats()
-    implicit none
-    integer(C_INT) :: field_index, iy, iz, ix
-
-    !$omp target teams distribute parallel do collapse(4) &
-    !$omp shared(convvelo_stats, n_convvelo_fields, ny0, nyN, nx0, nxN, nz) private(field_index, ix, iz, iy)
-    do field_index = 1, n_convvelo_fields
-      do ix = nx0, nxN
-        do iz = -nz, nz
-          do iy = ny0 - 2, nyN + 2
-            convvelo_stats(iy, iz, ix, field_index) = (0.0d0, 0.0d0)
-          end do
-        end do
-      end do
-    end do
-  end subroutine zero_convvelo_stats
-
-  subroutine zero_component_means()
-    implicit none
-    integer(C_INT) :: iy, ic
-
-    !$omp target teams distribute parallel do collapse(2) &
-    !$omp shared(component_means, ny0, nyN, nPhi) private(ic, iy)
-    do ic = 1, 3 + nPhi
-      do iy = ny0 - 2, nyN + 2
-        component_means(iy, ic) = (0.0d0, 0.0d0)
-      end do
-    end do
-  end subroutine zero_component_means
-
-  subroutine zero_real_buffer(buffer)
-    implicit none
-    real(C_DOUBLE), intent(inout) :: buffer(2*(nxd + 1), nzB, ny + 3)
-    integer(C_INT) :: iy, iz, ix
-
-    !$omp target teams distribute parallel do collapse(3) &
-    !$omp shared(buffer, nxd, nzB, ny) private(ix, iz, iy)
-    do iy = 1, ny + 3
-      do iz = 1, nzB
-        do ix = 1, 2*(nxd + 1)
-          buffer(ix, iz, iy) = 0.0d0
-        end do
-      end do
-    end do
-  end subroutine zero_real_buffer
-
   subroutine free_convvelo()
     implicit none
 
@@ -654,8 +623,15 @@ call accumulate_cross_product_derivative_field(scalar_offset + i_t_theta_dytheta
 
     !$omp target exit data map(delete: convvelo_stats, convvelo_work, component_means, convvelo_real0, convvelo_real1, convvelo_real_prod)
     deallocate (convvelo_stats, convvelo_work, component_means, convvelo_real0, convvelo_real1, convvelo_real_prod, n_field_samples)
+    if (allocated(convvelo_velocity_field_ids)) deallocate (convvelo_velocity_field_ids)
+    if (allocated(convvelo_scalar_field_ids)) deallocate (convvelo_scalar_field_ids)
+    if (allocated(convvelo_field_map)) deallocate (convvelo_field_map)
 
     n_convvelo_fields = 0
+    n_convvelo_velocity_fields = 0
+    n_convvelo_scalar_fields = 0
+    n_convvelo_profile_slots = 0_C_INT64_T
+    convvelo_last_write_index = -1_C_INT64_T
     n_mean_samples = 0_C_INT64_T
     convvelo_dirty = .false.
     convvelo_initialized = .false.
@@ -668,30 +644,72 @@ call accumulate_cross_product_derivative_field(scalar_offset + i_t_theta_dytheta
                                   (n_mean_samples > 0_C_INT64_T .or. any(n_field_samples > 0_C_INT64_T))
   end function convvelo_has_pending_output
 
-  subroutine write_convvelo_output(filename, write_full_fields)
+  subroutine init_convvelo_runtime()
+    implicit none
+    real(C_DOUBLE) :: shifted_time
+
+    if (.not. convvelo_enabled) return
+
+    call init_convvelo()
+    call reset_convvelo_stats()
+    if (convvelo_dt_write > 0.0d0) then
+      shifted_time = time + 0.5d0*deltat - convvelo_t_start
+      convvelo_last_write_index = max(0_C_INT64_T, int(floor(shifted_time/convvelo_dt_write), C_INT64_T))
+    else
+      convvelo_last_write_index = -1_C_INT64_T
+    end if
+    call write_convvelo_field_layout(trim(convvelo_output_file))
+  end subroutine init_convvelo_runtime
+
+  subroutine advance_convvelo_runtime()
     implicit none
 
-    character(len=*), intent(in) :: filename
-    logical, intent(in) :: write_full_fields
+    if (.not. convvelo_enabled) return
 
-    if (.not. convvelo_has_pending_output()) return
-
-    if (write_full_fields) then
-      call write_convvelo_raw_stats(filename)
-    else
-      call write_convvelo_component_means(filename)
+    if (crossed_convvelo_interval(convvelo_dt_compute, convvelo_t_start)) then
+      call update_convvelo_component_means()
+      call acc_convvelo_stats()
     end if
 
-    convvelo_dirty = .false.
-  end subroutine write_convvelo_output
+    if (convvelo_dt_write > 0.0d0) then
+      if (convvelo_has_pending_output() .and. crossed_convvelo_interval(convvelo_dt_write, convvelo_t_start)) then
+        call write_convvelo_runtime_snapshot()
+      end if
+    end if
+  end subroutine advance_convvelo_runtime
 
-  subroutine sync_convvelo_output_to_host()
+  subroutine finalize_convvelo_runtime()
     implicit none
 
-    if (.not. convvelo_initialized) return
+    if (.not. convvelo_enabled) return
 
-    !$omp target update from(component_means, convvelo_stats)
-  end subroutine sync_convvelo_output_to_host
+    if (convvelo_has_pending_output()) then
+      call write_convvelo_runtime_snapshot()
+    end if
+    call free_convvelo()
+  end subroutine finalize_convvelo_runtime
+
+  subroutine write_convvelo_runtime_snapshot()
+    implicit none
+    character(len=256) :: snapshot_filename
+    integer :: dot_index
+    character(len=32) :: index_string
+
+    snapshot_filename = trim(convvelo_output_file)
+    if (convvelo_dt_write > 0.0d0) then
+      convvelo_last_write_index = convvelo_last_write_index + 1_C_INT64_T
+      dot_index = index(trim(convvelo_output_file), '.', back=.true.)
+      write (index_string, '(I0)') convvelo_last_write_index
+      if (dot_index > 0) then
+     snapshot_filename = trim(convvelo_output_file(:dot_index - 1))//"."//trim(index_string)//trim(convvelo_output_file(dot_index:))
+      else
+        snapshot_filename = trim(convvelo_output_file)//"."//trim(index_string)
+      end if
+    end if
+    if (has_terminal) write (*, *) "Writing "//trim(snapshot_filename)//" at time ", time
+    call write_convvelo_raw_stats(snapshot_filename)
+    convvelo_dirty = .false.
+  end subroutine write_convvelo_runtime_snapshot
 
   subroutine write_convvelo_raw_stats(filename)
     implicit none
@@ -745,7 +763,7 @@ call accumulate_cross_product_derivative_field(scalar_offset + i_t_theta_dytheta
     profile_bytes = int(16, MPI_OFFSET_KIND)*int(ny + 3, MPI_OFFSET_KIND)
     field_bytes = int(16, MPI_OFFSET_KIND)*int(ny + 3, MPI_OFFSET_KIND)* &
                   int(2*nz + 1, MPI_OFFSET_KIND)*int(nx + 1, MPI_OFFSET_KIND)
-    total_bytes = int(1 + nPhi, MPI_OFFSET_KIND)*profile_bytes + int(n_convvelo_fields, MPI_OFFSET_KIND)*field_bytes
+    total_bytes = int(n_convvelo_profile_slots, MPI_OFFSET_KIND)*profile_bytes + int(n_convvelo_fields, MPI_OFFSET_KIND)*field_bytes
 
     call MPI_File_open(MPI_COMM_WORLD, trim(filename), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
     call MPI_File_set_size(fh, total_bytes)
@@ -753,14 +771,20 @@ call accumulate_cross_product_derivative_field(scalar_offset + i_t_theta_dytheta
     disp = 0_MPI_OFFSET_KIND
     call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, profile_file_type, 'native', MPI_INFO_NULL)
     call MPI_File_write_all(fh, component_means(:, 1), 1, profile_mem_type, status)
+    disp = profile_bytes
+    call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, profile_file_type, 'native', MPI_INFO_NULL)
+    call MPI_File_write_all(fh, component_means(:, 2), 1, profile_mem_type, status)
+    disp = 2_MPI_OFFSET_KIND*profile_bytes
+    call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, profile_file_type, 'native', MPI_INFO_NULL)
+    call MPI_File_write_all(fh, component_means(:, 3), 1, profile_mem_type, status)
     do iPhi = 1, nPhi
-      disp = int(iPhi, MPI_OFFSET_KIND)*profile_bytes
+      disp = int(2 + iPhi, MPI_OFFSET_KIND)*profile_bytes
       call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, profile_file_type, 'native', MPI_INFO_NULL)
       call MPI_File_write_all(fh, component_means(:, 3 + iPhi), 1, profile_mem_type, status)
     end do
 
     do field_index = 1, n_convvelo_fields
-      disp = int(1 + nPhi, MPI_OFFSET_KIND)*profile_bytes + int(field_index - 1, MPI_OFFSET_KIND)*field_bytes
+      disp = int(n_convvelo_profile_slots, MPI_OFFSET_KIND)*profile_bytes + int(field_index - 1, MPI_OFFSET_KIND)*field_bytes
       call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, file_type, 'native', MPI_INFO_NULL)
       call MPI_File_write_all(fh, convvelo_stats(:, :, :, field_index), 1, mem_type, status)
     end do
@@ -778,6 +802,8 @@ call accumulate_cross_product_derivative_field(scalar_offset + i_t_theta_dytheta
     end if
 
     write (99) component_means(:, 1)
+    write (99) component_means(:, 2)
+    write (99) component_means(:, 3)
     do iPhi = 1, nPhi
       write (99) component_means(:, 3 + iPhi)
     end do
@@ -788,93 +814,87 @@ call accumulate_cross_product_derivative_field(scalar_offset + i_t_theta_dytheta
 #endif
   end subroutine write_convvelo_raw_stats
 
-  subroutine write_convvelo_component_means(filename)
+  subroutine write_convvelo_field_layout(filename)
     implicit none
 
     character(len=*), intent(in) :: filename
-    integer :: io, iPhi
-    integer(C_INT) :: scalar_offset
+    character(len=512) :: layout_filename
+    integer :: io, i
 
-    if (.not. convvelo_initialized) return
     if (iproc /= 0) return
 
-    !$omp target update from(component_means, convvelo_stats)
-
-    open (unit=98, file=trim(filename), form='unformatted', access='stream', status='replace', action='write', iostat=io)
+    layout_filename = trim(filename)//".fields"
+    open (unit=98, file=trim(layout_filename), status='replace', action='write', iostat=io)
     if (io /= 0) then
-      write (*, *) 'ERROR: could not open convvelo means output file: ', trim(filename)
+      write (*, *) 'ERROR: could not open convvelo field layout file: ', trim(layout_filename)
       stop 1
     end if
 
-    write (98) component_means(:, 1)
-    do iPhi = 1, nPhi
-      write (98) component_means(:, 3 + iPhi)
+    write (98, '(A)', advance='no') 'profile_fields:'
+    do i = 1, size(convvelo_profile_field_names)
+      write (98, '(1X,A)', advance='no') trim(convvelo_profile_field_names(i))
     end do
+    write (98, *)
 
-    call write_selected_fields(98, 0_C_INT, minimal_velocity_fields)
-    do iPhi = 1, nPhi
-      scalar_offset = n_convvelo_velocity_fields + (iPhi - 1)*n_convvelo_scalar_fields
-      call write_selected_fields(98, scalar_offset, minimal_scalar_fields)
+    write (98, '(A)', advance='no') 'velocity_fields:'
+    do i = 1, size(convvelo_velocity_field_ids)
+      write (98, '(1X,A)', advance='no') trim(velocity_field_names(convvelo_velocity_field_ids(i)))
     end do
+    write (98, *)
+
+    write (98, '(A)', advance='no') 'scalar_fields:'
+    do i = 1, size(convvelo_scalar_field_ids)
+      write (98, '(1X,A)', advance='no') trim(scalar_field_names(convvelo_scalar_field_ids(i)))
+    end do
+    write (98, *)
     close (98)
-  end subroutine write_convvelo_component_means
+  end subroutine write_convvelo_field_layout
 
-  subroutine decode_product_case(product_case, rhs0, rhs1, routine_name)
+  integer(C_INT) function raw_scalar_field_index(i_phi, name)
     implicit none
-    integer(C_INT), intent(in) :: product_case
-    integer(C_INT), intent(out) :: rhs0, rhs1
-    character(len=*), intent(in) :: routine_name
+    integer(C_INT), intent(in) :: i_phi
+    character(len=*), intent(in) :: name
 
-    select case (product_case)
-    case (i_prod_uu)
-      rhs0 = i_u
-      rhs1 = i_u
-    case (i_prod_vv)
-      rhs0 = i_v
-      rhs1 = i_v
-    case (i_prod_ww)
-      rhs0 = i_w
-      rhs1 = i_w
-    case (i_prod_uv)
-      rhs0 = i_u
-      rhs1 = i_v
-    case (i_prod_vw)
-      rhs0 = i_v
-      rhs1 = i_w
-    case (i_prod_uw)
-      rhs0 = i_u
-      rhs1 = i_w
-    case default
-      if (product_case < 7) error stop trim(routine_name)//": unsupported product_case"
-      rhs0 = mod(product_case - 4, 3) + 1
-      rhs1 = 3 + (product_case - 4)/3
-    end select
-  end subroutine decode_product_case
+    raw_scalar_field_index = n_convvelo_velocity_fields_total + (i_phi - 1)*n_convvelo_scalar_fields_total + &
+                             field_name_index(name, scalar_field_names, "scalar")
+  end function raw_scalar_field_index
 
-  integer(C_INT) function scalar_component_index(iPhi)
+  integer(C_INT) function field_name_index(name, names, category)
     implicit none
-    integer(C_INT), intent(in) :: iPhi
-
-    scalar_component_index = i_w + iPhi
-  end function scalar_component_index
-
-  integer(C_INT) function scalar_product_case(velocity_component, iPhi)
-    implicit none
-    integer(C_INT), intent(in) :: velocity_component, iPhi
-
-    scalar_product_case = i_prod_uw + 3*(iPhi - 1) + velocity_component
-  end function scalar_product_case
-
-  subroutine write_selected_fields(io_unit, field_offset, field_indices)
-    implicit none
-    integer, intent(in) :: io_unit
-    integer(C_INT), intent(in) :: field_offset
-    integer(C_INT), intent(in) :: field_indices(:)
+    character(len=*), intent(in) :: name, category
+    character(len=*), intent(in) :: names(:)
     integer(C_INT) :: i
 
-    do i = 1, size(field_indices)
-      write (io_unit) convvelo_stats(:, :, :, field_offset + field_indices(i))
+    do i = 1, size(names)
+      if (trim(names(i)) == trim(name)) then
+        field_name_index = i
+        return
+      end if
     end do
-  end subroutine write_selected_fields
+    error stop "field_name_index: unknown "//trim(category)//" field name"
+  end function field_name_index
+
+  logical function convvelo_field_requested(field_index)
+    implicit none
+    integer(C_INT), intent(in) :: field_index
+
+    if (.not. allocated(convvelo_field_map)) then
+      convvelo_field_requested = .false.
+      return
+    end if
+ convvelo_field_requested = field_index >= 1 .and. field_index <= size(convvelo_field_map) .and. convvelo_field_map(field_index) > 0
+  end function convvelo_field_requested
+
+  logical function crossed_convvelo_interval(period, t_start)
+    implicit none
+    real(C_DOUBLE), intent(in) :: period, t_start
+
+    crossed_convvelo_interval = .false.
+    if (period <= 0.0d0) return
+    if (time + 0.5d0*deltat < t_start) return
+
+    crossed_convvelo_interval = floor((time + 0.5d0*deltat - t_start)/period) > &
+                                floor((time - 0.5d0*deltat - t_start)/period)
+  end function crossed_convvelo_interval
 
 end module convvelo

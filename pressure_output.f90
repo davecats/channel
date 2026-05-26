@@ -38,8 +38,21 @@ MODULE pressure_output
 
   public :: init_pressure_output, free_pressure_output
   public :: compute_pressure_output, compute_poisson, compute_dpdy
+  public :: get_pressure_memory_estimate
 
 CONTAINS
+
+  subroutine get_pressure_memory_estimate(n_floats)
+    implicit none
+    integer(C_INT64_T), intent(out) :: n_floats
+    integer(C_INT64_T) :: local_y, spectral_planes, real_planes
+
+    local_y = int(nyN - ny0 + 5, C_INT64_T)
+    spectral_planes = local_y*int(2*nz + 1, C_INT64_T)*int(nxN - nx0 + 1, C_INT64_T)
+    real_planes = int(2*(nxd + 1), C_INT64_T)*int(nzB, C_INT64_T)*int(ny + 3, C_INT64_T)
+
+    n_floats = 4_C_INT64_T*spectral_planes + 4_C_INT64_T*real_planes
+  end subroutine get_pressure_memory_estimate
 
   SUBROUTINE init_pressure_output()
     IMPLICIT NONE
