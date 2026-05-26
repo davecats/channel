@@ -163,7 +163,9 @@ CONTAINS
     IMPLICIT NONE
     integer:: iPhi, ix, iz, i, ic
 #ifdef chron
-    REAL timei, timee
+    REAL timei, timee, elapsed_run_time
+
+    elapsed_run_time = 0.0
 #endif
 
     DO WHILE ((time < t_max - deltat/2.0) .AND. (istep < nstep))
@@ -221,9 +223,10 @@ CONTAINS
 
 #ifdef chron
       CALL CPU_TIME(timee)
+      elapsed_run_time = elapsed_run_time + (timee - timei)
       if (has_terminal) then
-        write (*, '(A,F12.6,A,I0,A,I0,A,F12.6)') "TIME PER TIMESTEP ", timee - timei, &
-          " STEP ", istep, "/", nstep, " ELAPSED TIME ", time - time0
+        write (*, '(A,I0,A,I0,A,F12.6,A,F12.6)') "STEP ", istep, "/", nstep, " TIME PER TIMESTEP ", timee - timei, &
+          " ELAPSED RUN TIME ", elapsed_run_time
       end if
 #endif
     END DO
