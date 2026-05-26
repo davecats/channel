@@ -221,7 +221,10 @@ CONTAINS
 
 #ifdef chron
       CALL CPU_TIME(timee)
-      IF (has_terminal) WRITE (*, *) "TIME PER TIMESTEP", timee - timei
+      if (has_terminal) then
+        write (*, '(A,F12.6,A,I0,A,I0,A,F12.6)') "TIME PER TIMESTEP ", timee - timei, &
+          " STEP ", istep, "/", nstep, " ELAPSED TIME ", time - time0
+      end if
 #endif
     END DO
   END SUBROUTINE timeloop
