@@ -5,7 +5,7 @@ module convvelo
   use, intrinsic :: iso_c_binding
   use dnsdata, only: V, nPhi, nz, ny, der, nxd, izd, factor, iproc, D0mat, d240, d24m1, d24n, d24np1, &
                      COMPLEXderiv, LeftLU5div, convvelo_enabled, convvelo_write_full_fields, has_terminal, &
-                     convvelo_t_start, convvelo_dt_compute, convvelo_dt_write, convvelo_output_file, &
+                     convvelo_t_start, convvelo_dt_compute, convvelo_dt_write, &
                      time, deltat
   use pressure_output, only: compute_poisson, compute_dpdy
   use mpi_transpose, only: ny0, nyN, nx0, nxN, nxB, nzB, nx, has_average, ierr, sendbuf, recvbuf, &
@@ -32,6 +32,7 @@ module convvelo
   integer(C_INT), parameter :: i_u = 1
   integer(C_INT), parameter :: i_v = 2
   integer(C_INT), parameter :: i_w = 3
+  character(len=*), parameter :: convvelo_runtime_filename = "convvelo.bin"
   character(len=32), parameter :: velocity_field_names(n_convvelo_velocity_fields_total) = [character(len=32) :: &
                                "u_cross_u", "u_cross_dyu", "u_cross_v", "u_cross_dyv", "u_cross_w", "u_cross_dyw", "u_cross_dyyu", &
                                "v_cross_u", "v_cross_dyu", "v_cross_v", "v_cross_dyv", "v_cross_w", "v_cross_dyw", "v_cross_dyyv", &
@@ -635,19 +636,17 @@ contains
 
   subroutine init_convvelo_runtime()
     implicit none
-    real(C_DOUBLE) :: shifted_time
 
     if (.not. convvelo_enabled) return
 
     call init_convvelo()
     call reset_convvelo_stats()
     if (convvelo_dt_write > 0.0d0) then
-      shifted_time = time + 0.5d0*deltat - convvelo_t_start
-      convvelo_last_write_index = max(0_C_INT64_T, int(floor(shifted_time/convvelo_dt_write), C_INT64_T))
+      convvelo_last_write_index = int(floor((time + 0.5d0*deltat)/convvelo_dt_write), C_INT64_T)
     else
       convvelo_last_write_index = -1_C_INT64_T
     end if
-    call write_convvelo_field_layout(trim(convvelo_output_file))
+    call write_convvelo_field_layout(convvelo_runtime_filename)
   end subroutine init_convvelo_runtime
 
   subroutine advance_convvelo_runtime()
@@ -656,12 +655,14 @@ contains
     if (.not. convvelo_enabled) return
 
     if (crossed_convvelo_interval(convvelo_dt_compute, convvelo_t_start)) then
+      if (has_terminal) write (*, *) "Computing convvelo stats at time ", time
       call update_convvelo_component_means()
       call acc_convvelo_stats()
     end if
 
     if (convvelo_dt_write > 0.0d0) then
       if (convvelo_has_pending_output() .and. crossed_convvelo_interval(convvelo_dt_write, convvelo_t_start)) then
+        if (has_terminal) write (*, *) "Writing convvelo snapshot at time ", time
         call write_convvelo_runtime_snapshot()
       end if
     end if
@@ -681,20 +682,16 @@ contains
   subroutine write_convvelo_runtime_snapshot()
     implicit none
     character(len=256) :: snapshot_filename
-    integer :: dot_index
     character(len=32) :: index_string
 
-    snapshot_filename = trim(convvelo_output_file)
     if (convvelo_dt_write > 0.0d0) then
       convvelo_last_write_index = convvelo_last_write_index + 1_C_INT64_T
-      dot_index = index(trim(convvelo_output_file), '.', back=.true.)
       write (index_string, '(I0)') convvelo_last_write_index
-      if (dot_index > 0) then
-     snapshot_filename = trim(convvelo_output_file(:dot_index - 1))//"."//trim(index_string)//trim(convvelo_output_file(dot_index:))
-      else
-        snapshot_filename = trim(convvelo_output_file)//"."//trim(index_string)
-      end if
+      snapshot_filename = "convvelo."//trim(index_string)//".bin"
+    else
+      snapshot_filename = "convvelo.bin"
     end if
+
     if (has_terminal) write (*, *) "Writing "//trim(snapshot_filename)//" at time ", time
     call write_convvelo_raw_stats(snapshot_filename)
     convvelo_dirty = .false.

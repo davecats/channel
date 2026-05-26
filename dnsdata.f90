@@ -87,7 +87,6 @@ MODULE dnsdata
   real(C_DOUBLE) :: convvelo_dt_compute = -1.0d0
   real(C_DOUBLE) :: convvelo_dt_write = -1.0d0
   character(len=16) :: convvelo_output_mode = "full"
-  character(len=256) :: convvelo_output_file = "raw_statistics.bin"
 
   public :: get_solver_memory_estimate, sync_velocity_to_device
 
@@ -134,7 +133,6 @@ CONTAINS
     convvelo_dt_compute = -1.0d0
     convvelo_dt_write = -1.0d0
     convvelo_output_mode = "full"
-    convvelo_output_file = "raw_statistics.bin"
 
     READ (15, '(A)', iostat=io) convvelo_line
     if (io == 0 .and. len_trim(convvelo_line) > 0) then
@@ -154,11 +152,9 @@ CONTAINS
         case ("full", "FULL", "Full")
           convvelo_write_full_fields = .true.
           convvelo_output_mode = "full"
-          convvelo_output_file = "raw_statistics.bin"
         case ("minimal", "MINIMAL", "Minimal")
           convvelo_write_full_fields = .false.
           convvelo_output_mode = "minimal"
-          convvelo_output_file = "convvelo_minimal.bin"
         case default
           error stop "read_dnsin: convvelo_output_mode must be 'full' or 'minimal'"
         end select

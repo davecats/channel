@@ -33,6 +33,7 @@ PROGRAM post_pressure
 
   do ifile = 1, nfiles
     if (ifile > 1) then
+      if (iproc == 0) write (*, '(A,1X,A)') 'Reading', trim(restart_files(ifile))
       call read_restart_file(trim(restart_files(ifile)), V)
       !$omp target update to(V)
     end if
@@ -45,6 +46,7 @@ PROGRAM post_pressure
     p_filename = 'pField'//trim(step_id)//'.dat'
     dpdy_filename = 'dpdyField'//trim(step_id)//'.dat'
 
+    if (iproc == 0) write (*, '(A,1X,A)') 'Processing finished', trim(restart_files(ifile))
     call write_field_mpi(trim(p_filename), p)
     call write_field_mpi(trim(dpdy_filename), dpdy)
   end do

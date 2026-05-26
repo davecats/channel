@@ -24,11 +24,11 @@ program test_convvelo_runtime
   select case (trim(mode))
   case ("full")
     config_file = "tests/convvelo/dns_runtime.in"
-    generated_file = "raw_statistics.bin"
+    generated_file = "convvelo.bin"
     reference_file = "tests/convvelo/raw_statistics.bin"
   case ("minimal")
     config_file = "tests/convvelo/dns_runtime_minimal.in"
-    generated_file = "convvelo_minimal.bin"
+    generated_file = "convvelo.bin"
     reference_file = "tests/convvelo/convvelo_runtime_minimal.bin"
   case default
     write (*, *) "Unknown convvelo runtime mode: ", trim(mode)
@@ -39,7 +39,7 @@ program test_convvelo_runtime
   allocate (generated(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
   call timeloop()
   if (convvelo_enabled .and. convvelo_has_pending_output()) then
-    call write_convvelo_raw_stats(trim(convvelo_output_file))
+    call write_convvelo_raw_stats("convvelo.bin")
   end if
 
   if (trim(mode) == "full") then
