@@ -216,26 +216,20 @@ contains
 
     complex(C_DOUBLE_COMPLEX) :: snapshot(ny0 - 2:nyN + 2, 1:3 + nPhi)
     real(C_DOUBLE) :: old_weight, new_weight
-#ifndef HAVE_MPI
     integer(C_INT) :: iy, ic
-#endif
 
     if (.not. convvelo_initialized) call init_convvelo()
 
     snapshot = (0.0d0, 0.0d0)
+
     if (has_average) then
-#ifdef HAVE_MPI
-      !$omp target update from(V(ny0 - 2:nyN + 2, 0, 0, 1:3 + nPhi))
-      snapshot(:, :) = V(:, 0, 0, :)
-#else
-      !$omp target teams distribute parallel do collapse(2) default(none) &
-      !$omp shared(snapshot, V) private(ic, iy)
+      !$omp target teams distribute parallel do collapse(2)  &
+      !$omp shared(snapshot, V, ny0, nyN, nPhi) private(ic, iy) map(tofrom: snapshot)
       do ic = 1, 3 + nPhi
         do iy = ny0 - 2, nyN + 2
           snapshot(iy, ic) = V(iy, 0, 0, ic)
         end do
       end do
-#endif
     end if
 
 #ifdef HAVE_MPI
@@ -245,18 +239,13 @@ contains
     n_mean_samples = n_mean_samples + 1_C_INT64_T
     old_weight = dble(n_mean_samples - 1_C_INT64_T)/dble(n_mean_samples)
     new_weight = 1.0d0/dble(n_mean_samples)
-#ifdef HAVE_MPI
-    component_means = old_weight*component_means + new_weight*snapshot
-    !$omp target update to(component_means)
-#else
-    !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(component_means, snapshot, old_weight, new_weight) private(ic, iy)
+    !$omp target teams distribute parallel do collapse(2)  &
+    !$omp shared(component_means, snapshot, old_weight, new_weight, ny0, nyN, nPhi) private(ic, iy) map(to: snapshot)
     do ic = 1, 3 + nPhi
       do iy = ny0 - 2, nyN + 2
         component_means(iy, ic) = old_weight*component_means(iy, ic) + new_weight*snapshot(iy, ic)
       end do
     end do
-#endif
     convvelo_dirty = .true.
   end subroutine update_convvelo_component_means
 

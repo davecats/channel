@@ -45,7 +45,7 @@ module test_convvelo_utils
   integer(C_INT), parameter :: n_convvelo_profile_header_slots = 3
 
   public :: compare_field_to_reference
-  public :: compare_profile_to_expected
+  public :: compare_profile_to_reference
   public :: read_full_field
   public :: read_full_profile
   public :: read_minimal_field
@@ -114,11 +114,10 @@ contains
     deallocate (reference)
   end subroutine compare_field_to_reference
 
-  subroutine compare_profile_to_expected(name, filename, profile_index, expected, tol_local, nfail_local)
+  subroutine compare_profile_to_reference(name, generated_file, reference_file, generated_index, reference_index, tol_local, nfail_local)
     implicit none
-    character(len=*), intent(in) :: name, filename
-    integer(C_INT), intent(in) :: profile_index
-    complex(C_DOUBLE_COMPLEX), intent(in) :: expected(ny0 - 2:nyN + 2)
+    character(len=*), intent(in) :: name, generated_file, reference_file
+    integer(C_INT), intent(in) :: generated_index, reference_index
     real(C_DOUBLE), intent(in) :: tol_local
     integer(C_INT), intent(inout) :: nfail_local
 
@@ -127,11 +126,11 @@ contains
     allocate (reference(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
     generated = (0.0d0, 0.0d0)
     reference = (0.0d0, 0.0d0)
-    call read_profile(filename, profile_index, generated(:, 0, 0))
-    reference(:, 0, 0) = expected
+    call read_profile(trim(generated_file), generated_index, generated(:, 0, 0))
+    call read_profile(trim(reference_file), reference_index, reference(:, 0, 0))
     call compare_complex_fields(name, generated, reference, tol_local, nfail_local)
     deallocate (generated, reference)
-  end subroutine compare_profile_to_expected
+  end subroutine compare_profile_to_reference
 
   integer(C_INT) function velocity_field_index(name)
     implicit none
