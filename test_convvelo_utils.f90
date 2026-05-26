@@ -314,7 +314,7 @@ contains
     integer, parameter :: ndims = 3
     integer :: sizes(ndims), subsizes(ndims), starts(ndims)
     integer(MPI_OFFSET_KIND) :: disp
-    integer(MPI_OFFSET_KIND) :: field_bytes
+    integer(MPI_OFFSET_KIND) :: field_bytes, profile_bytes
 
     sizes = [ny + 3, 2*nz + 1, nx + 1]
     subsizes = [ny + 3, 2*nz + 1, nxN - nx0 + 1]
@@ -328,9 +328,11 @@ contains
     call MPI_Type_create_subarray(ndims, sizes, subsizes, starts, MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, mem_type, ierror)
     call MPI_Type_commit(mem_type, ierror)
 
+    profile_bytes = int(16, MPI_OFFSET_KIND)*int(ny + 3, MPI_OFFSET_KIND)
     field_bytes = int(16, MPI_OFFSET_KIND)*int(ny + 3, MPI_OFFSET_KIND)* &
                   int(2*nz + 1, MPI_OFFSET_KIND)*int(nx + 1, MPI_OFFSET_KIND)
-    disp = int(field_index, MPI_OFFSET_KIND)*field_bytes
+    disp = int(n_convvelo_profile_header_slots + nPhi, MPI_OFFSET_KIND)*profile_bytes + &
+           int(field_index, MPI_OFFSET_KIND)*field_bytes
 
     call MPI_File_open(MPI_COMM_WORLD, trim(filename), MPI_MODE_RDONLY, MPI_INFO_NULL, fh)
     call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, file_type, 'native', MPI_INFO_NULL)
@@ -340,10 +342,11 @@ contains
     call MPI_Type_free(mem_type, ierror)
 #else
     integer :: io
-    integer(C_INT64_T) :: field_bytes, pos_bytes
+    integer(C_INT64_T) :: profile_bytes, field_bytes, pos_bytes
 
+    profile_bytes = int(16, C_INT64_T)*int(ny + 3, C_INT64_T)
     field_bytes = int(16, C_INT64_T)*int(ny + 3, C_INT64_T)*int(2*nz + 1, C_INT64_T)*int(nx + 1, C_INT64_T)
-    pos_bytes = int(field_index, C_INT64_T)*field_bytes + 1_C_INT64_T
+    pos_bytes = int(n_convvelo_profile_header_slots + nPhi, C_INT64_T)*profile_bytes + int(field_index, C_INT64_T)*field_bytes + 1_C_INT64_T
 
     open (unit=95, file=filename, form='unformatted', access='stream', status='old', action='read', iostat=io)
     if (io /= 0) then
