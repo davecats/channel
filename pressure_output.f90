@@ -466,7 +466,7 @@ CONTAINS
 
     !$omp target teams distribute parallel do collapse(2) default(none) &
     !$omp shared(src0, src1, p, der, k2, d140, d240, d24n, V, ni, ialfa, ibeta, ny, ny0, nyN, nx0, nxN, nz) &
-    !$omp private(ix, iz, iy, pmat, eqm1, eq0, eqnp1, sol_solve, tmp, tmp2)
+    !$omp private(ix, iz, iy, pmat, eqm1, eq0, eqn, eqnp1, sol_solve, tmp, tmp2)
     do ix = nx0, nxN
       do iz = -nz, nz
 
@@ -564,7 +564,7 @@ CONTAINS
 
         ! Eliminate eqnm1(2) by inseting p(ny+1)
         p(ny-1, iz, ix) = p(ny-1, iz, ix) - p(ny+1, iz, ix)*pmat(ny-1, 2)/eqnp1(2)
-        pmat(ny-1, -2:2) = pmat(ny-1, -2:2) - eqnp1(-2:2)*pmat(ny-1, 2)/eqm1(2)
+        pmat(ny-1, -2:2) = pmat(ny-1, -2:2) - eqnp1(-2:2)*pmat(ny-1, 2)/eqnp1(2)
         pmat(ny-1, 2) = 0.0d0
 
         ! Eliminate eqnm1(1) by inserting p(ny)
