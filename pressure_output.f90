@@ -449,7 +449,7 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(in) :: src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: p(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     real(C_DOUBLE) :: pmat(ny0:nyN+2, -2:2), eqm1(-2:2), eq0(-2:2), eqn(-2:2), eqnp1(-2:2)
-    complex(C_DOUBLE_COMPLEX) :: sol_solve(-2:ny), tmp, tmp2
+    complex(C_DOUBLE_COMPLEX) :: sol_solve(-1:ny+1), tmp, tmp2
     integer(C_INT) :: ix, iz, iy
 
     !$omp target teams distribute parallel do collapse(3) default(none) &
@@ -560,7 +560,7 @@ CONTAINS
         ! Eliminate eqn(2) by inseting p(ny+1)
         p(ny, iz, ix) = p(ny, iz, ix) - p(ny+1, iz, ix)*eqn(2)/eqnp1(2)
         eqn(-2:2) = eqn(-2:2) - eqnp1(-2:2)*eqn(2)/eqnp1(2)
-        eq0(2) = 0.0d0
+        eqn(2) = 0.0d0
 
         ! Eliminate eqnm1(2) by inseting p(ny+1)
         p(ny-1, iz, ix) = p(ny-1, iz, ix) - p(ny+1, iz, ix)*pmat(ny-1, 2)/eqnp1(2)
@@ -569,7 +569,7 @@ CONTAINS
 
         ! Eliminate eqnm1(1) by inserting p(ny)
         p(ny-1, iz, ix) = p(ny-1, iz, ix) - p(ny, iz, ix)*pmat(ny-1, 1)/eqn(1)
-        pmat(ny-1, -2:2) = pmat(ny-1, -2:2) - eqn(-2:2)*pmat(ny-1, -1)/eqn(1)
+        pmat(ny-1, -2:2) = pmat(ny-1, -2:2) - eqn(-2:2)*pmat(ny-1, 1)/eqn(1)
         pmat(ny-1, 1) = 0.0d0
 
         ! Eliminate eqnm2(2) by inserting p(ny), be careful with the indices
@@ -586,19 +586,19 @@ CONTAINS
 
         ! Prepare solution array
         sol_solve(:) = 0.0d0
-        sol_solve(1:ny-1) = p(1:ny - 1, iz, ix)
+        sol_solve(-1:ny-1) = p(1:ny - 1, iz, ix)
 
         call LU5decomp(pmat)
         call LeftLU5div(sol_solve, pmat, sol_solve)
 
         ! Copy solution back to array (is this copy necessary, we do not do it in linsolve, it is inplace there)
-        p(1:ny - 1, iz, ix) = sol_solve(1:ny - 1)
+        p(1:ny - 1, iz, ix) = sol_solve(-1:ny - 1)
 
         ! Compute boundary value by applying BCs
         p(0, iz, ix) = -sum(eq0(0:2)*p(1:3, iz, ix))/eq0(-1)
         p(-1, iz, ix) = - sum(eqm1(-1:2)*p(0:3, iz, ix))/eqm1(-2)
         p(ny, iz, ix) = -sum(eqn(-2:0)*p(ny-3:ny-1, iz,ix))/eqn(1)
-        p(ny + 1, iz, ix) = -sum(eqn(-2:1)*p(ny-3:ny, iz,ix))/eqnp1(2)
+        p(ny + 1, iz, ix) = -sum(eqnp1(-2:1)*p(ny-3:ny, iz,ix))/eqnp1(2)
 
       end do
     end do
