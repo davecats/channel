@@ -75,7 +75,7 @@ contains
 
     pid = getpid()
     write (listfile, '(A,I0)') ".post_convvelo_files.", pid
-    command = "find . -maxdepth 1 -type f -name 'Dati.cart.*.out' -printf '%f\n' | sort -V > "//trim(listfile)
+    command = "find . -maxdepth 1 -name 'Dati.cart.*.out' -printf '%f\n' | sort -V > "//trim(listfile)
     call execute_command_line(trim(command), wait=.true., exitstat=exitstat, cmdstat=cmdstat)
     if (cmdstat /= 0 .or. exitstat /= 0) then
       write (*, *) "post_convvelo: Failed to scan restart files in the current directory."
