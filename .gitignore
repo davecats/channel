@@ -97,3 +97,17 @@ x1000*
 x1001*
 *.i
 *.csv
+
+fri*
+*-cpl.sh
+
+!tests/poisson/Dati.cart.35.out
+tests/convvelo/*.bin
+!tests/convvelo/*.bin
+!tests/convvelo/*.bin.fields
+tests/convvelo/*.in
+**/*.zarr
+tests/convvel/*.fld
+*.bin
+*.bin.fields
+!tests/convvelo/Dati.cart.*.out

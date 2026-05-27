@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(ChannelSolver LANGUAGES Fortran C)
 
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
 # --------------------------------------------------------------------
 # CMake module path (for custom FindFFTW)
 # --------------------------------------------------------------------
@@ -11,10 +13,13 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 # Sources
 # --------------------------------------------------------------------
 add_library(channel_core
+    config.f90
     rbmat.f90
     mpi_transpose.f90
     ffts.f90
     dnsdata.f90
+    convvelo.f90
+    pressure_output.f90
     driver.f90
 )
 
@@ -35,6 +40,9 @@ endif()
 add_executable(channel ${SOURCES} channel.f90)
 target_link_libraries(channel PRIVATE channel_core)
 
+add_executable(post_pressure post_pressure.f90)
+target_link_libraries(post_pressure PRIVATE channel_core)
+
 # --------------------------------------------------------------------
 # Tests
 # --------------------------------------------------------------------
@@ -46,6 +54,15 @@ target_link_libraries(test_regression PRIVATE channel_core)
 
 add_executable(test_regression_scalar test_regression_scalar.f90)
 target_link_libraries(test_regression_scalar PRIVATE channel_core)
+
+add_executable(test_pressure_dpdy test_pressure_dpdy.f90)
+target_link_libraries(test_pressure_dpdy PRIVATE channel_core)
+
+add_executable(test_convvelo_stats test_convvelo_utils.f90 test_convvelo_stats.f90)
+target_link_libraries(test_convvelo_stats PRIVATE channel_core)
+
+add_executable(test_convvelo_runtime test_convvelo_utils.f90 test_convvelo_runtime.f90)
+target_link_libraries(test_convvelo_runtime PRIVATE channel_core)
 
 # Add a CTest target
 enable_testing()
@@ -74,8 +91,58 @@ add_test(NAME regression_test_4rank
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
 set_tests_properties(regression_test_4rank PROPERTIES PROCESSORS 4)
+ 
+ add_test(NAME pressure_dpdy_1rank
+    COMMAND ${MPIEXEC_EXECUTABLE}
+            ${MPIEXEC_NUMPROC_FLAG} 1
+            ${MPIEXEC_PREFLAGS}
+            $<TARGET_FILE:test_pressure_dpdy>
+            ${MPIEXEC_POSTFLAGS}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(pressure_dpdy_1rank PROPERTIES PROCESSORS 1)
+ 
+ add_test(NAME pressure_dpdy_2rank
+    COMMAND ${MPIEXEC_EXECUTABLE}
+            ${MPIEXEC_NUMPROC_FLAG} 2
+            ${MPIEXEC_PREFLAGS}
+            $<TARGET_FILE:test_pressure_dpdy>
+            ${MPIEXEC_POSTFLAGS}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(pressure_dpdy_2rank PROPERTIES PROCESSORS 2)
 
-add_test(NAME regression_test_scalar_1rank
+add_test(NAME convvelo_stats_1rank
+    COMMAND ${MPIEXEC_EXECUTABLE}
+            ${MPIEXEC_NUMPROC_FLAG} 1
+            ${MPIEXEC_PREFLAGS}
+            $<TARGET_FILE:test_convvelo_stats>
+            ${MPIEXEC_POSTFLAGS}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(convvelo_stats_1rank PROPERTIES PROCESSORS 1)
+
+add_test(NAME convvelo_runtime_1rank
+    COMMAND ${MPIEXEC_EXECUTABLE}
+            ${MPIEXEC_NUMPROC_FLAG} 1
+            ${MPIEXEC_PREFLAGS}
+            $<TARGET_FILE:test_convvelo_runtime> full
+            ${MPIEXEC_POSTFLAGS}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(convvelo_runtime_1rank PROPERTIES PROCESSORS 1)
+
+add_test(NAME convvelo_runtime_minimal_1rank
+    COMMAND ${MPIEXEC_EXECUTABLE}
+            ${MPIEXEC_NUMPROC_FLAG} 1
+            ${MPIEXEC_PREFLAGS}
+            $<TARGET_FILE:test_convvelo_runtime> minimal
+            ${MPIEXEC_POSTFLAGS}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(convvelo_runtime_minimal_1rank PROPERTIES PROCESSORS 1)
+ 
+ add_test(NAME regression_test_scalar_1rank
     COMMAND ${MPIEXEC_EXECUTABLE}
             ${MPIEXEC_NUMPROC_FLAG} 1
             ${MPIEXEC_PREFLAGS}
@@ -95,6 +162,16 @@ add_test(NAME regression_test_scalar_4rank
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
 set_tests_properties(regression_test_scalar_4rank PROPERTIES PROCESSORS 4)
+
+set(POST_PRESSURE_NPROCS 1)
+set(POST_PRESSURE_EXE ${CMAKE_CURRENT_BINARY_DIR}/post_pressure)
+configure_file(cmake/run_post_pressure_test.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/run_post_pressure_test.cmake @ONLY)
+
+add_test(NAME post_pressure_1rank
+    COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_BINARY_DIR}/run_post_pressure_test.cmake
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(post_pressure_1rank PROPERTIES PROCESSORS 1)
 
 # --------------------------------------------------------------------
 # Compiler flags

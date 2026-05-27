@@ -1,0 +1,39 @@
+set(case_dir "@CMAKE_CURRENT_BINARY_DIR@/post_pressure_case")
+file(REMOVE_RECURSE "${case_dir}")
+file(MAKE_DIRECTORY "${case_dir}")
+file(COPY "@CMAKE_SOURCE_DIR@/tests/data/dns_test.in" DESTINATION "${case_dir}")
+file(RENAME "${case_dir}/dns_test.in" "${case_dir}/dns.in")
+file(COPY "@CMAKE_SOURCE_DIR@/tests/poisson/Dati.cart.35.out" DESTINATION "${case_dir}")
+
+execute_process(
+  COMMAND @MPIEXEC_EXECUTABLE@ @MPIEXEC_NUMPROC_FLAG@ @POST_PRESSURE_NPROCS@ @MPIEXEC_PREFLAGS@ @POST_PRESSURE_EXE@ @MPIEXEC_POSTFLAGS@
+  WORKING_DIRECTORY "${case_dir}"
+  RESULT_VARIABLE post_pressure_status
+)
+if(NOT post_pressure_status EQUAL 0)
+  message(FATAL_ERROR "post_pressure execution failed with status ${post_pressure_status}")
+endif()
+
+execute_process(
+  COMMAND @Python3_EXECUTABLE@ @CMAKE_SOURCE_DIR@/tests/compare_complex_fields.py
+          ${case_dir}/pField35.dat
+          @CMAKE_SOURCE_DIR@/tests/poisson/pField35.fld
+          1.0e-12
+  WORKING_DIRECTORY "${case_dir}"
+  RESULT_VARIABLE compare_p_status
+)
+if(NOT compare_p_status EQUAL 0)
+  message(FATAL_ERROR "post_pressure pressure-field comparison failed with status ${compare_p_status}")
+endif()
+
+execute_process(
+  COMMAND @Python3_EXECUTABLE@ @CMAKE_SOURCE_DIR@/tests/compare_complex_fields.py
+          ${case_dir}/dpdyField35.dat
+          @CMAKE_SOURCE_DIR@/tests/poisson/dpdyField35.fld
+          1.0e-12
+  WORKING_DIRECTORY "${case_dir}"
+  RESULT_VARIABLE compare_dpdy_status
+)
+if(NOT compare_dpdy_status EQUAL 0)
+  message(FATAL_ERROR "post_pressure dpdy-field comparison failed with status ${compare_dpdy_status}")
+endif()

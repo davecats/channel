@@ -31,6 +31,7 @@ MODULE ffts
 #elif defined(HAVE_FFTW)
   INCLUDE 'fftw3.f03'
   integer, save        :: plan_type = FFTW_PATIENT
+  real(C_DOUBLE), dimension(:, :, :, :), pointer :: products
   TYPE(C_PTR), save    :: pFFT, pIFT, pRFT, pHFT, ptrVVdx, ptrVVdz, ptrFdx, ptrFdz
 #endif
 #ifdef HAVE_CUDA
@@ -40,6 +41,22 @@ MODULE ffts
 #endif
 
 CONTAINS
+
+  subroutine get_fft_memory_estimate(nxd, nxB, ny, nzd, nzB, nPhi, overlapping, n_floats)
+    implicit none
+    integer(C_INT), intent(in) :: nxd, nxB, ny, nzd, nzB, nPhi
+    logical, intent(in) :: overlapping
+    integer(C_INT64_T), intent(out) :: n_floats
+    integer(C_INT64_T) :: nflds
+
+    nflds = int(merge(2, 1, overlapping), C_INT64_T)
+
+    n_floats = 0_C_INT64_T
+    n_floats = n_floats + 2_C_INT64_T*int(nzd, C_INT64_T)*int(nxB, C_INT64_T)*int(ny + 3, C_INT64_T)*nflds
+    n_floats = n_floats + 2_C_INT64_T*int(nxd + 1, C_INT64_T)*int(nzB, C_INT64_T)*int(ny + 3, C_INT64_T)*nflds
+    n_floats = n_floats + int(2*(nxd + 1), C_INT64_T)*int(nzB, C_INT64_T)*int(ny + 3, C_INT64_T)*int(3 + nPhi, C_INT64_T)
+    n_floats = n_floats + int(2*(nxd + 1), C_INT64_T)*int(nzB, C_INT64_T)*int(ny + 3, C_INT64_T)*nflds
+  end subroutine get_fft_memory_estimate
 
 #ifdef HAVE_FFTW
   SUBROUTINE init_fft(VVdz, VVdx, rVVdx, nxd, nxB, ny, nzd, nzB, nPhi, overlapping, odd_n_real, s)
@@ -52,6 +69,7 @@ CONTAINS
     integer, dimension(2) :: sn = 6
 
     integer(C_INT), dimension(1) :: n_z, n_x, rn_x
+    integer :: nflds
     n_z = [nzd]; n_x = [nxd]; rn_x = [2*nxd]; 
     if (present(odd_n_real)) then
       ! notice: odd_n_real is basically .FALSE. by default
@@ -66,12 +84,14 @@ CONTAINS
     sn(1) = 6 + 3*nPhi
     !Allocate aligned memory
     ptrVVdz = fftw_alloc_complex(int(nxB*nzd*nflds*sn(2), C_SIZE_T))
-    ptrVVdx = fftw_alloc_complex(int((nxd + 1)*nzB*sn(1)*sn(2), C_SIZE_T))
+    ptrVVdx = fftw_alloc_complex(int((nxd + 1)*nzB*nflds*sn(2), C_SIZE_T))
+    ptrFdx = fftw_alloc_real(int(2*(nxd + 1)*nzB*(3 + nPhi)*sn(2), C_SIZE_T))
 
     !Convert C to F pointer
-    CALL c_f_pointer(ptrVVdz, VVdz, [nzd, nxB, nflds, sn(1)]); 
-    CALL c_f_pointer(ptrVVdx, VVdx, [nxd + 1, nzB, nflds, sn(1)])
-    CALL c_f_pointer(ptrVVdx, rVVdx, [2*(nxd + 1), nzB, sn(2), sn(1)])
+    CALL c_f_pointer(ptrVVdz, VVdz, [nzd, nxB, sn(2), nflds]); 
+    CALL c_f_pointer(ptrVVdx, VVdx, [nxd + 1, nzB, sn(2), nflds])
+    CALL c_f_pointer(ptrFdx, rVVdx, [2*(nxd + 1), nzB, sn(2), 3 + nPhi])
+    allocate (products(2*(nxd + 1), nzB, sn(2), nflds))
 
     !$omp target enter data map(to: VVdz)
     !FFTs plans
@@ -95,10 +115,10 @@ CONTAINS
 
     nflds = merge(2, 1, overlapping)
 
-    allocate (VVdz(int(nzd, 8), int(nxB, 8), int(ny + 3, 8), int(nflds, 8)))
-    allocate (VVdx(int(nxd + 1, 8), int(nzB, 8), int(ny + 3, 8), int(nflds, 8)))
-    allocate (rVVdx(int(2*(nxd + 1), 8), int(nzB, 8), int(ny + 3, 8), int(3 + nPhi, 8)))
-    allocate (products(int(2*(nxd + 1), 8), int(nzB, 8), int(ny + 3, 8), int(nflds, 8)))
+    allocate (VVdz(nzd, nxB, ny + 3, nflds))
+    allocate (VVdx(nxd + 1, nzB, ny + 3, nflds))
+    allocate (rVVdx(2*(nxd + 1), nzB, ny + 3, 3 + nPhi))
+    allocate (products(2*(nxd + 1), nzB, ny + 3, nflds))
     !$omp target enter data map(to: VVdz, VVdx, rVVdx, products)
 
     !FFTs plans
@@ -144,10 +164,10 @@ CONTAINS
 
     nflds = merge(2, 1, overlapping)
 
-    allocate (VVdz(int(nzd, 8), int(nxB, 8), int(ny + 3, 8), int(nflds, 8)))
-    allocate (VVdx(int(nxd + 1, 8), int(nzB, 8), int(ny + 3, 8), int(nflds, 8)))
-    allocate (rVVdx(int(2*(nxd + 1), 8), int(nzB, 8), int(ny + 3, 8), int(3 + nPhi, 8)))
-    allocate (products(int(2*(nxd + 1), 8), int(nzB, 8), int(ny + 3, 8), int(nflds, 8)))
+    allocate (VVdz(nzd, nxB, ny + 3, nflds))
+    allocate (VVdx(nxd + 1, nzB, ny + 3, nflds))
+    allocate (rVVdx(2*(nxd + 1), nzB, ny + 3, 3 + nPhi))
+    allocate (products(2*(nxd + 1), nzB, ny + 3, nflds))
     !$omp target enter data map(to: VVdz, VVdx, rVVdx, products)
 
     !FFTs plans
@@ -311,9 +331,9 @@ CONTAINS
     real(C_DOUBLE), pointer, dimension(:, :, :, :), intent(out) :: rVVdx
 
     !$omp target exit data map(from: VVdz)
-    CALL fftw_free(ptrVVdx); CALL fftw_free(ptrVVdz); 
+    if (associated(products)) deallocate (products)
+    CALL fftw_free(ptrFdx); CALL fftw_free(ptrVVdx); CALL fftw_free(ptrVVdz); 
   END SUBROUTINE free_fft
 #endif
 
 END MODULE ffts
-

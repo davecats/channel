@@ -21,6 +21,7 @@ MODULE dnsdata
   ! der(iy,i,j),                                 i={0:d0, 1:d1, 2:d2, 3:d4}, j={-2:2}
 
   USE, intrinsic :: iso_c_binding
+  USE config
   USE rbmat
   USE mpi_transpose
   USE ffts
@@ -82,41 +83,70 @@ MODULE dnsdata
   character(len=40) :: fname
   logical :: overlapping
 
+  public :: get_solver_memory_estimate, sync_velocity_to_device
+
 CONTAINS
 
   !--------------------------------------------------------------!
   !---------------------- Read input files ----------------------!
-  SUBROUTINE read_dnsin(filename)
+  SUBROUTINE read_dnsin(cfg)
     IMPLICIT NONE
     logical :: i
     integer :: iPhi
-    CHARACTER(len=*), INTENT(IN) :: filename
+    type(ini_config), intent(in) :: cfg
     character(len=16) :: env_value
+    integer(C_INT) :: nstep_in
     integer :: status, length
-    OPEN (15, file=filename)
-    READ (15, *) nx, ny, nz; READ (15, *) alfa0, beta0; nxd = 3*(nx + 1)/2; nzd = 3*nz
+
+    call require_integer(cfg, "mesh", "nx", nx)
+    call require_integer(cfg, "mesh", "ny", ny)
+    call require_integer(cfg, "mesh", "nz", nz)
+    call require_real(cfg, "mesh", "alfa0", alfa0)
+    call require_real(cfg, "mesh", "beta0", beta0)
+    nxd = 3*(nx + 1)/2
+    nzd = 3*nz
     !$omp target update to(ny)
 #ifdef useFFTfit
     i = fftFIT(nxd); DO WHILE (.NOT. i); nxd = nxd + 1; i = fftFIT(nxd); END DO
     i = fftFIT(nzd); DO WHILE (.NOT. i); nzd = nzd + 1; i = fftFIT(nzd); END DO
 #endif
-    READ (15, *) ni; 
-    READ (15, *) a, ymin, ymax; ni = 1/ni
-    READ (15, *) meanpx, meanpz
-    READ (15, *) meanflowx, meanflowz
-    READ (15, *) meantx, meantb
-    READ (15, *) u0, uN, t0, tN
-    READ (15, *) nPhi
+
+    call require_real(cfg, "velocity", "ni", ni)
+    call require_real(cfg, "mesh", "stretching", a)
+    call require_real(cfg, "mesh", "ymin", ymin)
+    call require_real(cfg, "mesh", "ymax", ymax)
+    ni = 1/ni
+    call require_real(cfg, "velocity", "meanpx", meanpx)
+    call require_real(cfg, "velocity", "meanpz", meanpz)
+    call require_real(cfg, "velocity", "meanflowx", meanflowx)
+    call require_real(cfg, "velocity", "meanflowz", meanflowz)
+    call require_real(cfg, "velocity", "u0", u0)
+    call require_real(cfg, "velocity", "un", uN)
+
+    call require_integer(cfg, "scalars", "nphi", nPhi)
+    call require_real(cfg, "scalars", "meantx", meantx)
+    call require_real(cfg, "scalars", "meantb", meantb)
+    call require_real(cfg, "scalars", "t0", t0)
+    call require_real(cfg, "scalars", "tn", tN)
     allocate (pra(nPhi))
-    READ (15, *) pra(1:nPhi)
-    DO iPhi = 1, nPhi
-      pra(iPhi) = 1/pra(iPhi)
-    END DO
+    if (nPhi > 0) then
+      call require_real_vector(cfg, "scalars", "pr", pra(1:nPhi))
+      DO iPhi = 1, nPhi
+        pra(iPhi) = 1/pra(iPhi)
+      END DO
+    end if
     !$omp target enter data map(to: pra)
-    READ (15, *) deltat, cflmax, time
-    READ (15, *) dt_field, dt_save, t_max, time_from_restart
-    READ (15, *) nstep
-    CLOSE (15)
+
+    call require_real(cfg, "timestepping", "deltat", deltat)
+    call require_real(cfg, "timestepping", "cflmax", cflmax)
+    call require_real(cfg, "timestepping", "time", time)
+    call require_real(cfg, "timestepping", "dt_field", dt_field)
+    call require_real(cfg, "timestepping", "dt_save", dt_save)
+    call require_real(cfg, "timestepping", "t_max", t_max)
+    call require_logical(cfg, "timestepping", "time_from_restart", time_from_restart)
+    call require_integer(cfg, "timestepping", "nstep", nstep_in)
+    nstep = int(nstep_in, C_SIZE_T)
+
     dx = PI/(alfa0*nxd); dz = 2.0d0*PI/(beta0*nzd); factor = 1.0d0/(2.0d0*nxd*nzd)
     call get_environment_variable("CHANNEL_OVERLAPPING", env_value, length, status)
     overlapping = .false.
@@ -138,26 +168,25 @@ CONTAINS
     IMPLICIT NONE
     INTEGER(C_INT) :: ix, iz
     logical, intent(IN) :: solveNS
-    ALLOCATE (V(int(ny0 - 2, 8):int(nyN + 2, 8), int(-nz, 8):int(nz, 8), int(nx0, 8):int(nxN, 8), int(1, 8):int(3 + nPhi, 8))); V = 0
+    ALLOCATE (V(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3 + nPhi)); V = 0
     !$omp target enter data map(to: V)
 #ifdef bodyforce
-    ALLOCATE (F(int(ny0 - 2,8):int(nyN + 2,8), int(-nz,8):int(nz,8), int(nx0,8):int(nxN,8), int(1,8):int(3,8)))
-    F = 0
+    ALLOCATE (F(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3)); F = 0
     !$omp target enter data map(to: F)
 #endif
+    ALLOCATE (bc0(-nz:nz, nx0:nxN, 1:5 + nPhi), &
+              bcn(-nz:nz, nx0:nxN, 1:5 + nPhi))
+    bc0 = 0.0
+    bcn = 0.0
+    !$omp target enter data map(to: bc0, bcn)
     IF (solveNS) then
-      ALLOCATE (memrhs(int(1,8):int(ny - 1,8), int(-nz,8):int(nz,8), &
-                      int(nx0,8):int(nxN,8), int(1,8):int(2 + nPhi,8)), &
-              oldrhs(int(1,8):int(ny - 1,8), int(-nz,8):int(nz,8), &
-                      int(nx0,8):int(nxN,8), int(1,8):int(2 + nPhi,8)), &
-              bc0(int(-nz,8):int(nz,8), int(nx0,8):int(nxN,8), &
-                  int(1,8):int(5 + nPhi,8)), &
-              bcn(int(-nz,8):int(nz,8), int(nx0,8):int(nxN,8), &
-                  int(1,8):int(5 + nPhi,8)), &
-              linsolve_mat(int(ny0,8):int(nyN + 2,8), int(-2,8):int(2,8), &
-                           int(-nz,8):int(nz,8), int(nx0,8):int(nxN,8)))
-      memrhs = 0.0; oldrhs = 0.0; bc0 = 0.0; bcn = 0.0; linsolve_mat = 0.0
-      !$omp target enter data map(to: memrhs, linsolve_mat, oldrhs, bc0, bcn)
+      ALLOCATE (memrhs(1:ny - 1, -nz:nz, nx0:nxN, 1:2 + nPhi), &
+                oldrhs(1:ny - 1, -nz:nz, nx0:nxN, 1:2 + nPhi), &
+                linsolve_mat(ny0:nyN + 2, -2:2, -nz:nz, nx0:nxN))
+      memrhs = 0.0
+      oldrhs = 0.0
+      linsolve_mat = 0.0
+      !$omp target enter data map(to: memrhs, linsolve_mat, oldrhs)
     END IF
 #define newrhs(iy,iz,ix,i) memrhs(iy,iz,ix,i)
 #define imod(iy) MOD(iy+1000,5)
@@ -179,11 +208,38 @@ CONTAINS
     ibeta = (/(dcmplx(0.0d0, iz*beta0), iz=-nz, nz)/); 
     FORALL (iz=-nz:nz, ix=nx0:nxN) k2(iz, ix) = (alfa0*ix)**2.0d0 + (beta0*iz)**2.0d0
     !$omp target enter data map(to: izd, ialfa, ibeta, k2, y, iy, rk_rai, ucor, tcor)
-    OPEN (UNIT=195, FILE='Runtimedata.phi', ACTION='write')
+    IF (solveNS) OPEN (UNIT=195, FILE='Runtimedata.phi', ACTION='write')
     IF (solveNS .AND. has_terminal) OPEN (UNIT=121, FILE='Runtimedata', ACTION='write')
 
     allocate (fr(3 + 2*nPhi)); fr = 0.0
   END SUBROUTINE init_memory
+
+  SUBROUTINE get_solver_memory_estimate(solveNS, n_floats)
+    IMPLICIT NONE
+    logical, intent(in) :: solveNS
+    integer(C_INT64_T), intent(out) :: n_floats
+    integer(C_INT64_T) :: spectral_planes, bc_planes, linear_planes
+    integer(C_INT64_T) :: sendcount64, nbufs
+
+    spectral_planes = int(nyN - ny0 + 5, C_INT64_T)*int(2*nz + 1, C_INT64_T)*int(nxN - nx0 + 1, C_INT64_T)
+    bc_planes = int(2*nz + 1, C_INT64_T)*int(nxN - nx0 + 1, C_INT64_T)*int(5 + nPhi, C_INT64_T)
+    linear_planes = int(ny - 1, C_INT64_T)*int(2*nz + 1, C_INT64_T)*int(nxN - nx0 + 1, C_INT64_T)*int(2 + nPhi, C_INT64_T)
+    sendcount64 = int(nxB, C_INT64_T)*int(nzB, C_INT64_T)*int(ny + 3, C_INT64_T)
+    nbufs = int(merge(2, 1, overlapping), C_INT64_T)
+
+    n_floats = 0_C_INT64_T
+    n_floats = n_floats + 2_C_INT64_T*spectral_planes*int(3 + nPhi, C_INT64_T)
+#ifdef bodyforce
+    n_floats = n_floats + 2_C_INT64_T*spectral_planes*3_C_INT64_T
+#endif
+    n_floats = n_floats + 4_C_INT64_T*bc_planes
+    if (solveNS) then
+      n_floats = n_floats + 4_C_INT64_T*linear_planes
+      n_floats = n_floats + 2_C_INT64_T*5_C_INT64_T*int(nyN - ny0 + 3, C_INT64_T)* &
+                 int(2*nz + 1, C_INT64_T)*int(nxN - nx0 + 1, C_INT64_T)
+    end if
+    n_floats = n_floats + 4_C_INT64_T*sendcount64*int(nproc, C_INT64_T)*nbufs
+  END SUBROUTINE get_solver_memory_estimate
 
   !--------------------------------------------------------------!
   !--------------- Deallocate memory for solution ---------------!
@@ -192,17 +248,26 @@ CONTAINS
     LOGICAL, intent(IN) :: solveNS
     !$omp target exit data map(delete: d240, d24m1, d04n, d24n, d24np1, D0mat)
     !$omp target exit data map(delete: V)
-    !$omp target exit data map(delete: memrhs, oldrhs, bc0, bcn, linsolve_mat)
     !$omp target exit data map(delete: izd, ialfa, ibeta, k2, ucor, tcor)
 #ifdef bodyforce
     !$omp target exit data map(delete: F)
 #endif
-    DEALLOCATE (V, der, d0mat, linsolve_mat, y, dy)
+    DEALLOCATE (V, der, d0mat, y, dy)
+    !$omp target exit data map(delete: bc0, bcn)
+    DEALLOCATE (bc0, bcn)
     IF (solveNS) THEN
-      DEALLOCATE (memrhs, oldrhs, bc0, bcn)
+      !$omp target exit data map(delete: memrhs, oldrhs, linsolve_mat)
+      DEALLOCATE (memrhs, oldrhs, linsolve_mat)
+      CLOSE (UNIT=195)
       IF (has_terminal) CLOSE (UNIT=121)
     END IF
   END SUBROUTINE free_memory
+
+  SUBROUTINE sync_velocity_to_device()
+    IMPLICIT NONE
+
+    !$omp target update to(V)
+  END SUBROUTINE sync_velocity_to_device
 
   !--------------------------------------------------------------!
   !--------------- Set-up the compact derivatives ---------------!
@@ -427,9 +492,9 @@ CONTAINS
   !- Left LU division of a banded matrix -!
   !---------------------------------------!
 #ifdef HAVE_CUDA
-  !$omp declare target(LeftLU5div)
+  !$omp declare target(LeftLU5Backsub)
 #endif
-  SUBROUTINE LeftLU5div(x, A, b)
+  SUBROUTINE LeftLU5Backsub(x, A, b)
     complex(C_DOUBLE_COMPLEX), intent(out) :: x(-2:)
     complex(C_DOUBLE_COMPLEX), intent(in) :: b(-2:)
     real(C_DOUBLE), intent(in)  :: A(0:, -2:)
@@ -437,27 +502,42 @@ CONTAINS
     HI1 = SIZE(A, 1) - 1
     HI2 = SIZE(A, 2) - 3
 
-    ! initialise x with rhs
-
     DO i = LBOUND(x, 1), UBOUND(x, 1)
       x(i) = b(i)
     END DO
 
-    ! backward substitution
     DO i = HI1 - HI2, 0, -1
       x(i) = x(i) - (A(i, 1)*x(i + 1) + A(i, 2)*x(i + 2))
       x(i) = x(i)*A(i, 0)
     END DO
+  END SUBROUTINE LeftLU5Backsub
 
-    ! forward substitution
+#ifdef HAVE_CUDA
+  !$omp declare target(LeftLU5Forwardsub)
+#endif
+  SUBROUTINE LeftLU5Forwardsub(x, A)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(-2:)
+    real(C_DOUBLE), intent(in)  :: A(0:, -2:)
+    integer(C_INT) :: HI1, i
+    HI1 = SIZE(A, 1) - 1
+
     DO i = 0, HI1
       x(i) = x(i) - (A(i, -2)*x(i - 2) + A(i, -1)*x(i - 1))
     END DO
+  END SUBROUTINE LeftLU5Forwardsub
 
+#ifdef HAVE_CUDA
+  !$omp declare target(LeftLU5div)
+#endif
+  SUBROUTINE LeftLU5div(x, A, b)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: x(-2:)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: b(-2:)
+    real(C_DOUBLE), intent(in)  :: A(0:, -2:)
+
+    CALL LeftLU5Backsub(x, A, b)
+    CALL LeftLU5Forwardsub(x, A)
   END SUBROUTINE LeftLU5div
 
-  !--------------------------------------------------------------!
-  !------------------- solve the linear system  -----------------!
   SUBROUTINE linsolve(lambda)
     IMPLICIT NONE
     real(C_DOUBLE), intent(in) :: lambda
@@ -1127,12 +1207,14 @@ CONTAINS
       IF (has_terminal) WRITE (*, *) "Generating initial field..."
       DO iy = ny0 - 2, nyN + 2; DO ix = nx0, nxN; DO iz = -nz, nz
           CALL RANDOM_NUMBER(rn)
-          !R(iy,iz,ix,1) = 0.0001*EXP(dcmplx(0,rn(1)-0.5));  R(iy,iz,ix,2) = 0.0001*EXP(dcmplx(0,rn(2)-0.5));  R(iy,iz,ix,3) = 0.0001*EXP(dcmplx(0,rn(3)-0.5));
+          R(iy, iz, ix, 1) = 0.0000554*EXP(dcmplx(0, rn(1) - 0.5)); R(iy, iz, ix, 2) = 0.0000554*EXP(dcmplx(0, rn(2) - 0.5)); R(iy, iz, ix, 3) = 0.0000554*EXP(dcmplx(0, rn(3) - 0.5)); 
+          !!R(iy,iz,ix,1) = 0.0001*EXP(dcmplx(0,rn(1)-0.5));  R(iy,iz,ix,2) = 0.0001*EXP(dcmplx(0,rn(2)-0.5));  R(iy,iz,ix,3) = 0.0001*EXP(dcmplx(0,rn(3)-0.5));
         END DO; END DO; END DO
       IF (has_average) THEN
         DO iy = ny0 - 2, nyN + 2
-          R(iy, 0, 0, 1) = 3*0.5*y(iy)*(2 - y(iy)) + 0.01*SIN(8*y(iy)*2*PI)/ni
-          R(iy, 0, 0, 1) = y(iy)*(2 - y(iy))*3.d0/2.d0 + 0.001*SIN(8*y(iy)*2*PI); 
+          R(iy, 0, 0, 1) = 3*0.5*y(iy)*(2 - y(iy))
+          !R(iy, 0, 0, 1) = 3*0.5*y(iy)*(2 - y(iy)) + 0.01*SIN(8*y(iy)*2*PI)/ni
+          !R(iy, 0, 0, 1) = y(iy)*(2 - y(iy))*3.d0/2.d0 + 0.001*SIN(8*y(iy)*2*PI);
           !V(iy,0,0,1)=y(iy)-1
           DO iPhi = 1, nPhi
             R(iy, 0, 0, 3 + iPhi) = 3*0.5*y(iy)*(2 - y(iy))
@@ -1149,7 +1231,7 @@ CONTAINS
   !-------------------- save_restart_file -----------------------!
   SUBROUTINE save_restart_file(filename, R)
     IMPLICIT NONE
-    complex(C_DOUBLE_COMPLEX), intent(in) :: R(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: R(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3 + nPhi)
     character(len=*), intent(in) :: filename
     ! mpi stuff
 #ifdef HAVE_MPI

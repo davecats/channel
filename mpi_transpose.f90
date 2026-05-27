@@ -81,8 +81,7 @@ MODULE mpi_transpose
   complex(C_DOUBLE_COMPLEX), allocatable :: sendbuf(:, :), recvbuf(:, :)
 #endif
   integer(C_INT), save :: nproc, iproc, ierr, nzd, nx
-  integer(C_INT), save :: nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN, miny, maxy
-  integer(c_SIZE_T) :: sendcount
+  integer(C_INT), save :: nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN, miny, maxy, sendcount
   !$omp declare target(ny0, nyN)
 
   logical, save :: has_terminal, has_average
@@ -99,19 +98,15 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(out) :: send(:)
     integer(C_INT), intent(in)  :: ny
     integer(C_SIZE_T) :: iy, ix, iz, dest, p
-    integer(C_SIZE_T) :: nxB_s, nzB_s, sendcount_s
-
-    nxB_s = nxB
-    nzB_s = nzB
 
     !$omp target teams distribute parallel do collapse(4) default(none) &
-    !$omp shared(Vz, send) shared(ny, nxB_s, nzB_s, nproc, sendcount) private(iy, ix, iz, dest, p)
+    !$omp shared(Vz, send) shared(ny, nxB, nzB, nproc, sendcount) private(iy, ix, iz, dest, p)
     do dest = 0, nproc - 1
       do iy = 1, ny + 3
-        do ix = 1, nxB_s
-          do iz = 1, nzB_s
-            p = dest*sendcount + iz + (nzB_s*(ix - 1_C_SIZE_T)) !+ (nzB_s*nxB_s*(iy - 1_C_SIZE_T))
-            send(p) = Vz(dest*int(nzB_s, c_size_t) + iz, ix, iy)
+        do ix = 1, nxB
+          do iz = 1, nzB
+            p = dest*sendcount + iz + (nzB*(ix - 1)) + (nzB*nxB*(iy - 1))
+            send(p) = Vz(dest*nzB + iz, ix, iy)
           end do
         end do
       end do
@@ -127,25 +122,18 @@ CONTAINS
     integer(C_INT), intent(in)  :: ny
     integer(C_SIZE_T) :: iy, ix, iz, src, p
 
-    integer(C_SIZE_T) :: nxB_s, nzB_s, sendcount_s
-
-    nxB_s = nxB
-    nzB_s = nzB
-
-
     !$omp target teams distribute parallel do collapse(4) default(none) &
-    !$omp shared(Vx, recv) shared(ny, nxB_s, nzB_s, nproc, sendcount) private(iy, ix, iz, src, p)
+    !$omp shared(Vx, recv) shared(ny, nxB, nzB, nproc, sendcount) private(iy, ix, iz, src, p)
     do src = 0, nproc - 1
       do iy = 1, ny + 3
-        do ix = 1, nxB_s
-          do iz = 1, nzB_s
-            p = src*sendcount + iz + nzB_s*(ix - 1_C_SIZE_T)! + (nzB_s*nxB_s*(iy - 1_C_SIZE_T))
-            Vx(ix + src*int(nxB_s, c_size_t), iz, iy) = recv(p)
+        do ix = 1, nxB
+          do iz = 1, nzB
+            p = src*sendcount + iz + (nzB*(ix - 1)) + (nzB*nxB*(iy - 1))
+            Vx(ix + src*nxB, iz, iy) = recv(p)
           end do
         end do
       end do
     end do
-
   END SUBROUTINE unpack_zTOx
 
   SUBROUTINE pack_xTOz(Vx, send, ny)
@@ -156,20 +144,18 @@ CONTAINS
     integer(C_INT), intent(in)  :: ny
     integer(C_SIZE_T) :: iy, ix, iz, dest, p
 
-
     !$omp target teams distribute parallel do collapse(4) default(none) &
     !$omp shared(Vx, send) shared(ny, nxB, nzB, nproc, sendcount) private(iy, ix, iz, dest, p)
     do dest = 0, nproc - 1
       do iy = 1, ny + 3
         do iz = 1, nzB
           do ix = 1, nxB
-            p = dest*sendcount + ix + (int(nxB, c_size_t)*(iz - 1)) + (int(nxB, c_size_t)*int(nzB, c_size_t)*(iy - 1))
-            send(p) = Vx(dest*int(nxB, c_size_t) + ix, iz, iy)
+            p = dest*sendcount + ix + (nxB*(iz - 1)) + (nxB*nzB*(iy - 1))
+            send(p) = Vx(dest*nxB + ix, iz, iy)
           end do
         end do
       end do
     end do
-
   END SUBROUTINE pack_xTOz
 
   SUBROUTINE unpack_xTOz(recv, Vz, ny)
@@ -180,20 +166,18 @@ CONTAINS
     integer(C_INT), intent(in)  :: ny
     integer(C_SIZE_T) :: iy, ix, iz, src, p
 
-
     !$omp target teams distribute parallel do collapse(4) default(none) &
     !$omp shared(Vz, recv) shared(ny, nxB, nzB, nproc, sendcount) private(iy, ix, iz, src, p)
     do src = 0, nproc - 1
       do iy = 1, ny + 3
         do iz = 1, nzB
           do ix = 1, nxB
-            p = src*sendcount + ix + (int(nxB, c_size_t)*(iz - 1)) + (int(nxB, c_size_t)*int(nzB, c_size_t)*(iy - 1))
-            Vz(iz + src*int(nzB, c_size_t), ix, iy) = recv(p)
+            p = src*sendcount + ix + (nxB*(iz - 1)) + (nxB*nzB*(iy - 1))
+            Vz(iz + src*nzB, ix, iy) = recv(p)
           end do
         end do
       end do
     end do
-
   END SUBROUTINE unpack_xTOz
 
   SUBROUTINE alltoall(send, recv, request)
@@ -204,8 +188,8 @@ CONTAINS
 #ifndef HAVE_HIP
     !$omp target data use_device_ptr(send, recv)
 #endif
-    call MPI_IALLTOALL(send, int(sendcount, C_INT), MPI_DOUBLE_COMPLEX, &
-                       recv, int(sendcount, C_INT), MPI_DOUBLE_COMPLEX, MPI_COMM_WORLD, request, ierr)
+    call MPI_IALLTOALL(send, sendcount, MPI_DOUBLE_COMPLEX, &
+                       recv, sendcount, MPI_DOUBLE_COMPLEX, MPI_COMM_WORLD, request, ierr)
 #ifndef HAVE_HIP
     !$omp end target data
 #endif
@@ -248,6 +232,7 @@ CONTAINS
     end if
     sendsize = nproc*nxB*nzB*(ny + 3)
     recvsize = nproc*nxB*nzB*(ny + 3)
+
     sendcount = nxB*nzB*(ny + 3)
 
     ! Allocate buffers for transposes*int(16, c_size_t)
@@ -278,7 +263,7 @@ CONTAINS
     CALL MPI_Type_commit(writeview_type, ierror)
     ! For WRITING VELOCITY, SKIPPING HALO CELLS: datatype with holes to skip halo cells and select only data to be written
     array_of_sizes = [(nyN + 2) - (ny0 - 2) + 1, 2*nz + 1, nxB, 3 + nPhi] ! size along each dimension of the array IN MEMORY owned by each process
-    array_of_subsizes = [maxy - miny + 1, 2*nz + 1, nxB, 3] ! size of the PORTION of array TO BE WRITTEN BY EACH PROCESS
+    array_of_subsizes = [maxy - miny + 1, 2*nz + 1, nxB, 3 + nPhi] ! size of the PORTION of array TO BE WRITTEN BY EACH PROCESS
     array_of_starts = [miny - (ny0 - 2), 0, 0, 0] ! starting position of each component; !!! IT'S ZERO BASED AND WRT TO ARRAY IN MEMORY !!!
     CALL MPI_Type_create_subarray(ndims, array_of_sizes, array_of_subsizes, array_of_starts, MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, owned2write_type, ierror)
     CALL MPI_Type_commit(owned2write_type, ierror)
