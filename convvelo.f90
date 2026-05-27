@@ -26,12 +26,13 @@ module convvelo
 
   integer(C_INT), parameter :: n_convvelo_velocity_fields_total = 33
   integer(C_INT), parameter :: n_convvelo_scalar_fields_total = 10
-  integer(C_INT), parameter :: n_convvelo_velocity_fields_minimal_total = 20
+  integer(C_INT), parameter :: n_convvelo_velocity_fields_minimal_total = 21
   integer(C_INT), parameter :: n_convvelo_scalar_fields_minimal_total = 9
   integer(C_INT), parameter :: n_convvelo_profile_fields = 4
   integer(C_INT), parameter :: i_u = 1
   integer(C_INT), parameter :: i_v = 2
   integer(C_INT), parameter :: i_w = 3
+  integer(C_INT64_T), parameter :: convvelo_file_header_bytes = 2_C_INT64_T*8_C_INT64_T + 8_C_INT64_T
   character(len=*), parameter :: convvelo_runtime_filename = "convvelo.bin"
   character(len=32), parameter :: velocity_field_names(n_convvelo_velocity_fields_total) = [character(len=32) :: &
                                "u_cross_u", "u_cross_dyu", "u_cross_v", "u_cross_dyv", "u_cross_w", "u_cross_dyw", "u_cross_dyyu", &
@@ -43,7 +44,7 @@ module convvelo
                                                                  "t_cross_t", "t_cross_u", "t_cross_v", "t_cross_w", "t_cross_tu", &
                                                          "t_cross_tw", "t_cross_dyyt", "t_cross_dytv", "t_cross_dyt", "t_cross_dyv"]
   character(len=32), parameter :: minimal_velocity_field_names(n_convvelo_velocity_fields_minimal_total) = [character(len=32) :: &
-                                                                               "u_cross_u", "u_cross_v", "v_cross_v", "w_cross_w", &
+                                                                  "u_cross_u", "u_cross_v", "u_cross_w", "v_cross_v", "w_cross_w", &
                                                                                          "u_cross_p", "v_cross_dpdy", "w_cross_p", &
                                                "u_cross_uu", "u_cross_uw", "v_cross_uv", "v_cross_vw", "w_cross_uw", "w_cross_ww", &
                                                                                    "u_cross_dyyu", "v_cross_dyyv", "w_cross_dyyw", &
@@ -66,6 +67,8 @@ module convvelo
   real(C_DOUBLE), save :: convvelo_t_start = 0.0d0
   real(C_DOUBLE), save :: convvelo_dt_compute = -1.0d0
   real(C_DOUBLE), save :: convvelo_dt_write = -1.0d0
+  real(C_DOUBLE), save :: convvelo_average_start_time = 0.0d0
+  real(C_DOUBLE), save :: convvelo_average_end_time = 0.0d0
   character(len=16), save :: convvelo_output_mode = "full"
   integer(C_INT), allocatable, save :: convvelo_velocity_field_ids(:)
   integer(C_INT), allocatable, save :: convvelo_scalar_field_ids(:)
@@ -84,7 +87,7 @@ module convvelo
   public :: finish_convvelo_field
   public :: acc_convvelo_stats, convvelo_has_pending_output
   public :: init_convvelo_runtime, advance_convvelo_runtime, finalize_convvelo_runtime
-  public :: get_convvelo_memory_estimate, write_convvelo_raw_stats
+  public :: get_convvelo_memory_estimate, write_convvelo_raw_stats, write_convvelo_runtime_snapshot
   public :: configure_convvelo
 
 contains
@@ -101,6 +104,8 @@ contains
     convvelo_dt_compute = -1.0d0
     convvelo_dt_write = -1.0d0
     convvelo_output_mode = "full"
+    convvelo_average_start_time = 0.0d0
+    convvelo_average_end_time = 0.0d0
 
     convvelo_enabled = has_section(cfg, "convvelo")
 
@@ -181,6 +186,8 @@ contains
 
     n_mean_samples = 0_C_INT64_T
     convvelo_last_write_index = -1_C_INT64_T
+    convvelo_average_start_time = 0.0d0
+    convvelo_average_end_time = 0.0d0
     convvelo_dirty = .false.
     convvelo_initialized = .true.
   end subroutine init_convvelo
@@ -256,6 +263,8 @@ contains
     n_field_samples = 0_C_INT64_T
 
     n_mean_samples = 0_C_INT64_T
+    convvelo_average_start_time = 0.0d0
+    convvelo_average_end_time = 0.0d0
     convvelo_dirty = .false.
   end subroutine reset_convvelo_stats
 
@@ -284,7 +293,9 @@ contains
     call MPI_Allreduce(MPI_IN_PLACE, snapshot, size(snapshot), MPI_DOUBLE_COMPLEX, MPI_SUM, MPI_COMM_WORLD, ierr)
 #endif
 
+    if (n_mean_samples == 0_C_INT64_T) convvelo_average_start_time = time
     n_mean_samples = n_mean_samples + 1_C_INT64_T
+    convvelo_average_end_time = time
     old_weight = dble(n_mean_samples - 1_C_INT64_T)/dble(n_mean_samples)
     new_weight = 1.0d0/dble(n_mean_samples)
     !$omp target teams distribute parallel do collapse(2)  &
@@ -670,6 +681,8 @@ contains
     n_convvelo_profile_slots = 0_C_INT64_T
     convvelo_last_write_index = -1_C_INT64_T
     n_mean_samples = 0_C_INT64_T
+    convvelo_average_start_time = 0.0d0
+    convvelo_average_end_time = 0.0d0
     convvelo_dirty = .false.
     convvelo_initialized = .false.
   end subroutine free_convvelo
@@ -730,14 +743,16 @@ contains
     implicit none
     character(len=256) :: snapshot_filename
     character(len=32) :: index_string
+    logical :: exists
 
-    if (convvelo_dt_write > 0.0d0) then
-      convvelo_last_write_index = convvelo_last_write_index + 1_C_INT64_T
+    convvelo_last_write_index = 0_C_INT64_T
+    do
       write (index_string, '(I0)') convvelo_last_write_index
       snapshot_filename = "convvelo."//trim(index_string)//".bin"
-    else
-      snapshot_filename = "convvelo.bin"
-    end if
+      inquire (file=trim(snapshot_filename), exist=exists)
+      if (.not. exists) exit
+      convvelo_last_write_index = convvelo_last_write_index + 1_C_INT64_T
+    end do
 
     if (has_terminal) write (*, *) "Writing "//trim(snapshot_filename)//" at time ", time
     call write_convvelo_raw_stats(snapshot_filename)
@@ -749,6 +764,8 @@ contains
 
     character(len=*), intent(in) :: filename
     integer(C_INT) :: field_index, iPhi
+    real(C_DOUBLE) :: header_times(2)
+    integer(C_INT64_T) :: header_sample_count
 
 #ifdef HAVE_MPI
     type(MPI_File) :: fh
@@ -767,6 +784,8 @@ contains
     if (.not. convvelo_initialized) return
 
     !$omp target update from(component_means, convvelo_stats)
+    header_times = [convvelo_average_start_time, convvelo_average_end_time]
+    header_sample_count = n_mean_samples
 
 #ifdef HAVE_MPI
     sizes = [ny + 3, 2*nz + 1, nx + 1]
@@ -796,28 +815,35 @@ contains
     profile_bytes = int(16, MPI_OFFSET_KIND)*int(ny + 3, MPI_OFFSET_KIND)
     field_bytes = int(16, MPI_OFFSET_KIND)*int(ny + 3, MPI_OFFSET_KIND)* &
                   int(2*nz + 1, MPI_OFFSET_KIND)*int(nx + 1, MPI_OFFSET_KIND)
-    total_bytes = int(n_convvelo_profile_slots, MPI_OFFSET_KIND)*profile_bytes + int(n_convvelo_fields, MPI_OFFSET_KIND)*field_bytes
+    total_bytes = convvelo_file_header_bytes + int(n_convvelo_profile_slots, MPI_OFFSET_KIND)*profile_bytes + &
+                  int(n_convvelo_fields, MPI_OFFSET_KIND)*field_bytes
 
     call MPI_File_open(MPI_COMM_WORLD, trim(filename), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
     call MPI_File_set_size(fh, total_bytes)
 
-    disp = 0_MPI_OFFSET_KIND
+    if (iproc == 0) then
+      call MPI_File_write_at(fh, 0_MPI_OFFSET_KIND, header_times, 2, MPI_DOUBLE_PRECISION, status)
+      call MPI_File_write_at(fh, 16_MPI_OFFSET_KIND, header_sample_count, 1, MPI_INTEGER8, status)
+    end if
+
+    disp = convvelo_file_header_bytes
     call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, profile_file_type, 'native', MPI_INFO_NULL)
     call MPI_File_write_all(fh, component_means(:, 1), 1, profile_mem_type, status)
-    disp = profile_bytes
+    disp = convvelo_file_header_bytes + profile_bytes
     call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, profile_file_type, 'native', MPI_INFO_NULL)
     call MPI_File_write_all(fh, component_means(:, 2), 1, profile_mem_type, status)
-    disp = 2_MPI_OFFSET_KIND*profile_bytes
+    disp = convvelo_file_header_bytes + 2_MPI_OFFSET_KIND*profile_bytes
     call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, profile_file_type, 'native', MPI_INFO_NULL)
     call MPI_File_write_all(fh, component_means(:, 3), 1, profile_mem_type, status)
     do iPhi = 1, nPhi
-      disp = int(2 + iPhi, MPI_OFFSET_KIND)*profile_bytes
+      disp = convvelo_file_header_bytes + int(2 + iPhi, MPI_OFFSET_KIND)*profile_bytes
       call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, profile_file_type, 'native', MPI_INFO_NULL)
       call MPI_File_write_all(fh, component_means(:, 3 + iPhi), 1, profile_mem_type, status)
     end do
 
     do field_index = 1, n_convvelo_fields
-      disp = int(n_convvelo_profile_slots, MPI_OFFSET_KIND)*profile_bytes + int(field_index - 1, MPI_OFFSET_KIND)*field_bytes
+      disp = convvelo_file_header_bytes + int(n_convvelo_profile_slots, MPI_OFFSET_KIND)*profile_bytes + &
+             int(field_index - 1, MPI_OFFSET_KIND)*field_bytes
       call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, file_type, 'native', MPI_INFO_NULL)
       call MPI_File_write_all(fh, convvelo_stats(:, :, :, field_index), 1, mem_type, status)
     end do
@@ -834,6 +860,8 @@ contains
       stop 1
     end if
 
+    write (99) header_times
+    write (99) header_sample_count
     write (99) component_means(:, 1)
     write (99) component_means(:, 2)
     write (99) component_means(:, 3)

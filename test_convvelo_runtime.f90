@@ -1,7 +1,7 @@
 program test_convvelo_runtime
   use, intrinsic :: iso_c_binding
   use dnsdata
-  use convvelo, only: free_convvelo, convvelo_has_pending_output, write_convvelo_raw_stats, convvelo_enabled
+  use convvelo, only: free_convvelo, convvelo_has_pending_output, write_convvelo_runtime_snapshot, convvelo_enabled
   use pressure_output
   use driver
   use test_convvelo_utils
@@ -10,36 +10,61 @@ program test_convvelo_runtime
   character(len=32) :: mode
   character(len=256) :: config_file, generated_file, reference_file
   character(len=128) :: full_name
+  integer(C_INT64_T) :: average_count
+  integer :: command_status
   integer(C_INT) :: i_field, i_phi, nfail, raw_field_index, minimal_scalar_index
-  real(C_DOUBLE) :: field_tol, mean_tol
+  real(C_DOUBLE), parameter :: expected_start_time = 38.86540781764443d0
+  real(C_DOUBLE), parameter :: expected_end_time = 40.99369209898264d0
+  real(C_DOUBLE) :: average_end_time, average_start_time, field_tol, header_tol, mean_tol
   complex(C_DOUBLE_COMPLEX), allocatable :: generated(:, :, :)
 
   call get_command_argument(1, mode)
   if (len_trim(mode) == 0) mode = "full"
 
   field_tol = 2.0d-12
+  header_tol = 1.0d-12
   mean_tol = 1.0d-12
   nfail = 0
 
   select case (trim(mode))
   case ("full")
     config_file = "tests/convvelo/dns_runtime.in"
-    generated_file = "convvelo.bin"
+    generated_file = "convvelo.0.bin"
     reference_file = "tests/convvelo/raw_statistics.bin"
   case ("minimal")
     config_file = "tests/convvelo/dns_runtime_minimal.in"
-    generated_file = "convvelo.bin"
+    generated_file = "convvelo.0.bin"
     reference_file = "tests/convvelo/convvelo_runtime_minimal.bin"
   case default
     write (*, *) "Unknown convvelo runtime mode: ", trim(mode)
     stop 2
   end select
 
+  call execute_command_line("rm -f convvelo.bin convvelo.*.bin", exitstat=command_status)
+  if (command_status /= 0) then
+    write (*, *) "Could not remove old convvelo runtime files"
+    stop 3
+  end if
+
   call initialize(trim(config_file), "tests/data/start_field_scalar.out")
   allocate (generated(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
   call timeloop()
   if (convvelo_enabled .and. convvelo_has_pending_output()) then
-    call write_convvelo_raw_stats("convvelo.bin")
+    call write_convvelo_runtime_snapshot()
+  end if
+
+  call read_convvelo_header(trim(generated_file), average_start_time, average_end_time, average_count)
+  if (abs(average_start_time - expected_start_time) >= header_tol) then
+    write (*, '(A,ES20.12,A,ES20.12)') "convvelo average_start_time mismatch: got ", average_start_time, ", expected ", expected_start_time
+    nfail = nfail + 1
+  end if
+  if (abs(average_end_time - expected_end_time) >= header_tol) then
+   write (*, '(A,ES20.12,A,ES20.12)') "convvelo average_end_time mismatch: got ", average_end_time, ", expected ", expected_end_time
+    nfail = nfail + 1
+  end if
+  if (average_count /= 3_C_INT64_T) then
+    write (*, '(A,I0,A,I0)') "convvelo average_count mismatch: got ", average_count, ", expected ", 3_C_INT64_T
+    nfail = nfail + 1
   end if
 
   if (trim(mode) == "full") then

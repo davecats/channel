@@ -15,7 +15,7 @@ module test_convvelo_utils
                                                                             ]
   integer(C_INT), parameter, public :: n_convvelo_velocity_fields = 33
   integer(C_INT), parameter, public :: n_convvelo_scalar_fields = 10
-  integer(C_INT), parameter, public :: n_convvelo_velocity_fields_minimal = 20
+  integer(C_INT), parameter, public :: n_convvelo_velocity_fields_minimal = 21
   integer(C_INT), parameter, public :: n_convvelo_scalar_fields_minimal = 9
 
   character(len=32), parameter, public :: velocity_field_names(n_convvelo_velocity_fields) = [character(len=32) :: &
@@ -32,7 +32,7 @@ module test_convvelo_utils
 
   ! Minimal mode stores only the reduced zero-crossflow subset.
   character(len=32), parameter, public :: minimal_velocity_field_names(n_convvelo_velocity_fields_minimal) = [character(len=32) :: &
-                                                                               "u_cross_u", "u_cross_v", "v_cross_v", "w_cross_w", &
+                                                                  "u_cross_u", "u_cross_v", "u_cross_w", "v_cross_v", "w_cross_w", &
                                                                                          "u_cross_p", "v_cross_dpdy", "w_cross_p", &
                                                "u_cross_uu", "u_cross_uw", "v_cross_uv", "v_cross_vw", "w_cross_uw", "w_cross_ww", &
                                                                                    "u_cross_dyyu", "v_cross_dyyv", "w_cross_dyyw", &
@@ -42,6 +42,7 @@ module test_convvelo_utils
                                                                  "t_cross_t", "t_cross_u", "t_cross_v", "t_cross_w", "t_cross_tu", &
                                                                        "t_cross_tw", "t_cross_dyyt", "t_cross_dytv", "t_cross_dyv" &
                                                                                                           ]
+  integer(C_INT64_T), parameter, public :: convvelo_file_header_bytes = 2_C_INT64_T*8_C_INT64_T + 8_C_INT64_T
   integer(C_INT), parameter :: n_convvelo_profile_header_slots = 3
 
   public :: compare_field_to_reference
@@ -49,6 +50,7 @@ module test_convvelo_utils
   public :: read_full_field
   public :: read_full_profile
   public :: read_minimal_field
+  public :: read_convvelo_header
   public :: compute_reference_mean_profiles
   public :: finish_convvelo_test
   public :: read_raw_stat_field_mpi
@@ -237,7 +239,7 @@ contains
     integer(C_INT64_T) :: profile_bytes, pos_bytes
 
     profile_bytes = int(16, C_INT64_T)*int(ny + 3, C_INT64_T)
-    pos_bytes = int(profile_index, C_INT64_T)*profile_bytes + 1_C_INT64_T
+    pos_bytes = convvelo_file_header_bytes + int(profile_index, C_INT64_T)*profile_bytes + 1_C_INT64_T
 
     open (unit=97, file=filename, form='unformatted', access='stream', status='old', action='read', iostat=io)
     if (io /= 0) then
@@ -247,6 +249,27 @@ contains
     read (97, pos=pos_bytes) profile
     close (97)
   end subroutine read_profile
+
+  subroutine read_convvelo_header(filename, average_start_time, average_end_time, average_count)
+    implicit none
+    character(len=*), intent(in) :: filename
+    real(C_DOUBLE), intent(out) :: average_start_time, average_end_time
+    integer(C_INT64_T), intent(out) :: average_count
+    integer :: io
+    real(C_DOUBLE) :: header_times(2)
+
+    open (unit=93, file=filename, form='unformatted', access='stream', status='old', action='read', iostat=io)
+    if (io /= 0) then
+      write (*, *) 'ERROR: could not open convvelo file header: ', trim(filename)
+      stop 1
+    end if
+    read (93) header_times
+    read (93) average_count
+    close (93)
+
+    average_start_time = header_times(1)
+    average_end_time = header_times(2)
+  end subroutine read_convvelo_header
 
   subroutine read_full_profile(filename, profile_index, profile)
     implicit none
@@ -267,7 +290,8 @@ contains
 
     profile_bytes = int(16, C_INT64_T)*int(ny + 3, C_INT64_T)
     field_bytes = int(16, C_INT64_T)*int(ny + 3, C_INT64_T)*int(2*nz + 1, C_INT64_T)*int(nx + 1, C_INT64_T)
-    pos_bytes = int(n_convvelo_profile_header_slots + nPhi, C_INT64_T)*profile_bytes + int(field_index, C_INT64_T)*field_bytes + 1_C_INT64_T
+    pos_bytes = convvelo_file_header_bytes + int(n_convvelo_profile_header_slots + nPhi, C_INT64_T)*profile_bytes + &
+                int(field_index, C_INT64_T)*field_bytes + 1_C_INT64_T
 
     open (unit=94, file=filename, form='unformatted', access='stream', status='old', action='read', iostat=io)
     if (io /= 0) then
@@ -288,7 +312,8 @@ contains
 
     profile_bytes = int(16, C_INT64_T)*int(ny + 3, C_INT64_T)
     field_bytes = int(16, C_INT64_T)*int(ny + 3, C_INT64_T)*int(2*nz + 1, C_INT64_T)*int(nx + 1, C_INT64_T)
-    pos_bytes = int(n_convvelo_profile_header_slots + nPhi, C_INT64_T)*profile_bytes + int(field_index, C_INT64_T)*field_bytes + 1_C_INT64_T
+    pos_bytes = convvelo_file_header_bytes + int(n_convvelo_profile_header_slots + nPhi, C_INT64_T)*profile_bytes + &
+                int(field_index, C_INT64_T)*field_bytes + 1_C_INT64_T
 
     open (unit=96, file=filename, form='unformatted', access='stream', status='old', action='read', iostat=io)
     if (io /= 0) then
@@ -330,7 +355,7 @@ contains
     profile_bytes = int(16, MPI_OFFSET_KIND)*int(ny + 3, MPI_OFFSET_KIND)
     field_bytes = int(16, MPI_OFFSET_KIND)*int(ny + 3, MPI_OFFSET_KIND)* &
                   int(2*nz + 1, MPI_OFFSET_KIND)*int(nx + 1, MPI_OFFSET_KIND)
-    disp = int(n_convvelo_profile_header_slots + nPhi, MPI_OFFSET_KIND)*profile_bytes + &
+    disp = convvelo_file_header_bytes + int(n_convvelo_profile_header_slots + nPhi, MPI_OFFSET_KIND)*profile_bytes + &
            int(field_index, MPI_OFFSET_KIND)*field_bytes
 
     call MPI_File_open(MPI_COMM_WORLD, trim(filename), MPI_MODE_RDONLY, MPI_INFO_NULL, fh)
@@ -345,7 +370,8 @@ contains
 
     profile_bytes = int(16, C_INT64_T)*int(ny + 3, C_INT64_T)
     field_bytes = int(16, C_INT64_T)*int(ny + 3, C_INT64_T)*int(2*nz + 1, C_INT64_T)*int(nx + 1, C_INT64_T)
-    pos_bytes = int(n_convvelo_profile_header_slots + nPhi, C_INT64_T)*profile_bytes + int(field_index, C_INT64_T)*field_bytes + 1_C_INT64_T
+    pos_bytes = convvelo_file_header_bytes + int(n_convvelo_profile_header_slots + nPhi, C_INT64_T)*profile_bytes + &
+                int(field_index, C_INT64_T)*field_bytes + 1_C_INT64_T
 
     open (unit=95, file=filename, form='unformatted', access='stream', status='old', action='read', iostat=io)
     if (io /= 0) then
