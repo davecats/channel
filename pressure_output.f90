@@ -603,12 +603,12 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(in) :: src0(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(in) :: src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dpdy(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    real(C_DOUBLE) :: pmat(ny0:nyN + 2, -2:2), eqm1(-2:2), eqnp1(-2:2)
+    real(C_DOUBLE) :: pmat(ny0:nyN + 2, -2:2), eqm1(-2:2), eq0(-2:2), eqnp1(-2:2), eqn(-2:2)
     integer(C_INT) :: ix, iz, iy
 
     !$omp target teams distribute parallel do collapse(2) default(none) &
     !$omp shared(src0, src1, dpdy, der, k2, d140, d240, d24n, V, ni, ialfa, ibeta, ny, ny0, nyN, nx0, nxN, nz) &
-    !$omp private(ix, iz, iy, pmat, eqm1, eqnp1)
+    !$omp private(ix, iz, iy, pmat, eqm1, eqnp1, eq0, eqn)
     do ix = nx0, nxN
       do iz = -nz, nz
         do iy = ny0, nyN
@@ -617,65 +617,103 @@ CONTAINS
                              sum(der(iy, 2, -2:2)*src1(iy - 2:iy + 2, iz, ix))
         end do
 
-        ! Wall value q(0) = dp/dy|bottom from wall-normal momentum:
+        ! Bottom Dirichlet B.C. : Wall value q(0) = dp/dy|bottom from wall-normal momentum
         ! q = nu*d2v/dy2 for nonzero Fourier modes, and q = 0 for the mean mode.
         if (ix == 0 .and. iz == 0) then
           dpdy(0, iz, ix) = 0.0d0
         else
           dpdy(0, iz, ix) = ni*sum(d240(-2:2)*V(-1:3, iz, ix, 2))
         end if
+        eq0 = 0.d0; eq0(-1) = 1.d0
 
         ! Bottom ghost closure. This is not a physical BC; it is the d4(q)=0-style
         ! stencil used to remove q(-1) from the first interior row.
         dpdy(-1, iz, ix) = 0.0d0
         eqm1 = der(1, 3, :)
 
-        ! Eliminate q(-1) from row iy=1 using the bottom ghost equation.
-        pmat(1, -2:2) = pmat(1, -2:2) - eqm1(-2:2)*pmat(1, -2)/eqm1(-2)
-        pmat(1, -2) = 0.0d0
-
-        ! Eliminate the known wall value q(0) from rows iy=1 and iy=2.
-        dpdy(1, iz, ix) = dpdy(1, iz, ix) - dpdy(0, iz, ix)*pmat(1, -1)
-        pmat(1, -1) = 0.0d0
-        dpdy(2, iz, ix) = dpdy(2, iz, ix) - dpdy(0, iz, ix)*pmat(2, -2)
-        pmat(2, -2) = 0.0d0
-
-        ! Wall value q(ny) = dp/dy|top from wall-normal momentum:
+        ! Top Dirichlet B.C.: Wall value q(ny) = dp/dy|top from wall-normal momentum
         ! q = nu*d2v/dy2 for nonzero Fourier modes, and q = 0 for the mean mode.
         if (ix == 0 .and. iz == 0) then
           dpdy(ny, iz, ix) = 0.0d0
         else
           dpdy(ny, iz, ix) = ni*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 2))
         end if
+        eqn = 0.d0; eqn(1) = 1.d0
 
         ! Top ghost closure. This is the numerical relation used to eliminate q(ny+1)
         ! from the last interior row before solving.
         dpdy(ny + 1, iz, ix) = 0.0d0
         eqnp1 = der(ny - 1, 3, :)
 
-        ! Eliminate q(ny+1) from row iy=ny-1 using the top ghost equation.
+        ! Elimination at bottom wall
+
+        ! Eliminate eq0(-2) by inserting p(-1)
+        dpdy(0, iz, ix) = dpdy(0, iz, ix) - dpdy(-1, iz, ix)*eq0(-2)/eqm1(-2)
+        eq0(-2:2) = eq0(-2:2) - eqm1(-2:2)*eq0(-2)/eqm1(-2)
+        eq0(-2) = 0.0d0
+
+        ! Eliminate eq1(-2) by inserting p(-1)
+        dpdy(1, iz, ix) = dpdy(1, iz, ix) - dpdy(-1, iz, ix)*pmat(1, -2)/eqm1(-2)
+        pmat(1, -2:2) = pmat(1, -2:2) - eqm1(-2:2)*pmat(1, -2)/eqm1(-2)
+        pmat(1, -2) = 0.0d0
+
+        ! Eliminate eq1(-1) by inserting p(0)
+        dpdy(1, iz, ix) = dpdy(1, iz, ix) - dpdy(0, iz, ix)*pmat(1, -1)/eq0(-1)
+        pmat(1, -2:2) = pmat(1, -2:2) - eq0(-2:2)*pmat(1, -1)/eq0(-1)
+        pmat(1, -1) = 0.0d0
+
+        ! Eliminate eq2(-2) by inserting p(0), careful with the indices here
+        !
+        !
+        !
+        !       -1   0  1  2  3   4
+        !
+        ! -1    -2  -1  0  1  2
+        !  0    -2  -1  0  1  2
+        !  1    -2  -1  0  1  2
+        !  2        -2  -1  0  1  2
+        dpdy(2, iz, ix) = dpdy(2, iz, ix) - dpdy(0, iz, ix)*pmat(2, -2)/eq0(-1)
+        pmat(2, -2:1) = pmat(2, -2:1) - eq0(-1:2)*pmat(2, -2)/eq0(-1)
+        pmat(2, -2) = 0.0d0
+
+        ! Elimination at top wall
+
+        ! Eliminate eqn(2) by inseting p(ny+1)
+        dpdy(ny, iz, ix) = dpdy(ny, iz, ix) - dpdy(ny + 1, iz, ix)*eqn(2)/eqnp1(2)
+        eqn(-2:2) = eqn(-2:2) - eqnp1(-2:2)*eqn(2)/eqnp1(2)
+        eqn(2) = 0.0d0
+
+        ! Eliminate eqnm1(2) by inseting p(ny+1)
+        dpdy(ny - 1, iz, ix) = dpdy(ny - 1, iz, ix) - dpdy(ny + 1, iz, ix)*pmat(ny - 1, 2)/eqnp1(2)
         pmat(ny - 1, -2:2) = pmat(ny - 1, -2:2) - eqnp1(-2:2)*pmat(ny - 1, 2)/eqnp1(2)
         pmat(ny - 1, 2) = 0.0d0
 
-        ! Eliminate the known wall value q(ny) from rows iy=ny-1 and iy=ny-2.
-        dpdy(ny - 1, iz, ix) = dpdy(ny - 1, iz, ix) - dpdy(ny, iz, ix)*pmat(ny - 1, 1)
+        ! Eliminate eqnm1(1) by inserting p(ny)
+        dpdy(ny - 1, iz, ix) = dpdy(ny - 1, iz, ix) - dpdy(ny, iz, ix)*pmat(ny - 1, 1)/eqn(1)
+        pmat(ny - 1, -2:2) = pmat(ny - 1, -2:2) - eqn(-2:2)*pmat(ny - 1, 1)/eqn(1)
         pmat(ny - 1, 1) = 0.0d0
-        dpdy(ny - 2, iz, ix) = dpdy(ny - 2, iz, ix) - dpdy(ny, iz, ix)*pmat(ny - 2, 2)
+
+        ! Eliminate eqnm2(2) by inserting p(ny), be careful with the indices
+        !
+        !       ny-4  ny-3  ny-2  ny-1  ny   ny+1
+        !
+        ! ny-2   -2    -1    0    1     2
+        ! ny-1         -2    -1    0    1     2
+        ! ny           -2    -1    0    1     2
+        ! ny+1         -2    -1    0    1     2
+        dpdy(ny - 2, iz, ix) = dpdy(ny - 2, iz, ix) - dpdy(ny, iz, ix)*pmat(ny - 2, 2)/eqn(1)
+        pmat(ny - 2, -1:2) = pmat(ny - 2, -1:2) - eqn(-2:1)*pmat(ny - 2, 2)/eqn(1)
         pmat(ny - 2, 2) = 0.0d0
 
-        if (ix == 0 .and. iz == 0) then
-          call LU5decomp(pmat)
-          ! this is suspicious, but it was like that in CPL
-          call LeftLU5Backsub(dpdy(:, iz, ix), pmat, dpdy(:, iz, ix))
-        else
-          call LU5decomp(pmat)
-          call LeftLU5div(dpdy(:, iz, ix), pmat, dpdy(:, iz, ix))
+        call LU5decomp(pmat)
+        call LeftLU5div(dpdy(:, iz, ix), pmat, dpdy(:, iz, ix))
 
-          ! Recover only the ghost values after the solve. The wall values q(0) and q(ny)
-          ! were prescribed directly above.
-          dpdy(-1, iz, ix) = -sum(eqm1(-1:2)*dpdy(0:3, iz, ix))/eqm1(-2)
-          dpdy(ny + 1, iz, ix) = -sum(eqnp1(-2:1)*dpdy(ny - 3:ny, iz, ix))/eqnp1(2)
-        end if
+        ! Compute boundary value by applying BCs
+        dpdy(0, iz, ix) = -sum(eq0(0:2)*dpdy(1:3, iz, ix))/eq0(-1)
+        dpdy(-1, iz, ix) = -sum(eqm1(-1:2)*dpdy(0:3, iz, ix))/eqm1(-2)
+        dpdy(ny, iz, ix) = -sum(eqn(-2:0)*dpdy(ny - 3:ny - 1, iz, ix))/eqn(1)
+        dpdy(ny + 1, iz, ix) = -sum(eqnp1(-2:1)*dpdy(ny - 3:ny, iz, ix))/eqnp1(2)
+
       end do
     end do
     !$omp target update from(dpdy)
