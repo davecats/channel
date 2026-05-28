@@ -211,11 +211,11 @@ def _resolve_zarr_path(path: Path) -> Path:
     return path if path.suffix == ".zarr" else path / "convvelo.zarr"
 
 
-def _ensure_convvelo_store(path: Path) -> xr.Dataset:
+def _ensure_convvelo_store(path: Path, *, chunks_x: int = -1) -> xr.Dataset:
     if path.exists():
         return xr.open_zarr(path, consolidated=False)
 
-    data = build_convvelo_dataset(path.parent)
+    data = build_convvelo_dataset(path.parent, chunks_x=chunks_x)
     data.to_zarr(path, mode="w", consolidated=False)
     return xr.open_zarr(path, consolidated=False)
 
@@ -234,10 +234,11 @@ if __name__ == "__main__":
         description="Evaluate convvelo and append only the reconstructed uc fields to convvelo.zarr."
     )
     parser.add_argument("directory", type=Path, help="Case directory containing convvelo.zarr or the zarr store itself")
+    parser.add_argument("--chunks-x", type=int, default=-1, help="Chunk size for kx_folded if convvelo.zarr must be built first")
     args = parser.parse_args()
 
     zarr_path = _resolve_zarr_path(args.directory)
-    convvelo = _ensure_convvelo_store(zarr_path)
+    convvelo = _ensure_convvelo_store(zarr_path, chunks_x=args.chunks_x)
     result = _evaluated_uc_fields(convvelo)
     print(result)
     convvelo.assign(result).to_zarr(zarr_path, mode="a", consolidated=False)

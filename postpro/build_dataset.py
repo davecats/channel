@@ -223,7 +223,7 @@ def _sanity_check_convvelo_runtime(runtime_path, metadata, velocity_fields, scal
                 raise ValueError(f"{runtime_path} failed sanity check for first scalar field")
 
 
-def load_convvelo_runtime(directory, metadata):
+def load_convvelo_runtime(directory, metadata, *, chunks_x=-1):
     runtime_files, config = _find_convvelo_runtime_files(directory)
     if not runtime_files:
         return None
@@ -236,6 +236,7 @@ def load_convvelo_runtime(directory, metadata):
     nyf = metadata["ny"] + 3
     nzf = 2 * metadata["nz"] + 1
     nxf = metadata["nx"] + 1
+    kx_chunk = nxf if chunks_x is None or chunks_x < 0 else min(chunks_x, nxf)
     profile_bytes = nyf * np.dtype(np.complex128).itemsize
     field_bytes = nxf * nzf * nyf * np.dtype(np.complex128).itemsize
     field_offset = CONVVELO_HEADER_BYTES + _convvelo_profile_header_slots(nphi) * profile_bytes
@@ -244,18 +245,12 @@ def load_convvelo_runtime(directory, metadata):
     paths = [item["path"] for item in file_info]
     step_values = np.arange(len(paths), dtype=np.int64)
 
-    def _load_complex_slice(path, offset, shape):
-        with open(path, "rb") as stream:
-            stream.seek(offset)
-            buf = stream.read(int(np.prod(shape)) * np.dtype(np.complex128).itemsize)
-        return np.frombuffer(buf, dtype=np.complex128).reshape(shape)
-
-    def _stack_delayed(offsets, shape):
+    def _stack_memmaps(offsets, shape, chunks):
         return da.stack([
-            da.from_delayed(
-                dask.delayed(_load_complex_slice)(path, offset, shape),
-                shape=shape,
-                dtype=np.complex128,
+            da.from_array(
+                np.memmap(path, dtype=np.complex128, mode="r", offset=offset, shape=shape),
+                chunks=chunks,
+                asarray=False,
             )
             for path, offset in zip(paths, offsets, strict=True)
         ])
@@ -270,10 +265,12 @@ def load_convvelo_runtime(directory, metadata):
     }
 
     profile_offsets = [CONVVELO_HEADER_BYTES + i * profile_bytes for i in range(3 + nphi)]
+    profile_chunks = (nyf,)
+    field_chunks = (kx_chunk, nzf, nyf)
     profile_data = {
-        "mean_u": (("step", "y"), _stack_delayed([profile_offsets[0]] * len(paths), (nyf,))),
-        "mean_v": (("step", "y"), _stack_delayed([profile_offsets[1]] * len(paths), (nyf,))),
-        "mean_w": (("step", "y"), _stack_delayed([profile_offsets[2]] * len(paths), (nyf,))),
+        "mean_u": (("step", "y"), _stack_memmaps([profile_offsets[0]] * len(paths), (nyf,), profile_chunks)),
+        "mean_v": (("step", "y"), _stack_memmaps([profile_offsets[1]] * len(paths), (nyf,), profile_chunks)),
+        "mean_w": (("step", "y"), _stack_memmaps([profile_offsets[2]] * len(paths), (nyf,), profile_chunks)),
     }
 
     if nphi > 0:
@@ -281,7 +278,7 @@ def load_convvelo_runtime(directory, metadata):
             ("step", "isc", "y"),
             da.stack(
                 [
-                    _stack_delayed([profile_offsets[3 + i_phi]] * len(paths), (nyf,))
+                    _stack_memmaps([profile_offsets[3 + i_phi]] * len(paths), (nyf,), profile_chunks)
                     for i_phi in range(nphi)
                 ],
                 axis=1,
@@ -291,7 +288,7 @@ def load_convvelo_runtime(directory, metadata):
     spectral_fields = {
         name: (
             ("step", "kx_folded", "kz", "y"),
-            _stack_delayed([field_offset + i_field * field_bytes] * len(paths), (nxf, nzf, nyf)),
+            _stack_memmaps([field_offset + i_field * field_bytes] * len(paths), (nxf, nzf, nyf), field_chunks),
         )
         for i_field, name in enumerate(velocity_fields)
     }
@@ -300,9 +297,10 @@ def load_convvelo_runtime(directory, metadata):
             ("step", "isc", "kx_folded", "kz", "y"),
             da.stack(
                 [
-                    _stack_delayed(
+                    _stack_memmaps(
                         [field_offset + (len(velocity_fields) + i_phi * len(scalar_fields) + i_field) * field_bytes] * len(paths),
                         (nxf, nzf, nyf),
+                        field_chunks,
                     )
                     for i_phi in range(nphi)
                 ],
@@ -335,7 +333,7 @@ def load_convvelo_runtime(directory, metadata):
     return _average_convvelo_steps(ds)
 
 
-def build_convvelo_dataset(directory, *, pressure=False, command_semaphore=None):
+def build_convvelo_dataset(directory, *, pressure=False, command_semaphore=None, chunks_x=-1):
     if pressure:
         warnings.warn("pressure=True is ignored: convvelo datasets now come only from online runtime files.")
     if command_semaphore is not None:
@@ -343,7 +341,7 @@ def build_convvelo_dataset(directory, *, pressure=False, command_semaphore=None)
 
     directory = Path(directory)
     sim_meta = get_sim_metadata(directory)
-    data = load_convvelo_runtime(directory, sim_meta)
+    data = load_convvelo_runtime(directory, sim_meta, chunks_x=chunks_x)
     if data is None:
         raise FileNotFoundError(f"No convvelo runtime files found in {directory}")
     data["Pr"] = ("isc", sim_meta["pr"])
@@ -360,7 +358,7 @@ if __name__ == "__main__":
     cluster = LocalCluster(n_workers=8, threads_per_worker=2)
     client = Client(cluster)
 
-    data = build_convvelo_dataset(args.directory)
+    data = build_convvelo_dataset(args.directory, chunks_x=args.chunks_x)
     print(data)
 
     with ProgressBar():
