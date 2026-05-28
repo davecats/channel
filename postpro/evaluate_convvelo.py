@@ -220,9 +220,7 @@ def _ensure_convvelo_store(path: Path, *, chunks_x: int = -1) -> xr.Dataset:
     if path.exists():
         return xr.open_zarr(path, consolidated=False, chunks={})
 
-    data = build_convvelo_dataset(path.parent, chunks_x=chunks_x)
-    data.to_zarr(path, mode="w", consolidated=False)
-    return xr.open_zarr(path, consolidated=False)
+    return build_convvelo_dataset(path.parent, chunks_x=chunks_x)
 
 
 def _evaluated_uc_fields(cvv: xr.Dataset) -> xr.Dataset:

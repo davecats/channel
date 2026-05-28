@@ -10,7 +10,10 @@ from dask.distributed import Client, LocalCluster
 import numpy as np
 import xarray as xr
 
-from utils import fftfit, mesh2k
+try:
+    from utils import fftfit, mesh2k
+except ImportError:
+    from .utils import fftfit, mesh2k
 
 CONVVELO_HEADER_BYTES = 2 * np.dtype(np.float64).itemsize + np.dtype(np.int64).itemsize
 
@@ -23,6 +26,7 @@ def _get_ini_config(path: Path) -> configparser.ConfigParser:
 
 def get_sim_metadata(directory):
     path = Path(directory) / "dns.in"
+    print(path.absolute())
     cfg = _get_ini_config(path)
     nx = cfg.getint("mesh", "nx")
     ny = cfg.getint("mesh", "ny")
@@ -245,13 +249,30 @@ def load_convvelo_runtime(directory, metadata, *, chunks_x=-1):
     paths = [item["path"] for item in file_info]
     step_values = np.arange(len(paths), dtype=np.int64)
 
+    def _load_memmap_chunk(path, shape, offset, chunk_slice):
+        data = np.memmap(path, dtype=np.complex128, mode="r", offset=offset, shape=shape)
+        return np.asarray(data[chunk_slice])
+
+    def _chunked_memmap(path, offset, shape, chunks):
+        axis0 = shape[0]
+        block0 = chunks[0]
+        pieces = []
+        for start0 in range(0, axis0, block0):
+            stop0 = min(start0 + block0, axis0)
+            chunk_shape = (stop0 - start0, *shape[1:])
+            chunk_slice = (slice(start0, stop0),) + tuple(slice(None) for _ in shape[1:])
+            pieces.append(
+                da.from_delayed(
+                    dask.delayed(_load_memmap_chunk)(path, shape, offset, chunk_slice),
+                    shape=chunk_shape,
+                    dtype=np.complex128,
+                )
+            )
+        return da.concatenate(pieces, axis=0)
+
     def _stack_memmaps(offsets, shape, chunks):
         return da.stack([
-            da.from_array(
-                np.memmap(path, dtype=np.complex128, mode="r", offset=offset, shape=shape),
-                chunks=chunks,
-                asarray=False,
-            )
+            _chunked_memmap(path, offset, shape, chunks)
             for path, offset in zip(paths, offsets, strict=True)
         ])
 
