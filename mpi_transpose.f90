@@ -224,6 +224,16 @@ CONTAINS
     END DO
     FLUSH (output_unit)
 #endif
+    ! The pairwise all-to-all transpose uses one shared sendcount for every rank,
+    ! so both decomposed dimensions must divide evenly across MPI ranks.
+    if (mod(nxpp, nproc) /= 0 .or. mod(nzd, nproc) /= 0) then
+      if (has_terminal) then
+        print *, "Error: MPI transpose requires nproc to divide both nx+1 and nzd."
+        print *, "       Received nx+1=", nxpp, " nzd=", nzd, " nproc=", nproc
+        print *, "       This run would create uneven transpose counts and can fail in MPI_Ialltoall."
+      end if
+      CALL MPI_Abort(MPI_COMM_WORLD, 1, ierror)
+    end if
     if (int(nproc, 8)*int(nxB, 8)*int(nzB, 8)*int(ny + 3, 8) > huge(0_C_INT)) then
       if (has_terminal) then
         print *, "Error: problem too large for MPI transpose (integer overflow). Try to increase the number of processes."
