@@ -1,12 +1,17 @@
 import argparse
 from pathlib import Path
 
+import dask
 import numpy as np
 import xarray as xr
+from dask.diagnostics import ProgressBar
 
-from build_dataset import build_convvelo_dataset
-from derive import fourier_dy_fast, get_banded_derivative_operators
-
+try:
+    from build_dataset import build_convvelo_dataset
+    from derive import fourier_dy_fast, get_banded_derivative_operators
+except ImportError:
+    from .build_dataset import build_convvelo_dataset
+    from .derive import fourier_dy_fast, get_banded_derivative_operators
 
 def _uses_full_reconstruction(cvv: xr.Dataset) -> bool:
     return "v_cross_u" in cvv
@@ -213,7 +218,7 @@ def _resolve_zarr_path(path: Path) -> Path:
 
 def _ensure_convvelo_store(path: Path, *, chunks_x: int = -1) -> xr.Dataset:
     if path.exists():
-        return xr.open_zarr(path, consolidated=False)
+        return xr.open_zarr(path, consolidated=False, chunks={})
 
     data = build_convvelo_dataset(path.parent, chunks_x=chunks_x)
     data.to_zarr(path, mode="w", consolidated=False)
@@ -228,6 +233,22 @@ def _evaluated_uc_fields(cvv: xr.Dataset) -> xr.Dataset:
     return result[field_names]
 
 
+def _compute_with_progress(delayed_obj, *, description: str = "Computing"):
+    try:
+        from dask.distributed import get_client, progress
+
+        client = get_client()
+    except (ImportError, ValueError):
+        print(f"{description} with local progress bar...")
+        with ProgressBar():
+            return dask.compute(delayed_obj)[0]
+
+    print(f"{description} with distributed progress...")
+    future = client.compute(delayed_obj)
+    progress(future)
+    return future.result()
+
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -237,9 +258,17 @@ if __name__ == "__main__":
     parser.add_argument("--chunks-x", type=int, default=-1, help="Chunk size for kx_folded if convvelo.zarr must be built first")
     args = parser.parse_args()
 
+    from dask.distributed import Client, LocalCluster
+    cluster = LocalCluster(n_workers=8, threads_per_worker=2)
+    client = Client(cluster)
+
     zarr_path = _resolve_zarr_path(args.directory)
     convvelo = _ensure_convvelo_store(zarr_path, chunks_x=args.chunks_x)
     result = _evaluated_uc_fields(convvelo)
     print(result)
-    convvelo.assign(result).to_zarr(zarr_path, mode="a", consolidated=False)
+    write = convvelo.assign(result).to_zarr(zarr_path, mode="a", consolidated=False, compute=False)
+    _compute_with_progress(write, description=f"Appending evaluated convvelo fields to {zarr_path}")
     print(f"Appended evaluated convvelo fields to {zarr_path}")
+
+    client.close()
+    cluster.close()
