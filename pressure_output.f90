@@ -588,10 +588,10 @@ CONTAINS
         call LeftLU5div(p(:, iz, ix), pmat, p(:, iz, ix))
 
         ! Compute boundary value by applying BCs
-        p(0, iz, ix) = -sum(eq0(0:2)*p(1:3, iz, ix))/eq0(-1)
-        p(-1, iz, ix) = -sum(eqm1(-1:2)*p(0:3, iz, ix))/eqm1(-2)
-        p(ny, iz, ix) = -sum(eqn(-2:0)*p(ny - 3:ny - 1, iz, ix))/eqn(1)
-        p(ny + 1, iz, ix) = -sum(eqnp1(-2:1)*p(ny - 3:ny, iz, ix))/eqnp1(2)
+        p(0, iz, ix) = (p(0,iz,ix)-sum(eq0(0:2)*p(1:3, iz, ix)))/eq0(-1)
+        p(-1, iz, ix) = (p(-1,iz,ix) -sum(eqm1(-1:2)*p(0:3, iz, ix)))/eqm1(-2)
+        p(ny, iz, ix) = (p(ny,iz,ix)-sum(eqn(-2:0)*p(ny - 3:ny - 1, iz, ix)))/eqn(1)
+        p(ny + 1, iz, ix) = (p(ny+1,iz,ix)-sum(eqnp1(-2:1)*p(ny - 3:ny, iz, ix)))/eqnp1(2)
 
       end do
     end do
@@ -619,11 +619,7 @@ CONTAINS
 
         ! Bottom Dirichlet B.C. : Wall value q(0) = dp/dy|bottom from wall-normal momentum
         ! q = nu*d2v/dy2 for nonzero Fourier modes, and q = 0 for the mean mode.
-        if (ix == 0 .and. iz == 0) then
-          dpdy(0, iz, ix) = 0.0d0
-        else
-          dpdy(0, iz, ix) = ni*sum(d240(-2:2)*V(-1:3, iz, ix, 2))
-        end if
+        dpdy(0, iz, ix) = ni*sum(d240(-2:2)*V(-1:3, iz, ix, 2))
         eq0 = 0.d0; eq0(-1) = 1.d0
 
         ! Bottom ghost closure. This is not a physical BC; it is the d4(q)=0-style
@@ -633,11 +629,7 @@ CONTAINS
 
         ! Top Dirichlet B.C.: Wall value q(ny) = dp/dy|top from wall-normal momentum
         ! q = nu*d2v/dy2 for nonzero Fourier modes, and q = 0 for the mean mode.
-        if (ix == 0 .and. iz == 0) then
-          dpdy(ny, iz, ix) = 0.0d0
-        else
-          dpdy(ny, iz, ix) = ni*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 2))
-        end if
+        dpdy(ny, iz, ix) = ni*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 2))
         eqn = 0.d0; eqn(1) = 1.d0
 
         ! Top ghost closure. This is the numerical relation used to eliminate q(ny+1)
@@ -709,10 +701,10 @@ CONTAINS
         call LeftLU5div(dpdy(:, iz, ix), pmat, dpdy(:, iz, ix))
 
         ! Compute boundary value by applying BCs
-        dpdy(0, iz, ix) = -sum(eq0(0:2)*dpdy(1:3, iz, ix))/eq0(-1)
-        dpdy(-1, iz, ix) = -sum(eqm1(-1:2)*dpdy(0:3, iz, ix))/eqm1(-2)
-        dpdy(ny, iz, ix) = -sum(eqn(-2:0)*dpdy(ny - 3:ny - 1, iz, ix))/eqn(1)
-        dpdy(ny + 1, iz, ix) = -sum(eqnp1(-2:1)*dpdy(ny - 3:ny, iz, ix))/eqnp1(2)
+        dpdy(0, iz, ix) = (dpdy(0,iz,ix) -sum(eq0(0:2)*dpdy(1:3, iz, ix)))/eq0(-1)
+        dpdy(-1, iz, ix) = (dpdy(-1,iz,ix) -sum(eqm1(-1:2)*dpdy(0:3, iz, ix)))/eqm1(-2)
+        dpdy(ny, iz, ix) = (dpdy(ny,iz,ix) -sum(eqn(-2:0)*dpdy(ny - 3:ny - 1, iz, ix)))/eqn(1)
+        dpdy(ny + 1, iz, ix) = (dpdy(ny+1,iz,ix) -sum(eqnp1(-2:1)*dpdy(ny - 3:ny, iz, ix)))/eqnp1(2)
 
       end do
     end do
