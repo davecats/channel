@@ -147,7 +147,7 @@ def write_restart(path: Path, target: dict[str, float | int], time: float, field
         np.array(target["nz"], dtype=np.int32).tofile(handle)
         np.array(target["alfa0"], dtype=np.float64).tofile(handle)
         np.array(target["beta0"], dtype=np.float64).tofile(handle)
-        np.array(target["ni"], dtype=np.float64).tofile(handle)
+        np.array(1 / target["ni"], dtype=np.float64).tofile(handle)
         np.array(target["a"], dtype=np.float64).tofile(handle)
         np.array(target["ymin"], dtype=np.float64).tofile(handle)
         np.array(target["ymax"], dtype=np.float64).tofile(handle)
