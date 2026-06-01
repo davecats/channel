@@ -5,11 +5,12 @@ module convvelo
   use, intrinsic :: iso_c_binding
   use config, only: ini_config, has_section, get_string, get_real, lower
   use dnsdata, only: V, nPhi, nz, ny, der, nxd, izd, factor, iproc, D0mat, d240, d24m1, d24n, d24np1, &
-                     COMPLEXderiv, LeftLU5div, has_terminal, &
+                     COMPLEXderiv, has_terminal, &
                      time, deltat
   use pressure_output, only: compute_poisson, compute_dpdy
   use mpi_transpose, only: ny0, nyN, nx0, nxN, nxB, nzB, nx, has_average, ierr, sendbuf, recvbuf, &
                            pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, nzd
+  use y_line_solvers, only: ys_leftlu5div
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
   use ffts, only: IFT, RFT, HFT, FFT, VVdx, VVdz
 #else
@@ -450,7 +451,7 @@ contains
                                         der(ny - 1, 0, 2)*convvelo_work(ny + 1, iz, ix))
         convvelo_work(ny - 2, iz, ix) = convvelo_work(ny - 2, iz, ix) - &
                                         der(ny - 2, 0, 2)*convvelo_work(ny, iz, ix)
-        call LeftLU5div(convvelo_work(:, iz, ix), D0mat, convvelo_work(:, iz, ix))
+        call ys_leftlu5div(convvelo_work(:, iz, ix), D0mat)
       end do
     end do
   end subroutine apply_dyy_to_work

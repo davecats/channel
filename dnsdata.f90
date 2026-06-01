@@ -25,8 +25,7 @@ MODULE dnsdata
   USE rbmat
   USE mpi_transpose
   USE ffts
-  USE y_line_solvers, ONLY: ys_applybc_0, ys_applybc_n, ys_lu5decomp, ys_leftlu5backsub, ys_leftlu5forwardsub, &
-                            ys_leftlu5div, ys_solve_compact_derivative, ys_solve_compact_system
+  USE y_line_solvers, ONLY: ys_lu5decomp, ys_leftlu5div, ys_solve_compact_derivative, ys_solve_compact_system
 
   IMPLICIT NONE
 
@@ -305,7 +304,7 @@ CONTAINS
     t = 0; t(2) = 2; d24np1(-2:2) = M.bs.t
     d04n = 0; d04n(1) = 1; 
     FORALL (iy=1:ny - 1) D0mat(iy, -2:2) = der(iy, 0, -2:2); 
-    CALL LU5decomp(D0mat)
+    call ys_lu5decomp(D0mat)
     !$omp target update to(d14np1, d14n, d14m1, d140)
     !$omp target enter data map(to: d240, d24m1, d04n, d14n, d24n, d24np1, D0mat, der)
   END SUBROUTINE setup_derivatives
@@ -426,76 +425,9 @@ CONTAINS
     call ys_solve_compact_derivative(f0, f1, der, D0mat, d140, d14m1, d14n, d14np1, ny, ny0, nyN)
   END SUBROUTINE COMPLEXderiv
 
-  !--------------------------------------------------------------!
-  !----------------- apply the boundary conditions --------------!
-#ifdef HAVE_CUDA
-  !$omp declare target(applybc_0)
-#endif
-  PURE SUBROUTINE applybc_0(EQ, bc0, bc0m1)
-    real(C_DOUBLE), intent(inout) :: EQ(ny0:nyN + 2, -2:2)
-    real(C_DOUBLE), intent(in) :: bc0(-2:2), bc0m1(-2:2)
-
-    call ys_applybc_0(eq, bc0, bc0m1, ny0, nyN)
-  END SUBROUTINE applybc_0
-
-#ifdef HAVE_CUDA
-  !$omp declare target(applybc_n)
-#endif
-  PURE SUBROUTINE applybc_n(EQ, bcn, bcnp1)
-    real(C_DOUBLE), intent(inout) :: EQ(ny0:nyN + 2, -2:2)
-    real(C_DOUBLE), intent(in) :: bcn(-2:2), bcnp1(-2:2)
-
-    call ys_applybc_n(eq, bcn, bcnp1, ny, ny0, nyN)
-  END SUBROUTINE applybc_n
-
 ! Orr-Sommerfeld and Squire opearators
 #define OS(iy,j) (ni*(der(iy,3,j)-2.0d0*k2(iz,ix)*der(iy,2,j)+k2(iz,ix)*k2(iz,ix)*der(iy,0,j)))
 #define SQ(iy,j) (ni*(der(iy,2,j)-k2(iz,ix)*der(iy,0,j)))
-
-#ifdef HAVE_CUDA
-  !$omp declare target(LU5decomp)
-#endif
-  !---- in-place LU Decomposition of a banded matrix ---!
-  !-----------------------------------------------------!
-  SUBROUTINE LU5decomp(A)
-    real(C_DOUBLE), intent(inout) :: A(0:, -2:)
-
-    call ys_lu5decomp(a)
-  END SUBROUTINE LU5decomp
-
-  !- Left LU division of a banded matrix -!
-  !---------------------------------------!
-#ifdef HAVE_CUDA
-  !$omp declare target(LeftLU5Backsub)
-#endif
-  SUBROUTINE LeftLU5Backsub(x, A, b)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: x(-2:)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: b(-2:)
-    real(C_DOUBLE), intent(in)  :: A(0:, -2:)
-
-    call ys_leftlu5backsub(x, a, b)
-  END SUBROUTINE LeftLU5Backsub
-
-#ifdef HAVE_CUDA
-  !$omp declare target(LeftLU5Forwardsub)
-#endif
-  SUBROUTINE LeftLU5Forwardsub(x, A)
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(-2:)
-    real(C_DOUBLE), intent(in)  :: A(0:, -2:)
-
-    call ys_leftlu5forwardsub(x, a)
-  END SUBROUTINE LeftLU5Forwardsub
-
-#ifdef HAVE_CUDA
-  !$omp declare target(LeftLU5div)
-#endif
-  SUBROUTINE LeftLU5div(x, A, b)
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(-2:)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: b(-2:)
-    real(C_DOUBLE), intent(in)  :: A(0:, -2:)
-
-    call ys_leftlu5div(x, a, b)
-  END SUBROUTINE LeftLU5div
 
   SUBROUTINE linsolve(lambda)
     IMPLICIT NONE
@@ -544,7 +476,7 @@ CONTAINS
           V(:, 0, 0, 1) = dcmplx(dreal(V(:, 0, 0, 1)), 0.d0); 
           ucor(ny0 - 2:ny0 - 1) = 0; ucor(ny0:nyN) = 1; ucor(nyN + 1:nyN + 2) = 0
           !linsolve_mat contains etamat
-          CALL LeftLU5div(ucor, linsolve_mat(:, :, iz, ix), ucor)
+          call ys_leftlu5div(ucor, linsolve_mat(:, :, iz, ix))
           ucor(0) = -sum(ucor(1:3)*eta0bc(0:2))/eta0bc(-1)
           ucor(-1) = -sum(ucor(0:3)*eta0m1bc(-1:2))/eta0m1bc(-2)
           ucor(ny) = -sum(ucor(ny - 3:ny - 1)*etanbc(-2:0))/etanbc(1)
@@ -605,7 +537,7 @@ CONTAINS
           tcor(ny0:nyN, :) = 1
           tcor(nyN + 1:nyN + 2, :) = 0
 
-          CALL LeftLU5div(tcor(:, iPhi), linsolve_mat(:, :, iz, ix), tcor(:, iPhi))
+          call ys_leftlu5div(tcor(:, iPhi), linsolve_mat(:, :, iz, ix))
           tcor(0, iPhi) = -sum(tcor(1:3, iPhi)*phi0bc(0:2))/phi0bc(-1)
           tcor(-1, iPhi) = -sum(tcor(0:3, iPhi)*phi0m1bc(-1:2))/phi0m1bc(-2)
           tcor(ny, iPhi) = -sum(tcor(ny - 3:ny - 1, iPhi)*phinbc(-2:0))/phinbc(1)
