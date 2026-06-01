@@ -318,6 +318,78 @@ CONTAINS
 #endif
   END SUBROUTINE transpose_xz_to_y_pencil
 
+  SUBROUTINE transpose_xz_to_y_pencil_fields(src, dst)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: src(:, :, :, :)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: dst(:, :, :, :)
+#ifdef HAVE_MPI
+    complex(C_DOUBLE_COMPLEX), allocatable :: send(:), recv(:)
+    integer, allocatable :: sendcounts(:), recvcounts(:), senddispls(:), recvdispls(:)
+    integer(C_INT) :: nfields
+    integer(C_INT) :: iy_local, iz_local, ix_local, ifield, dest, iy_global, p
+    integer(C_INT) :: source_start, source_count, local_z_start, local_z_count
+
+    nfields = int(size(src, 4), C_INT)
+    if (npy_grid == 1) then
+      dst = src
+      return
+    end if
+
+    allocate (sendcounts(0:npy_grid - 1), recvcounts(0:npy_grid - 1), senddispls(0:npy_grid - 1), recvdispls(0:npy_grid - 1))
+    senddispls(0) = 0
+    recvdispls(0) = 0
+    do dest = 0, npy_grid - 1
+      sendcounts(dest) = int(ylB*z_pencil_counts(dest + 1)*nxB*nfields)
+      recvcounts(dest) = int(y_block_counts(dest + 1)*zpyB*nxB*nfields)
+      if (dest > 0) then
+        senddispls(dest) = senddispls(dest - 1) + sendcounts(dest - 1)
+        recvdispls(dest) = recvdispls(dest - 1) + recvcounts(dest - 1)
+      end if
+    end do
+
+    allocate (send(sum(sendcounts)), recv(sum(recvcounts)))
+
+    do dest = 0, npy_grid - 1
+      local_z_start = z_pencil_starts(dest + 1)
+      local_z_count = z_pencil_counts(dest + 1)
+      p = senddispls(dest)
+      do ifield = 1, nfields
+        do iy_local = 1, ylB
+          do ix_local = 1, nxB
+            do iz_local = 1, local_z_count
+              p = p + 1
+              send(p) = src(iy_local, local_z_start + iz_local - 1, ix_local, ifield)
+            end do
+          end do
+        end do
+      end do
+    end do
+
+    call MPI_Alltoallv(send, sendcounts, senddispls, MPI_DOUBLE_COMPLEX, &
+                       recv, recvcounts, recvdispls, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
+
+    do dest = 0, npy_grid - 1
+      source_start = y_block_starts(dest + 1)
+      source_count = y_block_counts(dest + 1)
+      p = recvdispls(dest)
+      do ifield = 1, nfields
+        do iy_local = 1, source_count
+          iy_global = source_start + iy_local - 1
+          do ix_local = 1, nxB
+            do iz_local = 1, zpyB
+              p = p + 1
+              dst(iy_global, iz_local, ix_local, ifield) = recv(p)
+            end do
+          end do
+        end do
+      end do
+    end do
+
+    deallocate (send, recv, sendcounts, recvcounts, senddispls, recvdispls)
+#else
+    dst = src
+#endif
+  END SUBROUTINE transpose_xz_to_y_pencil_fields
+
   SUBROUTINE transpose_y_pencil_to_xz(src, dst)
     complex(C_DOUBLE_COMPLEX), intent(in) :: src(:, :, :)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dst(:, :, :)
@@ -386,6 +458,79 @@ CONTAINS
     dst = src
 #endif
   END SUBROUTINE transpose_y_pencil_to_xz
+
+  SUBROUTINE transpose_y_pencil_to_xz_fields(src, dst)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: src(:, :, :, :)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: dst(:, :, :, :)
+#ifdef HAVE_MPI
+    complex(C_DOUBLE_COMPLEX), allocatable :: send(:), recv(:)
+    integer, allocatable :: sendcounts(:), recvcounts(:), senddispls(:), recvdispls(:)
+    integer(C_INT) :: nfields
+    integer(C_INT) :: iy_local, iz_local, ix_local, ifield, dest, iy_global, iz_global
+    integer(C_INT) :: local_y_start, local_y_count, source_z_start, source_z_count, p
+
+    nfields = int(size(src, 4), C_INT)
+    if (npy_grid == 1) then
+      dst = src
+      return
+    end if
+
+    allocate (sendcounts(0:npy_grid - 1), recvcounts(0:npy_grid - 1), senddispls(0:npy_grid - 1), recvdispls(0:npy_grid - 1))
+    senddispls(0) = 0
+    recvdispls(0) = 0
+    do dest = 0, npy_grid - 1
+      sendcounts(dest) = int(y_block_counts(dest + 1)*zpyB*nxB*nfields)
+      recvcounts(dest) = int(ylB*z_pencil_counts(dest + 1)*nxB*nfields)
+      if (dest > 0) then
+        senddispls(dest) = senddispls(dest - 1) + sendcounts(dest - 1)
+        recvdispls(dest) = recvdispls(dest - 1) + recvcounts(dest - 1)
+      end if
+    end do
+
+    allocate (send(sum(sendcounts)), recv(sum(recvcounts)))
+
+    do dest = 0, npy_grid - 1
+      local_y_start = y_block_starts(dest + 1)
+      local_y_count = y_block_counts(dest + 1)
+      p = senddispls(dest)
+      do ifield = 1, nfields
+        do iy_local = 1, local_y_count
+          iy_global = local_y_start + iy_local - 1
+          do ix_local = 1, nxB
+            do iz_local = 1, zpyB
+              p = p + 1
+              send(p) = src(iy_global, iz_local, ix_local, ifield)
+            end do
+          end do
+        end do
+      end do
+    end do
+
+    call MPI_Alltoallv(send, sendcounts, senddispls, MPI_DOUBLE_COMPLEX, &
+                       recv, recvcounts, recvdispls, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
+
+    do dest = 0, npy_grid - 1
+      source_z_start = z_pencil_starts(dest + 1)
+      source_z_count = z_pencil_counts(dest + 1)
+      p = recvdispls(dest)
+      do ifield = 1, nfields
+        do iy_local = 1, ylB
+          do ix_local = 1, nxB
+            do iz_local = 1, source_z_count
+              p = p + 1
+              iz_global = source_z_start + iz_local - 1
+              dst(iy_local, iz_global, ix_local, ifield) = recv(p)
+            end do
+          end do
+        end do
+      end do
+    end do
+
+    deallocate (send, recv, sendcounts, recvcounts, senddispls, recvdispls)
+#else
+    dst = src
+#endif
+  END SUBROUTINE transpose_y_pencil_to_xz_fields
 
   !------- Divide the problem in 1D slices -------!
   !-----------------------------------------------!
