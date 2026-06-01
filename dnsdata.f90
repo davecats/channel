@@ -39,6 +39,7 @@ MODULE dnsdata
   integer(C_INT), allocatable :: izd(:)
   complex(C_DOUBLE_COMPLEX), allocatable :: ialfa(:), ibeta(:)
   real(C_DOUBLE), allocatable :: k2(:, :)
+  integer(C_INT) :: npy = 1
   logical :: time_from_restart
   !Grid
   integer(C_INT), private :: iy
@@ -97,11 +98,17 @@ CONTAINS
     type(ini_config), intent(in) :: cfg
     character(len=16) :: env_value
     integer(C_INT) :: nstep_in
+    integer(C_INT) :: npy_in
     integer :: status, length
+    logical :: found
 
     call require_integer(cfg, "mesh", "nx", nx)
     call require_integer(cfg, "mesh", "ny", ny)
     call require_integer(cfg, "mesh", "nz", nz)
+    npy_in = 1
+    call get_integer(cfg, "parallel", "npy", npy_in, found)
+    if (.not. found) call get_integer(cfg, "mesh", "npy", npy_in, found)
+    npy = npy_in
     call require_real(cfg, "mesh", "alfa0", alfa0)
     call require_real(cfg, "mesh", "beta0", beta0)
     nxd = 3*(nx + 1)/2

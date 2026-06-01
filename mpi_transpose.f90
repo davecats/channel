@@ -81,6 +81,7 @@ MODULE mpi_transpose
   complex(C_DOUBLE_COMPLEX), allocatable :: sendbuf(:, :), recvbuf(:, :)
 #endif
   integer(C_INT), save :: nproc, iproc, ierr, nzd, nx
+  integer(C_INT), save :: npy_grid = 1, npxz = 1, ipy = 0, ipxz = 0
   integer(C_INT), save :: nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN, miny, maxy, sendcount
   !$omp declare target(ny0, nyN)
 
@@ -138,8 +139,8 @@ CONTAINS
     integer(C_SIZE_T) :: iy, ix, iz, dest, p
 
     !$omp target teams distribute parallel do collapse(4) default(none) &
-    !$omp shared(Vz, send) shared(ny, nxB, nzB, nproc, sendcount) private(iy, ix, iz, dest, p)
-    do dest = 0, nproc - 1
+    !$omp shared(Vz, send) shared(ny, nxB, nzB, npxz, sendcount) private(iy, ix, iz, dest, p)
+    do dest = 0, npxz - 1
       do iy = 1, ny + 3
         do ix = 1, nxB
           do iz = 1, nzB
@@ -161,8 +162,8 @@ CONTAINS
     integer(C_SIZE_T) :: iy, ix, iz, src, p
 
     !$omp target teams distribute parallel do collapse(4) default(none) &
-    !$omp shared(Vx, recv) shared(ny, nxB, nzB, nproc, sendcount) private(iy, ix, iz, src, p)
-    do src = 0, nproc - 1
+    !$omp shared(Vx, recv) shared(ny, nxB, nzB, npxz, sendcount) private(iy, ix, iz, src, p)
+    do src = 0, npxz - 1
       do iy = 1, ny + 3
         do ix = 1, nxB
           do iz = 1, nzB
@@ -183,8 +184,8 @@ CONTAINS
     integer(C_SIZE_T) :: iy, ix, iz, dest, p
 
     !$omp target teams distribute parallel do collapse(4) default(none) &
-    !$omp shared(Vx, send) shared(ny, nxB, nzB, nproc, sendcount) private(iy, ix, iz, dest, p)
-    do dest = 0, nproc - 1
+    !$omp shared(Vx, send) shared(ny, nxB, nzB, npxz, sendcount) private(iy, ix, iz, dest, p)
+    do dest = 0, npxz - 1
       do iy = 1, ny + 3
         do iz = 1, nzB
           do ix = 1, nxB
@@ -205,8 +206,8 @@ CONTAINS
     integer(C_SIZE_T) :: iy, ix, iz, src, p
 
     !$omp target teams distribute parallel do collapse(4) default(none) &
-    !$omp shared(Vz, recv) shared(ny, nxB, nzB, nproc, sendcount) private(iy, ix, iz, src, p)
-    do src = 0, nproc - 1
+    !$omp shared(Vz, recv) shared(ny, nxB, nzB, npxz, sendcount) private(iy, ix, iz, src, p)
+    do src = 0, npxz - 1
       do iy = 1, ny + 3
         do iz = 1, nzB
           do ix = 1, nxB
@@ -227,7 +228,7 @@ CONTAINS
     !$omp target data use_device_ptr(send, recv)
 #endif
     call MPI_IALLTOALL(send, sendcount, MPI_DOUBLE_COMPLEX, &
-                       recv, sendcount, MPI_DOUBLE_COMPLEX, MPI_COMM_WORLD, request, ierr)
+                       recv, sendcount, MPI_DOUBLE_COMPLEX, MPI_COMM_X, request, ierr)
 #ifndef HAVE_HIP
     !$omp end target data
 #endif
@@ -236,51 +237,86 @@ CONTAINS
 
   !------- Divide the problem in 1D slices -------!
   !-----------------------------------------------!
-  SUBROUTINE init_MPI(nxpp, nz, ny, nxd, nzd, nPhi, overlapping)
-    integer(C_INT), intent(in)  :: nxpp, nz, ny, nxd, nzd, nPhi
+  SUBROUTINE init_MPI(nxpp, nz, ny, nxd, nzd, nPhi, overlapping, npy_requested)
+    integer(C_INT), intent(in)  :: nxpp, nz, ny, nxd, nzd, nPhi, npy_requested
     logical, intent(in) :: overlapping
     integer, parameter :: ndims = 4
-    integer :: i
+    integer :: i, color, key
     integer :: array_of_sizes(ndims), array_of_subsizes(ndims), array_of_starts(ndims), ierror
     type(c_ptr) :: sendptr, recvptr
     integer(c_size_t) :: sendsize, recvsize
     ! Define which process write on screen
     has_terminal = (iproc == 0)
+    npy_grid = npy_requested
+#ifdef HAVE_MPI
+    if (npy_grid < 1) then
+      if (has_terminal) print *, "Error: npy must be >= 1."
+      call MPI_Abort(MPI_COMM_WORLD, 1, ierror)
+    end if
+    if (mod(nproc, npy_grid) /= 0) then
+      if (has_terminal) then
+        print *, "Error: nproc must be divisible by npy."
+        print *, "       Received nproc=", nproc, " npy=", npy_grid
+      end if
+      call MPI_Abort(MPI_COMM_WORLD, 1, ierror)
+    end if
+#else
+    if (npy_grid /= 1) error stop "init_MPI: npy > 1 requires MPI"
+#endif
+    npxz = nproc/npy_grid
+    ipy = iproc/npxz
+    ipxz = mod(iproc, npxz)
+
+#ifdef HAVE_MPI
+    color = ipy
+    key = ipxz
+    call MPI_Comm_split(MPI_COMM_WORLD, color, key, MPI_COMM_X, ierr)
+    color = ipxz
+    key = ipy
+    call MPI_Comm_split(MPI_COMM_WORLD, color, key, MPI_COMM_Y, ierr)
+    if (npy_grid /= 1) then
+      if (has_terminal) then
+        print *, "Error: npy > 1 is not enabled yet in the timestep path."
+        print *, "       The y-pencil redistribution work has not been wired in."
+      end if
+      call MPI_Abort(MPI_COMM_WORLD, 1, ierror)
+    end if
+#endif
     ! Calculate domain division in wall-normal direction
     ny0 = 1; nyN = ny - 1; miny = ny0 - 2; maxy = nyN + 2
     !$omp target update to(ny0, nyN)
 
     ! Calculate domain division
-    nx0 = iproc*(nxpp)/nproc; nxN = (iproc + 1)*(nxpp)/nproc - 1; nxB = nxN - nx0 + 1; 
-    nz0 = iproc*nzd/nproc; nzN = (iproc + 1)*nzd/nproc - 1; nzB = nzN - nz0 + 1; 
+    nx0 = ipxz*(nxpp)/npxz; nxN = (ipxz + 1)*(nxpp)/npxz - 1; nxB = nxN - nx0 + 1; 
+    nz0 = ipxz*nzd/npxz; nzN = (ipxz + 1)*nzd/npxz - 1; nzB = nzN - nz0 + 1; 
     has_average = (nx0 == 0)
     fft_transpose_is_local = (nzB == nzd)
 #ifdef HAVE_MPI
 #ifdef mpiverbose
     DO i = 0, nproc - 1
-       IF (iproc==i) WRITE(*,*) "iproc=",iproc,"nx0=",nx0," nxN=",nxN," nxB=",nxB, "nz0=",nz0," nzN=",nzN," nzB=",nzB, "ny0=", ny0, "nyN=", nyN 
+       IF (iproc==i) WRITE(*,*) "iproc=",iproc," ipxz=",ipxz," ipy=",ipy," nx0=",nx0," nxN=",nxN," nxB=",nxB, "nz0=",nz0," nzN=",nzN," nzB=",nzB, "ny0=", ny0, "nyN=", nyN
       CALL MPI_Barrier(MPI_COMM_WORLD)
     END DO
     FLUSH (output_unit)
 #endif
     ! The pairwise all-to-all transpose uses one shared sendcount for every rank,
     ! so both decomposed dimensions must divide evenly across MPI ranks.
-    if (mod(nxpp, nproc) /= 0 .or. mod(nzd, nproc) /= 0) then
+    if (mod(nxpp, npxz) /= 0 .or. mod(nzd, npxz) /= 0) then
       if (has_terminal) then
-        print *, "Error: MPI transpose requires nproc to divide both nx+1 and nzd."
-        print *, "       Received nx+1=", nxpp, " nzd=", nzd, " nproc=", nproc
+        print *, "Error: FFT transpose requires npxz to divide both nx+1 and nzd."
+        print *, "       Received nx+1=", nxpp, " nzd=", nzd, " npxz=", npxz, " npy=", npy_grid
         print *, "       This run would create uneven transpose counts and can fail in MPI_Ialltoall."
       end if
       CALL MPI_Abort(MPI_COMM_WORLD, 1, ierror)
     end if
-    if (int(nproc, 8)*int(nxB, 8)*int(nzB, 8)*int(ny + 3, 8) > huge(0_C_INT)) then
+    if (int(npxz, 8)*int(nxB, 8)*int(nzB, 8)*int(ny + 3, 8) > huge(0_C_INT)) then
       if (has_terminal) then
         print *, "Error: problem too large for MPI transpose (integer overflow). Try to increase the number of processes."
       end if
       CALL MPI_Abort(MPI_COMM_WORLD, 1, ierror)
     end if
-    sendsize = nproc*nxB*nzB*(ny + 3)
-    recvsize = nproc*nxB*nzB*(ny + 3)
+    sendsize = npxz*nxB*nzB*(ny + 3)
+    recvsize = npxz*nxB*nzB*(ny + 3)
 
     sendcount = nxB*nzB*(ny + 3)
 

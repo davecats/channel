@@ -73,7 +73,7 @@ CONTAINS
     CALL read_dnsin(cfg)
     call configure_convvelo(cfg)
     deltat_from_dnsin = deltat
-    CALL init_MPI(nx + 1, nz, ny, nxd + 1, nzd, nPhi, overlapping)
+    CALL init_MPI(nx + 1, nz, ny, nxd + 1, nzd, nPhi, overlapping, npy)
     call get_solver_memory_estimate(run_solver, solver_floats)
     call get_fft_memory_estimate(nxd, nxB, ny, nzd, nzB, nPhi, overlapping, fft_floats)
     call get_pressure_memory_estimate(pressure_floats)
