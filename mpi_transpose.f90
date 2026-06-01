@@ -83,7 +83,10 @@ MODULE mpi_transpose
   integer(C_INT), save :: nproc, iproc, ierr, nzd, nx
   integer(C_INT), save :: npy_grid = 1, npxz = 1, ipy = 0, ipxz = 0
   integer(C_INT), save :: nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN, miny, maxy, sendcount
+  integer(C_INT), save :: yl0 = 1, ylN = 1, ylB = 1
+  integer(C_INT), save :: zpy0 = 1, zpyN = 1, zpyB = 1
   !$omp declare target(ny0, nyN)
+  integer, allocatable, save :: y_block_starts(:), y_block_counts(:), z_pencil_starts(:), z_pencil_counts(:)
 
   logical, save :: has_terminal, has_average, fft_transpose_is_local
 #ifdef HAVE_MPI
@@ -91,6 +94,18 @@ MODULE mpi_transpose
 #endif
 
 CONTAINS
+
+  SUBROUTINE split_block(total, nparts, part, start, count)
+    integer(C_INT), intent(in) :: total, nparts, part
+    integer(C_INT), intent(out) :: start, count
+    integer(C_INT) :: base, rem
+
+    base = total/nparts
+    rem = mod(total, nparts)
+    count = base
+    if (part < rem) count = count + 1
+    start = part*base + min(part, rem) + 1
+  END SUBROUTINE split_block
 
   SUBROUTINE repack_zTOx_local(Vz, Vx, ny)
     use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
@@ -235,6 +250,143 @@ CONTAINS
 
   END SUBROUTINE alltoall
 
+  SUBROUTINE transpose_xz_to_y_pencil(src, dst)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: src(:, :, :)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: dst(:, :, :)
+#ifdef HAVE_MPI
+    complex(C_DOUBLE_COMPLEX), allocatable :: send(:), recv(:)
+    integer, allocatable :: sendcounts(:), recvcounts(:), senddispls(:), recvdispls(:)
+    integer(C_INT) :: total_z
+    integer(C_INT) :: iy_local, iz_local, ix_local, dest, iy_global, iz_global, p
+    integer(C_INT) :: source_start, source_count, local_z_start, local_z_count
+
+    total_z = int(size(src, 2), C_INT)
+    if (npy_grid == 1) then
+      dst = src
+      return
+    end if
+
+    allocate (sendcounts(0:npy_grid - 1), recvcounts(0:npy_grid - 1), senddispls(0:npy_grid - 1), recvdispls(0:npy_grid - 1))
+    senddispls(0) = 0
+    recvdispls(0) = 0
+    do dest = 0, npy_grid - 1
+      sendcounts(dest) = int(ylB*z_pencil_counts(dest + 1)*nxB)
+      recvcounts(dest) = int(y_block_counts(dest + 1)*zpyB*nxB)
+      if (dest > 0) then
+        senddispls(dest) = senddispls(dest - 1) + sendcounts(dest - 1)
+        recvdispls(dest) = recvdispls(dest - 1) + recvcounts(dest - 1)
+      end if
+    end do
+
+    allocate (send(sum(sendcounts)), recv(sum(recvcounts)))
+
+    do dest = 0, npy_grid - 1
+      local_z_start = z_pencil_starts(dest + 1)
+      local_z_count = z_pencil_counts(dest + 1)
+      p = senddispls(dest)
+      do iy_local = 1, ylB
+        do ix_local = 1, nxB
+          do iz_local = 1, local_z_count
+            p = p + 1
+            send(p) = src(iy_local, local_z_start + iz_local - 1, ix_local)
+          end do
+        end do
+      end do
+    end do
+
+    call MPI_Alltoallv(send, sendcounts, senddispls, MPI_DOUBLE_COMPLEX, &
+                       recv, recvcounts, recvdispls, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
+
+    do dest = 0, npy_grid - 1
+      source_start = y_block_starts(dest + 1)
+      source_count = y_block_counts(dest + 1)
+      p = recvdispls(dest)
+      do iy_local = 1, source_count
+        iy_global = source_start + iy_local - 1
+        do ix_local = 1, nxB
+          do iz_local = 1, zpyB
+            p = p + 1
+            dst(iy_global, iz_local, ix_local) = recv(p)
+          end do
+        end do
+      end do
+    end do
+
+    deallocate (send, recv, sendcounts, recvcounts, senddispls, recvdispls)
+#else
+    dst = src
+#endif
+  END SUBROUTINE transpose_xz_to_y_pencil
+
+  SUBROUTINE transpose_y_pencil_to_xz(src, dst)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: src(:, :, :)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: dst(:, :, :)
+#ifdef HAVE_MPI
+    complex(C_DOUBLE_COMPLEX), allocatable :: send(:), recv(:)
+    integer, allocatable :: sendcounts(:), recvcounts(:), senddispls(:), recvdispls(:)
+    integer(C_INT) :: total_y
+    integer(C_INT) :: iy_local, iz_local, ix_local, dest, iy_global, iz_global
+    integer(C_INT) :: local_y_start, local_y_count, source_z_start, source_z_count, p
+
+    total_y = int(size(src, 1), C_INT)
+    if (npy_grid == 1) then
+      dst = src
+      return
+    end if
+
+    allocate (sendcounts(0:npy_grid - 1), recvcounts(0:npy_grid - 1), senddispls(0:npy_grid - 1), recvdispls(0:npy_grid - 1))
+    senddispls(0) = 0
+    recvdispls(0) = 0
+    do dest = 0, npy_grid - 1
+      sendcounts(dest) = int(y_block_counts(dest + 1)*zpyB*nxB)
+      recvcounts(dest) = int(ylB*z_pencil_counts(dest + 1)*nxB)
+      if (dest > 0) then
+        senddispls(dest) = senddispls(dest - 1) + sendcounts(dest - 1)
+        recvdispls(dest) = recvdispls(dest - 1) + recvcounts(dest - 1)
+      end if
+    end do
+
+    allocate (send(sum(sendcounts)), recv(sum(recvcounts)))
+
+    do dest = 0, npy_grid - 1
+      local_y_start = y_block_starts(dest + 1)
+      local_y_count = y_block_counts(dest + 1)
+      p = senddispls(dest)
+      do iy_local = 1, local_y_count
+        iy_global = local_y_start + iy_local - 1
+        do ix_local = 1, nxB
+          do iz_local = 1, zpyB
+            p = p + 1
+            send(p) = src(iy_global, iz_local, ix_local)
+          end do
+        end do
+      end do
+    end do
+
+    call MPI_Alltoallv(send, sendcounts, senddispls, MPI_DOUBLE_COMPLEX, &
+                       recv, recvcounts, recvdispls, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
+
+    do dest = 0, npy_grid - 1
+      source_z_start = z_pencil_starts(dest + 1)
+      source_z_count = z_pencil_counts(dest + 1)
+      p = recvdispls(dest)
+      do iy_local = 1, ylB
+        do ix_local = 1, nxB
+          do iz_local = 1, source_z_count
+            p = p + 1
+            iz_global = source_z_start + iz_local - 1
+            dst(iy_local, iz_global, ix_local) = recv(p)
+          end do
+        end do
+      end do
+    end do
+
+    deallocate (send, recv, sendcounts, recvcounts, senddispls, recvdispls)
+#else
+    dst = src
+#endif
+  END SUBROUTINE transpose_y_pencil_to_xz
+
   !------- Divide the problem in 1D slices -------!
   !-----------------------------------------------!
   SUBROUTINE init_MPI(nxpp, nz, ny, nxd, nzd, nPhi, overlapping, npy_requested)
@@ -274,17 +426,20 @@ CONTAINS
     color = ipxz
     key = ipy
     call MPI_Comm_split(MPI_COMM_WORLD, color, key, MPI_COMM_Y, ierr)
-    if (npy_grid /= 1) then
-      if (has_terminal) then
-        print *, "Error: npy > 1 is not enabled yet in the timestep path."
-        print *, "       The y-pencil redistribution work has not been wired in."
-      end if
-      call MPI_Abort(MPI_COMM_WORLD, 1, ierror)
-    end if
 #endif
     ! Calculate domain division in wall-normal direction
     ny0 = 1; nyN = ny - 1; miny = ny0 - 2; maxy = nyN + 2
     !$omp target update to(ny0, nyN)
+    call split_block(ny + 3, npy_grid, ipy, yl0, ylB)
+    ylN = yl0 + ylB - 1
+    call split_block(2*nz + 1, npy_grid, ipy, zpy0, zpyB)
+    zpyN = zpy0 + zpyB - 1
+    if (allocated(y_block_starts)) deallocate (y_block_starts, y_block_counts, z_pencil_starts, z_pencil_counts)
+    allocate (y_block_starts(npy_grid), y_block_counts(npy_grid), z_pencil_starts(npy_grid), z_pencil_counts(npy_grid))
+    do i = 0, npy_grid - 1
+      call split_block(ny + 3, npy_grid, i, y_block_starts(i + 1), y_block_counts(i + 1))
+      call split_block(2*nz + 1, npy_grid, i, z_pencil_starts(i + 1), z_pencil_counts(i + 1))
+    end do
 
     ! Calculate domain division
     nx0 = ipxz*(nxpp)/npxz; nxN = (ipxz + 1)*(nxpp)/npxz - 1; nxB = nxN - nx0 + 1; 

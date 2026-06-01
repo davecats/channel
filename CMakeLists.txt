@@ -71,6 +71,9 @@ target_link_libraries(test_convvelo_runtime PRIVATE channel_core)
 add_executable(test_post_convvelo test_convvelo_utils.f90 test_post_convvelo.f90)
 target_link_libraries(test_post_convvelo PRIVATE channel_core)
 
+add_executable(test_y_pencil_transpose test_y_pencil_transpose.f90)
+target_link_libraries(test_y_pencil_transpose PRIVATE channel_core)
+
 # Add a CTest target
 enable_testing()
 
@@ -190,6 +193,16 @@ add_test(NAME post_convvelo_1rank
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
 set_tests_properties(post_convvelo_1rank PROPERTIES PROCESSORS 1)
+
+add_test(NAME y_pencil_transpose_2rank
+    COMMAND ${MPIEXEC_EXECUTABLE}
+            ${MPIEXEC_NUMPROC_FLAG} 2
+            ${MPIEXEC_PREFLAGS}
+            $<TARGET_FILE:test_y_pencil_transpose>
+            ${MPIEXEC_POSTFLAGS}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(y_pencil_transpose_2rank PROPERTIES PROCESSORS 2)
 
 # --------------------------------------------------------------------
 # Compiler flags

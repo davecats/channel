@@ -71,6 +71,9 @@ CONTAINS
 
     call read_ini_file(config_file, cfg)
     CALL read_dnsin(cfg)
+    if (npy /= 1) then
+      error stop "initialize: npy > 1 is not wired into the solver runtime yet"
+    end if
     call configure_convvelo(cfg)
     deltat_from_dnsin = deltat
     CALL init_MPI(nx + 1, nz, ny, nxd + 1, nzd, nPhi, overlapping, npy)
