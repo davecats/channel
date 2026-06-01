@@ -674,14 +674,20 @@ CONTAINS
       if (m <= 3 + nPhi) then
         CALL assemble_vvdz(m, to)
         CALL IFT(VVdz(:, :, :, to), ny)
-        CALL pack_zTOx(VVdz(:, :, :, to), sendbuf(:, to), ny)
-        CALL alltoall(sendbuf(:, to), recvbuf(:, to), requests(m))
+        if (fft_transpose_is_local) then
+          call repack_zTOx_local(VVdz(:, :, :, to), VVdx(:, :, :, to), ny)
+        else
+          CALL pack_zTOx(VVdz(:, :, :, to), sendbuf(:, to), ny)
+          CALL alltoall(sendbuf(:, to), recvbuf(:, to), requests(m))
+        end if
       end if
 
       ! Step 2: wait, unpack, FFT (depending on overlap)
       if (MERGE(m > 1, .true., overlapping)) then
-        CALL MPI_WAIT(requests(mm1), status, ierr)
-        CALL unpack_zTOx(recvbuf(:, from), VVdx(:, :, :, from), ny)
+        if (.not. fft_transpose_is_local) then
+          CALL MPI_WAIT(requests(mm1), status, ierr)
+          CALL unpack_zTOx(recvbuf(:, from), VVdx(:, :, :, from), ny)
+        end if
         CALL zero_vvdx_hft(from)
         CALL RFT(VVdx(:, :, :, from), rVVdx(:, :, :, mm1), ny)
       end if
@@ -708,14 +714,20 @@ CONTAINS
       if (m <= 6 + 3*nPhi) then
         call build_products(m, to)
         call HFT(products(:, :, :, to), VVdx(:, :, :, to), ny)
-        call pack_xTOz(VVdx(:, :, :, to), sendbuf(:, to), ny)
-        call alltoall(sendbuf(:, to), recvbuf(:, to), requests(m))
+        if (fft_transpose_is_local) then
+          call repack_xTOz_local(VVdx(:, :, :, to), VVdz(:, :, :, to), ny)
+        else
+          call pack_xTOz(VVdx(:, :, :, to), sendbuf(:, to), ny)
+          call alltoall(sendbuf(:, to), recvbuf(:, to), requests(m))
+        end if
       end if
 
       ! Step 2: Wait, unpack, FFT, and build RHS
       if (MERGE(m > 1, .true., overlapping)) then
-        call MPI_WAIT(requests(mm1), status, ierr)
-        call unpack_xTOz(recvbuf(:, from), VVdz(:, :, :, from), ny)
+        if (.not. fft_transpose_is_local) then
+          call MPI_WAIT(requests(mm1), status, ierr)
+          call unpack_xTOz(recvbuf(:, from), VVdz(:, :, :, from), ny)
+        end if
         call FFT(VVdz(:, :, :, from), ny)
         call buildrhs(ODE, mm1, from)
       end if

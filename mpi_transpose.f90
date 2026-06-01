@@ -84,12 +84,50 @@ MODULE mpi_transpose
   integer(C_INT), save :: nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN, miny, maxy, sendcount
   !$omp declare target(ny0, nyN)
 
-  logical, save :: has_terminal, has_average
+  logical, save :: has_terminal, has_average, fft_transpose_is_local
 #ifdef HAVE_MPI
   TYPE(MPI_Datatype), save :: writeview_type, owned2write_type, vel_read_type, vel_field_type
 #endif
 
 CONTAINS
+
+  SUBROUTINE repack_zTOx_local(Vz, Vx, ny)
+    use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
+    implicit none
+    complex(C_DOUBLE_COMPLEX), intent(in) :: Vz(1:, 1:, :)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: Vx(1:, 1:, :)
+    integer(C_INT), intent(in) :: ny
+    integer(C_SIZE_T) :: iy, ix, iz
+
+    !$omp target teams distribute parallel do collapse(3) default(none) &
+    !$omp shared(Vz, Vx) shared(ny, nxB, nzd) private(iy, ix, iz)
+    do iy = 1, ny + 3
+      do ix = 1, nxB
+        do iz = 1, nzd
+          Vx(ix, iz, iy) = Vz(iz, ix, iy)
+        end do
+      end do
+    end do
+  END SUBROUTINE repack_zTOx_local
+
+  SUBROUTINE repack_xTOz_local(Vx, Vz, ny)
+    use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
+    implicit none
+    complex(C_DOUBLE_COMPLEX), intent(in) :: Vx(1:, 1:, :)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: Vz(1:, 1:, :)
+    integer(C_INT), intent(in) :: ny
+    integer(C_SIZE_T) :: iy, ix, iz
+
+    !$omp target teams distribute parallel do collapse(3) default(none) &
+    !$omp shared(Vx, Vz) shared(ny, nxB, nzd) private(iy, ix, iz)
+    do iy = 1, ny + 3
+      do iz = 1, nzd
+        do ix = 1, nxB
+          Vz(iz, ix, iy) = Vx(ix, iz, iy)
+        end do
+      end do
+    end do
+  END SUBROUTINE repack_xTOz_local
 
   SUBROUTINE pack_zTOx(Vz, send, ny)
     use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
@@ -216,6 +254,7 @@ CONTAINS
     nx0 = iproc*(nxpp)/nproc; nxN = (iproc + 1)*(nxpp)/nproc - 1; nxB = nxN - nx0 + 1; 
     nz0 = iproc*nzd/nproc; nzN = (iproc + 1)*nzd/nproc - 1; nzB = nzN - nz0 + 1; 
     has_average = (nx0 == 0)
+    fft_transpose_is_local = (nzB == nzd)
 #ifdef HAVE_MPI
 #ifdef mpiverbose
     DO i = 0, nproc - 1

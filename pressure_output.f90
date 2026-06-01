@@ -13,7 +13,8 @@ MODULE pressure_output
   USE ffts, ONLY: FFT, IFT, RFT, HFT
 #endif
   USE mpi_transpose, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, ierr, &
-                           sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall
+                           sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, &
+                           fft_transpose_is_local, repack_zTOx_local, repack_xTOz_local
   USE y_line_solvers, ONLY: ys_solve_ghost_system
 #ifdef HAVE_MPI
   USE mpi_f08
@@ -387,12 +388,16 @@ CONTAINS
     integer(C_INT) :: ix, iz, iy, jx
 
     call IFT(VVdz(:, :, :, 1), ny)
-    call pack_zTOx(VVdz(:, :, :, 1), sendbuf(:, 1), ny)
-    call alltoall(sendbuf(:, 1), recvbuf(:, 1), request)
+    if (fft_transpose_is_local) then
+      call repack_zTOx_local(VVdz(:, :, :, 1), VVdx(:, :, :, 1), ny)
+    else
+      call pack_zTOx(VVdz(:, :, :, 1), sendbuf(:, 1), ny)
+      call alltoall(sendbuf(:, 1), recvbuf(:, 1), request)
+    end if
 #ifdef HAVE_MPI
-    call MPI_Wait(request, status, ierr)
+    if (.not. fft_transpose_is_local) call MPI_Wait(request, status, ierr)
 #endif
-    call unpack_zTOx(recvbuf(:, 1), VVdx(:, :, :, 1), ny)
+    if (.not. fft_transpose_is_local) call unpack_zTOx(recvbuf(:, 1), VVdx(:, :, :, 1), ny)
     !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp shared(VVdx, nx, nxd, nzB, ny) private(ix, iz, iy)
     do iy = 1, ny + 3
@@ -416,12 +421,16 @@ CONTAINS
     integer(C_INT) :: ix, iz, iy
 
     call HFT(rx, VVdx(:, :, :, 1), ny)
-    call pack_xTOz(VVdx(:, :, :, 1), sendbuf(:, 1), ny)
-    call alltoall(sendbuf(:, 1), recvbuf(:, 1), request)
+    if (fft_transpose_is_local) then
+      call repack_xTOz_local(VVdx(:, :, :, 1), VVdz(:, :, :, 1), ny)
+    else
+      call pack_xTOz(VVdx(:, :, :, 1), sendbuf(:, 1), ny)
+      call alltoall(sendbuf(:, 1), recvbuf(:, 1), request)
+    end if
 #ifdef HAVE_MPI
-    call MPI_Wait(request, status, ierr)
+    if (.not. fft_transpose_is_local) call MPI_Wait(request, status, ierr)
 #endif
-    call unpack_xTOz(recvbuf(:, 1), VVdz(:, :, :, 1), ny)
+    if (.not. fft_transpose_is_local) call unpack_xTOz(recvbuf(:, 1), VVdz(:, :, :, 1), ny)
     call FFT(VVdz(:, :, :, 1), ny)
 
     !$omp target teams distribute parallel do collapse(3) default(none) &
