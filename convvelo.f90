@@ -5,7 +5,7 @@ module convvelo
   use, intrinsic :: iso_c_binding
   use config, only: ini_config, has_section, get_string, get_real, lower
   use dnsdata, only: V, nPhi, nz, ny, der, nxd, izd, factor, iproc, D0mat, d240, d24m1, d24n, d24np1, &
-                     COMPLEXderiv, has_terminal, &
+                     apply_complex_derivative_with_y_pencil, has_terminal, &
                      time, deltat
   use pressure_output, only: compute_poisson, compute_dpdy
   use mpi_transpose, only: ny0, nyN, nx0, nxN, nxB, nzB, nx, has_average, ierr, sendbuf, recvbuf, &
@@ -416,15 +416,8 @@ contains
   subroutine apply_dy_to_work(component_index)
     implicit none
     integer(C_INT), intent(in) :: component_index
-    integer(C_INT) :: iy, iz, ix
 
-    !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(V, convvelo_work, component_index, der, D0mat, nx0, nxN, nz) private(ix, iz)
-    do ix = nx0, nxN
-      do iz = -nz, nz
-        call COMPLEXderiv(V(:, iz, ix, component_index), convvelo_work(:, iz, ix), der, D0mat)
-      end do
-    end do
+    call apply_complex_derivative_with_y_pencil(V(:, :, :, component_index), convvelo_work)
   end subroutine apply_dy_to_work
 
   subroutine apply_dyy_to_work(component_index)
@@ -661,17 +654,12 @@ contains
 
   subroutine apply_dy_to_existing_work()
     implicit none
-    complex(C_DOUBLE_COMPLEX) :: tmp(ny0 - 2:nyN + 2)
-    integer(C_INT) :: iz, ix
+    complex(C_DOUBLE_COMPLEX), allocatable :: deriv(:, :, :)
 
-    !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(convvelo_work, der, D0mat, nx0, nxN, nz) private(ix, iz, tmp)
-    do ix = nx0, nxN
-      do iz = -nz, nz
-        tmp = convvelo_work(:, iz, ix)
-        call COMPLEXderiv(tmp, convvelo_work(:, iz, ix), der, D0mat)
-      end do
-    end do
+    allocate (deriv(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
+    call apply_complex_derivative_with_y_pencil(convvelo_work, deriv)
+    convvelo_work = deriv
+    deallocate (deriv)
   end subroutine apply_dy_to_existing_work
 
   subroutine free_convvelo()

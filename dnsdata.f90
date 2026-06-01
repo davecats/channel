@@ -85,7 +85,7 @@ MODULE dnsdata
   character(len=40) :: fname
   logical :: overlapping
 
-  public :: get_solver_memory_estimate, sync_velocity_to_device
+  public :: get_solver_memory_estimate, sync_velocity_to_device, apply_complex_derivative_with_y_pencil
 
 CONTAINS
 
@@ -432,6 +432,42 @@ CONTAINS
     call ys_solve_compact_derivative(f0, f1, der, D0mat, d140, d14m1, d14n, d14np1, ny, ny0, nyN)
   END SUBROUTINE COMPLEXderiv
 
+  SUBROUTINE apply_complex_derivative_with_y_pencil(src, dst)
+    IMPLICIT NONE
+    complex(C_DOUBLE_COMPLEX), intent(in) :: src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    complex(C_DOUBLE_COMPLEX), allocatable :: field_xz(:, :, :), deriv_xz(:, :, :)
+    complex(C_DOUBLE_COMPLEX), allocatable :: field_y(:, :, :), deriv_y(:, :, :)
+    integer(C_INT) :: ix, iz, ix_local, iz_local
+
+    allocate (field_xz(ylB, 2*nz + 1, nxB), deriv_xz(ylB, 2*nz + 1, nxB))
+    allocate (field_y(ny + 3, zpyB, nxB), deriv_y(ny + 3, zpyB, nxB))
+
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        field_xz(:, iz + nz + 1, ix - nx0 + 1) = src(:, iz, ix)
+      end do
+    end do
+
+    call transpose_xz_to_y_pencil(field_xz, field_y)
+
+    do ix_local = 1, nxB
+      do iz_local = 1, zpyB
+        call COMPLEXderiv(field_y(:, iz_local, ix_local), deriv_y(:, iz_local, ix_local), der, D0mat)
+      end do
+    end do
+
+    call transpose_y_pencil_to_xz(deriv_y, deriv_xz)
+
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        dst(:, iz, ix) = deriv_xz(:, iz + nz + 1, ix - nx0 + 1)
+      end do
+    end do
+
+    deallocate (field_xz, deriv_xz, field_y, deriv_y)
+  END SUBROUTINE apply_complex_derivative_with_y_pencil
+
   SUBROUTINE solve_compact_component_with_y_pencil(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
                                                    lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
                                                    lambda_coeff, diffusion_coeff)
@@ -538,6 +574,7 @@ CONTAINS
 
 call solve_compact_component_with_y_pencil(2_C_INT, v0bc, v0m1bc, vnbc, vnp1bc, 2_C_INT, 4_C_INT, -2_C_INT, -4_C_INT, lambda, 1.0d0)
     call solve_compact_component_with_y_pencil(1_C_INT, eta0bc, eta0m1bc, etanbc, etanp1bc, 5_C_INT, 0_C_INT, -5_C_INT, 0_C_INT, lambda, 1.0d0)
+    call apply_complex_derivative_with_y_pencil(V(:, :, :, 2), V(:, :, :, 3))
 
     !$omp target teams distribute parallel do collapse(2) default(none) &
     !$omp shared(ny, ny0, nyN, nz, nx0, nxN) &
@@ -564,7 +601,6 @@ call solve_compact_component_with_y_pencil(2_C_INT, v0bc, v0m1bc, vnbc, vnp1bc, 
             V(:, 0, 0, 3) = dcmplx(dreal(V(:, 0, 0, 3)) + corrpz*dreal(ucor), dimag(V(:, 0, 0, 3)))
           END IF
         ELSE
-          CALL COMPLEXderiv(V(:, iz, ix, 2), V(:, iz, ix, 3), der, D0mat)
           do j = ny0 - 2, nyN + 2
             temp = (ialfa(ix)*V(j, iz, ix, 3) - ibeta(iz)*V(j, iz, ix, 1))/k2(iz, ix)
             V(j, iz, ix, 3) = (ibeta(iz)*V(j, iz, ix, 3) + ialfa(ix)*V(j, iz, ix, 1))/k2(iz, ix)
