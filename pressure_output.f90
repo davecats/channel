@@ -12,9 +12,10 @@ MODULE pressure_output
                      ny, nz, nxd, izd, VVdz, VVdx
   USE ffts, ONLY: FFT, IFT, RFT, HFT
 #endif
-  USE mpi_transpose, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, ierr, &
+  USE mpi_transpose, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, ierr, ylB, zpy0, zpyB, &
                            sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, &
-                           fft_transpose_is_local, repack_zTOx_local, repack_xTOz_local
+                           fft_transpose_is_local, repack_zTOx_local, repack_xTOz_local, &
+                           transpose_xz_to_y_pencil, transpose_y_pencil_to_xz
   USE y_line_solvers, ONLY: ys_solve_ghost_system
 #ifdef HAVE_MPI
   USE mpi_f08
@@ -458,87 +459,82 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(in) :: src0(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(in) :: src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: p(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    real(C_DOUBLE) :: pmat(ny0:nyN + 2, -2:2), eqm1(-2:2), eq0(-2:2), eqn(-2:2), eqnp1(-2:2)
-    complex(C_DOUBLE_COMPLEX) :: sol_solve(-1:ny + 1), tmp, tmp2
-    integer(C_INT) :: ix, iz, iy
+    complex(C_DOUBLE_COMPLEX), allocatable :: src0_xz(:, :, :), src1_xz(:, :, :), p_xz(:, :, :)
+    complex(C_DOUBLE_COMPLEX), allocatable :: src0_y(:, :, :), src1_y(:, :, :), p_y(:, :, :)
+    real(C_DOUBLE) :: pmat(1:ny + 1, -2:2), eqm1(-2:2), eq0(-2:2), eqn(-2:2), eqnp1(-2:2)
+    complex(C_DOUBLE_COMPLEX) :: tmp, tmp2
+    integer(C_INT) :: ix, iz, iy, ix_local, iz_local, ix_global, iz_global
 
-    !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(src0, src1, p, der, ny, ny0, nyN, nx0, nxN, nz) &
-    !$omp private(ix, iz, iy)
+    allocate (src0_xz(ylB, 2*nz + 1, nxB), src1_xz(ylB, 2*nz + 1, nxB), p_xz(ylB, 2*nz + 1, nxB))
+    allocate (src0_y(ny + 3, zpyB, nxB), src1_y(ny + 3, zpyB, nxB), p_y(ny + 3, zpyB, nxB))
+
     do ix = nx0, nxN
       do iz = -nz, nz
-        do iy = ny0, nyN
-          p(iy, iz, ix) = sum(der(iy, 0, -2:2)*src0(iy - 2:iy + 2, iz, ix)) + &
-                          sum(der(iy, 1, -2:2)*src1(iy - 2:iy + 2, iz, ix))
-        end do
+        src0_xz(:, iz + nz + 1, ix - nx0 + 1) = src0(:, iz, ix)
+        src1_xz(:, iz + nz + 1, ix - nx0 + 1) = src1(:, iz, ix)
       end do
     end do
 
-    !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(src0, src1, p, der, k2, d140, d240, d24n, V, ni, ialfa, ibeta, ny, ny0, nyN, nx0, nxN, nz) &
-    !$omp private(ix, iz, iy, pmat, eqm1, eq0, eqn, eqnp1, sol_solve, tmp, tmp2)
-    do ix = nx0, nxN
-      do iz = -nz, nz
+    call transpose_xz_to_y_pencil(src0_xz, src0_y)
+    call transpose_xz_to_y_pencil(src1_xz, src1_y)
 
-        pmat = 0
+    do ix_local = 1, nxB
+      ix_global = nx0 + ix_local - 1
+      do iz_local = 1, zpyB
+        iz_global = zpy0 + iz_local - 1 - (nz + 1)
+        pmat = 0.0d0
 
-        if (ix == 0 .and. iz == 0) then
+        do iy = 1, ny - 1
+          p_y(iy + 2, iz_local, ix_local) = sum(der(iy, 0, -2:2)*src0_y(iy:iy + 4, iz_local, ix_local)) + &
+                                            sum(der(iy, 1, -2:2)*src1_y(iy:iy + 4, iz_local, ix_local))
+        end do
 
-          ! LHS = d2p/dy2
-          do iy = ny0, nyN
+        if (ix_global == 0 .and. iz_global == 0) then
+          do iy = 1, ny - 1
             pmat(iy, -2:2) = der(iy, 2, -2:2)
           end do
-
-          ! Bottom Ghost BC: momentum_y
           eqm1(:) = d140
-          p(-1, iz, ix) = ni*sum(d240(-2:2)*V(-1:3, iz, ix, 2))
-
-          ! Bottom BC: usual poisson equation in the vertical direction
+          p_y(1, iz_local, ix_local) = ni*sum(d240(-2:2)*V(-1:3, iz_global, ix_global, 2))
           eq0(:) = d240
-          p(0, iz, ix) = src0(0, iz, ix) + src1(0, iz, ix)
-
-          ! Top  BC: Dirichlet p(ny)=0
-          p(ny, iz, ix) = 0.0d0
-          eqn(:) = 0.d0; eqn(1) = 1.d0
-
-          ! Bottom Ghost BC, ghost not needed d4(p)|ny-1 = 0
+          p_y(2, iz_local, ix_local) = src0_y(2, iz_local, ix_local) + src1_y(2, iz_local, ix_local)
+          p_y(ny + 2, iz_local, ix_local) = 0.0d0
+          eqn(:) = 0.0d0
+          eqn(1) = 1.0d0
           eqnp1(:) = der(ny - 1, 3, :)
-          p(ny + 1, iz, ix) = 0.0d0
-
+          p_y(ny + 3, iz_local, ix_local) = 0.0d0
         else
-
-          ! LHS = lapl(p) = D2(p)- k2*D0(p)
-          do iy = ny0, nyN
-            pmat(iy, -2:2) = der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)
+          do iy = 1, ny - 1
+            pmat(iy, -2:2) = der(iy, 2, -2:2) - k2(iz_global, ix_global)*der(iy, 0, -2:2)
           end do
-
-          ! Bottom Ghost BC, ghost not needed d4(p)|1 = 0
           eqm1(:) = der(1, 3, :)
-          p(-1, iz, ix) = 0.0d0
-
-          ! Bottom BC, dirichlet from d/dx(momentum_x) + d/dz(momentum_z) solved for p
-          tmp = sum(d240(-2:2)*V(-1:3, iz, ix, 1))
-          tmp2 = sum(d240(-2:2)*V(-1:3, iz, ix, 3))
-          p(0, iz, ix) = -ni*(ialfa(ix)*tmp + ibeta(iz)*tmp2)/k2(iz, ix)
-          eq0(:) = 0.d0; eq0(-1) = 1.d0
-
-          ! Top BC, dirichlet from d/dx(momentum_x) + d/dz(momentum_z) solved for p
-          tmp = sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 1))
-          tmp2 = sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 3))
-          p(ny, iz, ix) = -ni*(ialfa(ix)*tmp + ibeta(iz)*tmp2)/k2(iz, ix)
-          eqn(:) = 0.d0; eqn(1) = 1.d0
-
-          ! Top Ghost BC, ghost not needed d4(p)|ny-1 = 0
-          p(ny + 1, iz, ix) = 0.0d0
+          p_y(1, iz_local, ix_local) = 0.0d0
+          tmp = sum(d240(-2:2)*V(-1:3, iz_global, ix_global, 1))
+          tmp2 = sum(d240(-2:2)*V(-1:3, iz_global, ix_global, 3))
+          p_y(2, iz_local, ix_local) = -ni*(ialfa(ix_global)*tmp + ibeta(iz_global)*tmp2)/k2(iz_global, ix_global)
+          eq0(:) = 0.0d0
+          eq0(-1) = 1.0d0
+          tmp = sum(d24n(-2:2)*V(ny - 3:ny + 1, iz_global, ix_global, 1))
+          tmp2 = sum(d24n(-2:2)*V(ny - 3:ny + 1, iz_global, ix_global, 3))
+          p_y(ny + 2, iz_local, ix_local) = -ni*(ialfa(ix_global)*tmp + ibeta(iz_global)*tmp2)/k2(iz_global, ix_global)
+          eqn(:) = 0.0d0
+          eqn(1) = 1.0d0
+          p_y(ny + 3, iz_local, ix_local) = 0.0d0
           eqnp1(:) = der(ny - 1, 3, :)
-
         end if
 
-        call ys_solve_ghost_system(p(:, iz, ix), pmat, eqm1, eq0, eqn, eqnp1, ny)
-
+        call ys_solve_ghost_system(p_y(:, iz_local, ix_local), pmat, eqm1, eq0, eqn, eqnp1, ny)
       end do
     end do
-    !$omp target update from(p)
+
+    call transpose_y_pencil_to_xz(p_y, p_xz)
+
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        p(:, iz, ix) = p_xz(:, iz + nz + 1, ix - nx0 + 1)
+      end do
+    end do
+
+    deallocate (src0_xz, src1_xz, p_xz, src0_y, src1_y, p_y)
   END SUBROUTINE solve_pressure_field
 
   SUBROUTINE solve_dpdy_field(src0, src1, dpdy)
@@ -546,45 +542,60 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(in) :: src0(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(in) :: src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dpdy(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    real(C_DOUBLE) :: pmat(ny0:nyN + 2, -2:2), eqm1(-2:2), eq0(-2:2), eqnp1(-2:2), eqn(-2:2)
-    integer(C_INT) :: ix, iz, iy
+    complex(C_DOUBLE_COMPLEX), allocatable :: src0_xz(:, :, :), src1_xz(:, :, :), dpdy_xz(:, :, :)
+    complex(C_DOUBLE_COMPLEX), allocatable :: src0_y(:, :, :), src1_y(:, :, :), dpdy_y(:, :, :)
+    real(C_DOUBLE) :: pmat(1:ny + 1, -2:2), eqm1(-2:2), eq0(-2:2), eqnp1(-2:2), eqn(-2:2)
+    integer(C_INT) :: ix, iz, iy, ix_local, iz_local, ix_global, iz_global
 
-    !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(src0, src1, dpdy, der, k2, d140, d240, d24n, V, ni, ialfa, ibeta, ny, ny0, nyN, nx0, nxN, nz) &
-    !$omp private(ix, iz, iy, pmat, eqm1, eqnp1, eq0, eqn)
+    allocate (src0_xz(ylB, 2*nz + 1, nxB), src1_xz(ylB, 2*nz + 1, nxB), dpdy_xz(ylB, 2*nz + 1, nxB))
+    allocate (src0_y(ny + 3, zpyB, nxB), src1_y(ny + 3, zpyB, nxB), dpdy_y(ny + 3, zpyB, nxB))
+
     do ix = nx0, nxN
       do iz = -nz, nz
-        do iy = ny0, nyN
-          pmat(iy, -2:2) = der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)
-          dpdy(iy, iz, ix) = sum(der(iy, 1, -2:2)*src0(iy - 2:iy + 2, iz, ix)) + &
-                             sum(der(iy, 2, -2:2)*src1(iy - 2:iy + 2, iz, ix))
-        end do
-
-        ! Bottom Dirichlet B.C. : Wall value q(0) = dp/dy|bottom from wall-normal momentum
-        ! q = nu*d2v/dy2 for nonzero Fourier modes, and q = 0 for the mean mode.
-        dpdy(0, iz, ix) = ni*sum(d240(-2:2)*V(-1:3, iz, ix, 2))
-        eq0 = 0.d0; eq0(-1) = 1.d0
-
-        ! Bottom ghost closure. This is not a physical BC; it is the d4(q)=0-style
-        ! stencil used to remove q(-1) from the first interior row.
-        dpdy(-1, iz, ix) = 0.0d0
-        eqm1 = der(1, 3, :)
-
-        ! Top Dirichlet B.C.: Wall value q(ny) = dp/dy|top from wall-normal momentum
-        ! q = nu*d2v/dy2 for nonzero Fourier modes, and q = 0 for the mean mode.
-        dpdy(ny, iz, ix) = ni*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 2))
-        eqn = 0.d0; eqn(1) = 1.d0
-
-        ! Top ghost closure. This is the numerical relation used to eliminate q(ny+1)
-        ! from the last interior row before solving.
-        dpdy(ny + 1, iz, ix) = 0.0d0
-        eqnp1 = der(ny - 1, 3, :)
-
-        call ys_solve_ghost_system(dpdy(:, iz, ix), pmat, eqm1, eq0, eqn, eqnp1, ny)
-
+        src0_xz(:, iz + nz + 1, ix - nx0 + 1) = src0(:, iz, ix)
+        src1_xz(:, iz + nz + 1, ix - nx0 + 1) = src1(:, iz, ix)
       end do
     end do
-    !$omp target update from(dpdy)
+
+    call transpose_xz_to_y_pencil(src0_xz, src0_y)
+    call transpose_xz_to_y_pencil(src1_xz, src1_y)
+
+    do ix_local = 1, nxB
+      ix_global = nx0 + ix_local - 1
+      do iz_local = 1, zpyB
+        iz_global = zpy0 + iz_local - 1 - (nz + 1)
+        pmat = 0.0d0
+
+        do iy = 1, ny - 1
+          pmat(iy, -2:2) = der(iy, 2, -2:2) - k2(iz_global, ix_global)*der(iy, 0, -2:2)
+          dpdy_y(iy + 2, iz_local, ix_local) = sum(der(iy, 1, -2:2)*src0_y(iy:iy + 4, iz_local, ix_local)) + &
+                                               sum(der(iy, 2, -2:2)*src1_y(iy:iy + 4, iz_local, ix_local))
+        end do
+
+        dpdy_y(2, iz_local, ix_local) = ni*sum(d240(-2:2)*V(-1:3, iz_global, ix_global, 2))
+        eq0 = 0.0d0
+        eq0(-1) = 1.0d0
+        dpdy_y(1, iz_local, ix_local) = 0.0d0
+        eqm1 = der(1, 3, :)
+        dpdy_y(ny + 2, iz_local, ix_local) = ni*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz_global, ix_global, 2))
+        eqn = 0.0d0
+        eqn(1) = 1.0d0
+        dpdy_y(ny + 3, iz_local, ix_local) = 0.0d0
+        eqnp1 = der(ny - 1, 3, :)
+
+        call ys_solve_ghost_system(dpdy_y(:, iz_local, ix_local), pmat, eqm1, eq0, eqn, eqnp1, ny)
+      end do
+    end do
+
+    call transpose_y_pencil_to_xz(dpdy_y, dpdy_xz)
+
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        dpdy(:, iz, ix) = dpdy_xz(:, iz + nz + 1, ix - nx0 + 1)
+      end do
+    end do
+
+    deallocate (src0_xz, src1_xz, dpdy_xz, src0_y, src1_y, dpdy_y)
   END SUBROUTINE solve_dpdy_field
 
 END MODULE pressure_output
