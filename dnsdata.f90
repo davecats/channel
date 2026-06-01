@@ -25,6 +25,8 @@ MODULE dnsdata
   USE rbmat
   USE mpi_transpose
   USE ffts
+  USE y_line_solvers, ONLY: ys_applybc_0, ys_applybc_n, ys_lu5decomp, ys_leftlu5backsub, ys_leftlu5forwardsub, &
+                            ys_leftlu5div, ys_solve_compact_derivative, ys_solve_compact_system
 
   IMPLICIT NONE
 
@@ -416,24 +418,12 @@ CONTAINS
   !$omp declare target(COMPLEXderiv)
 #endif
   SUBROUTINE COMPLEXderiv(f0, f1, der, D0mat)
-    IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), intent(in)  :: f0(-1:ny + 1)
     complex(C_DOUBLE_COMPLEX), intent(out) :: f1(-1:ny + 1)
     real(C_DOUBLE), DIMENSION(:, :), intent(in) :: der(ny0:nyN, 0:3, -2:2)
     real(C_DOUBLE), DIMENSION(:, :), intent(in) :: D0mat(ny0:nyN + 2, -2:2)
-    integer(C_INT) :: iy
-    f1(0) = sum(d140(-2:2)*f0(-1:3))
-    f1(-1) = sum(d14m1(-2:2)*f0(-1:3))
-    f1(ny) = sum(d14n(-2:2)*f0(ny - 3:ny + 1))
-    f1(ny + 1) = sum(d14np1(-2:2)*f0(ny - 3:ny + 1))
-    DO iy = ny0, nyN
-      f1(iy) = sum(der(iy, 1, -2:2)*f0(iy - 2:iy + 2))
-    END DO
-    f1(1) = f1(1) - (der(1, 0, -1)*f1(0) + der(1, 0, -2)*f1(-1))
-    f1(2) = f1(2) - der(2, 0, -2)*f1(0)
-    f1(ny - 1) = f1(ny - 1) - (der(ny - 1, 0, 1)*f1(ny) + der(ny - 1, 0, 2)*f1(ny + 1))
-    f1(ny - 2) = f1(ny - 2) - der(ny - 2, 0, 2)*f1(ny)
-    CALL LeftLU5div(f1, D0mat, f1)
+
+    call ys_solve_compact_derivative(f0, f1, der, D0mat, d140, d14m1, d14n, d14np1, ny, ny0, nyN)
   END SUBROUTINE COMPLEXderiv
 
   !--------------------------------------------------------------!
@@ -444,9 +434,8 @@ CONTAINS
   PURE SUBROUTINE applybc_0(EQ, bc0, bc0m1)
     real(C_DOUBLE), intent(inout) :: EQ(ny0:nyN + 2, -2:2)
     real(C_DOUBLE), intent(in) :: bc0(-2:2), bc0m1(-2:2)
-    EQ(1, -1:2) = EQ(1, -1:2) - EQ(1, -2)*bc0m1(-1:2)/bc0m1(-2)
-    EQ(1, 0:2) = EQ(1, 0:2) - EQ(1, -1)*bc0(0:2)/bc0(-1)
-    EQ(2, -1:1) = EQ(2, -1:1) - EQ(2, -2)*bc0(0:2)/bc0(-1)
+
+    call ys_applybc_0(eq, bc0, bc0m1, ny0, nyN)
   END SUBROUTINE applybc_0
 
 #ifdef HAVE_CUDA
@@ -455,9 +444,8 @@ CONTAINS
   PURE SUBROUTINE applybc_n(EQ, bcn, bcnp1)
     real(C_DOUBLE), intent(inout) :: EQ(ny0:nyN + 2, -2:2)
     real(C_DOUBLE), intent(in) :: bcn(-2:2), bcnp1(-2:2)
-    EQ(ny - 1, -2:1) = EQ(ny - 1, -2:1) - EQ(ny - 1, 2)*bcnp1(-2:1)/bcnp1(2)
-    EQ(ny - 1, -2:0) = EQ(ny - 1, -2:0) - EQ(ny - 1, 1)*bcn(-2:0)/bcn(1)
-    EQ(ny - 2, -1:1) = EQ(ny - 2, -1:1) - EQ(ny - 2, 2)*bcn(-2:0)/bcn(1)
+
+    call ys_applybc_n(eq, bcn, bcnp1, ny, ny0, nyN)
   END SUBROUTINE applybc_n
 
 ! Orr-Sommerfeld and Squire opearators
@@ -470,23 +458,9 @@ CONTAINS
   !---- in-place LU Decomposition of a banded matrix ---!
   !-----------------------------------------------------!
   SUBROUTINE LU5decomp(A)
-    IMPLICIT NONE
     real(C_DOUBLE), intent(inout) :: A(0:, -2:)
-    integer(C_INT) :: HI1, HI2
-    real(C_DOUBLE) :: piv
-    INTEGER :: i, k, j
-    HI1 = SIZE(A, 1) - 1; HI2 = SIZE(A, 2) - 3; 
-    A(HI1 - 2, 1:2) = 0; A(HI1 - 3, 2) = 0
-    DO i = HI1 - HI2, 0, -1
-      DO k = HI2, 1, -1
-        piv = A(i, k)
-        DO j = -1, -2, -1
-          A(i, j + k) = A(i, j + k) - piv*A(i + k, j)
-        END DO
-      END DO
-      piv = 1.0d0/A(i, 0); A(i, 0) = piv; A(i, -2:-1) = A(i, -2:-1)*piv
-    END DO
-    A(0, -2:-1) = 0; A(1, -2) = 0
+
+    call ys_lu5decomp(a)
   END SUBROUTINE LU5decomp
 
   !- Left LU division of a banded matrix -!
@@ -498,18 +472,8 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(out) :: x(-2:)
     complex(C_DOUBLE_COMPLEX), intent(in) :: b(-2:)
     real(C_DOUBLE), intent(in)  :: A(0:, -2:)
-    integer(C_INT) :: HI1, HI2, i
-    HI1 = SIZE(A, 1) - 1
-    HI2 = SIZE(A, 2) - 3
 
-    DO i = LBOUND(x, 1), UBOUND(x, 1)
-      x(i) = b(i)
-    END DO
-
-    DO i = HI1 - HI2, 0, -1
-      x(i) = x(i) - (A(i, 1)*x(i + 1) + A(i, 2)*x(i + 2))
-      x(i) = x(i)*A(i, 0)
-    END DO
+    call ys_leftlu5backsub(x, a, b)
   END SUBROUTINE LeftLU5Backsub
 
 #ifdef HAVE_CUDA
@@ -518,24 +482,19 @@ CONTAINS
   SUBROUTINE LeftLU5Forwardsub(x, A)
     complex(C_DOUBLE_COMPLEX), intent(inout) :: x(-2:)
     real(C_DOUBLE), intent(in)  :: A(0:, -2:)
-    integer(C_INT) :: HI1, i
-    HI1 = SIZE(A, 1) - 1
 
-    DO i = 0, HI1
-      x(i) = x(i) - (A(i, -2)*x(i - 2) + A(i, -1)*x(i - 1))
-    END DO
+    call ys_leftlu5forwardsub(x, a)
   END SUBROUTINE LeftLU5Forwardsub
 
 #ifdef HAVE_CUDA
   !$omp declare target(LeftLU5div)
 #endif
   SUBROUTINE LeftLU5div(x, A, b)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: x(-2:)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(-2:)
     complex(C_DOUBLE_COMPLEX), intent(in) :: b(-2:)
     real(C_DOUBLE), intent(in)  :: A(0:, -2:)
 
-    CALL LeftLU5Backsub(x, A, b)
-    CALL LeftLU5Forwardsub(x, A)
+    call ys_leftlu5div(x, a, b)
   END SUBROUTINE LeftLU5div
 
   SUBROUTINE linsolve(lambda)
@@ -553,21 +512,8 @@ CONTAINS
           linsolve_mat(iy, -2:2, iz, ix) = lambda*(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)) - OS(iy, -2:2)
         END DO
 
-        CALL applybc_0(linsolve_mat(:, :, iz, ix), v0bc, v0m1bc)
-        V(1, iz, ix, 2) = V(1, iz, ix, 2) - linsolve_mat(1, -2, iz, ix)*bc0(iz, ix, 4)/v0m1bc(-2) - linsolve_mat(1, -1, iz, ix)*bc0(iz, ix, 2)/v0bc(-1)
-        V(2, iz, ix, 2) = V(2, iz, ix, 2) - linsolve_mat(2, -2, iz, ix)*bc0(iz, ix, 2)/v0bc(-1)
-
-        CALL applybc_n(linsolve_mat(:, :, iz, ix), vnbc, vnp1bc)
-        V(ny - 1, iz, ix, 2) = V(ny - 1, iz, ix, 2) - linsolve_mat(ny - 1, 2, iz, ix)*bcn(iz, ix, 4)/vnp1bc(2) - linsolve_mat(ny - 1, 1, iz, ix)*bcn(iz, ix, 2)/vnbc(1)
-        V(ny - 2, iz, ix, 2) = V(ny - 2, iz, ix, 2) - linsolve_mat(ny - 2, 2, iz, ix)*bcn(iz, ix, 2)/vnbc(1)
-
-        CALL LU5decomp(linsolve_mat(:, :, iz, ix)); 
-        CALL LeftLU5div(V(:, iz, ix, 2), linsolve_mat(:, :, iz, ix), V(:, iz, ix, 2))
-
-        V(0, iz, ix, 2) = (bc0(iz, ix, 2) - sum(V(1:3, iz, ix, 2)*v0bc(0:2)))/v0bc(-1)
-        V(-1, iz, ix, 2) = (bc0(iz, ix, 4) - sum(V(0:3, iz, ix, 2)*v0m1bc(-1:2)))/v0m1bc(-2)
-        V(ny, iz, ix, 2) = (bcn(iz, ix, 2) - sum(V(ny - 3:ny - 1, iz, ix, 2)*vnbc(-2:0)))/vnbc(1)
-        V(ny + 1, iz, ix, 2) = (bcn(iz, ix, 4) - sum(V(ny - 3:ny, iz, ix, 2)*vnp1bc(-2:1)))/vnp1bc(2)
+        call ys_solve_compact_system(V(:, iz, ix, 2), linsolve_mat(:, :, iz, ix), v0bc, v0m1bc, vnbc, vnp1bc, &
+                                     bc0(iz, ix, 2), bc0(iz, ix, 4), bcn(iz, ix, 2), bcn(iz, ix, 4), ny, ny0, nyN)
       END DO
     END DO
 
@@ -580,21 +526,8 @@ CONTAINS
           linsolve_mat(iy, -2:2, iz, ix) = lambda*der(iy, 0, -2:2) - SQ(iy, -2:2)
         END DO
 
-        CALL applybc_0(linsolve_mat(:, :, iz, ix), eta0bc, eta0m1bc)
-        V(1, iz, ix, 1) = V(1, iz, ix, 1) - linsolve_mat(1, -1, iz, ix)*bc0(iz, ix, 5)/eta0bc(-1)
-        V(2, iz, ix, 1) = V(2, iz, ix, 1) - linsolve_mat(2, -2, iz, ix)*bc0(iz, ix, 5)/eta0bc(-1)
-
-        CALL applybc_n(linsolve_mat(:, :, iz, ix), etanbc, etanp1bc)
-        V(ny - 1, iz, ix, 1) = V(ny - 1, iz, ix, 1) - linsolve_mat(ny - 1, 1, iz, ix)*bcn(iz, ix, 5)/etanbc(1)
-        V(ny - 2, iz, ix, 1) = V(ny - 2, iz, ix, 1) - linsolve_mat(ny - 2, 2, iz, ix)*bcn(iz, ix, 5)/etanbc(1)
-
-        CALL LU5decomp(linsolve_mat(:, :, iz, ix))
-        CALL LeftLU5div(V(:, iz, ix, 1), linsolve_mat(:, :, iz, ix), V(:, iz, ix, 1))
-
-        V(0, iz, ix, 1) = (bc0(iz, ix, 5) - sum(V(1:3, iz, ix, 1)*eta0bc(0:2)))/eta0bc(-1)
-        V(-1, iz, ix, 1) = -sum(V(0:3, iz, ix, 1)*eta0m1bc(-1:2))/eta0m1bc(-2)
-        V(ny, iz, ix, 1) = (bcn(iz, ix, 5) - sum(V(ny - 3:ny - 1, iz, ix, 1)*etanbc(-2:0)))/etanbc(1)
-        V(ny + 1, iz, ix, 1) = -sum(V(ny - 3:ny, iz, ix, 1)*etanp1bc(-2:1))/etanp1bc(2)
+        call ys_solve_compact_system(V(:, iz, ix, 1), linsolve_mat(:, :, iz, ix), eta0bc, eta0m1bc, etanbc, etanp1bc, &
+                                     bc0(iz, ix, 5), (0.0d0, 0.0d0), bcn(iz, ix, 5), (0.0d0, 0.0d0), ny, ny0, nyN)
       END DO
     END DO
 
@@ -655,21 +588,8 @@ CONTAINS
           linsolve_mat(iy, -2:2, iz, ix) = lambda*der(iy, 0, -2:2) - pra(iPhi)*(SQ(iy, -2:2))
         END DO
 
-        CALL applybc_0(linsolve_mat(:, :, iz, ix), phi0bc, phi0m1bc)
-        V(1, iz, ix, 3 + iPhi) = V(1, iz, ix, 3 + iPhi) - linsolve_mat(1, -1, iz, ix)*bc0(iz, ix, 5 + iPhi)/phi0bc(-1)
-        V(2, iz, ix, 3 + iPhi) = V(2, iz, ix, 3 + iPhi) - linsolve_mat(2, -2, iz, ix)*bc0(iz, ix, 5 + iPhi)/phi0bc(-1)
-
-        CALL applybc_n(linsolve_mat(:, :, iz, ix), phinbc, phinp1bc)
-        V(ny - 1, iz, ix, 3 + iPhi) = V(ny - 1, iz, ix, 3 + iPhi) - linsolve_mat(ny - 1, 1, iz, ix)*bcn(iz, ix, 5 + iPhi)/phinbc(1)
-        V(ny - 2, iz, ix, 3 + iPhi) = V(ny - 2, iz, ix, 3 + iPhi) - linsolve_mat(ny - 2, 2, iz, ix)*bcn(iz, ix, 5 + iPhi)/phinbc(1)
-
-        CALL LU5decomp(linsolve_mat(:, :, iz, ix))
-        CALL LeftLU5div(V(:, iz, ix, 3 + iPhi), linsolve_mat(:, :, iz, ix), V(:, iz, ix, 3 + iPhi))
-
-        V(0, iz, ix, 3 + iPhi) = (bc0(iz, ix, 5 + iPhi) - sum(V(1:3, iz, ix, 3 + iPhi)*phi0bc(0:2)))/phi0bc(-1)
-        V(-1, iz, ix, 3 + iPhi) = -sum(V(0:3, iz, ix, 3 + iPhi)*phi0m1bc(-1:2))/phi0m1bc(-2)
-        V(ny, iz, ix, 3 + iPhi) = (bcn(iz, ix, 5 + iPhi) - sum(V(ny - 3:ny - 1, iz, ix, 3 + iPhi)*phinbc(-2:0)))/phinbc(1)
-        V(ny + 1, iz, ix, 3 + iPhi) = -sum(V(ny - 3:ny, iz, ix, 3 + iPhi)*phinp1bc(-2:1))/phinp1bc(2)
+        call ys_solve_compact_system(V(:, iz, ix, 3 + iPhi), linsolve_mat(:, :, iz, ix), phi0bc, phi0m1bc, phinbc, phinp1bc, &
+                                     bc0(iz, ix, 5 + iPhi), (0.0d0, 0.0d0), bcn(iz, ix, 5 + iPhi), (0.0d0, 0.0d0), ny, ny0, nyN)
       END DO
     END do
 

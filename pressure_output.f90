@@ -5,15 +5,16 @@ MODULE pressure_output
   USE, intrinsic :: iso_c_binding
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
   USE dnsdata, ONLY: V, der, k2, ialfa, ibeta, d140, d240, d24n, ni, alfa0, beta0, factor, &
-                     ny, nz, nxd, izd, LU5decomp, LeftLU5div, LeftLU5Backsub
+                     ny, nz, nxd, izd
   USE ffts, ONLY: FFT, IFT, RFT, HFT, VVdz, VVdx
 #else
   USE dnsdata, ONLY: V, der, k2, ialfa, ibeta, d140, d240, d24n, ni, alfa0, beta0, factor, &
-                     ny, nz, nxd, izd, LU5decomp, LeftLU5div, LeftLU5Backsub, VVdz, VVdx
+                     ny, nz, nxd, izd, VVdz, VVdx
   USE ffts, ONLY: FFT, IFT, RFT, HFT
 #endif
   USE mpi_transpose, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, ierr, &
                            sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall
+  USE y_line_solvers, ONLY: ys_solve_ghost_system
 #ifdef HAVE_MPI
   USE mpi_f08
 #endif
@@ -524,74 +525,7 @@ CONTAINS
 
         end if
 
-        ! Elimination at bottom wall
-
-        ! Eliminate eq0(-2) by inserting p(-1)
-        p(0, iz, ix) = p(0, iz, ix) - p(-1, iz, ix)*eq0(-2)/eqm1(-2)
-        eq0(-2:2) = eq0(-2:2) - eqm1(-2:2)*eq0(-2)/eqm1(-2)
-        eq0(-2) = 0.0d0
-
-        ! Eliminate eq1(-2) by inserting p(-1)
-        p(1, iz, ix) = p(1, iz, ix) - p(-1, iz, ix)*pmat(1, -2)/eqm1(-2)
-        pmat(1, -2:2) = pmat(1, -2:2) - eqm1(-2:2)*pmat(1, -2)/eqm1(-2)
-        pmat(1, -2) = 0.0d0
-
-        ! Eliminate eq1(-1) by inserting p(0)
-        p(1, iz, ix) = p(1, iz, ix) - p(0, iz, ix)*pmat(1, -1)/eq0(-1)
-        pmat(1, -2:2) = pmat(1, -2:2) - eq0(-2:2)*pmat(1, -1)/eq0(-1)
-        pmat(1, -1) = 0.0d0
-
-        ! Eliminate eq2(-2) by inserting p(0), careful with the indices here
-        !
-        !
-        !
-        !       -1   0  1  2  3   4
-        !
-        ! -1    -2  -1  0  1  2
-        !  0    -2  -1  0  1  2
-        !  1    -2  -1  0  1  2
-        !  2        -2  -1  0  1  2
-        p(2, iz, ix) = p(2, iz, ix) - p(0, iz, ix)*pmat(2, -2)/eq0(-1)
-        pmat(2, -2:1) = pmat(2, -2:1) - eq0(-1:2)*pmat(2, -2)/eq0(-1)
-        pmat(2, -2) = 0.0d0
-
-        ! Elimination at top wall
-
-        ! Eliminate eqn(2) by inseting p(ny+1)
-        p(ny, iz, ix) = p(ny, iz, ix) - p(ny + 1, iz, ix)*eqn(2)/eqnp1(2)
-        eqn(-2:2) = eqn(-2:2) - eqnp1(-2:2)*eqn(2)/eqnp1(2)
-        eqn(2) = 0.0d0
-
-        ! Eliminate eqnm1(2) by inseting p(ny+1)
-        p(ny - 1, iz, ix) = p(ny - 1, iz, ix) - p(ny + 1, iz, ix)*pmat(ny - 1, 2)/eqnp1(2)
-        pmat(ny - 1, -2:2) = pmat(ny - 1, -2:2) - eqnp1(-2:2)*pmat(ny - 1, 2)/eqnp1(2)
-        pmat(ny - 1, 2) = 0.0d0
-
-        ! Eliminate eqnm1(1) by inserting p(ny)
-        p(ny - 1, iz, ix) = p(ny - 1, iz, ix) - p(ny, iz, ix)*pmat(ny - 1, 1)/eqn(1)
-        pmat(ny - 1, -2:2) = pmat(ny - 1, -2:2) - eqn(-2:2)*pmat(ny - 1, 1)/eqn(1)
-        pmat(ny - 1, 1) = 0.0d0
-
-        ! Eliminate eqnm2(2) by inserting p(ny), be careful with the indices
-        !
-        !       ny-4  ny-3  ny-2  ny-1  ny   ny+1
-        !
-        ! ny-2   -2    -1    0    1     2
-        ! ny-1         -2    -1    0    1     2
-        ! ny           -2    -1    0    1     2
-        ! ny+1         -2    -1    0    1     2
-        p(ny - 2, iz, ix) = p(ny - 2, iz, ix) - p(ny, iz, ix)*pmat(ny - 2, 2)/eqn(1)
-        pmat(ny - 2, -1:2) = pmat(ny - 2, -1:2) - eqn(-2:1)*pmat(ny - 2, 2)/eqn(1)
-        pmat(ny - 2, 2) = 0.0d0
-
-        call LU5decomp(pmat)
-        call LeftLU5div(p(:, iz, ix), pmat, p(:, iz, ix))
-
-        ! Compute boundary value by applying BCs
-        p(0, iz, ix) = (p(0,iz,ix)-sum(eq0(0:2)*p(1:3, iz, ix)))/eq0(-1)
-        p(-1, iz, ix) = (p(-1,iz,ix) -sum(eqm1(-1:2)*p(0:3, iz, ix)))/eqm1(-2)
-        p(ny, iz, ix) = (p(ny,iz,ix)-sum(eqn(-2:0)*p(ny - 3:ny - 1, iz, ix)))/eqn(1)
-        p(ny + 1, iz, ix) = (p(ny+1,iz,ix)-sum(eqnp1(-2:1)*p(ny - 3:ny, iz, ix)))/eqnp1(2)
+        call ys_solve_ghost_system(p(:, iz, ix), pmat, eqm1, eq0, eqn, eqnp1, ny)
 
       end do
     end do
@@ -637,74 +571,7 @@ CONTAINS
         dpdy(ny + 1, iz, ix) = 0.0d0
         eqnp1 = der(ny - 1, 3, :)
 
-        ! Elimination at bottom wall
-
-        ! Eliminate eq0(-2) by inserting p(-1)
-        dpdy(0, iz, ix) = dpdy(0, iz, ix) - dpdy(-1, iz, ix)*eq0(-2)/eqm1(-2)
-        eq0(-2:2) = eq0(-2:2) - eqm1(-2:2)*eq0(-2)/eqm1(-2)
-        eq0(-2) = 0.0d0
-
-        ! Eliminate eq1(-2) by inserting p(-1)
-        dpdy(1, iz, ix) = dpdy(1, iz, ix) - dpdy(-1, iz, ix)*pmat(1, -2)/eqm1(-2)
-        pmat(1, -2:2) = pmat(1, -2:2) - eqm1(-2:2)*pmat(1, -2)/eqm1(-2)
-        pmat(1, -2) = 0.0d0
-
-        ! Eliminate eq1(-1) by inserting p(0)
-        dpdy(1, iz, ix) = dpdy(1, iz, ix) - dpdy(0, iz, ix)*pmat(1, -1)/eq0(-1)
-        pmat(1, -2:2) = pmat(1, -2:2) - eq0(-2:2)*pmat(1, -1)/eq0(-1)
-        pmat(1, -1) = 0.0d0
-
-        ! Eliminate eq2(-2) by inserting p(0), careful with the indices here
-        !
-        !
-        !
-        !       -1   0  1  2  3   4
-        !
-        ! -1    -2  -1  0  1  2
-        !  0    -2  -1  0  1  2
-        !  1    -2  -1  0  1  2
-        !  2        -2  -1  0  1  2
-        dpdy(2, iz, ix) = dpdy(2, iz, ix) - dpdy(0, iz, ix)*pmat(2, -2)/eq0(-1)
-        pmat(2, -2:1) = pmat(2, -2:1) - eq0(-1:2)*pmat(2, -2)/eq0(-1)
-        pmat(2, -2) = 0.0d0
-
-        ! Elimination at top wall
-
-        ! Eliminate eqn(2) by inseting p(ny+1)
-        dpdy(ny, iz, ix) = dpdy(ny, iz, ix) - dpdy(ny + 1, iz, ix)*eqn(2)/eqnp1(2)
-        eqn(-2:2) = eqn(-2:2) - eqnp1(-2:2)*eqn(2)/eqnp1(2)
-        eqn(2) = 0.0d0
-
-        ! Eliminate eqnm1(2) by inseting p(ny+1)
-        dpdy(ny - 1, iz, ix) = dpdy(ny - 1, iz, ix) - dpdy(ny + 1, iz, ix)*pmat(ny - 1, 2)/eqnp1(2)
-        pmat(ny - 1, -2:2) = pmat(ny - 1, -2:2) - eqnp1(-2:2)*pmat(ny - 1, 2)/eqnp1(2)
-        pmat(ny - 1, 2) = 0.0d0
-
-        ! Eliminate eqnm1(1) by inserting p(ny)
-        dpdy(ny - 1, iz, ix) = dpdy(ny - 1, iz, ix) - dpdy(ny, iz, ix)*pmat(ny - 1, 1)/eqn(1)
-        pmat(ny - 1, -2:2) = pmat(ny - 1, -2:2) - eqn(-2:2)*pmat(ny - 1, 1)/eqn(1)
-        pmat(ny - 1, 1) = 0.0d0
-
-        ! Eliminate eqnm2(2) by inserting p(ny), be careful with the indices
-        !
-        !       ny-4  ny-3  ny-2  ny-1  ny   ny+1
-        !
-        ! ny-2   -2    -1    0    1     2
-        ! ny-1         -2    -1    0    1     2
-        ! ny           -2    -1    0    1     2
-        ! ny+1         -2    -1    0    1     2
-        dpdy(ny - 2, iz, ix) = dpdy(ny - 2, iz, ix) - dpdy(ny, iz, ix)*pmat(ny - 2, 2)/eqn(1)
-        pmat(ny - 2, -1:2) = pmat(ny - 2, -1:2) - eqn(-2:1)*pmat(ny - 2, 2)/eqn(1)
-        pmat(ny - 2, 2) = 0.0d0
-
-        call LU5decomp(pmat)
-        call LeftLU5div(dpdy(:, iz, ix), pmat, dpdy(:, iz, ix))
-
-        ! Compute boundary value by applying BCs
-        dpdy(0, iz, ix) = (dpdy(0,iz,ix) -sum(eq0(0:2)*dpdy(1:3, iz, ix)))/eq0(-1)
-        dpdy(-1, iz, ix) = (dpdy(-1,iz,ix) -sum(eqm1(-1:2)*dpdy(0:3, iz, ix)))/eqm1(-2)
-        dpdy(ny, iz, ix) = (dpdy(ny,iz,ix) -sum(eqn(-2:0)*dpdy(ny - 3:ny - 1, iz, ix)))/eqn(1)
-        dpdy(ny + 1, iz, ix) = (dpdy(ny+1,iz,ix) -sum(eqnp1(-2:1)*dpdy(ny - 3:ny, iz, ix)))/eqnp1(2)
+        call ys_solve_ghost_system(dpdy(:, iz, ix), pmat, eqm1, eq0, eqn, eqnp1, ny)
 
       end do
     end do
