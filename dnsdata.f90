@@ -432,6 +432,100 @@ CONTAINS
     call ys_solve_compact_derivative(f0, f1, der, D0mat, d140, d14m1, d14n, d14np1, ny, ny0, nyN)
   END SUBROUTINE COMPLEXderiv
 
+  SUBROUTINE solve_compact_component_with_y_pencil(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
+                                                   lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
+                                                   lambda_coeff, diffusion_coeff)
+    IMPLICIT NONE
+    integer(C_INT), intent(in) :: component_index, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index
+    real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
+    real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
+    complex(C_DOUBLE_COMPLEX), allocatable :: field_xz(:, :, :), field_y(:, :, :)
+    complex(C_DOUBLE_COMPLEX) :: line(-1:ny + 1)
+    real(C_DOUBLE) :: mat(1:ny + 1, -2:2)
+    integer(C_INT) :: ix, iz, iy, ix_local, iz_local, ix_global, iz_global
+
+    allocate (field_xz(ylB, 2*nz + 1, nxB))
+    allocate (field_y(ny + 3, zpyB, nxB))
+
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        field_xz(:, iz + nz + 1, ix - nx0 + 1) = V(:, iz, ix, component_index)
+      end do
+    end do
+
+    call transpose_xz_to_y_pencil(field_xz, field_y)
+
+    do ix_local = 1, nxB
+      ix_global = nx0 + ix_local - 1
+      do iz_local = 1, zpyB
+        iz_global = zpy0 + iz_local - 1 - (nz + 1)
+        mat = 0.0d0
+        do iy = 1, ny - 1
+          mat(iy, -2:2) = lambda_coeff*der(iy, 0, -2:2) - &
+                          diffusion_coeff*ni*(der(iy, 2, -2:2) - k2(iz_global, ix_global)*der(iy, 0, -2:2))
+        end do
+        if (component_index == 2_C_INT) then
+          do iy = 1, ny - 1
+            mat(iy, -2:2) = lambda_coeff*(der(iy, 2, -2:2) - k2(iz_global, ix_global)*der(iy, 0, -2:2)) - &
+                            ni*(der(iy, 3, -2:2) - 2.0d0*k2(iz_global, ix_global)*der(iy, 2, -2:2) + &
+                                k2(iz_global, ix_global)*k2(iz_global, ix_global)*der(iy, 0, -2:2))
+          end do
+        end if
+
+        line = field_y(:, iz_local, ix_local)
+        call ys_solve_compact_system(line, mat, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
+                                     select_bc_rhs(iz_global, ix_global, lower_rhs_index), &
+                                     select_bc_rhs(iz_global, ix_global, lower_ghost_rhs_index), &
+                                     select_bc_rhs(iz_global, ix_global, upper_rhs_index), &
+                                     select_bc_rhs(iz_global, ix_global, upper_ghost_rhs_index), ny, 1_C_INT, ny - 1)
+        field_y(:, iz_local, ix_local) = line
+      end do
+    end do
+
+    call transpose_y_pencil_to_xz(field_y, field_xz)
+
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        V(:, iz, ix, component_index) = field_xz(:, iz + nz + 1, ix - nx0 + 1)
+      end do
+    end do
+
+    deallocate (field_xz, field_y)
+  END SUBROUTINE solve_compact_component_with_y_pencil
+
+  COMPLEX(C_DOUBLE_COMPLEX) FUNCTION select_bc_rhs(iz, ix, rhs_index)
+    IMPLICIT NONE
+    integer(C_INT), intent(in) :: iz, ix, rhs_index
+
+    if (rhs_index == 0_C_INT) then
+      select_bc_rhs = (0.0d0, 0.0d0)
+    else if (rhs_index > 0_C_INT) then
+      select_bc_rhs = bc0(iz, ix, rhs_index)
+    else
+      select_bc_rhs = bcn(iz, ix, -rhs_index)
+    end if
+  END FUNCTION select_bc_rhs
+
+  SUBROUTINE solve_mean_correction_line(x, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, lambda_coeff, diffusion_coeff)
+    IMPLICIT NONE
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(-1:ny + 1)
+    real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
+    real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
+    real(C_DOUBLE) :: mat(1:ny + 1, -2:2)
+    integer(C_INT) :: iy
+
+    x(-1:0) = 0.0d0
+    x(1:ny - 1) = 1.0d0
+    x(ny:ny + 1) = 0.0d0
+    mat = 0.0d0
+    do iy = 1, ny - 1
+      mat(iy, -2:2) = lambda_coeff*der(iy, 0, -2:2) - &
+                      diffusion_coeff*ni*(der(iy, 2, -2:2) - k2(0, 0)*der(iy, 0, -2:2))
+    end do
+    call ys_solve_compact_system(x, mat, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
+                                 (0.0d0, 0.0d0), (0.0d0, 0.0d0), (0.0d0, 0.0d0), (0.0d0, 0.0d0), ny, 1_C_INT, ny - 1)
+  END SUBROUTINE solve_mean_correction_line
+
 ! Orr-Sommerfeld and Squire opearators
 #define OS(iy,j) (ni*(der(iy,3,j)-2.0d0*k2(iz,ix)*der(iy,2,j)+k2(iz,ix)*k2(iz,ix)*der(iy,0,j)))
 #define SQ(iy,j) (ni*(der(iy,2,j)-k2(iz,ix)*der(iy,0,j)))
@@ -442,38 +536,13 @@ CONTAINS
     integer(C_INT) :: ix, iz, i, j, iPhi
     complex(C_DOUBLE_COMPLEX) :: temp
 
-    !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(V, linsolve_mat, bc0, bcn, der, lambda, ni, ny, k2, ny0, nyN, nx0, nxN, nz, v0bc, v0m1bc, vnbc, vnp1bc) &
-    !$omp private(ix, iz, iy)
-    DO ix = nx0, nxN
-      DO iz = -nz, nz
-        DO iy = ny0, nyN
-          linsolve_mat(iy, -2:2, iz, ix) = lambda*(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)) - OS(iy, -2:2)
-        END DO
-
-        call ys_solve_compact_system(V(:, iz, ix, 2), linsolve_mat(:, :, iz, ix), v0bc, v0m1bc, vnbc, vnp1bc, &
-                                     bc0(iz, ix, 2), bc0(iz, ix, 4), bcn(iz, ix, 2), bcn(iz, ix, 4), ny, ny0, nyN)
-      END DO
-    END DO
-
-    !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(V, linsolve_mat, bc0, bcn, der, k2, ny, ni, lambda, ny0, nyN, nx0, nxN, nz, eta0bc, eta0m1bc, etanbc, etanp1bc) &
-    !$omp private(ix, iz, iy)
-    DO ix = nx0, nxN
-      DO iz = -nz, nz
-        DO iy = ny0, nyN
-          linsolve_mat(iy, -2:2, iz, ix) = lambda*der(iy, 0, -2:2) - SQ(iy, -2:2)
-        END DO
-
-        call ys_solve_compact_system(V(:, iz, ix, 1), linsolve_mat(:, :, iz, ix), eta0bc, eta0m1bc, etanbc, etanp1bc, &
-                                     bc0(iz, ix, 5), (0.0d0, 0.0d0), bcn(iz, ix, 5), (0.0d0, 0.0d0), ny, ny0, nyN)
-      END DO
-    END DO
+call solve_compact_component_with_y_pencil(2_C_INT, v0bc, v0m1bc, vnbc, vnp1bc, 2_C_INT, 4_C_INT, -2_C_INT, -4_C_INT, lambda, 1.0d0)
+    call solve_compact_component_with_y_pencil(1_C_INT, eta0bc, eta0m1bc, etanbc, etanp1bc, 5_C_INT, 0_C_INT, -5_C_INT, 0_C_INT, lambda, 1.0d0)
 
     !$omp target teams distribute parallel do collapse(2) default(none) &
     !$omp shared(ny, ny0, nyN, nz, nx0, nxN) &
-    !$omp shared(V, bc0, bcn, v0bc, v0m1bc, eta0bc, eta0m1bc, vnbc, vnp1bc, etanbc, etanp1bc, linsolve_mat) &
-    !$omp shared(D0mat, der, k2, ialfa, ibeta, y, fr, ucor, meanflowx, meanflowz, corrpx, corrpz) &
+    !$omp shared(V, eta0bc, eta0m1bc, etanbc, etanp1bc) &
+    !$omp shared(D0mat, der, k2, ialfa, ibeta, y, fr, ucor, meanflowx, meanflowz, corrpx, corrpz, lambda) &
     !$omp private(ix, iz, j, temp)
     DO ix = nx0, nxN
       DO iz = -nz, nz
@@ -481,13 +550,7 @@ CONTAINS
         IF (ix == 0 .AND. iz == 0) THEN
           V(:, 0, 0, 3) = dcmplx(dimag(V(:, 0, 0, 1)), 0.d0); 
           V(:, 0, 0, 1) = dcmplx(dreal(V(:, 0, 0, 1)), 0.d0); 
-          ucor(ny0 - 2:ny0 - 1) = 0; ucor(ny0:nyN) = 1; ucor(nyN + 1:nyN + 2) = 0
-          !linsolve_mat contains etamat
-          call ys_leftlu5div(ucor, linsolve_mat(:, :, iz, ix))
-          ucor(0) = -sum(ucor(1:3)*eta0bc(0:2))/eta0bc(-1)
-          ucor(-1) = -sum(ucor(0:3)*eta0m1bc(-1:2))/eta0m1bc(-2)
-          ucor(ny) = -sum(ucor(ny - 3:ny - 1)*etanbc(-2:0))/etanbc(1)
-          ucor(ny + 1) = -sum(ucor(ny - 3:ny)*etanp1bc(-2:1))/etanp1bc(2)
+          call solve_mean_correction_line(ucor, eta0bc, eta0m1bc, etanbc, etanp1bc, lambda, 1.0d0)
 
           fr(1) = yintegr(V(:, 0, 0, 1), y)
           fr(2) = yintegr(V(:, 0, 0, 3), y)
@@ -518,37 +581,18 @@ CONTAINS
     real(C_DOUBLE), intent(in) :: lambda
     integer(C_INT) :: ix, iz, i, j
     complex(C_DOUBLE_COMPLEX) :: temp
-    !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(V, linsolve_mat, bc0, bcn, der, lambda, pra, ni, k2, ny, ny0, nyN, nx0, nxN, nz, phi0bc, phi0m1bc, phinbc, phinp1bc, iPhi) &
-    !$omp private(ix, iz, iy)
-    DO ix = nx0, nxN
-      DO iz = -nz, nz
-        DO iy = ny0, nyN
-          linsolve_mat(iy, -2:2, iz, ix) = lambda*der(iy, 0, -2:2) - pra(iPhi)*(SQ(iy, -2:2))
-        END DO
-
-        call ys_solve_compact_system(V(:, iz, ix, 3 + iPhi), linsolve_mat(:, :, iz, ix), phi0bc, phi0m1bc, phinbc, phinp1bc, &
-                                     bc0(iz, ix, 5 + iPhi), (0.0d0, 0.0d0), bcn(iz, ix, 5 + iPhi), (0.0d0, 0.0d0), ny, ny0, nyN)
-      END DO
-    END do
+    call solve_compact_component_with_y_pencil(3_C_INT + iPhi, phi0bc, phi0m1bc, phinbc, phinp1bc, 5_C_INT + iPhi, 0_C_INT, &
+                                               -(5_C_INT + iPhi), 0_C_INT, lambda, pra(iPhi))
 
     !$omp target teams distribute parallel do collapse(2) default(none) &
     !$omp shared(ny, ny0, nyN, nz, nx0, nxN, nPhi) &
-    !$omp shared(V, bc0, bcn, phi0bc, phi0m1bc, phinbc, phinp1bc,linsolve_mat, tcor, y, fr, corrtx, meantb, iPhi) &
+    !$omp shared(V, phi0bc, phi0m1bc, phinbc, phinp1bc, tcor, y, fr, corrtx, meantb, iPhi, lambda, pra) &
     !$omp private(ix, iz, temp)
     DO ix = nx0, nxN
       DO iz = -nz, nz
         ! Correct flow rate
         IF (ix == 0 .AND. iz == 0) THEN
-          tcor(ny0 - 2:ny0 - 1, :) = 0
-          tcor(ny0:nyN, :) = 1
-          tcor(nyN + 1:nyN + 2, :) = 0
-
-          call ys_leftlu5div(tcor(:, iPhi), linsolve_mat(:, :, iz, ix))
-          tcor(0, iPhi) = -sum(tcor(1:3, iPhi)*phi0bc(0:2))/phi0bc(-1)
-          tcor(-1, iPhi) = -sum(tcor(0:3, iPhi)*phi0m1bc(-1:2))/phi0m1bc(-2)
-          tcor(ny, iPhi) = -sum(tcor(ny - 3:ny - 1, iPhi)*phinbc(-2:0))/phinbc(1)
-          tcor(ny + 1, iPhi) = -sum(tcor(ny - 3:ny, iPhi)*phinp1bc(-2:1))/phinp1bc(2)
+          call solve_mean_correction_line(tcor(:, iPhi), phi0bc, phi0m1bc, phinbc, phinp1bc, lambda, pra(iPhi))
           fr(3 + iPhi) = yintegr(V(:, 0, 0, 3 + iPhi), y); 
           fr(3 + nPhi + iPhi) = yintegr(tcor(:, iPhi), y); 
           IF (abs(meantb) > 1.0d-7) THEN
