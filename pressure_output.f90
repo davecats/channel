@@ -12,10 +12,10 @@ MODULE pressure_output
                      ny, nz, nxd, izd, VVdz, VVdx
   USE ffts, ONLY: FFT, IFT, RFT, HFT
 #endif
-  USE mpi_transpose, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, ierr, ylB, zpy0, zpyB, &
+  USE mpi_transpose, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, ierr, yl0, ylN, ylB, zpy0, zpyB, &
                            sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, &
                            fft_transpose_is_local, repack_zTOx_local, repack_xTOz_local, &
-                           transpose_xz_to_y_pencil, transpose_y_pencil_to_xz
+                           transpose_xz_to_y_pencil, transpose_y_pencil_to_xz, allgather_y_blocks_to_xz_full
   USE y_line_solvers, ONLY: ys_solve_ghost_system
 #ifdef HAVE_MPI
   USE mpi_f08
@@ -459,19 +459,20 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(in) :: src0(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(in) :: src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: p(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    complex(C_DOUBLE_COMPLEX), allocatable :: src0_xz(:, :, :), src1_xz(:, :, :), p_xz(:, :, :)
+    complex(C_DOUBLE_COMPLEX), allocatable :: src0_xz(:, :, :), src1_xz(:, :, :), p_xz(:, :, :), p_xz_full(:, :, :)
     complex(C_DOUBLE_COMPLEX), allocatable :: src0_y(:, :, :), src1_y(:, :, :), p_y(:, :, :)
     real(C_DOUBLE) :: pmat(1:ny + 1, -2:2), eqm1(-2:2), eq0(-2:2), eqn(-2:2), eqnp1(-2:2)
     complex(C_DOUBLE_COMPLEX) :: tmp, tmp2
     integer(C_INT) :: ix, iz, iy, ix_local, iz_local, ix_global, iz_global
 
     allocate (src0_xz(ylB, 2*nz + 1, nxB), src1_xz(ylB, 2*nz + 1, nxB), p_xz(ylB, 2*nz + 1, nxB))
+    allocate (p_xz_full(ny + 3, 2*nz + 1, nxB))
     allocate (src0_y(ny + 3, zpyB, nxB), src1_y(ny + 3, zpyB, nxB), p_y(ny + 3, zpyB, nxB))
 
     do ix = nx0, nxN
       do iz = -nz, nz
-        src0_xz(:, iz + nz + 1, ix - nx0 + 1) = src0(:, iz, ix)
-        src1_xz(:, iz + nz + 1, ix - nx0 + 1) = src1(:, iz, ix)
+        src0_xz(:, iz + nz + 1, ix - nx0 + 1) = src0(yl0 - 2:ylN - 2, iz, ix)
+        src1_xz(:, iz + nz + 1, ix - nx0 + 1) = src1(yl0 - 2:ylN - 2, iz, ix)
       end do
     end do
 
@@ -527,14 +528,15 @@ CONTAINS
     end do
 
     call transpose_y_pencil_to_xz(p_y, p_xz)
+    call allgather_y_blocks_to_xz_full(p_xz, p_xz_full)
 
     do ix = nx0, nxN
       do iz = -nz, nz
-        p(:, iz, ix) = p_xz(:, iz + nz + 1, ix - nx0 + 1)
+        p(:, iz, ix) = p_xz_full(:, iz + nz + 1, ix - nx0 + 1)
       end do
     end do
 
-    deallocate (src0_xz, src1_xz, p_xz, src0_y, src1_y, p_y)
+    deallocate (src0_xz, src1_xz, p_xz, p_xz_full, src0_y, src1_y, p_y)
   END SUBROUTINE solve_pressure_field
 
   SUBROUTINE solve_dpdy_field(src0, src1, dpdy)
@@ -542,18 +544,19 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(in) :: src0(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(in) :: src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dpdy(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    complex(C_DOUBLE_COMPLEX), allocatable :: src0_xz(:, :, :), src1_xz(:, :, :), dpdy_xz(:, :, :)
+    complex(C_DOUBLE_COMPLEX), allocatable :: src0_xz(:, :, :), src1_xz(:, :, :), dpdy_xz(:, :, :), dpdy_xz_full(:, :, :)
     complex(C_DOUBLE_COMPLEX), allocatable :: src0_y(:, :, :), src1_y(:, :, :), dpdy_y(:, :, :)
     real(C_DOUBLE) :: pmat(1:ny + 1, -2:2), eqm1(-2:2), eq0(-2:2), eqnp1(-2:2), eqn(-2:2)
     integer(C_INT) :: ix, iz, iy, ix_local, iz_local, ix_global, iz_global
 
     allocate (src0_xz(ylB, 2*nz + 1, nxB), src1_xz(ylB, 2*nz + 1, nxB), dpdy_xz(ylB, 2*nz + 1, nxB))
+    allocate (dpdy_xz_full(ny + 3, 2*nz + 1, nxB))
     allocate (src0_y(ny + 3, zpyB, nxB), src1_y(ny + 3, zpyB, nxB), dpdy_y(ny + 3, zpyB, nxB))
 
     do ix = nx0, nxN
       do iz = -nz, nz
-        src0_xz(:, iz + nz + 1, ix - nx0 + 1) = src0(:, iz, ix)
-        src1_xz(:, iz + nz + 1, ix - nx0 + 1) = src1(:, iz, ix)
+        src0_xz(:, iz + nz + 1, ix - nx0 + 1) = src0(yl0 - 2:ylN - 2, iz, ix)
+        src1_xz(:, iz + nz + 1, ix - nx0 + 1) = src1(yl0 - 2:ylN - 2, iz, ix)
       end do
     end do
 
@@ -588,14 +591,15 @@ CONTAINS
     end do
 
     call transpose_y_pencil_to_xz(dpdy_y, dpdy_xz)
+    call allgather_y_blocks_to_xz_full(dpdy_xz, dpdy_xz_full)
 
     do ix = nx0, nxN
       do iz = -nz, nz
-        dpdy(:, iz, ix) = dpdy_xz(:, iz + nz + 1, ix - nx0 + 1)
+        dpdy(:, iz, ix) = dpdy_xz_full(:, iz + nz + 1, ix - nx0 + 1)
       end do
     end do
 
-    deallocate (src0_xz, src1_xz, dpdy_xz, src0_y, src1_y, dpdy_y)
+    deallocate (src0_xz, src1_xz, dpdy_xz, dpdy_xz_full, src0_y, src1_y, dpdy_y)
   END SUBROUTINE solve_dpdy_field
 
 END MODULE pressure_output

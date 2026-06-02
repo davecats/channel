@@ -264,8 +264,12 @@ CONTAINS
     !$omp target exit data map(delete: bc0, bcn)
     DEALLOCATE (bc0, bcn)
     IF (solveNS) THEN
-      !$omp target exit data map(delete: memrhs, oldrhs, linsolve_mat)
-      DEALLOCATE (memrhs, oldrhs, linsolve_mat)
+      if (associated(memrhs) .or. associated(linsolve_mat) .or. allocated(oldrhs)) then
+        !$omp target exit data map(delete: memrhs, oldrhs, linsolve_mat)
+      end if
+      if (associated(memrhs)) deallocate (memrhs)
+      if (allocated(oldrhs)) deallocate (oldrhs)
+      if (associated(linsolve_mat)) deallocate (linsolve_mat)
       CLOSE (UNIT=195)
       IF (has_terminal) CLOSE (UNIT=121)
     END IF
@@ -436,16 +440,17 @@ CONTAINS
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), intent(in) :: src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    complex(C_DOUBLE_COMPLEX), allocatable :: field_xz(:, :, :), deriv_xz(:, :, :)
+    complex(C_DOUBLE_COMPLEX), allocatable :: field_xz(:, :, :), deriv_xz(:, :, :), deriv_xz_full(:, :, :)
     complex(C_DOUBLE_COMPLEX), allocatable :: field_y(:, :, :), deriv_y(:, :, :)
     integer(C_INT) :: ix, iz, ix_local, iz_local
 
     allocate (field_xz(ylB, 2*nz + 1, nxB), deriv_xz(ylB, 2*nz + 1, nxB))
+    allocate (deriv_xz_full(ny + 3, 2*nz + 1, nxB))
     allocate (field_y(ny + 3, zpyB, nxB), deriv_y(ny + 3, zpyB, nxB))
 
     do ix = nx0, nxN
       do iz = -nz, nz
-        field_xz(:, iz + nz + 1, ix - nx0 + 1) = src(:, iz, ix)
+        field_xz(:, iz + nz + 1, ix - nx0 + 1) = src(yl0 - 2:ylN - 2, iz, ix)
       end do
     end do
 
@@ -458,14 +463,15 @@ CONTAINS
     end do
 
     call transpose_y_pencil_to_xz(deriv_y, deriv_xz)
+    call allgather_y_blocks_to_xz_full(deriv_xz, deriv_xz_full)
 
     do ix = nx0, nxN
       do iz = -nz, nz
-        dst(:, iz, ix) = deriv_xz(:, iz + nz + 1, ix - nx0 + 1)
+        dst(:, iz, ix) = deriv_xz_full(:, iz + nz + 1, ix - nx0 + 1)
       end do
     end do
 
-    deallocate (field_xz, deriv_xz, field_y, deriv_y)
+    deallocate (field_xz, deriv_xz, deriv_xz_full, field_y, deriv_y)
   END SUBROUTINE apply_complex_derivative_with_y_pencil
 
   SUBROUTINE solve_compact_component_with_y_pencil(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
@@ -475,17 +481,17 @@ CONTAINS
     integer(C_INT), intent(in) :: component_index, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index
     real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
     real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
-    complex(C_DOUBLE_COMPLEX), allocatable :: field_xz(:, :, :), field_y(:, :, :)
+    complex(C_DOUBLE_COMPLEX), allocatable :: field_xz(:, :, :), field_xz_full(:, :, :), field_y(:, :, :)
     complex(C_DOUBLE_COMPLEX) :: line(-1:ny + 1)
     real(C_DOUBLE) :: mat(1:ny + 1, -2:2)
     integer(C_INT) :: ix, iz, iy, ix_local, iz_local, ix_global, iz_global
 
-    allocate (field_xz(ylB, 2*nz + 1, nxB))
+    allocate (field_xz(ylB, 2*nz + 1, nxB), field_xz_full(ny + 3, 2*nz + 1, nxB))
     allocate (field_y(ny + 3, zpyB, nxB))
 
     do ix = nx0, nxN
       do iz = -nz, nz
-        field_xz(:, iz + nz + 1, ix - nx0 + 1) = V(:, iz, ix, component_index)
+        field_xz(:, iz + nz + 1, ix - nx0 + 1) = V(yl0 - 2:ylN - 2, iz, ix, component_index)
       end do
     end do
 
@@ -519,14 +525,15 @@ CONTAINS
     end do
 
     call transpose_y_pencil_to_xz(field_y, field_xz)
+    call allgather_y_blocks_to_xz_full(field_xz, field_xz_full)
 
     do ix = nx0, nxN
       do iz = -nz, nz
-        V(:, iz, ix, component_index) = field_xz(:, iz + nz + 1, ix - nx0 + 1)
+        V(:, iz, ix, component_index) = field_xz_full(:, iz + nz + 1, ix - nx0 + 1)
       end do
     end do
 
-    deallocate (field_xz, field_y)
+    deallocate (field_xz, field_xz_full, field_y)
   END SUBROUTINE solve_compact_component_with_y_pencil
 
   COMPLEX(C_DOUBLE_COMPLEX) FUNCTION select_bc_rhs(iz, ix, rhs_index)

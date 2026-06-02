@@ -71,7 +71,7 @@ CONTAINS
 
     call read_ini_file(config_file, cfg)
     CALL read_dnsin(cfg)
-    if (npy /= 1) then
+    if (npy /= 1 .and. run_solver) then
       error stop "initialize: npy > 1 is not wired into the solver runtime yet"
     end if
     call configure_convvelo(cfg)

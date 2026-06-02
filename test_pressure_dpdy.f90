@@ -7,6 +7,7 @@ program test_pressure_dpdy
   implicit none
 
   character(len=256) :: restart_in, config_file
+  character(len=256) :: arg
   integer(C_INT) :: iy, iz, ix
   complex(C_DOUBLE_COMPLEX), allocatable :: p(:, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable :: dpdy(:, :, :)
@@ -24,8 +25,10 @@ program test_pressure_dpdy
 
   config_file = "tests/data/dns_test.in"
   restart_in = "tests/poisson/Dati.cart.35.out"
+  call get_command_argument(1, arg)
+  if (len_trim(arg) > 0) config_file = trim(arg)
 
-  call initialize(config_file, restart_in)
+  call initialize(config_file, restart_in, .false.)
 
   allocate (p(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
   allocate (dpdy(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
@@ -135,7 +138,7 @@ program test_pressure_dpdy
   end if
 
   call free_pressure_output()
-  call free_memory(.TRUE.)
+  call free_memory(.FALSE.)
 #ifdef HAVE_MPI
   call MPI_Finalize()
 #endif
