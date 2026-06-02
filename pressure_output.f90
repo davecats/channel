@@ -16,7 +16,7 @@ MODULE pressure_output
                            sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, &
                            fft_transpose_is_local, repack_zTOx_local, repack_xTOz_local, &
                            transpose_xz_to_y_pencil, transpose_y_pencil_to_xz, allgather_y_blocks_to_xz_full
-  USE y_line_solvers, ONLY: ys_solve_ghost_field_with_y_pencil
+  USE y_line_solvers, ONLY: ys_solve_ghost_field
 #ifdef HAVE_MPI
   USE mpi_f08
 #endif
@@ -459,7 +459,7 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(in) :: src0(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(in) :: src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: p(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    call ys_solve_ghost_field_with_y_pencil(src0, src1, p, ny, nz, build_pressure_line)
+    call ys_solve_ghost_field(src0, src1, p, ny, nz, build_pressure_line)
   END SUBROUTINE solve_pressure_field
 
   SUBROUTINE solve_dpdy_field(src0, src1, dpdy)
@@ -467,7 +467,7 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(in) :: src0(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(in) :: src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dpdy(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    call ys_solve_ghost_field_with_y_pencil(src0, src1, dpdy, ny, nz, build_dpdy_line)
+    call ys_solve_ghost_field(src0, src1, dpdy, ny, nz, build_dpdy_line)
   END SUBROUTINE solve_dpdy_field
 
   SUBROUTINE build_pressure_line(ix_global, iz_global, src0_line, src1_line, line, pmat, eqm1, eq0, eqn, eqnp1, ny_line)
