@@ -186,15 +186,14 @@ contains
     complex(C_DOUBLE_COMPLEX) :: line(-1:ny + 1), local_line(-1:ny + 1)
     complex(C_DOUBLE_COMPLEX) :: local_block(ylB)
     complex(C_DOUBLE_COMPLEX) :: packed_remote(20), u_left(2), u_right(2)
-    real(C_DOUBLE), allocatable :: factored_a(:, :, :)
-    complex(C_DOUBLE_COMPLEX), allocatable :: rhs_base(:, :), left_couple(:, :, :), right_couple(:, :, :)
+    real(C_DOUBLE), allocatable :: factored_a(:, :)
+    complex(C_DOUBLE_COMPLEX), allocatable :: rhs_base(:), left_couple(:, :), right_couple(:, :)
     complex(C_DOUBLE_COMPLEX), allocatable :: reduced_rhs(:, :), packed_send(:, :), packed_recv(:, :, :), mat(:, :), rhs(:), sol(:)
-    complex(C_DOUBLE_COMPLEX), allocatable :: lower_rhsm1(:), lower_rhs0(:), upper_rhsn(:), upper_rhsnp1(:)
+    complex(C_DOUBLE_COMPLEX) :: lower_rhsm1, lower_rhs0, upper_rhsn, upper_rhsnp1
     real(C_DOUBLE) :: a(1:ny + 1, -2:2), eqm1(-2:2), eq0(-2:2), eqn(-2:2), eqnp1(-2:2)
     real(C_DOUBLE) :: local_a(1:ny + 1, -2:2), local_eqm1(-2:2), local_eq0(-2:2), local_eqn(-2:2), local_eqnp1(-2:2)
     real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-2:2), upper_eqn(-2:2)
-    real(C_DOUBLE), allocatable :: eqm1_store(:, :), eqnp1_store(:, :), lower_eq0_store(:, :), upper_eqn_store(:, :)
-    integer(C_INT) :: ix, iz, iline, nlines, row_start, row_end, active_n, row, idx, col, global_col, iblock, row0
+    integer(C_INT) :: ix, iz, iline, nlines, nlines_z, row_start, row_end, active_n, row, idx, col, global_col, iblock, row0
     logical :: has_lower_boundary, has_upper_boundary
 
     ! Solve each x/z line on the native distributed-y layout, then gather the
@@ -224,77 +223,71 @@ contains
         end do
       end do
     else
-      nlines = nxB*(2*nz + 1)
-      allocate (factored_a(0:active_n - 1, -2:2, nlines), rhs_base(0:active_n - 1, nlines))
-      allocate (left_couple(0:active_n - 1, 2, nlines), right_couple(0:active_n - 1, 2, nlines))
+      nlines_z = size(src0, 2)
+      nlines = size(src0, 3)*nlines_z
+      allocate (factored_a(0:active_n - 1, -2:2), rhs_base(0:active_n - 1))
+      allocate (left_couple(0:active_n - 1, 2), right_couple(0:active_n - 1, 2))
       allocate (packed_send(20, nlines), packed_recv(20, nlines, npy_grid))
-      allocate (lower_rhsm1(nlines), lower_rhs0(nlines), upper_rhsn(nlines), upper_rhsnp1(nlines))
-      allocate (eqm1_store(5, nlines), eqnp1_store(5, nlines), lower_eq0_store(5, nlines), upper_eqn_store(5, nlines))
       allocate (reduced_rhs(0:active_n - 1, 5), mat(4*npy_grid, 4*npy_grid), rhs(4*npy_grid), sol(4*npy_grid))
 
-      iline = 0
       do ix = nx0, nxN
         do iz = -nz, nz
-          iline = iline + 1
+          iline = (ix - nx0)*nlines_z + (iz + nz + 1)
 
           call build_line(ix, iz, src0(:, iz + nz + 1, ix - nx0 + 1), src1(:, iz + nz + 1, ix - nx0 + 1), &
                           line, a, eqm1, eq0, eqn, eqnp1, ny)
 
-          factored_a(:, :, iline) = 0.0d0
-          rhs_base(:, iline) = (0.0d0, 0.0d0)
-          left_couple(:, :, iline) = (0.0d0, 0.0d0)
-          right_couple(:, :, iline) = (0.0d0, 0.0d0)
+          factored_a = 0.0d0
+          rhs_base = (0.0d0, 0.0d0)
+          left_couple = (0.0d0, 0.0d0)
+          right_couple = (0.0d0, 0.0d0)
 
           ! Mirror the first elimination stage of ys_solve_ghost_system:
           ! first eliminate the true ghost rows from the wall rows.
-          lower_rhsm1(iline) = line(-1)
-          lower_rhs0(iline) = line(0) - line(-1)*eq0(-2)/eqm1(-2)
+          lower_rhsm1 = line(-1)
+          lower_rhs0 = line(0) - line(-1)*eq0(-2)/eqm1(-2)
           lower_eq0 = eq0 - eqm1*eq0(-2)/eqm1(-2)
           lower_eq0(-2) = 0.0d0
-          upper_rhsnp1(iline) = line(ny + 1)
-          upper_rhsn(iline) = line(ny) - line(ny + 1)*eqn(2)/eqnp1(2)
+          upper_rhsnp1 = line(ny + 1)
+          upper_rhsn = line(ny) - line(ny + 1)*eqn(2)/eqnp1(2)
           upper_eqn = eqn - eqnp1*eqn(2)/eqnp1(2)
           upper_eqn(2) = 0.0d0
-          eqm1_store(:, iline) = eqm1
-          eqnp1_store(:, iline) = eqnp1
-          lower_eq0_store(:, iline) = lower_eq0
-          upper_eqn_store(:, iline) = upper_eqn
 
           do row = row_start, row_end
-            rhs_base(row - row_start, iline) = line(row)
-            factored_a(row - row_start, :, iline) = 0.0d0
+            rhs_base(row - row_start) = line(row)
+            factored_a(row - row_start, :) = 0.0d0
           end do
 
           if (has_lower_boundary) then
-            rhs_base(0, iline) = rhs_base(0, iline) - line(-1)*a(1, -2)/eqm1(-2)
+            rhs_base(0) = rhs_base(0) - line(-1)*a(1, -2)/eqm1(-2)
             row_coeffs = a(1, -2:2) - eqm1*a(1, -2)/eqm1(-2)
             row_coeffs(-2) = 0.0d0
-            rhs_base(0, iline) = rhs_base(0, iline) - lower_rhs0(iline)*row_coeffs(-1)/lower_eq0(-1)
+            rhs_base(0) = rhs_base(0) - lower_rhs0*row_coeffs(-1)/lower_eq0(-1)
             row_coeffs = row_coeffs - lower_eq0*row_coeffs(-1)/lower_eq0(-1)
             row_coeffs(-1) = 0.0d0
-            factored_a(0, 0:2, iline) = row_coeffs(0:2)
+            factored_a(0, 0:2) = row_coeffs(0:2)
 
-            rhs_base(1, iline) = rhs_base(1, iline) - lower_rhs0(iline)*a(2, -2)/lower_eq0(-1)
+            rhs_base(1) = rhs_base(1) - lower_rhs0*a(2, -2)/lower_eq0(-1)
             row_coeffs = a(2, -2:2)
             row_coeffs(-2:1) = row_coeffs(-2:1) - lower_eq0(-1:2)*a(2, -2)/lower_eq0(-1)
             row_coeffs(-2) = 0.0d0
-            factored_a(1, -1:2, iline) = row_coeffs(-1:2)
+            factored_a(1, -1:2) = row_coeffs(-1:2)
           end if
 
           if (has_upper_boundary) then
-            rhs_base(active_n - 1, iline) = rhs_base(active_n - 1, iline) - line(ny + 1)*a(ny - 1, 2)/eqnp1(2)
+            rhs_base(active_n - 1) = rhs_base(active_n - 1) - line(ny + 1)*a(ny - 1, 2)/eqnp1(2)
             row_coeffs = a(ny - 1, -2:2) - eqnp1*a(ny - 1, 2)/eqnp1(2)
             row_coeffs(2) = 0.0d0
-            rhs_base(active_n - 1, iline) = rhs_base(active_n - 1, iline) - upper_rhsn(iline)*row_coeffs(1)/upper_eqn(1)
+            rhs_base(active_n - 1) = rhs_base(active_n - 1) - upper_rhsn*row_coeffs(1)/upper_eqn(1)
             row_coeffs = row_coeffs - upper_eqn*row_coeffs(1)/upper_eqn(1)
             row_coeffs(1) = 0.0d0
-            factored_a(active_n - 1, -2:0, iline) = row_coeffs(-2:0)
+            factored_a(active_n - 1, -2:0) = row_coeffs(-2:0)
 
-            rhs_base(active_n - 2, iline) = rhs_base(active_n - 2, iline) - upper_rhsn(iline)*a(ny - 2, 2)/upper_eqn(1)
+            rhs_base(active_n - 2) = rhs_base(active_n - 2) - upper_rhsn*a(ny - 2, 2)/upper_eqn(1)
             row_coeffs = a(ny - 2, -2:2)
             row_coeffs(-1:2) = row_coeffs(-1:2) - upper_eqn(-2:1)*a(ny - 2, 2)/upper_eqn(1)
             row_coeffs(2) = 0.0d0
-            factored_a(active_n - 2, -2:1, iline) = row_coeffs(-2:1)
+            factored_a(active_n - 2, -2:1) = row_coeffs(-2:1)
           end if
 
           do row = row_start, row_end
@@ -304,26 +297,26 @@ contains
             do col = -2, 2
               global_col = row + col
               if (global_col < row_start) then
-                if (global_col == row_start - 2) left_couple(idx, 1, iline) = cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
-                if (global_col == row_start - 1) left_couple(idx, 2, iline) = cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
+                if (global_col == row_start - 2) left_couple(idx, 1) = cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
+                if (global_col == row_start - 1) left_couple(idx, 2) = cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
               else if (global_col > row_end) then
-                if (global_col == row_end + 1) right_couple(idx, 1, iline) = cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
-                if (global_col == row_end + 2) right_couple(idx, 2, iline) = cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
+                if (global_col == row_end + 1) right_couple(idx, 1) = cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
+                if (global_col == row_end + 2) right_couple(idx, 2) = cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
               else
-                factored_a(idx, col, iline) = row_coeffs(col)
+                factored_a(idx, col) = row_coeffs(col)
               end if
             end do
           end do
 
-          call ys_factor_penta(factored_a(:, :, iline))
+          call ys_factor_penta(factored_a)
           ! One block solve produces the particular solution plus the four
           ! interface response vectors needed by the reduced system.
-          reduced_rhs(:, 1) = rhs_base(:, iline)
-          reduced_rhs(:, 2) = -left_couple(:, 1, iline)
-          reduced_rhs(:, 3) = -left_couple(:, 2, iline)
-          reduced_rhs(:, 4) = -right_couple(:, 1, iline)
-          reduced_rhs(:, 5) = -right_couple(:, 2, iline)
-          call ys_solve_factored_penta_multi(reduced_rhs, factored_a(:, :, iline))
+          reduced_rhs(:, 1) = rhs_base
+          reduced_rhs(:, 2) = -left_couple(:, 1)
+          reduced_rhs(:, 3) = -left_couple(:, 2)
+          reduced_rhs(:, 4) = -right_couple(:, 1)
+          reduced_rhs(:, 5) = -right_couple(:, 2)
+          call ys_solve_factored_penta_multi(reduced_rhs, factored_a)
 
           packed_send(1:4, iline) = [reduced_rhs(0, 1), reduced_rhs(1, 1), &
                                      reduced_rhs(active_n - 2, 1), reduced_rhs(active_n - 1, 1)]
@@ -341,10 +334,83 @@ contains
 #ifdef HAVE_MPI
       call MPI_Allgather(packed_send, 20*nlines, MPI_DOUBLE_COMPLEX, packed_recv, 20*nlines, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
 
-      iline = 0
       do ix = nx0, nxN
         do iz = -nz, nz
-          iline = iline + 1
+          iline = (ix - nx0)*nlines_z + (iz + nz + 1)
+
+          call build_line(ix, iz, src0(:, iz + nz + 1, ix - nx0 + 1), src1(:, iz + nz + 1, ix - nx0 + 1), &
+                          line, a, eqm1, eq0, eqn, eqnp1, ny)
+
+          factored_a = 0.0d0
+          rhs_base = (0.0d0, 0.0d0)
+          left_couple = (0.0d0, 0.0d0)
+          right_couple = (0.0d0, 0.0d0)
+
+          lower_rhsm1 = line(-1)
+          lower_rhs0 = line(0) - line(-1)*eq0(-2)/eqm1(-2)
+          lower_eq0 = eq0 - eqm1*eq0(-2)/eqm1(-2)
+          lower_eq0(-2) = 0.0d0
+          upper_rhsnp1 = line(ny + 1)
+          upper_rhsn = line(ny) - line(ny + 1)*eqn(2)/eqnp1(2)
+          upper_eqn = eqn - eqnp1*eqn(2)/eqnp1(2)
+          upper_eqn(2) = 0.0d0
+
+          do row = row_start, row_end
+            rhs_base(row - row_start) = line(row)
+            factored_a(row - row_start, :) = 0.0d0
+          end do
+
+          if (has_lower_boundary) then
+            rhs_base(0) = rhs_base(0) - line(-1)*a(1, -2)/eqm1(-2)
+            row_coeffs = a(1, -2:2) - eqm1*a(1, -2)/eqm1(-2)
+            row_coeffs(-2) = 0.0d0
+            rhs_base(0) = rhs_base(0) - lower_rhs0*row_coeffs(-1)/lower_eq0(-1)
+            row_coeffs = row_coeffs - lower_eq0*row_coeffs(-1)/lower_eq0(-1)
+            row_coeffs(-1) = 0.0d0
+            factored_a(0, 0:2) = row_coeffs(0:2)
+
+            rhs_base(1) = rhs_base(1) - lower_rhs0*a(2, -2)/lower_eq0(-1)
+            row_coeffs = a(2, -2:2)
+            row_coeffs(-2:1) = row_coeffs(-2:1) - lower_eq0(-1:2)*a(2, -2)/lower_eq0(-1)
+            row_coeffs(-2) = 0.0d0
+            factored_a(1, -1:2) = row_coeffs(-1:2)
+          end if
+
+          if (has_upper_boundary) then
+            rhs_base(active_n - 1) = rhs_base(active_n - 1) - line(ny + 1)*a(ny - 1, 2)/eqnp1(2)
+            row_coeffs = a(ny - 1, -2:2) - eqnp1*a(ny - 1, 2)/eqnp1(2)
+            row_coeffs(2) = 0.0d0
+            rhs_base(active_n - 1) = rhs_base(active_n - 1) - upper_rhsn*row_coeffs(1)/upper_eqn(1)
+            row_coeffs = row_coeffs - upper_eqn*row_coeffs(1)/upper_eqn(1)
+            row_coeffs(1) = 0.0d0
+            factored_a(active_n - 1, -2:0) = row_coeffs(-2:0)
+
+            rhs_base(active_n - 2) = rhs_base(active_n - 2) - upper_rhsn*a(ny - 2, 2)/upper_eqn(1)
+            row_coeffs = a(ny - 2, -2:2)
+            row_coeffs(-1:2) = row_coeffs(-1:2) - upper_eqn(-2:1)*a(ny - 2, 2)/upper_eqn(1)
+            row_coeffs(2) = 0.0d0
+            factored_a(active_n - 2, -2:1) = row_coeffs(-2:1)
+          end if
+
+          do row = row_start, row_end
+            idx = row - row_start
+            if ((has_lower_boundary .and. row <= 2) .or. (has_upper_boundary .and. row >= ny - 2)) cycle
+            row_coeffs = a(row, -2:2)
+            do col = -2, 2
+              global_col = row + col
+              if (global_col < row_start) then
+                if (global_col == row_start - 2) left_couple(idx, 1) = cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
+                if (global_col == row_start - 1) left_couple(idx, 2) = cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
+              else if (global_col > row_end) then
+                if (global_col == row_end + 1) right_couple(idx, 1) = cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
+                if (global_col == row_end + 2) right_couple(idx, 2) = cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
+              else
+                factored_a(idx, col) = row_coeffs(col)
+              end if
+            end do
+          end do
+
+          call ys_factor_penta(factored_a)
           mat = (0.0d0, 0.0d0)
           rhs = (0.0d0, 0.0d0)
           do iblock = 0, npy_grid - 1
@@ -374,9 +440,9 @@ contains
           if (ipy > 0) u_left = sol(row0 - 1:row0)
           if (ipy < npy_grid - 1) u_right = sol(row0 + 5:row0 + 6)
 
-          reduced_rhs(:, 1) = rhs_base(:, iline) - left_couple(:, 1, iline)*u_left(1) - left_couple(:, 2, iline)*u_left(2) - &
-                              right_couple(:, 1, iline)*u_right(1) - right_couple(:, 2, iline)*u_right(2)
-          call ys_solve_factored_penta_multi(reduced_rhs(:, 1:1), factored_a(:, :, iline))
+          reduced_rhs(:, 1) = rhs_base - left_couple(:, 1)*u_left(1) - left_couple(:, 2)*u_left(2) - &
+                              right_couple(:, 1)*u_right(1) - right_couple(:, 2)*u_right(2)
+          call ys_solve_factored_penta_multi(reduced_rhs(:, 1:1), factored_a)
 
           local_block = (0.0d0, 0.0d0)
           do row = row_start, row_end
@@ -386,25 +452,21 @@ contains
           ! Reconstruct the wall and ghost rows in the same order as
           ! ys_solve_ghost_system once the local interior block is known.
           if (has_lower_boundary) then
-            eqm1 = eqm1_store(:, iline)
-            lower_eq0 = lower_eq0_store(:, iline)
-            local_block(2) = (lower_rhs0(iline) - &
+            local_block(2) = (lower_rhs0 - &
                               sum(lower_eq0(0:2)*[local_block(3), local_block(4), local_block(5)]))/lower_eq0(-1)
-            local_block(1) = (lower_rhsm1(iline) - &
+            local_block(1) = (lower_rhsm1 - &
                               sum(eqm1(-1:2)*[local_block(2), local_block(3), local_block(4), local_block(5)]))/eqm1(-2)
           end if
           if (has_upper_boundary) then
-            eqnp1 = eqnp1_store(:, iline)
-            upper_eqn = upper_eqn_store(:, iline)
-            local_block(ny - (yl0 - 2) + 1) = (upper_rhsn(iline) - sum(upper_eqn(-2:0)*[ &
-                                                                       local_block(ny - 3 - (yl0 - 2) + 1), &
-                                                                       local_block(ny - 2 - (yl0 - 2) + 1), &
-                                                                       local_block(ny - 1 - (yl0 - 2) + 1)]))/upper_eqn(1)
-            local_block(ny + 1 - (yl0 - 2) + 1) = (upper_rhsnp1(iline) - sum(eqnp1(-2:1)*[ &
-                                                                             local_block(ny - 3 - (yl0 - 2) + 1), &
-                                                                             local_block(ny - 2 - (yl0 - 2) + 1), &
-                                                                             local_block(ny - 1 - (yl0 - 2) + 1), &
-                                                                             local_block(ny - (yl0 - 2) + 1)]))/eqnp1(2)
+            local_block(ny - (yl0 - 2) + 1) = (upper_rhsn - sum(upper_eqn(-2:0)*[ &
+                                                                local_block(ny - 3 - (yl0 - 2) + 1), &
+                                                                local_block(ny - 2 - (yl0 - 2) + 1), &
+                                                                local_block(ny - 1 - (yl0 - 2) + 1)]))/upper_eqn(1)
+            local_block(ny + 1 - (yl0 - 2) + 1) = (upper_rhsnp1 - sum(eqnp1(-2:1)*[ &
+                                                                      local_block(ny - 3 - (yl0 - 2) + 1), &
+                                                                      local_block(ny - 2 - (yl0 - 2) + 1), &
+                                                                      local_block(ny - 1 - (yl0 - 2) + 1), &
+                                                                      local_block(ny - (yl0 - 2) + 1)]))/eqnp1(2)
           end if
 
           dst_xz(:, iz + nz + 1, ix - nx0 + 1) = local_block
@@ -412,9 +474,7 @@ contains
       end do
 #endif
 
-      deallocate (factored_a, rhs_base, left_couple, right_couple, packed_send, packed_recv)
-      deallocate (lower_rhsm1, lower_rhs0, upper_rhsn, upper_rhsnp1, eqm1_store, eqnp1_store, lower_eq0_store, upper_eqn_store)
-      deallocate (reduced_rhs, mat, rhs, sol)
+      deallocate (factored_a, rhs_base, left_couple, right_couple, packed_send, packed_recv, reduced_rhs, mat, rhs, sol)
     end if
 
     call allgather_y_blocks_to_xz_full(dst_xz, dst_xz_full)
