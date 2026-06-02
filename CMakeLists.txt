@@ -204,7 +204,7 @@ add_test(NAME post_convvelo_1rank
 )
 set_tests_properties(post_convvelo_1rank PROPERTIES PROCESSORS 1)
 
-add_test(NAME y_pencil_transpose_2rank
+add_test(NAME reduced_ghost_backend_2rank
     COMMAND ${MPIEXEC_EXECUTABLE}
             ${MPIEXEC_NUMPROC_FLAG} 2
             ${MPIEXEC_PREFLAGS}
@@ -212,7 +212,7 @@ add_test(NAME y_pencil_transpose_2rank
             ${MPIEXEC_POSTFLAGS}
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
-set_tests_properties(y_pencil_transpose_2rank PROPERTIES PROCESSORS 2)
+set_tests_properties(reduced_ghost_backend_2rank PROPERTIES PROCESSORS 2)
 
 # --------------------------------------------------------------------
 # Compiler flags

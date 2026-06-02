@@ -12,10 +12,9 @@ MODULE pressure_output
                      ny, nz, nxd, izd, VVdz, VVdx
   USE ffts, ONLY: FFT, IFT, RFT, HFT
 #endif
-  USE mpi_transpose, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, ierr, yl0, ylN, ylB, zpy0, zpyB, &
+  USE mpi_transpose, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, ierr, yl0, ylN, ylB, &
                            sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, &
-                           fft_transpose_is_local, repack_zTOx_local, repack_xTOz_local, &
-                           transpose_xz_to_y_pencil, transpose_y_pencil_to_xz, allgather_y_blocks_to_xz_full
+                           fft_transpose_is_local, repack_zTOx_local, repack_xTOz_local
   USE y_line_solvers, ONLY: ys_solve_ghost_field
 #ifdef HAVE_MPI
   USE mpi_f08
