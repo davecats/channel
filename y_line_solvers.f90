@@ -183,13 +183,15 @@ contains
     complex(C_DOUBLE_COMPLEX), intent(out) :: dst(:, :, :)
     procedure(ys_build_ghost_line) :: build_line
     complex(C_DOUBLE_COMPLEX), allocatable :: dst_xz(:, :, :), dst_xz_full(:, :, :)
-    complex(C_DOUBLE_COMPLEX) :: line(-1:ny + 1)
+    complex(C_DOUBLE_COMPLEX) :: line(-1:ny + 1), local_line(-1:ny + 1)
     complex(C_DOUBLE_COMPLEX) :: local_block(ylB)
     complex(C_DOUBLE_COMPLEX) :: packed_remote(20), u_left(2), u_right(2)
-    complex(C_DOUBLE_COMPLEX), allocatable :: factored_a(:, :, :), rhs_base(:, :), left_couple(:, :, :), right_couple(:, :, :)
+    real(C_DOUBLE), allocatable :: factored_a(:, :, :)
+    complex(C_DOUBLE_COMPLEX), allocatable :: rhs_base(:, :), left_couple(:, :, :), right_couple(:, :, :)
     complex(C_DOUBLE_COMPLEX), allocatable :: reduced_rhs(:, :), packed_send(:, :), packed_recv(:, :, :), mat(:, :), rhs(:), sol(:)
     complex(C_DOUBLE_COMPLEX), allocatable :: lower_rhsm1(:), lower_rhs0(:), upper_rhsn(:), upper_rhsnp1(:)
     real(C_DOUBLE) :: a(1:ny + 1, -2:2), eqm1(-2:2), eq0(-2:2), eqn(-2:2), eqnp1(-2:2)
+    real(C_DOUBLE) :: local_a(1:ny + 1, -2:2), local_eqm1(-2:2), local_eq0(-2:2), local_eqn(-2:2), local_eqnp1(-2:2)
     real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-2:2), upper_eqn(-2:2)
     real(C_DOUBLE), allocatable :: eqm1_store(:, :), eqnp1_store(:, :), lower_eq0_store(:, :), upper_eqn_store(:, :)
     integer(C_INT) :: ix, iz, iline, nlines, row_start, row_end, active_n, row, idx, col, global_col, iblock, row0
@@ -211,18 +213,24 @@ contains
         do iz = -nz, nz
           call build_line(ix, iz, src0(:, iz + nz + 1, ix - nx0 + 1), src1(:, iz + nz + 1, ix - nx0 + 1), &
                           line, a, eqm1, eq0, eqn, eqnp1, ny)
-          call ys_solve_ghost_block_local(line, a, eqm1, eq0, eqn, eqnp1, ny, local_block)
-          dst_xz(:, iz + nz + 1, ix - nx0 + 1) = local_block
+          local_line = line
+          local_a = a
+          local_eqm1 = eqm1
+          local_eq0 = eq0
+          local_eqn = eqn
+          local_eqnp1 = eqnp1
+          call ys_solve_ghost_system(local_line, local_a, local_eqm1, local_eq0, local_eqn, local_eqnp1, ny)
+          dst_xz(:, iz + nz + 1, ix - nx0 + 1) = local_line(yl0 - 2:ylN - 2)
         end do
       end do
     else
       nlines = nxB*(2*nz + 1)
-      allocate (factored_a(active_n, active_n, nlines), rhs_base(active_n, nlines))
-      allocate (left_couple(active_n, 2, nlines), right_couple(active_n, 2, nlines))
+      allocate (factored_a(0:active_n - 1, -2:2, nlines), rhs_base(0:active_n - 1, nlines))
+      allocate (left_couple(0:active_n - 1, 2, nlines), right_couple(0:active_n - 1, 2, nlines))
       allocate (packed_send(20, nlines), packed_recv(20, nlines, npy_grid))
       allocate (lower_rhsm1(nlines), lower_rhs0(nlines), upper_rhsn(nlines), upper_rhsnp1(nlines))
       allocate (eqm1_store(5, nlines), eqnp1_store(5, nlines), lower_eq0_store(5, nlines), upper_eqn_store(5, nlines))
-      allocate (reduced_rhs(active_n, 5), mat(4*npy_grid, 4*npy_grid), rhs(4*npy_grid), sol(4*npy_grid))
+      allocate (reduced_rhs(0:active_n - 1, 5), mat(4*npy_grid, 4*npy_grid), rhs(4*npy_grid), sol(4*npy_grid))
 
       iline = 0
       do ix = nx0, nxN
@@ -232,11 +240,13 @@ contains
           call build_line(ix, iz, src0(:, iz + nz + 1, ix - nx0 + 1), src1(:, iz + nz + 1, ix - nx0 + 1), &
                           line, a, eqm1, eq0, eqn, eqnp1, ny)
 
-          factored_a(:, :, iline) = (0.0d0, 0.0d0)
+          factored_a(:, :, iline) = 0.0d0
           rhs_base(:, iline) = (0.0d0, 0.0d0)
           left_couple(:, :, iline) = (0.0d0, 0.0d0)
           right_couple(:, :, iline) = (0.0d0, 0.0d0)
 
+          ! Mirror the first elimination stage of ys_solve_ghost_system:
+          ! first eliminate the true ghost rows from the wall rows.
           lower_rhsm1(iline) = line(-1)
           lower_rhs0(iline) = line(0) - line(-1)*eq0(-2)/eqm1(-2)
           lower_eq0 = eq0 - eqm1*eq0(-2)/eqm1(-2)
@@ -251,40 +261,46 @@ contains
           upper_eqn_store(:, iline) = upper_eqn
 
           do row = row_start, row_end
-            idx = row - row_start + 1
-            rhs_base(idx, iline) = line(row)
+            rhs_base(row - row_start, iline) = line(row)
+            factored_a(row - row_start, :, iline) = 0.0d0
+          end do
+
+          if (has_lower_boundary) then
+            rhs_base(0, iline) = rhs_base(0, iline) - line(-1)*a(1, -2)/eqm1(-2)
+            row_coeffs = a(1, -2:2) - eqm1*a(1, -2)/eqm1(-2)
+            row_coeffs(-2) = 0.0d0
+            rhs_base(0, iline) = rhs_base(0, iline) - lower_rhs0(iline)*row_coeffs(-1)/lower_eq0(-1)
+            row_coeffs = row_coeffs - lower_eq0*row_coeffs(-1)/lower_eq0(-1)
+            row_coeffs(-1) = 0.0d0
+            factored_a(0, 0:2, iline) = row_coeffs(0:2)
+
+            rhs_base(1, iline) = rhs_base(1, iline) - lower_rhs0(iline)*a(2, -2)/lower_eq0(-1)
+            row_coeffs = a(2, -2:2)
+            row_coeffs(-2:1) = row_coeffs(-2:1) - lower_eq0(-1:2)*a(2, -2)/lower_eq0(-1)
+            row_coeffs(-2) = 0.0d0
+            factored_a(1, -1:2, iline) = row_coeffs(-1:2)
+          end if
+
+          if (has_upper_boundary) then
+            rhs_base(active_n - 1, iline) = rhs_base(active_n - 1, iline) - line(ny + 1)*a(ny - 1, 2)/eqnp1(2)
+            row_coeffs = a(ny - 1, -2:2) - eqnp1*a(ny - 1, 2)/eqnp1(2)
+            row_coeffs(2) = 0.0d0
+            rhs_base(active_n - 1, iline) = rhs_base(active_n - 1, iline) - upper_rhsn(iline)*row_coeffs(1)/upper_eqn(1)
+            row_coeffs = row_coeffs - upper_eqn*row_coeffs(1)/upper_eqn(1)
+            row_coeffs(1) = 0.0d0
+            factored_a(active_n - 1, -2:0, iline) = row_coeffs(-2:0)
+
+            rhs_base(active_n - 2, iline) = rhs_base(active_n - 2, iline) - upper_rhsn(iline)*a(ny - 2, 2)/upper_eqn(1)
+            row_coeffs = a(ny - 2, -2:2)
+            row_coeffs(-1:2) = row_coeffs(-1:2) - upper_eqn(-2:1)*a(ny - 2, 2)/upper_eqn(1)
+            row_coeffs(2) = 0.0d0
+            factored_a(active_n - 2, -2:1, iline) = row_coeffs(-2:1)
+          end if
+
+          do row = row_start, row_end
+            idx = row - row_start
+            if ((has_lower_boundary .and. row <= 2) .or. (has_upper_boundary .and. row >= ny - 2)) cycle
             row_coeffs = a(row, -2:2)
-
-            if (has_lower_boundary) then
-              if (row == 1) then
-                rhs_base(idx, iline) = rhs_base(idx, iline) - line(-1)*a(1, -2)/eqm1(-2)
-                row_coeffs = row_coeffs - eqm1*a(1, -2)/eqm1(-2)
-                row_coeffs(-2) = 0.0d0
-                rhs_base(idx, iline) = rhs_base(idx, iline) - lower_rhs0(iline)*row_coeffs(-1)/lower_eq0(-1)
-                row_coeffs = row_coeffs - lower_eq0*row_coeffs(-1)/lower_eq0(-1)
-                row_coeffs(-1) = 0.0d0
-              else if (row == 2) then
-                rhs_base(idx, iline) = rhs_base(idx, iline) - lower_rhs0(iline)*a(2, -2)/lower_eq0(-1)
-                row_coeffs(-2:1) = row_coeffs(-2:1) - lower_eq0(-1:2)*a(2, -2)/lower_eq0(-1)
-                row_coeffs(-2) = 0.0d0
-              end if
-            end if
-
-            if (has_upper_boundary) then
-              if (row == ny - 1) then
-                rhs_base(idx, iline) = rhs_base(idx, iline) - line(ny + 1)*a(ny - 1, 2)/eqnp1(2)
-                row_coeffs = row_coeffs - eqnp1*a(ny - 1, 2)/eqnp1(2)
-                row_coeffs(2) = 0.0d0
-                rhs_base(idx, iline) = rhs_base(idx, iline) - upper_rhsn(iline)*row_coeffs(1)/upper_eqn(1)
-                row_coeffs = row_coeffs - upper_eqn*row_coeffs(1)/upper_eqn(1)
-                row_coeffs(1) = 0.0d0
-              else if (row == ny - 2) then
-                rhs_base(idx, iline) = rhs_base(idx, iline) - upper_rhsn(iline)*a(ny - 2, 2)/upper_eqn(1)
-                row_coeffs(-1:2) = row_coeffs(-1:2) - upper_eqn(-2:1)*a(ny - 2, 2)/upper_eqn(1)
-                row_coeffs(2) = 0.0d0
-              end if
-            end if
-
             do col = -2, 2
               global_col = row + col
               if (global_col < row_start) then
@@ -294,29 +310,31 @@ contains
                 if (global_col == row_end + 1) right_couple(idx, 1, iline) = cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
                 if (global_col == row_end + 2) right_couple(idx, 2, iline) = cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
               else
-                factored_a(idx, global_col - row_start + 1, iline) = cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
+                factored_a(idx, col, iline) = row_coeffs(col)
               end if
             end do
           end do
 
-          call ys_factor_banded_dense(factored_a(:, :, iline), 2_C_INT)
+          call ys_factor_penta(factored_a(:, :, iline))
+          ! One block solve produces the particular solution plus the four
+          ! interface response vectors needed by the reduced system.
           reduced_rhs(:, 1) = rhs_base(:, iline)
           reduced_rhs(:, 2) = -left_couple(:, 1, iline)
           reduced_rhs(:, 3) = -left_couple(:, 2, iline)
           reduced_rhs(:, 4) = -right_couple(:, 1, iline)
           reduced_rhs(:, 5) = -right_couple(:, 2, iline)
-          call ys_solve_factored_banded_dense_multi(factored_a(:, :, iline), reduced_rhs, 2_C_INT)
+          call ys_solve_factored_penta_multi(reduced_rhs, factored_a(:, :, iline))
 
-          packed_send(1:4, iline) = [reduced_rhs(1, 1), reduced_rhs(2, 1), &
-                                     reduced_rhs(active_n - 1, 1), reduced_rhs(active_n, 1)]
-          packed_send(5:12, iline) = [reduced_rhs(1, 2), reduced_rhs(2, 2), &
-                                      reduced_rhs(active_n - 1, 2), reduced_rhs(active_n, 2), &
-                                      reduced_rhs(1, 3), reduced_rhs(2, 3), &
-                                      reduced_rhs(active_n - 1, 3), reduced_rhs(active_n, 3)]
-          packed_send(13:20, iline) = [reduced_rhs(1, 4), reduced_rhs(2, 4), &
-                                       reduced_rhs(active_n - 1, 4), reduced_rhs(active_n, 4), &
-                                       reduced_rhs(1, 5), reduced_rhs(2, 5), &
-                                       reduced_rhs(active_n - 1, 5), reduced_rhs(active_n, 5)]
+          packed_send(1:4, iline) = [reduced_rhs(0, 1), reduced_rhs(1, 1), &
+                                     reduced_rhs(active_n - 2, 1), reduced_rhs(active_n - 1, 1)]
+          packed_send(5:12, iline) = [reduced_rhs(0, 2), reduced_rhs(1, 2), &
+                                      reduced_rhs(active_n - 2, 2), reduced_rhs(active_n - 1, 2), &
+                                      reduced_rhs(0, 3), reduced_rhs(1, 3), &
+                                      reduced_rhs(active_n - 2, 3), reduced_rhs(active_n - 1, 3)]
+          packed_send(13:20, iline) = [reduced_rhs(0, 4), reduced_rhs(1, 4), &
+                                       reduced_rhs(active_n - 2, 4), reduced_rhs(active_n - 1, 4), &
+                                       reduced_rhs(0, 5), reduced_rhs(1, 5), &
+                                       reduced_rhs(active_n - 2, 5), reduced_rhs(active_n - 1, 5)]
         end do
       end do
 
@@ -358,13 +376,15 @@ contains
 
           reduced_rhs(:, 1) = rhs_base(:, iline) - left_couple(:, 1, iline)*u_left(1) - left_couple(:, 2, iline)*u_left(2) - &
                               right_couple(:, 1, iline)*u_right(1) - right_couple(:, 2, iline)*u_right(2)
-          call ys_solve_factored_banded_dense(factored_a(:, :, iline), reduced_rhs(:, 1), 2_C_INT)
+          call ys_solve_factored_penta_multi(reduced_rhs(:, 1:1), factored_a(:, :, iline))
 
           local_block = (0.0d0, 0.0d0)
           do row = row_start, row_end
-            local_block(row - (yl0 - 2) + 1) = reduced_rhs(row - row_start + 1, 1)
+            local_block(row - (yl0 - 2) + 1) = reduced_rhs(row - row_start, 1)
           end do
 
+          ! Reconstruct the wall and ghost rows in the same order as
+          ! ys_solve_ghost_system once the local interior block is known.
           if (has_lower_boundary) then
             eqm1 = eqm1_store(:, iline)
             lower_eq0 = lower_eq0_store(:, iline)
@@ -408,25 +428,6 @@ contains
     deallocate (dst_xz, dst_xz_full)
   end subroutine ys_solve_ghost_field_reduced
 
-  subroutine ys_solve_ghost_block_local(line, a, eqm1, eq0, eqn, eqnp1, ny, local_block)
-    integer(C_INT), intent(in) :: ny
-    complex(C_DOUBLE_COMPLEX), intent(in) :: line(-1:ny + 1)
-    real(C_DOUBLE), intent(in) :: a(1:ny + 1, -2:2)
-    real(C_DOUBLE), intent(in) :: eqm1(-2:2), eq0(-2:2), eqn(-2:2), eqnp1(-2:2)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: local_block(ylB)
-    complex(C_DOUBLE_COMPLEX) :: work(-1:ny + 1)
-    real(C_DOUBLE) :: amat(1:ny + 1, -2:2), beqm1(-2:2), beq0(-2:2), beqn(-2:2), beqnp1(-2:2)
-
-    work = line
-    amat = a
-    beqm1 = eqm1
-    beq0 = eq0
-    beqn = eqn
-    beqnp1 = eqnp1
-    call ys_solve_ghost_system(work, amat, beqm1, beq0, beqn, beqnp1, ny)
-    local_block = work(yl0 - 2:ylN - 2)
-  end subroutine ys_solve_ghost_block_local
-
   subroutine ys_solve_dense_complex(mat, rhs)
     complex(C_DOUBLE_COMPLEX), intent(inout) :: mat(:, :)
     complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs(:)
@@ -465,67 +466,53 @@ contains
     end do
   end subroutine ys_solve_dense_complex
 
-  subroutine ys_factor_banded_dense(mat, half_bw)
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: mat(:, :)
-    integer(C_INT), intent(in) :: half_bw
-    integer(C_INT) :: n, i, j, k, jmax, kmax
-    complex(C_DOUBLE_COMPLEX) :: factor
+  subroutine ys_factor_penta(a)
+    real(C_DOUBLE), intent(inout) :: a(0:, -2:)
+    integer(C_INT) :: n, i
+    real(C_DOUBLE) :: piv, factor
 
-    n = int(size(mat, 1), C_INT)
-    do i = 1, n
-      jmax = min(n, i + half_bw)
-      do j = i + 1, jmax
-        factor = mat(j, i)/mat(i, i)
-        mat(j, i) = factor
-        kmax = min(n, min(i + half_bw, j + half_bw))
-        do k = i + 1, kmax
-          mat(j, k) = mat(j, k) - factor*mat(i, k)
-        end do
-      end do
+    ! Generic pentadiagonal LU on the local reduced block. The wall/ghost rows
+    ! are already eliminated outside this factorization, so this is a pure
+    ! interior solve rather than the boundary-aware variant used elsewhere.
+    n = size(a, 1)
+    do i = 0, n - 1
+      piv = a(i, 0)
+      a(i, 0) = 1.0d0/piv
+
+      if (i + 1 < n) then
+        factor = a(i + 1, -1)*a(i, 0)
+        a(i + 1, -1) = factor
+        a(i + 1, 0) = a(i + 1, 0) - factor*a(i, 1)
+        if (i + 2 < n) a(i + 1, 1) = a(i + 1, 1) - factor*a(i, 2)
+      end if
+
+      if (i + 2 < n) then
+        factor = a(i + 2, -2)*a(i, 0)
+        a(i + 2, -2) = factor
+        a(i + 2, -1) = a(i + 2, -1) - factor*a(i, 1)
+        a(i + 2, 0) = a(i + 2, 0) - factor*a(i, 2)
+      end if
     end do
-  end subroutine ys_factor_banded_dense
+  end subroutine ys_factor_penta
 
-  subroutine ys_solve_factored_banded_dense(mat, rhs, half_bw)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: mat(:, :)
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs(:)
-    integer(C_INT), intent(in) :: half_bw
-    integer(C_INT) :: n, i, j
+  subroutine ys_solve_factored_penta_multi(rhs, a)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs(0:, :)
+    real(C_DOUBLE), intent(in) :: a(0:, -2:)
+    integer(C_INT) :: n, nrhs, i
 
-    n = int(size(rhs), C_INT)
-    do i = 1, n
-      do j = max(1_C_INT, i - half_bw), i - 1
-        rhs(i) = rhs(i) - mat(i, j)*rhs(j)
-      end do
-    end do
+    n = size(a, 1)
+    nrhs = size(rhs, 2)
 
-    do i = n, 1, -1
-      do j = i + 1, min(n, i + half_bw)
-        rhs(i) = rhs(i) - mat(i, j)*rhs(j)
-      end do
-      rhs(i) = rhs(i)/mat(i, i)
-    end do
-  end subroutine ys_solve_factored_banded_dense
-
-  subroutine ys_solve_factored_banded_dense_multi(mat, rhs, half_bw)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: mat(:, :)
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs(:, :)
-    integer(C_INT), intent(in) :: half_bw
-    integer(C_INT) :: n, nrhs, i, j
-
-    n = int(size(rhs, 1), C_INT)
-    nrhs = int(size(rhs, 2), C_INT)
-    do i = 1, n
-      do j = max(1_C_INT, i - half_bw), i - 1
-        rhs(i, 1:nrhs) = rhs(i, 1:nrhs) - mat(i, j)*rhs(j, 1:nrhs)
-      end do
+    do i = 0, n - 1
+      if (i >= 2) rhs(i, 1:nrhs) = rhs(i, 1:nrhs) - a(i, -2)*rhs(i - 2, 1:nrhs)
+      if (i >= 1) rhs(i, 1:nrhs) = rhs(i, 1:nrhs) - a(i, -1)*rhs(i - 1, 1:nrhs)
     end do
 
-    do i = n, 1, -1
-      do j = i + 1, min(n, i + half_bw)
-        rhs(i, 1:nrhs) = rhs(i, 1:nrhs) - mat(i, j)*rhs(j, 1:nrhs)
-      end do
-      rhs(i, 1:nrhs) = rhs(i, 1:nrhs)/mat(i, i)
+    do i = n - 1, 0, -1
+      if (i + 1 < n) rhs(i, 1:nrhs) = rhs(i, 1:nrhs) - a(i, 1)*rhs(i + 1, 1:nrhs)
+      if (i + 2 < n) rhs(i, 1:nrhs) = rhs(i, 1:nrhs) - a(i, 2)*rhs(i + 2, 1:nrhs)
+      rhs(i, 1:nrhs) = rhs(i, 1:nrhs)*a(i, 0)
     end do
-  end subroutine ys_solve_factored_banded_dense_multi
+  end subroutine ys_solve_factored_penta_multi
 
 end module y_line_solvers
