@@ -188,13 +188,16 @@ contains
     complex(C_DOUBLE_COMPLEX) :: packed_remote(20), u_left(2), u_right(2)
     real(C_DOUBLE), allocatable :: factored_a(:, :)
     complex(C_DOUBLE_COMPLEX), allocatable :: rhs_base(:), left_couple(:, :), right_couple(:, :)
-    complex(C_DOUBLE_COMPLEX), allocatable :: reduced_rhs(:, :), packed_send(:, :), packed_recv(:, :, :), mat(:, :), rhs(:), sol(:)
+    complex(C_DOUBLE_COMPLEX), allocatable :: reduced_rhs(:, :), reduced_store(:, :, :)
+    complex(C_DOUBLE_COMPLEX), allocatable :: packed_send(:, :), packed_recv(:, :, :), mat(:, :), rhs(:), sol(:)
     complex(C_DOUBLE_COMPLEX) :: lower_rhsm1, lower_rhs0, upper_rhsn, upper_rhsnp1
     real(C_DOUBLE) :: a(1:ny + 1, -2:2), eqm1(-2:2), eq0(-2:2), eqn(-2:2), eqnp1(-2:2)
     real(C_DOUBLE) :: local_a(1:ny + 1, -2:2), local_eqm1(-2:2), local_eq0(-2:2), local_eqn(-2:2), local_eqnp1(-2:2)
     real(C_DOUBLE) :: lower_eq0(-2:2), upper_eqn(-2:2)
     integer(C_INT) :: ix, iz, iline, nlines, nlines_z, row_start, row_end, active_n, row, iblock, row0
     logical :: has_lower_boundary, has_upper_boundary
+    real(C_DOUBLE), allocatable :: eqm1_store(:, :), eqnp1_store(:, :), lower_eq0_store(:, :), upper_eqn_store(:, :)
+    complex(C_DOUBLE_COMPLEX), allocatable :: lower_rhsm1_store(:), lower_rhs0_store(:), upper_rhsn_store(:), upper_rhsnp1_store(:)
 
     ! Solve each x/z line on the native distributed-y layout, then gather the
     ! owned y blocks back into the full x/z-shaped output field.
@@ -228,7 +231,10 @@ contains
       allocate (factored_a(0:active_n - 1, -2:2), rhs_base(0:active_n - 1))
       allocate (left_couple(0:active_n - 1, 2), right_couple(0:active_n - 1, 2))
       allocate (packed_send(20, nlines), packed_recv(20, nlines, npy_grid))
-      allocate (reduced_rhs(0:active_n - 1, 5), mat(4*npy_grid, 4*npy_grid), rhs(4*npy_grid), sol(4*npy_grid))
+      allocate (reduced_rhs(0:active_n - 1, 5), reduced_store(0:active_n - 1, 5, nlines))
+      allocate (eqm1_store(-2:2, nlines), eqnp1_store(-2:2, nlines), lower_eq0_store(-2:2, nlines), upper_eqn_store(-2:2, nlines))
+      allocate (lower_rhsm1_store(nlines), lower_rhs0_store(nlines), upper_rhsn_store(nlines), upper_rhsnp1_store(nlines))
+      allocate (mat(4*npy_grid, 4*npy_grid), rhs(4*npy_grid), sol(4*npy_grid))
 
       do ix = nx0, nxN
         do iz = -nz, nz
@@ -249,6 +255,15 @@ contains
           reduced_rhs(:, 4) = -right_couple(:, 1)
           reduced_rhs(:, 5) = -right_couple(:, 2)
           call ys_solve_factored_penta_multi(reduced_rhs, factored_a)
+          reduced_store(:, :, iline) = reduced_rhs
+          eqm1_store(:, iline) = eqm1
+          eqnp1_store(:, iline) = eqnp1
+          lower_eq0_store(:, iline) = lower_eq0
+          upper_eqn_store(:, iline) = upper_eqn
+          lower_rhsm1_store(iline) = lower_rhsm1
+          lower_rhs0_store(iline) = lower_rhs0
+          upper_rhsn_store(iline) = upper_rhsn
+          upper_rhsnp1_store(iline) = upper_rhsnp1
 
           packed_send(1:4, iline) = [reduced_rhs(0, 1), reduced_rhs(1, 1), &
                                      reduced_rhs(active_n - 2, 1), reduced_rhs(active_n - 1, 1)]
@@ -269,14 +284,6 @@ contains
       do ix = nx0, nxN
         do iz = -nz, nz
           iline = (ix - nx0)*nlines_z + (iz + nz + 1)
-
-          call build_line(ix, iz, src0(:, iz + nz + 1, ix - nx0 + 1), src1(:, iz + nz + 1, ix - nx0 + 1), &
-                          line, a, eqm1, eq0, eqn, eqnp1, ny)
-          call ys_build_reduced_local_block( &
-            line, a, eqm1, eq0, eqn, eqnp1, row_start, row_end, active_n, ny, &
-            has_lower_boundary, has_upper_boundary, factored_a, rhs_base, left_couple, right_couple, &
-            lower_rhsm1, lower_rhs0, lower_eq0, upper_rhsn, upper_rhsnp1, upper_eqn)
-          call ys_factor_penta(factored_a)
           mat = (0.0d0, 0.0d0)
           rhs = (0.0d0, 0.0d0)
           do iblock = 0, npy_grid - 1
@@ -306,9 +313,9 @@ contains
           if (ipy > 0) u_left = sol(row0 - 1:row0)
           if (ipy < npy_grid - 1) u_right = sol(row0 + 5:row0 + 6)
 
-          reduced_rhs(:, 1) = rhs_base - left_couple(:, 1)*u_left(1) - left_couple(:, 2)*u_left(2) - &
-                              right_couple(:, 1)*u_right(1) - right_couple(:, 2)*u_right(2)
-          call ys_solve_factored_penta_multi(reduced_rhs(:, 1:1), factored_a)
+          reduced_rhs(:, 1) = reduced_store(:, 1, iline) + reduced_store(:, 2, iline)*u_left(1) + &
+                              reduced_store(:, 3, iline)*u_left(2) + reduced_store(:, 4, iline)*u_right(1) + &
+                              reduced_store(:, 5, iline)*u_right(2)
 
           local_block = (0.0d0, 0.0d0)
           do row = row_start, row_end
@@ -318,21 +325,25 @@ contains
           ! Reconstruct the wall and ghost rows in the same order as
           ! ys_solve_ghost_system once the local interior block is known.
           if (has_lower_boundary) then
-            local_block(2) = (lower_rhs0 - &
-                              sum(lower_eq0(0:2)*[local_block(3), local_block(4), local_block(5)]))/lower_eq0(-1)
-            local_block(1) = (lower_rhsm1 - &
-                              sum(eqm1(-1:2)*[local_block(2), local_block(3), local_block(4), local_block(5)]))/eqm1(-2)
+            local_block(2) = (lower_rhs0_store(iline) - &
+                              sum(lower_eq0_store(0:2, iline)*[local_block(3), local_block(4), local_block(5)]))/ &
+                             lower_eq0_store(-1, iline)
+            local_block(1) = (lower_rhsm1_store(iline) - &
+                              sum(eqm1_store(-1:2, iline)*[local_block(2), local_block(3), local_block(4), local_block(5)]))/ &
+                             eqm1_store(-2, iline)
           end if
           if (has_upper_boundary) then
-            local_block(ny - (yl0 - 2) + 1) = (upper_rhsn - sum(upper_eqn(-2:0)*[ &
-                                                                local_block(ny - 3 - (yl0 - 2) + 1), &
-                                                                local_block(ny - 2 - (yl0 - 2) + 1), &
-                                                                local_block(ny - 1 - (yl0 - 2) + 1)]))/upper_eqn(1)
-            local_block(ny + 1 - (yl0 - 2) + 1) = (upper_rhsnp1 - sum(eqnp1(-2:1)*[ &
-                                                                      local_block(ny - 3 - (yl0 - 2) + 1), &
-                                                                      local_block(ny - 2 - (yl0 - 2) + 1), &
-                                                                      local_block(ny - 1 - (yl0 - 2) + 1), &
-                                                                      local_block(ny - (yl0 - 2) + 1)]))/eqnp1(2)
+            local_block(ny - (yl0 - 2) + 1) = (upper_rhsn_store(iline) - &
+                                               sum(upper_eqn_store(-2:0, iline)*[ &
+                                                   local_block(ny - 3 - (yl0 - 2) + 1), &
+                                                   local_block(ny - 2 - (yl0 - 2) + 1), &
+                                                   local_block(ny - 1 - (yl0 - 2) + 1)]))/upper_eqn_store(1, iline)
+            local_block(ny + 1 - (yl0 - 2) + 1) = (upper_rhsnp1_store(iline) - &
+                                                   sum(eqnp1_store(-2:1, iline)*[ &
+                                                       local_block(ny - 3 - (yl0 - 2) + 1), &
+                                                       local_block(ny - 2 - (yl0 - 2) + 1), &
+                                                       local_block(ny - 1 - (yl0 - 2) + 1), &
+                                                       local_block(ny - (yl0 - 2) + 1)]))/eqnp1_store(2, iline)
           end if
 
           dst_xz(:, iz + nz + 1, ix - nx0 + 1) = local_block
@@ -340,7 +351,10 @@ contains
       end do
 #endif
 
-      deallocate (factored_a, rhs_base, left_couple, right_couple, packed_send, packed_recv, reduced_rhs, mat, rhs, sol)
+      deallocate (factored_a, rhs_base, left_couple, right_couple, packed_send, packed_recv, reduced_rhs, reduced_store, &
+                  mat, rhs, sol)
+      deallocate (eqm1_store, eqnp1_store, lower_eq0_store, upper_eqn_store)
+      deallocate (lower_rhsm1_store, lower_rhs0_store, upper_rhsn_store, upper_rhsnp1_store)
     end if
 
     call allgather_y_blocks_to_xz_full(dst_xz, dst_xz_full)
