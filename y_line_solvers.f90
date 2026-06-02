@@ -185,16 +185,16 @@ contains
     complex(C_DOUBLE_COMPLEX), allocatable :: dst_xz(:, :, :), dst_xz_full(:, :, :)
     complex(C_DOUBLE_COMPLEX) :: line(-1:ny + 1), local_line(-1:ny + 1)
     complex(C_DOUBLE_COMPLEX) :: local_block(ylB)
-    complex(C_DOUBLE_COMPLEX) :: packed_remote(20), u_left(2), u_right(2)
+    complex(C_DOUBLE_COMPLEX) :: u_left(2), u_right(2)
     real(C_DOUBLE), allocatable :: factored_a(:, :)
     complex(C_DOUBLE_COMPLEX), allocatable :: rhs_base(:), left_couple(:, :), right_couple(:, :)
     complex(C_DOUBLE_COMPLEX), allocatable :: reduced_rhs(:, :), reduced_store(:, :, :)
-    complex(C_DOUBLE_COMPLEX), allocatable :: packed_send(:, :), packed_recv(:, :, :), mat(:, :), rhs(:), sol(:)
+    complex(C_DOUBLE_COMPLEX), allocatable :: packed_send(:, :), left_u(:, :), right_u(:, :)
     complex(C_DOUBLE_COMPLEX) :: lower_rhsm1, lower_rhs0, upper_rhsn, upper_rhsnp1
     real(C_DOUBLE) :: a(1:ny + 1, -2:2), eqm1(-2:2), eq0(-2:2), eqn(-2:2), eqnp1(-2:2)
     real(C_DOUBLE) :: local_a(1:ny + 1, -2:2), local_eqm1(-2:2), local_eq0(-2:2), local_eqn(-2:2), local_eqnp1(-2:2)
     real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-2:2), upper_eqn(-2:2)
-    integer(C_INT) :: ix, iz, iline, nlines, nlines_z, row_start, row_end, active_n, row, idx, col, global_col, iblock, row0
+    integer(C_INT) :: ix, iz, iline, nlines, nlines_z, row_start, row_end, active_n, row, idx, col, global_col
     logical :: has_lower_boundary, has_upper_boundary
     real(C_DOUBLE), allocatable :: eqm1_store(:, :), eqnp1_store(:, :), lower_eq0_store(:, :), upper_eqn_store(:, :)
     complex(C_DOUBLE_COMPLEX), allocatable :: lower_rhsm1_store(:), lower_rhs0_store(:), upper_rhsn_store(:), upper_rhsnp1_store(:)
@@ -230,11 +230,10 @@ contains
       nlines = size(src0, 3)*nlines_z
       allocate (factored_a(0:active_n - 1, -2:2), rhs_base(0:active_n - 1))
       allocate (left_couple(0:active_n - 1, 2), right_couple(0:active_n - 1, 2))
-      allocate (packed_send(20, nlines), packed_recv(20, nlines, npy_grid))
+      allocate (packed_send(20, nlines), left_u(2, nlines), right_u(2, nlines))
       allocate (reduced_rhs(0:active_n - 1, 5), reduced_store(0:active_n - 1, 5, nlines))
       allocate (eqm1_store(-2:2, nlines), eqnp1_store(-2:2, nlines), lower_eq0_store(-2:2, nlines), upper_eqn_store(-2:2, nlines))
       allocate (lower_rhsm1_store(nlines), lower_rhs0_store(nlines), upper_rhsn_store(nlines), upper_rhsnp1_store(nlines))
-      allocate (mat(4*npy_grid, 4*npy_grid), rhs(4*npy_grid), sol(4*npy_grid))
 
       do ix = nx0, nxN
         do iz = -nz, nz
@@ -345,39 +344,13 @@ contains
       end do
 
 #ifdef HAVE_MPI
-      call MPI_Allgather(packed_send, 20*nlines, MPI_DOUBLE_COMPLEX, packed_recv, 20*nlines, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
+      call ys_solve_reduced_interfaces(packed_send, left_u, right_u)
 
       do ix = nx0, nxN
         do iz = -nz, nz
           iline = (ix - nx0)*nlines_z + (iz + nz + 1)
-          mat = (0.0d0, 0.0d0)
-          rhs = (0.0d0, 0.0d0)
-          do iblock = 0, npy_grid - 1
-            row0 = 4*iblock
-            packed_remote = packed_recv(:, iline, iblock + 1)
-            mat(row0 + 1:row0 + 4, row0 + 1:row0 + 4) = (0.0d0, 0.0d0)
-            mat(row0 + 1, row0 + 1) = (1.0d0, 0.0d0)
-            mat(row0 + 2, row0 + 2) = (1.0d0, 0.0d0)
-            mat(row0 + 3, row0 + 3) = (1.0d0, 0.0d0)
-            mat(row0 + 4, row0 + 4) = (1.0d0, 0.0d0)
-            rhs(row0 + 1:row0 + 4) = packed_remote(1:4)
-            if (iblock > 0) then
-              mat(row0 + 1:row0 + 4, row0 - 1) = -packed_remote(5:8)
-              mat(row0 + 1:row0 + 4, row0) = -packed_remote(9:12)
-            end if
-            if (iblock < npy_grid - 1) then
-              mat(row0 + 1:row0 + 4, row0 + 5) = -packed_remote(13:16)
-              mat(row0 + 1:row0 + 4, row0 + 6) = -packed_remote(17:20)
-            end if
-          end do
-
-          sol = rhs
-          call ys_solve_dense_complex(mat, sol)
-          row0 = 4*ipy
-          u_left = (0.0d0, 0.0d0)
-          u_right = (0.0d0, 0.0d0)
-          if (ipy > 0) u_left = sol(row0 - 1:row0)
-          if (ipy < npy_grid - 1) u_right = sol(row0 + 5:row0 + 6)
+          u_left = left_u(:, iline)
+          u_right = right_u(:, iline)
 
           reduced_rhs(:, 1) = reduced_store(:, 1, iline) + reduced_store(:, 2, iline)*u_left(1) + &
                               reduced_store(:, 3, iline)*u_left(2) + reduced_store(:, 4, iline)*u_right(1) + &
@@ -417,8 +390,7 @@ contains
       end do
 #endif
 
-      deallocate (factored_a, rhs_base, left_couple, right_couple, packed_send, packed_recv, reduced_rhs, reduced_store, &
-                  mat, rhs, sol)
+      deallocate (factored_a, rhs_base, left_couple, right_couple, packed_send, left_u, right_u, reduced_rhs, reduced_store)
       deallocate (eqm1_store, eqnp1_store, lower_eq0_store, upper_eqn_store)
       deallocate (lower_rhsm1_store, lower_rhs0_store, upper_rhsn_store, upper_rhsnp1_store)
     end if
@@ -434,43 +406,111 @@ contains
     deallocate (dst_xz, dst_xz_full)
   end subroutine ys_solve_ghost_field_reduced
 
-  subroutine ys_solve_dense_complex(mat, rhs)
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: mat(:, :)
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs(:)
-    complex(C_DOUBLE_COMPLEX) :: factor, pivot_row(size(mat, 2)), rhs_tmp
-    real(C_DOUBLE) :: pivot_abs, cand_abs
-    integer(C_INT) :: n, i, j, pivot
+  subroutine ys_solve_reduced_interfaces(packed_send, left_u, right_u)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: packed_send(:, :)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: left_u(:, :), right_u(:, :)
+    complex(C_DOUBLE_COMPLEX), allocatable :: packed_recv(:, :, :), band_a(:, :), rhs(:)
+    complex(C_DOUBLE_COMPLEX) :: packed_remote(20)
+    integer(C_INT), parameter :: bw = 5
+    integer(C_INT) :: nlines, niface, iline, iblock, row0
 
-    n = int(size(rhs), C_INT)
-    do i = 1, n
-      pivot = i
-      pivot_abs = abs(mat(i, i))
-      do j = i + 1, n
-        cand_abs = abs(mat(j, i))
-        if (cand_abs > pivot_abs) then
-          pivot = j
-          pivot_abs = cand_abs
+    nlines = size(packed_send, 2)
+    niface = 4*npy_grid
+    allocate (packed_recv(20, nlines, npy_grid), band_a(1:niface, 1:2*bw + 1), rhs(niface))
+
+#ifdef HAVE_MPI
+    call MPI_Allgather(packed_send, 20*nlines, MPI_DOUBLE_COMPLEX, packed_recv, 20*nlines, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
+#endif
+
+    do iline = 1, nlines
+      band_a = (0.0d0, 0.0d0)
+      rhs = (0.0d0, 0.0d0)
+      do iblock = 0, npy_grid - 1
+        row0 = 4*iblock
+        packed_remote = packed_recv(:, iline, iblock + 1)
+        band_a(row0 + 1, bw + 1) = (1.0d0, 0.0d0)
+        band_a(row0 + 2, bw + 1) = (1.0d0, 0.0d0)
+        band_a(row0 + 3, bw + 1) = (1.0d0, 0.0d0)
+        band_a(row0 + 4, bw + 1) = (1.0d0, 0.0d0)
+        rhs(row0 + 1:row0 + 4) = packed_remote(1:4)
+        if (iblock > 0) then
+          band_a(row0 + 1, bw - 1) = -packed_remote(5)
+          band_a(row0 + 2, bw - 2) = -packed_remote(6)
+          band_a(row0 + 3, bw - 3) = -packed_remote(7)
+          band_a(row0 + 4, bw - 4) = -packed_remote(8)
+          band_a(row0 + 1, bw) = -packed_remote(9)
+          band_a(row0 + 2, bw - 1) = -packed_remote(10)
+          band_a(row0 + 3, bw - 2) = -packed_remote(11)
+          band_a(row0 + 4, bw - 3) = -packed_remote(12)
+        end if
+        if (iblock < npy_grid - 1) then
+          band_a(row0 + 1, bw + 5) = -packed_remote(13)
+          band_a(row0 + 2, bw + 4) = -packed_remote(14)
+          band_a(row0 + 3, bw + 3) = -packed_remote(15)
+          band_a(row0 + 4, bw + 2) = -packed_remote(16)
+          band_a(row0 + 1, bw + 6) = -packed_remote(17)
+          band_a(row0 + 2, bw + 5) = -packed_remote(18)
+          band_a(row0 + 3, bw + 4) = -packed_remote(19)
+          band_a(row0 + 4, bw + 3) = -packed_remote(20)
         end if
       end do
-      if (pivot /= i) then
-        pivot_row = mat(i, :)
-        mat(i, :) = mat(pivot, :)
-        mat(pivot, :) = pivot_row
-        rhs_tmp = rhs(i)
-        rhs(i) = rhs(pivot)
-        rhs(pivot) = rhs_tmp
+
+      call ys_factor_banded_complex(band_a)
+      call ys_solve_factored_banded_complex(rhs, band_a)
+      left_u(:, iline) = (0.0d0, 0.0d0)
+      right_u(:, iline) = (0.0d0, 0.0d0)
+      row0 = 4*ipy
+      if (ipy > 0) then
+        left_u(:, iline) = rhs(row0 - 1:row0)
       end if
-      do j = i + 1, n
-        factor = mat(j, i)/mat(i, i)
-        mat(j, i:n) = mat(j, i:n) - factor*mat(i, i:n)
-        rhs(j) = rhs(j) - factor*rhs(i)
+      if (ipy < npy_grid - 1) then
+        right_u(:, iline) = rhs(row0 + 5:row0 + 6)
+      end if
+    end do
+
+    deallocate (packed_recv, band_a, rhs)
+  end subroutine ys_solve_reduced_interfaces
+
+  subroutine ys_factor_banded_complex(a)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: a(:, :)
+    integer(C_INT), parameter :: bw = 5
+    integer(C_INT) :: n, i, j, t
+    complex(C_DOUBLE_COMPLEX) :: piv, factor
+
+    n = size(a, 1)
+    do i = 1, n
+      piv = a(i, bw + 1)
+      do j = 1, min(bw, n - i)
+        factor = a(i + j, bw + 1 - j)/piv
+        a(i + j, bw + 1 - j) = factor
+        do t = 1, min(bw, n - i)
+          if (t - j > bw) cycle
+          a(i + j, bw + 1 + t - j) = a(i + j, bw + 1 + t - j) - factor*a(i, bw + 1 + t)
+        end do
       end do
     end do
-    do i = n, 1, -1
-      if (i < n) rhs(i) = rhs(i) - sum(mat(i, i + 1:n)*rhs(i + 1:n))
-      rhs(i) = rhs(i)/mat(i, i)
+  end subroutine ys_factor_banded_complex
+
+  subroutine ys_solve_factored_banded_complex(rhs, a)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs(:)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: a(:, :)
+    integer(C_INT), parameter :: bw = 5
+    integer(C_INT) :: n, i, j
+
+    n = size(a, 1)
+    do i = 1, n
+      do j = max(1_C_INT, i - bw), i - 1
+        rhs(i) = rhs(i) - a(i, bw + 1 + j - i)*rhs(j)
+      end do
     end do
-  end subroutine ys_solve_dense_complex
+
+    do i = n, 1, -1
+      do j = i + 1, min(n, i + bw)
+        rhs(i) = rhs(i) - a(i, bw + 1 + j - i)*rhs(j)
+      end do
+      rhs(i) = rhs(i)/a(i, bw + 1)
+    end do
+  end subroutine ys_solve_factored_banded_complex
 
   subroutine ys_factor_penta(a)
     real(C_DOUBLE), intent(inout) :: a(0:, -2:)
