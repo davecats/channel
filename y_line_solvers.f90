@@ -28,6 +28,8 @@ module y_line_solvers
     end subroutine ys_build_ghost_line
   end interface
 
+  !$omp declare target(ys_lu5decomp, ys_leftlu5div, ys_solve_compact_derivative, ys_factor_banded_complex, ys_solve_factored_banded_complex, ys_factor_penta, ys_solve_factored_penta_multi)
+
 contains
 
   subroutine ys_solve_ghost_field(src0, src1, dst, ny, nz, build_line)
@@ -183,6 +185,8 @@ contains
     complex(C_DOUBLE_COMPLEX), intent(out) :: dst(:, :, :)
     procedure(ys_build_ghost_line) :: build_line
     complex(C_DOUBLE_COMPLEX), allocatable :: dst_xz(:, :, :), dst_xz_full(:, :, :)
+    complex(C_DOUBLE_COMPLEX), allocatable :: line_store(:, :)
+    real(C_DOUBLE), allocatable :: local_branch_a(:, :, :)
     complex(C_DOUBLE_COMPLEX) :: line(-1:ny + 1), local_line(-1:ny + 1)
     complex(C_DOUBLE_COMPLEX) :: local_block(ylB)
     complex(C_DOUBLE_COMPLEX) :: u_left(2), u_right(2)
@@ -195,8 +199,11 @@ contains
     real(C_DOUBLE) :: local_a(1:ny + 1, -2:2), local_eqm1(-2:2), local_eq0(-2:2), local_eqn(-2:2), local_eqnp1(-2:2)
     real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-2:2), upper_eqn(-2:2)
     integer(C_INT) :: ix, iz, iline, nlines, nlines_z, row_start, row_end, active_n, row, idx, col, global_col
+    integer(C_INT) :: hi1, hi2, i, j, k
+    real(C_DOUBLE) :: piv
     logical :: has_lower_boundary, has_upper_boundary
-    real(C_DOUBLE), allocatable :: eqm1_store(:, :), eqnp1_store(:, :), lower_eq0_store(:, :), upper_eqn_store(:, :)
+    real(C_DOUBLE), allocatable :: eqm1_store(:, :), eq0_store(:, :), eqn_store(:, :), eqnp1_store(:, :)
+    real(C_DOUBLE), allocatable :: lower_eq0_store(:, :), upper_eqn_store(:, :), factored_store(:, :, :)
     complex(C_DOUBLE_COMPLEX), allocatable :: lower_rhsm1_store(:), lower_rhs0_store(:), upper_rhsn_store(:), upper_rhsnp1_store(:)
 
     ! Solve each x/z line on the native distributed-y layout, then gather the
@@ -211,20 +218,116 @@ contains
     has_upper_boundary = (row_end == ny - 1)
 
     if (npy_grid == 1 .or. active_n < 4) then
+      nlines_z = size(src0, 2)
+      nlines = size(src0, 3)*nlines_z
+      allocate (line_store(-2:ny, nlines), local_branch_a(0:ny, -2:2, nlines))
+      allocate (eqm1_store(-2:2, nlines), eq0_store(-2:2, nlines), eqn_store(-2:2, nlines), eqnp1_store(-2:2, nlines))
+
       do ix = nx0, nxN
         do iz = -nz, nz
+          iline = (ix - nx0)*nlines_z + (iz + nz + 1)
           call build_line(ix, iz, src0(:, iz + nz + 1, ix - nx0 + 1), src1(:, iz + nz + 1, ix - nx0 + 1), &
                           line, a, eqm1, eq0, eqn, eqnp1, ny)
-          local_line = line
-          local_a = a
-          local_eqm1 = eqm1
-          local_eq0 = eq0
-          local_eqn = eqn
-          local_eqnp1 = eqnp1
-          call ys_solve_ghost_system(local_line, local_a, local_eqm1, local_eq0, local_eqn, local_eqnp1, ny)
-          dst_xz(:, iz + nz + 1, ix - nx0 + 1) = local_line(yl0 - 2:ylN - 2)
+          line_store(:, iline) = line(-1:ny + 1)
+          local_branch_a(:, :, iline) = a(1:ny + 1, -2:2)
+          eqm1_store(:, iline) = eqm1
+          eq0_store(:, iline) = eq0
+          eqn_store(:, iline) = eqn
+          eqnp1_store(:, iline) = eqnp1
         end do
       end do
+
+      !$omp target enter data map(to: line_store, local_branch_a, eqm1_store, eq0_store, eqn_store, eqnp1_store)
+      !$omp target teams distribute parallel do private(local_eqm1, local_eq0, local_eqn, local_eqnp1, i, j, k, piv, hi1, hi2)
+      do iline = 1, nlines
+        local_eqm1 = eqm1_store(:, iline)
+        local_eq0 = eq0_store(:, iline)
+        local_eqn = eqn_store(:, iline)
+        local_eqnp1 = eqnp1_store(:, iline)
+
+        line_store(-1, iline) = line_store(-1, iline) - line_store(-2, iline)*local_eq0(-2)/local_eqm1(-2)
+        local_eq0(-2:2) = local_eq0(-2:2) - local_eqm1(-2:2)*local_eq0(-2)/local_eqm1(-2)
+        local_eq0(-2) = 0.0d0
+
+        line_store(0, iline) = line_store(0, iline) - line_store(-2, iline)*local_branch_a(0, -2, iline)/local_eqm1(-2)
+      local_branch_a(0, -2:2, iline) = local_branch_a(0, -2:2, iline) - local_eqm1(-2:2)*local_branch_a(0, -2, iline)/local_eqm1(-2)
+        local_branch_a(0, -2, iline) = 0.0d0
+
+        line_store(0, iline) = line_store(0, iline) - line_store(-1, iline)*local_branch_a(0, -1, iline)/local_eq0(-1)
+        local_branch_a(0, -2:2, iline) = local_branch_a(0, -2:2, iline) - local_eq0(-2:2)*local_branch_a(0, -1, iline)/local_eq0(-1)
+        local_branch_a(0, -1, iline) = 0.0d0
+
+        line_store(1, iline) = line_store(1, iline) - line_store(-1, iline)*local_branch_a(1, -2, iline)/local_eq0(-1)
+        local_branch_a(1, -2:1, iline) = local_branch_a(1, -2:1, iline) - local_eq0(-1:2)*local_branch_a(1, -2, iline)/local_eq0(-1)
+        local_branch_a(1, -2, iline) = 0.0d0
+
+        line_store(ny - 1, iline) = line_store(ny - 1, iline) - line_store(ny, iline)*local_eqn(2)/local_eqnp1(2)
+        local_eqn(-2:2) = local_eqn(-2:2) - local_eqnp1(-2:2)*local_eqn(2)/local_eqnp1(2)
+        local_eqn(2) = 0.0d0
+
+       line_store(ny - 2, iline) = line_store(ny - 2, iline) - line_store(ny, iline)*local_branch_a(ny - 2, 2, iline)/local_eqnp1(2)
+        local_branch_a(ny - 2, -2:2, iline) = local_branch_a(ny - 2, -2:2, iline) - &
+                                              local_eqnp1(-2:2)*local_branch_a(ny - 2, 2, iline)/local_eqnp1(2)
+        local_branch_a(ny - 2, 2, iline) = 0.0d0
+
+     line_store(ny - 2, iline) = line_store(ny - 2, iline) - line_store(ny - 1, iline)*local_branch_a(ny - 2, 1, iline)/local_eqn(1)
+        local_branch_a(ny - 2, -2:2, iline) = local_branch_a(ny - 2, -2:2, iline) - &
+                                              local_eqn(-2:2)*local_branch_a(ny - 2, 1, iline)/local_eqn(1)
+        local_branch_a(ny - 2, 1, iline) = 0.0d0
+
+     line_store(ny - 3, iline) = line_store(ny - 3, iline) - line_store(ny - 1, iline)*local_branch_a(ny - 3, 2, iline)/local_eqn(1)
+        local_branch_a(ny - 3, -1:2, iline) = local_branch_a(ny - 3, -1:2, iline) - &
+                                              local_eqn(-2:1)*local_branch_a(ny - 3, 2, iline)/local_eqn(1)
+        local_branch_a(ny - 3, 2, iline) = 0.0d0
+
+        hi1 = ny
+        hi2 = 2
+        local_branch_a(hi1 - 2, 1:2, iline) = 0.0d0
+        local_branch_a(hi1 - 3, 2, iline) = 0.0d0
+        do i = hi1 - hi2, 0, -1
+          do k = hi2, 1, -1
+            piv = local_branch_a(i, k, iline)
+            do j = -1, -2, -1
+              local_branch_a(i, j + k, iline) = local_branch_a(i, j + k, iline) - piv*local_branch_a(i + k, j, iline)
+            end do
+          end do
+          piv = 1.0d0/local_branch_a(i, 0, iline)
+          local_branch_a(i, 0, iline) = piv
+          local_branch_a(i, -2:-1, iline) = local_branch_a(i, -2:-1, iline)*piv
+        end do
+        local_branch_a(0, -2:-1, iline) = 0.0d0
+        local_branch_a(1, -2, iline) = 0.0d0
+
+        do i = hi1 - hi2, 0, -1
+          line_store(i, iline) = line_store(i, iline) - ( &
+                                 local_branch_a(i, 1, iline)*line_store(i + 1, iline) + &
+                                 local_branch_a(i, 2, iline)*line_store(i + 2, iline))
+          line_store(i, iline) = line_store(i, iline)*local_branch_a(i, 0, iline)
+        end do
+        do i = 0, hi1
+          line_store(i, iline) = line_store(i, iline) - ( &
+                                 local_branch_a(i, -2, iline)*line_store(i - 2, iline) + &
+                                 local_branch_a(i, -1, iline)*line_store(i - 1, iline))
+        end do
+
+        line_store(-1, iline) = (line_store(-1, iline) - sum(local_eq0(0:2)*line_store(0:2, iline)))/local_eq0(-1)
+        line_store(-2, iline) = (line_store(-2, iline) - sum(local_eqm1(-1:2)*line_store(-1:2, iline)))/local_eqm1(-2)
+        line_store(ny - 1, iline) = (line_store(ny - 1, iline) - &
+                                     sum(local_eqn(-2:0)*line_store(ny - 4:ny - 2, iline)))/local_eqn(1)
+        line_store(ny, iline) = (line_store(ny, iline) - &
+                                 sum(local_eqnp1(-2:1)*line_store(ny - 4:ny - 1, iline)))/local_eqnp1(2)
+      end do
+      !$omp target update from(line_store)
+      !$omp target exit data map(delete: line_store, local_branch_a, eqm1_store, eq0_store, eqn_store, eqnp1_store)
+
+      do ix = nx0, nxN
+        do iz = -nz, nz
+          iline = (ix - nx0)*nlines_z + (iz + nz + 1)
+          dst_xz(:, iz + nz + 1, ix - nx0 + 1) = line_store(yl0 - 3:ylN - 3, iline)
+        end do
+      end do
+
+      deallocate (line_store, local_branch_a, eqm1_store, eq0_store, eqn_store, eqnp1_store)
     else
       nlines_z = size(src0, 2)
       nlines = size(src0, 3)*nlines_z
@@ -233,8 +336,16 @@ contains
       allocate (packed_send(20, nlines), left_u(2, nlines), right_u(2, nlines))
       allocate (reduced_rhs(0:active_n - 1, 5), reduced_store(0:active_n - 1, 5, nlines))
       allocate (eqm1_store(-2:2, nlines), eqnp1_store(-2:2, nlines), lower_eq0_store(-2:2, nlines), upper_eqn_store(-2:2, nlines))
+      allocate (factored_store(0:active_n - 1, -2:2, nlines))
       allocate (lower_rhsm1_store(nlines), lower_rhs0_store(nlines), upper_rhsn_store(nlines), upper_rhsnp1_store(nlines))
 
+      !$omp target teams distribute parallel do collapse(2) default(none) defaultmap(none) &
+      !$omp private(rhs_base, left_couple, right_couple, iline, ix, iz, line, a, eqm1, eq0, eqn, eqnp1, idx, global_col) &
+      !$omp private(factored_a, lower_rhsm1, lower_rhs0, upper_rhsn, upper_rhsnp1, row_coeffs, lower_eq0, upper_eqn) &
+      !$omp shared(factored_store, reduced_store, eqm1_store, eqnp1_store, lower_eq0_store, upper_eqn_store, lower_rhsm1_store, lower_rhs0_store, upper_rhsn_store, upper_rhsnp1_store) &
+      !$omp private(reduced_rhs) &
+      !$omp shared(reduced_store, packed_send) &
+      !$omp shared(nx0, nxN, nz, nlines_z, src0, src1, ny, active_n, row_start, row_end, has_lower_boundary, has_upper_boundary)
       do ix = nx0, nxN
         do iz = -nz, nz
           iline = (ix - nx0)*nlines_z + (iz + nz + 1)
@@ -311,7 +422,6 @@ contains
               end if
             end do
           end do
-          call ys_factor_penta(factored_a)
           ! One block solve produces the particular solution plus the four
           ! interface response vectors needed by the reduced system.
           reduced_rhs(:, 1) = rhs_base
@@ -319,8 +429,8 @@ contains
           reduced_rhs(:, 3) = -left_couple(:, 2)
           reduced_rhs(:, 4) = -right_couple(:, 1)
           reduced_rhs(:, 5) = -right_couple(:, 2)
-          call ys_solve_factored_penta_multi(reduced_rhs, factored_a)
           reduced_store(:, :, iline) = reduced_rhs
+          factored_store(:, :, iline) = factored_a
           eqm1_store(:, iline) = eqm1
           eqnp1_store(:, iline) = eqnp1
           lower_eq0_store(:, iline) = lower_eq0
@@ -329,21 +439,22 @@ contains
           lower_rhs0_store(iline) = lower_rhs0
           upper_rhsn_store(iline) = upper_rhsn
           upper_rhsnp1_store(iline) = upper_rhsnp1
+          call ys_factor_penta(factored_store(:, :, iline))
+          call ys_solve_factored_penta_multi(reduced_store(:, :, iline), factored_store(:, :, iline))
+          packed_send(1:4, iline) = [reduced_store(0, 1, iline), reduced_store(1, 1, iline), &
+                                     reduced_store(active_n - 2, 1, iline), reduced_store(active_n - 1, 1, iline)]
+          packed_send(5:12, iline) = [reduced_store(0, 2, iline), reduced_store(1, 2, iline), &
+                                      reduced_store(active_n - 2, 2, iline), reduced_store(active_n - 1, 2, iline), &
+                                      reduced_store(0, 3, iline), reduced_store(1, 3, iline), &
+                                      reduced_store(active_n - 2, 3, iline), reduced_store(active_n - 1, 3, iline)]
+          packed_send(13:20, iline) = [reduced_store(0, 4, iline), reduced_store(1, 4, iline), &
+                                       reduced_store(active_n - 2, 4, iline), reduced_store(active_n - 1, 4, iline), &
+                                       reduced_store(0, 5, iline), reduced_store(1, 5, iline), &
+                                       reduced_store(active_n - 2, 5, iline), reduced_store(active_n - 1, 5, iline)]
 
-          packed_send(1:4, iline) = [reduced_rhs(0, 1), reduced_rhs(1, 1), &
-                                     reduced_rhs(active_n - 2, 1), reduced_rhs(active_n - 1, 1)]
-          packed_send(5:12, iline) = [reduced_rhs(0, 2), reduced_rhs(1, 2), &
-                                      reduced_rhs(active_n - 2, 2), reduced_rhs(active_n - 1, 2), &
-                                      reduced_rhs(0, 3), reduced_rhs(1, 3), &
-                                      reduced_rhs(active_n - 2, 3), reduced_rhs(active_n - 1, 3)]
-          packed_send(13:20, iline) = [reduced_rhs(0, 4), reduced_rhs(1, 4), &
-                                       reduced_rhs(active_n - 2, 4), reduced_rhs(active_n - 1, 4), &
-                                       reduced_rhs(0, 5), reduced_rhs(1, 5), &
-                                       reduced_rhs(active_n - 2, 5), reduced_rhs(active_n - 1, 5)]
         end do
       end do
 
-#ifdef HAVE_MPI
       call ys_solve_reduced_interfaces(packed_send, left_u, right_u)
 
       do ix = nx0, nxN
@@ -388,10 +499,9 @@ contains
           dst_xz(:, iz + nz + 1, ix - nx0 + 1) = local_block
         end do
       end do
-#endif
 
       deallocate (factored_a, rhs_base, left_couple, right_couple, packed_send, left_u, right_u, reduced_rhs, reduced_store)
-      deallocate (eqm1_store, eqnp1_store, lower_eq0_store, upper_eqn_store)
+      deallocate (eqm1_store, eqnp1_store, lower_eq0_store, upper_eqn_store, factored_store)
       deallocate (lower_rhsm1_store, lower_rhs0_store, upper_rhsn_store, upper_rhsnp1_store)
     end if
 
@@ -560,5 +670,4 @@ contains
       rhs(i, 1:nrhs) = rhs(i, 1:nrhs)*a(i, 0)
     end do
   end subroutine ys_solve_factored_penta_multi
-
 end module y_line_solvers

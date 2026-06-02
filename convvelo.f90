@@ -11,7 +11,6 @@ module convvelo
   use mpi_transpose, only: ny0, nyN, nx0, nxN, nxB, nzB, nx, has_average, ierr, sendbuf, recvbuf, &
                            pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, nzd, fft_transpose_is_local, &
                            repack_zTOx_local, repack_xTOz_local
-  use y_line_solvers, only: ys_leftlu5div
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
   use ffts, only: IFT, RFT, HFT, FFT, VVdx, VVdz
 #else
@@ -445,7 +444,17 @@ contains
                                         der(ny - 1, 0, 2)*convvelo_work(ny + 1, iz, ix))
         convvelo_work(ny - 2, iz, ix) = convvelo_work(ny - 2, iz, ix) - &
                                         der(ny - 2, 0, 2)*convvelo_work(ny, iz, ix)
-        call ys_leftlu5div(convvelo_work(:, iz, ix), D0mat)
+        do iy = nyN, ny0, -1
+          convvelo_work(iy, iz, ix) = convvelo_work(iy, iz, ix) - ( &
+                                      D0mat(iy, 1)*convvelo_work(iy + 1, iz, ix) + &
+                                      D0mat(iy, 2)*convvelo_work(iy + 2, iz, ix))
+          convvelo_work(iy, iz, ix) = convvelo_work(iy, iz, ix)*D0mat(iy, 0)
+        end do
+        do iy = ny0, nyN + 2
+          convvelo_work(iy, iz, ix) = convvelo_work(iy, iz, ix) - ( &
+                                      D0mat(iy, -2)*convvelo_work(iy - 2, iz, ix) + &
+                                      D0mat(iy, -1)*convvelo_work(iy - 1, iz, ix))
+        end do
       end do
     end do
   end subroutine apply_dyy_to_work

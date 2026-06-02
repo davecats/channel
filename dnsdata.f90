@@ -25,7 +25,7 @@ MODULE dnsdata
   USE rbmat
   USE mpi_transpose
   USE ffts
-  USE y_line_solvers, ONLY: ys_lu5decomp, ys_leftlu5div, ys_solve_compact_derivative, ys_solve_compact_system, &
+  USE y_line_solvers, ONLY: ys_lu5decomp, ys_solve_compact_system, &
                             ys_solve_ghost_field
 
   IMPLICIT NONE
@@ -35,6 +35,7 @@ MODULE dnsdata
   integer(C_INT) :: ny, nz, nxd, nPhi
   !$omp declare target(ny)
   real(C_DOUBLE) :: alfa0, beta0, ni, a, ymin, ymax, deltat, cflmax, time, time0 = 0, dt_field, dt_save, t_max, gamma
+  !$omp declare target(ni)
   real(C_DOUBLE) :: u0, uN, t0, tN
   real(C_DOUBLE) :: meanpx, meanpz, meanflowx, meanflowz, meantx, meantb
   integer(C_INT), allocatable :: izd(:)
@@ -131,6 +132,7 @@ CONTAINS
     call require_real(cfg, "velocity", "meanflowz", meanflowz)
     call require_real(cfg, "velocity", "u0", u0)
     call require_real(cfg, "velocity", "un", uN)
+    !$omp target update to(ni)
 
     call require_integer(cfg, "scalars", "nphi", nPhi)
     call require_real(cfg, "scalars", "meantx", meantx)
@@ -353,7 +355,7 @@ CONTAINS
     !$omp target enter data map(to: v0bc, v0m1bc, vnbc, vnp1bc, eta0bc, eta0m1bc, etanbc, etanp1bc, phinbc, phi0bc, phi0m1bc, phinp1bc)
 
     !precompute bc0 and bcn
-    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp target teams distribute parallel do collapse(2) &
     !$omp shared(bc0, bcn, ialfa, ibeta, v0bc, v0m1bc, vnbc, vnp1bc, nx0, nxN, nz) &
     !$omp private(ix, iz)
     DO ix = nx0, nxN
@@ -425,16 +427,32 @@ CONTAINS
 #define D4(f,g) D_MASTER(f,g,3)
   !--------------------------------------------------------------!
   !---COMPLEX----- derivative in the y-direction ----------------!
-#ifdef HAVE_CUDA
   !$omp declare target(COMPLEXderiv)
-#endif
   SUBROUTINE COMPLEXderiv(f0, f1, der, D0mat)
     complex(C_DOUBLE_COMPLEX), intent(in)  :: f0(-1:ny + 1)
     complex(C_DOUBLE_COMPLEX), intent(out) :: f1(-1:ny + 1)
     real(C_DOUBLE), DIMENSION(:, :), intent(in) :: der(ny0:nyN, 0:3, -2:2)
     real(C_DOUBLE), DIMENSION(:, :), intent(in) :: D0mat(ny0:nyN + 2, -2:2)
+    integer(C_INT) :: iy
 
-    call ys_solve_compact_derivative(f0, f1, der, D0mat, d140, d14m1, d14n, d14np1, ny, ny0, nyN)
+    f1(0) = sum(d140(-2:2)*f0(-1:3))
+    f1(-1) = sum(d14m1(-2:2)*f0(-1:3))
+    f1(ny) = sum(d14n(-2:2)*f0(ny - 3:ny + 1))
+    f1(ny + 1) = sum(d14np1(-2:2)*f0(ny - 3:ny + 1))
+    do iy = ny0, nyN
+      f1(iy) = sum(der(iy, 1, -2:2)*f0(iy - 2:iy + 2))
+    end do
+    f1(1) = f1(1) - (der(1, 0, -1)*f1(0) + der(1, 0, -2)*f1(-1))
+    f1(2) = f1(2) - der(2, 0, -2)*f1(0)
+    f1(ny - 1) = f1(ny - 1) - (der(ny - 1, 0, 1)*f1(ny) + der(ny - 1, 0, 2)*f1(ny + 1))
+    f1(ny - 2) = f1(ny - 2) - der(ny - 2, 0, 2)*f1(ny)
+    do iy = nyN, ny0, -1
+      f1(iy) = f1(iy) - (D0mat(iy, 1)*f1(iy + 1) + D0mat(iy, 2)*f1(iy + 2))
+      f1(iy) = f1(iy)*D0mat(iy, 0)
+    end do
+    do iy = ny0, nyN + 2
+      f1(iy) = f1(iy) - (D0mat(iy, -2)*f1(iy - 2) + D0mat(iy, -1)*f1(iy - 1))
+    end do
   END SUBROUTINE COMPLEXderiv
 
   SUBROUTINE apply_complex_derivative_with_y_pencil(src, dst)
@@ -442,9 +460,25 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(in) :: src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX) :: dummy(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    integer(C_INT) :: ix, iz
+    complex(C_DOUBLE_COMPLEX) :: src_line(-1:ny + 1), dst_line(-1:ny + 1)
 
+    if (npy_grid == 1) then
+      !$omp target teams distribute parallel do collapse(2) private(src_line, dst_line)
+      do ix = nx0, nxN
+        do iz = -nz, nz
+          src_line = src(:, iz, ix)
+          call COMPLEXderiv(src_line, dst_line, der, D0mat)
+          dst(:, iz, ix) = dst_line
+        end do
+      end do
+      return
+    end if
+
+    !$omp target update from(src)
     dummy = (0.0d0, 0.0d0)
     call ys_solve_ghost_field(src, dummy, dst, ny, nz, build_derivative_line)
+    !$omp target update to(dst)
   contains
     subroutine build_derivative_line(ix_global, iz_global, src0_line, src1_line, line, amat, eqm1, eq0, eqn, eqnp1, ny_line)
       integer(C_INT), intent(in) :: ix_global, iz_global, ny_line
@@ -485,9 +519,13 @@ CONTAINS
     real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
     real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
     complex(C_DOUBLE_COMPLEX) :: dummy(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    integer(C_INT) :: ix, iz
+    complex(C_DOUBLE_COMPLEX) :: line_local(-1:ny + 1)
 
+    !$omp target update from(V(:, :, :, component_index))
     dummy = (0.0d0, 0.0d0)
     call ys_solve_ghost_field(V(:, :, :, component_index), dummy, V(:, :, :, component_index), ny, nz, build_compact_line)
+    !$omp target update to(V(:, :, :, component_index))
   contains
     subroutine build_compact_line(ix_global, iz_global, src0_line, src1_line, line, mat, eqm1, eq0, eqn, eqnp1, ny_line)
       integer(C_INT), intent(in) :: ix_global, iz_global, ny_line
@@ -567,7 +605,7 @@ CONTAINS
   SUBROUTINE linsolve(lambda)
     IMPLICIT NONE
     real(C_DOUBLE), intent(in) :: lambda
-    integer(C_INT) :: ix, iz, i, j, iPhi
+    integer(C_INT) :: ix, iz, i, j, iPhi, lower_j, upper_j
     complex(C_DOUBLE_COMPLEX) :: temp
 
     call solve_compact_component_with_y_pencil(2_C_INT, v0bc, v0m1bc, vnbc, vnp1bc, &
@@ -575,33 +613,17 @@ CONTAINS
     call solve_compact_component_with_y_pencil(1_C_INT, eta0bc, eta0m1bc, etanbc, etanp1bc, &
                                                5_C_INT, 0_C_INT, -5_C_INT, 0_C_INT, lambda, 1.0d0)
     call apply_complex_derivative_with_y_pencil(V(:, :, :, 2), V(:, :, :, 3))
+    lower_j = ny0 - 2
+    upper_j = nyN + 2
 
-    !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(ny, ny0, nyN, nz, nx0, nxN) &
-    !$omp shared(V, eta0bc, eta0m1bc, etanbc, etanp1bc) &
-    !$omp shared(D0mat, der, k2, ialfa, ibeta, y, fr, ucor, meanflowx, meanflowz, corrpx, corrpz, lambda) &
+    !$omp target teams distribute parallel do collapse(2) &
+    !$omp shared(nz, nx0, nxN, lower_j, upper_j) &
+    !$omp shared(V, k2, ialfa, ibeta) &
     !$omp private(ix, iz, j, temp)
     DO ix = nx0, nxN
       DO iz = -nz, nz
-        ! Correct flow rate
-        IF (ix == 0 .AND. iz == 0) THEN
-          V(:, 0, 0, 3) = dcmplx(dimag(V(:, 0, 0, 1)), 0.d0); 
-          V(:, 0, 0, 1) = dcmplx(dreal(V(:, 0, 0, 1)), 0.d0); 
-          call solve_mean_correction_line(ucor, eta0bc, eta0m1bc, etanbc, etanp1bc, lambda, 1.0d0)
-
-          fr(1) = yintegr(V(:, 0, 0, 1), y)
-          fr(2) = yintegr(V(:, 0, 0, 3), y)
-          fr(3) = yintegr(ucor, y)
-          IF (abs(meanflowx) > 1.0d-7) THEN
-            corrpx = (meanflowx - fr(1))/fr(3)
-            V(:, 0, 0, 1) = dcmplx(dreal(V(:, 0, 0, 1)) + corrpx*dreal(ucor), dimag(V(:, 0, 0, 1)))
-          END IF
-          IF (abs(meanflowz) > 1.0d-7) THEN
-            corrpz = (meanflowz - fr(2))/fr(3)
-            V(:, 0, 0, 3) = dcmplx(dreal(V(:, 0, 0, 3)) + corrpz*dreal(ucor), dimag(V(:, 0, 0, 3)))
-          END IF
-        ELSE
-          do j = ny0 - 2, nyN + 2
+        IF (.not. (ix == 0 .AND. iz == 0)) THEN
+          do j = lower_j, upper_j
             temp = (ialfa(ix)*V(j, iz, ix, 3) - ibeta(iz)*V(j, iz, ix, 1))/k2(iz, ix)
             V(j, iz, ix, 3) = (ibeta(iz)*V(j, iz, ix, 3) + ialfa(ix)*V(j, iz, ix, 1))/k2(iz, ix)
             V(j, iz, ix, 1) = temp
@@ -609,6 +631,26 @@ CONTAINS
         END IF
       END DO
     END DO
+
+    if (has_average) then
+      !$omp target update from(V(:, 0, 0, 1), V(:, 0, 0, 3))
+      V(:, 0, 0, 3) = dcmplx(dimag(V(:, 0, 0, 1)), 0.d0)
+      V(:, 0, 0, 1) = dcmplx(dreal(V(:, 0, 0, 1)), 0.d0)
+      call solve_mean_correction_line(ucor, eta0bc, eta0m1bc, etanbc, etanp1bc, lambda, 1.0d0)
+
+      fr(1) = yintegr(V(:, 0, 0, 1), y)
+      fr(2) = yintegr(V(:, 0, 0, 3), y)
+      fr(3) = yintegr(ucor, y)
+      IF (abs(meanflowx) > 1.0d-7) THEN
+        corrpx = (meanflowx - fr(1))/fr(3)
+        V(:, 0, 0, 1) = dcmplx(dreal(V(:, 0, 0, 1)) + corrpx*dreal(ucor), dimag(V(:, 0, 0, 1)))
+      END IF
+      IF (abs(meanflowz) > 1.0d-7) THEN
+        corrpz = (meanflowz - fr(2))/fr(3)
+        V(:, 0, 0, 3) = dcmplx(dreal(V(:, 0, 0, 3)) + corrpz*dreal(ucor), dimag(V(:, 0, 0, 3)))
+      END IF
+      !$omp target update to(V(:, 0, 0, 1), V(:, 0, 0, 3))
+    end if
   END SUBROUTINE linsolve
 
   SUBROUTINE linsolve_scalar(lambda, iPhi)
@@ -620,25 +662,18 @@ CONTAINS
     call solve_compact_component_with_y_pencil(3_C_INT + iPhi, phi0bc, phi0m1bc, phinbc, phinp1bc, 5_C_INT + iPhi, 0_C_INT, &
                                                -(5_C_INT + iPhi), 0_C_INT, lambda, pra(iPhi))
 
-    !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(ny, ny0, nyN, nz, nx0, nxN, nPhi) &
-    !$omp shared(V, phi0bc, phi0m1bc, phinbc, phinp1bc, tcor, y, fr, corrtx, meantb, iPhi, lambda, pra) &
-    !$omp private(ix, iz, temp)
-    DO ix = nx0, nxN
-      DO iz = -nz, nz
-        ! Correct flow rate
-        IF (ix == 0 .AND. iz == 0) THEN
-          call solve_mean_correction_line(tcor(:, iPhi), phi0bc, phi0m1bc, phinbc, phinp1bc, lambda, pra(iPhi))
-          fr(3 + iPhi) = yintegr(V(:, 0, 0, 3 + iPhi), y); 
-          fr(3 + nPhi + iPhi) = yintegr(tcor(:, iPhi), y); 
-          IF (abs(meantb) > 1.0d-7) THEN
-            corrtx(iPhi) = (meantb - fr(3 + iPhi))/fr(3 + nPhi + iPhi)
-            V(:, 0, 0, 3 + iPhi) = dcmplx(dreal(V(:, 0, 0, 3 + iPhi)) + corrtx(iPhi)*dreal(tcor(:, iPhi)), &
-                                          dimag(V(:, 0, 0, 3 + iPhi)))
-          END IF
-        END IF
-      END DO
-    END DO
+    if (has_average) then
+      !$omp target update from(V(:, 0, 0, 3 + iPhi))
+      call solve_mean_correction_line(tcor(:, iPhi), phi0bc, phi0m1bc, phinbc, phinp1bc, lambda, pra(iPhi))
+      fr(3 + iPhi) = yintegr(V(:, 0, 0, 3 + iPhi), y)
+      fr(3 + nPhi + iPhi) = yintegr(tcor(:, iPhi), y)
+      IF (abs(meantb) > 1.0d-7) THEN
+        corrtx(iPhi) = (meantb - fr(3 + iPhi))/fr(3 + nPhi + iPhi)
+        V(:, 0, 0, 3 + iPhi) = dcmplx(dreal(V(:, 0, 0, 3 + iPhi)) + corrtx(iPhi)*dreal(tcor(:, iPhi)), &
+                                      dimag(V(:, 0, 0, 3 + iPhi)))
+      END IF
+      !$omp target update to(V(:, 0, 0, 3 + iPhi))
+    end if
   END SUBROUTINE linsolve_scalar
 
   !--------------------------------------------------------------!
@@ -649,8 +684,8 @@ CONTAINS
     integer(C_INT) :: iy
     integer(C_INT) :: i, j, k
     integer(C_INT), intent(in) :: m, to
-    !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(V, VVdz) shared(ny, nxB, nzd, nx0, nxN, nz, m, to) private(i,j,k)
+    !$omp target teams distribute parallel do collapse(3) &
+    !$omp shared(V, VVdz) shared(ny, nx0, nxB, nzd, nxN, nz, m, to) private(i,j,k)
     DO i = 1, ny + 3
       DO j = 1, nxB
         DO k = 1, nzd
@@ -870,7 +905,7 @@ CONTAINS
 #endif
 
     ! contribution known a-priori
-    !$omp target teams distribute parallel do collapse(3) default(none)  &
+    !$omp target teams distribute parallel do collapse(3)  &
     !$omp private(iz, ix, iy, tmp, k, unkn) &
     !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) shared(meanpx, meanpz, ni, deltat, ode) &
     !$omp shared(vvdz, v, pra)
@@ -890,7 +925,7 @@ CONTAINS
       END DO
     END DO
 
-    !$omp target teams distribute parallel do collapse(3) default(none)  &
+    !$omp target teams distribute parallel do collapse(3)  &
     !$omp private(iz, ix, iy, tmp, k, unkn) &
     !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) shared(meanpx, meanpz, ni, deltat, ode) &
     !$omp shared(vvdz, v, pra)
@@ -914,7 +949,7 @@ CONTAINS
       END DO
     END DO
 
-    !$omp target teams distribute parallel do collapse(3) default(none)  &
+    !$omp target teams distribute parallel do collapse(3)  &
     !$omp private(rhsu, rhsw, expl) private(iz, ix, iy, tmp, k, unkn) &
     !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) shared(meanpx, meanpz, ni, deltat, ode) &
     !$omp shared(vvdz, v, pra)
@@ -935,7 +970,7 @@ CONTAINS
 
     !initialize phi
     DO iPhi = 1, nPhi
-      !$omp target teams distribute parallel do collapse(3) default(none)  &
+      !$omp target teams distribute parallel do collapse(3)  &
       !$omp private(tmp, iz, ix, iy, k, unkn) &
       !$omp shared(nz, nx0, nxN, ny, pra, V, memrhs, ode, deltat, oldrhs, iphi, der, k2, ni)
       DO iz = -nz, nz
@@ -953,7 +988,7 @@ CONTAINS
       END DO
     END DO
 
-    !$omp target teams distribute parallel do collapse(3) default(none) &
+    !$omp target teams distribute parallel do collapse(3) &
     !$omp shared(memrhs, V) shared(nz, nx0, nxN, ny, nPhi) private(iy, ix, iz)
     DO iz = -nz, nz
     DO ix = nx0, nxN
@@ -978,9 +1013,9 @@ CONTAINS
 
     SELECT CASE (component)
     CASE (1)
-      !$omp target teams distribute parallel do collapse(3) default(none)  &
+      !$omp target teams distribute parallel do collapse(3)  &
       !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
-      !$omp shared(nz, nx0, nxN, ny, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode) shared(vvdz)
+      !$omp shared(nz, nx0, nxN, ny, from) shared(ialfa, ibeta) shared(der, ny0) shared(V, oldrhs, izd, ode) shared(vvdz)
       DO iz = -nz, nz
         DO ix = nx0, nxN
           DO iy = 1, ny - 1
@@ -995,9 +1030,9 @@ CONTAINS
       END DO
     CASE (2)
       !contribution from VVdz(:,:,:,2)
-      !$omp target teams distribute parallel do collapse(3) default(none)  &
+      !$omp target teams distribute parallel do collapse(3)  &
       !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
-      !$omp shared(nz, nx0, nxN, ny, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
+      !$omp shared(nz, nx0, nxN, ny, from) shared(ialfa, ibeta) shared(der, ny0) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
       DO iz = -nz, nz
         DO ix = nx0, nxN
           DO iy = 1, ny - 1
@@ -1009,9 +1044,9 @@ CONTAINS
       END DO
     CASE (3)
       !contribution from VVdz(:,:,:,3)
-      !$omp target teams distribute parallel do collapse(3) default(none)  &
+      !$omp target teams distribute parallel do collapse(3)  &
       !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
-      !$omp shared(nz, nx0, nxN, ny, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
+      !$omp shared(nz, nx0, nxN, ny, from) shared(ialfa, ibeta) shared(der, ny0) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
       DO iz = -nz, nz
         DO ix = nx0, nxN
           DO iy = 1, ny - 1
@@ -1025,9 +1060,9 @@ CONTAINS
       END DO
     CASE (4)
       !contribution from VVdz(:,:,:,4)
-      !$omp target teams distribute parallel do collapse(3) default(none)  &
+      !$omp target teams distribute parallel do collapse(3)  &
       !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
-      !$omp shared(nz, nx0, nxN, ny, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
+      !$omp shared(nz, nx0, nxN, ny, from) shared(ialfa, ibeta) shared(der, ny0) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
       DO iz = -nz, nz
         DO ix = nx0, nxN
           DO iy = 1, ny - 1
@@ -1042,9 +1077,9 @@ CONTAINS
       END DO
     CASE (5)
       !contribution from VVdz(:,:,:,5)
-      !$omp target teams distribute parallel do collapse(3) default(none)  &
+      !$omp target teams distribute parallel do collapse(3)  &
       !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
-      !$omp shared(nz, nx0, nxN, ny, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
+      !$omp shared(nz, nx0, nxN, ny, from) shared(ialfa, ibeta) shared(der, ny0) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
       DO iz = -nz, nz
         DO ix = nx0, nxN
           DO iy = 1, ny - 1
@@ -1060,9 +1095,9 @@ CONTAINS
       END DO
     CASE (6)
       !contribution from VVdz(:,:,:,6)
-      !$omp target teams distribute parallel do collapse(3) default(none)  &
+      !$omp target teams distribute parallel do collapse(3)  &
       !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
-      !$omp shared(nz, nx0, nxN, ny, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
+      !$omp shared(nz, nx0, nxN, ny, from) shared(ialfa, ibeta) shared(der, ny0) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
       DO iz = -nz, nz
         DO ix = nx0, nxN
           DO iy = 1, ny - 1
@@ -1081,9 +1116,9 @@ CONTAINS
       iPhi = (component - 4)/3
       SELECT CASE (MODULO((component - 4), 3) + 1)
       CASE (1)
-        !$omp target teams distribute parallel do collapse(3) default(none)  &
+        !$omp target teams distribute parallel do collapse(3)  &
         !$omp private(rhst, iz, ix, iy) &
-        !$omp shared(nz, nx0, nxN, ny, ialfa, V, ode, der, oldrhs, iphi, vvdz, izd, from)
+        !$omp shared(nz, nx0, nxN, ny, ialfa, V, ode, der, oldrhs, iphi, vvdz, izd, from, ny0)
         DO iz = -nz, nz
           DO ix = nx0, nxN
             DO iy = 1, ny - 1
@@ -1093,9 +1128,9 @@ CONTAINS
           END DO
         END DO
       CASE (2)
-        !$omp target teams distribute parallel do collapse(3) default(none)  &
+        !$omp target teams distribute parallel do collapse(3)  &
         !$omp private(rhst, iz, ix, iy) &
-        !$omp shared(nz, nx0, nxN, ny, V, ode, der, oldrhs, iphi, vvdz, izd, from)
+        !$omp shared(nz, nx0, nxN, ny, V, ode, der, oldrhs, iphi, vvdz, izd, from, ny0)
         DO iz = -nz, nz
           DO ix = nx0, nxN
             DO iy = 1, ny - 1
@@ -1106,9 +1141,9 @@ CONTAINS
           END DO
         END DO
       CASE (3)
-        !$omp target teams distribute parallel do collapse(3) default(none)  &
+        !$omp target teams distribute parallel do collapse(3)  &
         !$omp private(rhst, iz, ix, iy) &
-        !$omp shared(nz, nx0, nxN, ny, ibeta,V, ode, der, oldrhs, iphi, vvdz, izd, from)
+        !$omp shared(nz, nx0, nxN, ny, ibeta, V, ode, der, oldrhs, iphi, vvdz, izd, from, ny0)
         DO iz = -nz, nz
           DO ix = nx0, nxN
             DO iy = 1, ny - 1
