@@ -37,6 +37,8 @@ contains
     complex(C_DOUBLE_COMPLEX), intent(out) :: dst(:, :, :)
     procedure(ys_build_ghost_line) :: build_line
 
+    ! The reduced interface solve keeps two boundary-adjacent unknowns per side,
+    ! so each rank must own at least four physical/ghost rows.
     if (npy_grid > 1 .and. ylB < 4) error stop "ys_solve_ghost_field requires at least four y rows per rank"
     call ys_solve_ghost_field_reduced(src0, src1, dst, ny, nz, build_line)
   end subroutine ys_solve_ghost_field
@@ -186,6 +188,8 @@ contains
     real(C_DOUBLE) :: a(1:ny + 1, -2:2), eqm1(-2:2), eq0(-2:2), eqn(-2:2), eqnp1(-2:2)
     integer(C_INT) :: ix, iz
 
+    ! Solve each x/z line on the native distributed-y layout, then gather the
+    ! owned y blocks back into the full x/z-shaped output field.
     allocate (dst_xz(ylB, 2*nz + 1, nxB))
     allocate (dst_xz_full(ny + 3, 2*nz + 1, nxB))
 
@@ -228,6 +232,8 @@ contains
       return
     end if
 
+    ! Reduce the local y block to its four interface unknowns:
+    ! first two rows and last two rows as functions of neighboring interface data.
     call ys_build_local_reduction(line, a, eqm1, eq0, eqn, eqnp1, ny, c_local, tl_local, tr_local, &
                                   factored_a, rhs_local, left_couple, right_couple)
 
@@ -237,6 +243,9 @@ contains
     call MPI_Allgather(packed, int(size(packed), kind=4), MPI_DOUBLE_COMPLEX, &
                        gathered, int(size(packed), kind=4), MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
 
+    ! The current backend replicates the tiny interface system on every rank.
+    ! This keeps communication to interface data only; a future PCR step can
+    ! replace this dense replicated solve without changing the local reduction.
     allocate (mat(niface*npy_grid, niface*npy_grid), rhs(niface*npy_grid), sol(niface*npy_grid))
     mat = (0.0d0, 0.0d0)
     rhs = (0.0d0, 0.0d0)
@@ -303,35 +312,14 @@ contains
     complex(C_DOUBLE_COMPLEX), intent(out) :: rhs_local(0:ylB - 1), left_couple(0:ylB - 1, 2), right_couple(0:ylB - 1, 2)
     complex(C_DOUBLE_COMPLEX) :: rhs_work(ylB)
     complex(C_DOUBLE_COMPLEX) :: particular(0:ylB - 1), left_resp(0:ylB - 1, 2), right_resp(0:ylB - 1, 2)
-    complex(C_DOUBLE_COMPLEX) :: local_a(ylB, ylB)
-    integer(C_INT) :: row, idx, cols(5), k, col
-    complex(C_DOUBLE_COMPLEX) :: row_left(2), row_right(2)
-    real(C_DOUBLE) :: coeffs(5)
     integer(C_INT), parameter :: local_half_bw = 4
 
     if (ylB < 4) error stop "ys_build_local_reduction requires at least 4 local y rows"
 
-    local_a = (0.0d0, 0.0d0)
-    rhs_local = (0.0d0, 0.0d0)
-    left_couple = (0.0d0, 0.0d0)
-    right_couple = (0.0d0, 0.0d0)
+    call ys_build_local_block_system(line, a, eqm1, eq0, eqn, eqnp1, ny, factored_a, rhs_local, left_couple, right_couple)
 
-    do row = yl0 - 2, ylN - 2
-      idx = row - (yl0 - 2)
-      call ys_get_ghost_row(row, ny, a, eqm1, eq0, eqn, eqnp1, cols, coeffs)
-      rhs_local(idx) = line(row)
-      call ys_scatter_row(cols, coeffs, row_left, row_right, ny)
-      left_couple(idx, :) = row_left
-      right_couple(idx, :) = row_right
-      do k = 1, 5
-        col = cols(k)
-        if (col >= yl0 - 2 .and. col <= ylN - 2) then
-          local_a(idx + 1, col - (yl0 - 2) + 1) = cmplx(coeffs(k), 0.0d0, kind=C_DOUBLE)
-        end if
-      end do
-    end do
-
-    factored_a = local_a
+    ! The local reduced operator is slightly wider than pentadiagonal once the
+    ! ghost rows are folded in, but it still has a small fixed half-bandwidth.
     call ys_factor_banded_dense(factored_a, local_half_bw)
 
     rhs_work = rhs_local
@@ -374,6 +362,38 @@ contains
     call ys_solve_factored_banded_dense(factored_a, rhs_work, local_half_bw)
     local_block = rhs_work
   end subroutine ys_reconstruct_local_block
+
+  subroutine ys_build_local_block_system(line, a, eqm1, eq0, eqn, eqnp1, ny, local_a, rhs_local, left_couple, right_couple)
+    integer(C_INT), intent(in) :: ny
+    complex(C_DOUBLE_COMPLEX), intent(in) :: line(-1:ny + 1)
+    real(C_DOUBLE), intent(in) :: a(1:ny + 1, -2:2)
+    real(C_DOUBLE), intent(in) :: eqm1(-2:2), eq0(-2:2), eqn(-2:2), eqnp1(-2:2)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: local_a(ylB, ylB)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: rhs_local(0:ylB - 1), left_couple(0:ylB - 1, 2), right_couple(0:ylB - 1, 2)
+    integer(C_INT) :: row, idx, cols(5), k, col
+    complex(C_DOUBLE_COMPLEX) :: row_left(2), row_right(2)
+    real(C_DOUBLE) :: coeffs(5)
+
+    local_a = (0.0d0, 0.0d0)
+    rhs_local = (0.0d0, 0.0d0)
+    left_couple = (0.0d0, 0.0d0)
+    right_couple = (0.0d0, 0.0d0)
+
+    do row = yl0 - 2, ylN - 2
+      idx = row - (yl0 - 2)
+      call ys_get_ghost_row(row, ny, a, eqm1, eq0, eqn, eqnp1, cols, coeffs)
+      rhs_local(idx) = line(row)
+      call ys_scatter_row(cols, coeffs, row_left, row_right, ny)
+      left_couple(idx, :) = row_left
+      right_couple(idx, :) = row_right
+      do k = 1, 5
+        col = cols(k)
+        if (col >= yl0 - 2 .and. col <= ylN - 2) then
+          local_a(idx + 1, col - (yl0 - 2) + 1) = cmplx(coeffs(k), 0.0d0, kind=C_DOUBLE)
+        end if
+      end do
+    end do
+  end subroutine ys_build_local_block_system
 
   subroutine ys_get_ghost_row(row, ny, a, eqm1, eq0, eqn, eqnp1, cols, coeffs)
     integer(C_INT), intent(in) :: row, ny
