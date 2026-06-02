@@ -270,6 +270,8 @@ contains
     integer(C_INT), parameter :: niface = 4
     complex(C_DOUBLE_COMPLEX) :: c_local(niface), tl_local(niface, 2), tr_local(niface, 2)
     complex(C_DOUBLE_COMPLEX) :: u_left(2), u_right(2)
+    complex(C_DOUBLE_COMPLEX) :: factored_a(ylB, ylB)
+    complex(C_DOUBLE_COMPLEX) :: rhs_local(0:ylB - 1), left_couple(0:ylB - 1, 2), right_couple(0:ylB - 1, 2)
     complex(C_DOUBLE_COMPLEX), allocatable :: packed(:), gathered(:), mat(:, :), rhs(:), sol(:)
     integer(C_INT) :: iblock, row0
 
@@ -278,7 +280,8 @@ contains
       return
     end if
 
-    call ys_build_local_reduction(line, a, eqm1, eq0, eqn, eqnp1, ny, c_local, tl_local, tr_local)
+    call ys_build_local_reduction(line, a, eqm1, eq0, eqn, eqnp1, ny, c_local, tl_local, tr_local, &
+                                  factored_a, rhs_local, left_couple, right_couple)
 
 #ifdef HAVE_MPI
     allocate (packed(20), gathered(20*npy_grid))
@@ -315,7 +318,7 @@ contains
     u_right = (0.0d0, 0.0d0)
     if (ipy > 0) u_left = sol(row0 - 1:row0)
     if (ipy < npy_grid - 1) u_right = sol(row0 + 5:row0 + 6)
-    call ys_reconstruct_local_block(line, a, eqm1, eq0, eqn, eqnp1, ny, u_left, u_right, local_block)
+    call ys_reconstruct_local_block(factored_a, rhs_local, left_couple, right_couple, u_left, u_right, local_block)
     deallocate (packed, gathered, mat, rhs, sol)
 #else
     call ys_solve_ghost_block_local(line, a, eqm1, eq0, eqn, eqnp1, ny, local_block)
@@ -341,19 +344,22 @@ contains
     local_block = work(yl0 - 2:ylN - 2)
   end subroutine ys_solve_ghost_block_local
 
-  subroutine ys_build_local_reduction(line, a, eqm1, eq0, eqn, eqnp1, ny, c_local, tl_local, tr_local)
+  subroutine ys_build_local_reduction(line, a, eqm1, eq0, eqn, eqnp1, ny, c_local, tl_local, tr_local, factored_a, &
+                                      rhs_local, left_couple, right_couple)
     integer(C_INT), intent(in) :: ny
     complex(C_DOUBLE_COMPLEX), intent(in) :: line(-1:ny + 1)
     real(C_DOUBLE), intent(in) :: a(1:ny + 1, -2:2)
     real(C_DOUBLE), intent(in) :: eqm1(-2:2), eq0(-2:2), eqn(-2:2), eqnp1(-2:2)
     complex(C_DOUBLE_COMPLEX), intent(out) :: c_local(4), tl_local(4, 2), tr_local(4, 2)
-    complex(C_DOUBLE_COMPLEX) :: local_a(ylB, ylB), mat_work(ylB, ylB)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: factored_a(ylB, ylB)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: rhs_local(0:ylB - 1), left_couple(0:ylB - 1, 2), right_couple(0:ylB - 1, 2)
     complex(C_DOUBLE_COMPLEX) :: rhs_work(ylB)
-    complex(C_DOUBLE_COMPLEX) :: rhs_local(0:ylB - 1), left_couple(0:ylB - 1, 2), right_couple(0:ylB - 1, 2)
     complex(C_DOUBLE_COMPLEX) :: particular(0:ylB - 1), left_resp(0:ylB - 1, 2), right_resp(0:ylB - 1, 2)
+    complex(C_DOUBLE_COMPLEX) :: local_a(ylB, ylB)
     integer(C_INT) :: row, idx, cols(5), k, col
     complex(C_DOUBLE_COMPLEX) :: row_left(2), row_right(2)
     real(C_DOUBLE) :: coeffs(5)
+    integer(C_INT), parameter :: local_half_bw = 4
 
     if (ylB < 4) error stop "ys_build_local_reduction requires at least 4 local y rows"
 
@@ -377,29 +383,27 @@ contains
       end do
     end do
 
-    mat_work = local_a
+    factored_a = local_a
+    call ys_factor_banded_dense(factored_a, local_half_bw)
+
     rhs_work = rhs_local
-    call ys_solve_dense_complex(mat_work, rhs_work)
+    call ys_solve_factored_banded_dense(factored_a, rhs_work, local_half_bw)
     particular = rhs_work
 
-    mat_work = local_a
     rhs_work = -left_couple(:, 1)
-    call ys_solve_dense_complex(mat_work, rhs_work)
+    call ys_solve_factored_banded_dense(factored_a, rhs_work, local_half_bw)
     left_resp(:, 1) = rhs_work
 
-    mat_work = local_a
     rhs_work = -left_couple(:, 2)
-    call ys_solve_dense_complex(mat_work, rhs_work)
+    call ys_solve_factored_banded_dense(factored_a, rhs_work, local_half_bw)
     left_resp(:, 2) = rhs_work
 
-    mat_work = local_a
     rhs_work = -right_couple(:, 1)
-    call ys_solve_dense_complex(mat_work, rhs_work)
+    call ys_solve_factored_banded_dense(factored_a, rhs_work, local_half_bw)
     right_resp(:, 1) = rhs_work
 
-    mat_work = local_a
     rhs_work = -right_couple(:, 2)
-    call ys_solve_dense_complex(mat_work, rhs_work)
+    call ys_solve_factored_banded_dense(factored_a, rhs_work, local_half_bw)
     right_resp(:, 2) = rhs_work
 
     c_local = [particular(0), particular(1), particular(ylB - 2), particular(ylB - 1)]
@@ -409,42 +413,17 @@ contains
     tr_local(:, 2) = [right_resp(0, 2), right_resp(1, 2), right_resp(ylB - 2, 2), right_resp(ylB - 1, 2)]
   end subroutine ys_build_local_reduction
 
-  subroutine ys_reconstruct_local_block(line, a, eqm1, eq0, eqn, eqnp1, ny, u_left, u_right, local_block)
-    integer(C_INT), intent(in) :: ny
-    complex(C_DOUBLE_COMPLEX), intent(in) :: line(-1:ny + 1)
-    real(C_DOUBLE), intent(in) :: a(1:ny + 1, -2:2)
-    real(C_DOUBLE), intent(in) :: eqm1(-2:2), eq0(-2:2), eqn(-2:2), eqnp1(-2:2)
+  subroutine ys_reconstruct_local_block(factored_a, rhs_local, left_couple, right_couple, u_left, u_right, local_block)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: factored_a(ylB, ylB)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: rhs_local(0:ylB - 1), left_couple(0:ylB - 1, 2), right_couple(0:ylB - 1, 2)
     complex(C_DOUBLE_COMPLEX), intent(in) :: u_left(2), u_right(2)
     complex(C_DOUBLE_COMPLEX), intent(out) :: local_block(ylB)
-    complex(C_DOUBLE_COMPLEX) :: local_a(ylB, ylB), mat_work(ylB, ylB), rhs_work(ylB)
-    complex(C_DOUBLE_COMPLEX) :: rhs_local(0:ylB - 1), left_couple(0:ylB - 1, 2), right_couple(0:ylB - 1, 2)
-    integer(C_INT) :: row, idx, cols(5), k, col
-    complex(C_DOUBLE_COMPLEX) :: row_left(2), row_right(2)
-    real(C_DOUBLE) :: coeffs(5)
+    complex(C_DOUBLE_COMPLEX) :: rhs_work(ylB)
+    integer(C_INT), parameter :: local_half_bw = 4
 
-    local_a = (0.0d0, 0.0d0)
-    rhs_local = (0.0d0, 0.0d0)
-    left_couple = (0.0d0, 0.0d0)
-    right_couple = (0.0d0, 0.0d0)
-    do row = yl0 - 2, ylN - 2
-      idx = row - (yl0 - 2)
-      call ys_get_ghost_row(row, ny, a, eqm1, eq0, eqn, eqnp1, cols, coeffs)
-      rhs_local(idx) = line(row)
-      call ys_scatter_row(cols, coeffs, row_left, row_right, ny)
-      left_couple(idx, :) = row_left
-      right_couple(idx, :) = row_right
-      do k = 1, 5
-        col = cols(k)
-        if (col >= yl0 - 2 .and. col <= ylN - 2) then
-          local_a(idx + 1, col - (yl0 - 2) + 1) = cmplx(coeffs(k), 0.0d0, kind=C_DOUBLE)
-        end if
-      end do
-    end do
-
-    mat_work = local_a
     rhs_work = rhs_local - left_couple(:, 1)*u_left(1) - left_couple(:, 2)*u_left(2) - &
                right_couple(:, 1)*u_right(1) - right_couple(:, 2)*u_right(2)
-    call ys_solve_dense_complex(mat_work, rhs_work)
+    call ys_solve_factored_banded_dense(factored_a, rhs_work, local_half_bw)
     local_block = rhs_work
   end subroutine ys_reconstruct_local_block
 
@@ -551,5 +530,46 @@ contains
       rhs(i) = rhs(i)/mat(i, i)
     end do
   end subroutine ys_solve_dense_complex
+
+  subroutine ys_factor_banded_dense(mat, half_bw)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: mat(:, :)
+    integer(C_INT), intent(in) :: half_bw
+    integer(C_INT) :: n, i, j, k, jmax, kmax
+    complex(C_DOUBLE_COMPLEX) :: factor
+
+    n = int(size(mat, 1), C_INT)
+    do i = 1, n
+      jmax = min(n, i + half_bw)
+      do j = i + 1, jmax
+        factor = mat(j, i)/mat(i, i)
+        mat(j, i) = factor
+        kmax = min(n, min(i + half_bw, j + half_bw))
+        do k = i + 1, kmax
+          mat(j, k) = mat(j, k) - factor*mat(i, k)
+        end do
+      end do
+    end do
+  end subroutine ys_factor_banded_dense
+
+  subroutine ys_solve_factored_banded_dense(mat, rhs, half_bw)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: mat(:, :)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs(:)
+    integer(C_INT), intent(in) :: half_bw
+    integer(C_INT) :: n, i, j
+
+    n = int(size(rhs), C_INT)
+    do i = 1, n
+      do j = max(1_C_INT, i - half_bw), i - 1
+        rhs(i) = rhs(i) - mat(i, j)*rhs(j)
+      end do
+    end do
+
+    do i = n, 1, -1
+      do j = i + 1, min(n, i + half_bw)
+        rhs(i) = rhs(i) - mat(i, j)*rhs(j)
+      end do
+      rhs(i) = rhs(i)/mat(i, i)
+    end do
+  end subroutine ys_solve_factored_banded_dense
 
 end module y_line_solvers
