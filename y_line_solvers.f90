@@ -3,12 +3,27 @@
 module y_line_solvers
 
   use, intrinsic :: iso_c_binding
+  use mpi_transpose, only: ny0, nx0, nxN, nxB, yl0, ylN, ylB, zpy0, zpyB, &
+                           transpose_xz_to_y_pencil, transpose_y_pencil_to_xz, allgather_y_blocks_to_xz_full
 
   implicit none
   private
 
   public :: ys_lu5decomp, ys_leftlu5div
   public :: ys_solve_compact_derivative, ys_solve_compact_system, ys_solve_ghost_system
+  public :: ys_solve_ghost_field_with_y_pencil
+
+  abstract interface
+    subroutine ys_build_ghost_line(ix_global, iz_global, src0_line, src1_line, line, a, eqm1, eq0, eqn, eqnp1, ny)
+      use, intrinsic :: iso_c_binding
+      implicit none
+      integer(C_INT), intent(in) :: ix_global, iz_global, ny
+      complex(C_DOUBLE_COMPLEX), intent(in) :: src0_line(:), src1_line(:)
+      complex(C_DOUBLE_COMPLEX), intent(out) :: line(-1:ny + 1)
+      real(C_DOUBLE), intent(out) :: a(1:ny + 1, -2:2)
+      real(C_DOUBLE), intent(out) :: eqm1(-2:2), eq0(-2:2), eqn(-2:2), eqnp1(-2:2)
+    end subroutine ys_build_ghost_line
+  end interface
 
 contains
 
@@ -144,5 +159,54 @@ contains
     x(ny) = (x(ny) - sum(eqn(-2:0)*x(ny - 3:ny - 1)))/eqn(1)
     x(ny + 1) = (x(ny + 1) - sum(eqnp1(-2:1)*x(ny - 3:ny)))/eqnp1(2)
   end subroutine ys_solve_ghost_system
+
+  subroutine ys_solve_ghost_field_with_y_pencil(src0, src1, dst, ny, nz, build_line)
+    implicit none
+    integer(C_INT), intent(in) :: ny, nz
+    complex(C_DOUBLE_COMPLEX), intent(in) :: src0(:, :, :), src1(:, :, :)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: dst(:, :, :)
+    procedure(ys_build_ghost_line) :: build_line
+    complex(C_DOUBLE_COMPLEX), allocatable :: src0_xz(:, :, :), src1_xz(:, :, :), dst_xz(:, :, :), dst_xz_full(:, :, :)
+    complex(C_DOUBLE_COMPLEX), allocatable :: src0_y(:, :, :), src1_y(:, :, :), dst_y(:, :, :)
+    complex(C_DOUBLE_COMPLEX) :: line(-1:ny + 1)
+    real(C_DOUBLE) :: a(1:ny + 1, -2:2), eqm1(-2:2), eq0(-2:2), eqn(-2:2), eqnp1(-2:2)
+    integer(C_INT) :: ix, iz, ix_local, iz_local, ix_global, iz_global
+
+    allocate (src0_xz(ylB, 2*nz + 1, nxB), src1_xz(ylB, 2*nz + 1, nxB), dst_xz(ylB, 2*nz + 1, nxB))
+    allocate (dst_xz_full(ny + 3, 2*nz + 1, nxB))
+    allocate (src0_y(ny + 3, zpyB, nxB), src1_y(ny + 3, zpyB, nxB), dst_y(ny + 3, zpyB, nxB))
+
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        src0_xz(:, iz + nz + 1, ix - nx0 + 1) = src0(yl0:ylN, iz + nz + 1, ix - nx0 + 1)
+        src1_xz(:, iz + nz + 1, ix - nx0 + 1) = src1(yl0:ylN, iz + nz + 1, ix - nx0 + 1)
+      end do
+    end do
+
+    call transpose_xz_to_y_pencil(src0_xz, src0_y)
+    call transpose_xz_to_y_pencil(src1_xz, src1_y)
+
+    do ix_local = 1, nxB
+      ix_global = nx0 + ix_local - 1
+      do iz_local = 1, zpyB
+        iz_global = zpy0 + iz_local - 1 - (nz + 1)
+        call build_line(ix_global, iz_global, src0_y(:, iz_local, ix_local), src1_y(:, iz_local, ix_local), &
+                        line, a, eqm1, eq0, eqn, eqnp1, ny)
+        call ys_solve_ghost_system(line, a, eqm1, eq0, eqn, eqnp1, ny)
+        dst_y(:, iz_local, ix_local) = line
+      end do
+    end do
+
+    call transpose_y_pencil_to_xz(dst_y, dst_xz)
+    call allgather_y_blocks_to_xz_full(dst_xz, dst_xz_full)
+
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        dst(:, iz + nz + 1, ix - nx0 + 1) = dst_xz_full(:, iz + nz + 1, ix - nx0 + 1)
+      end do
+    end do
+
+    deallocate (src0_xz, src1_xz, dst_xz, dst_xz_full, src0_y, src1_y, dst_y)
+  end subroutine ys_solve_ghost_field_with_y_pencil
 
 end module y_line_solvers
