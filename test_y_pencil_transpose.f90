@@ -3,7 +3,7 @@
 program test_y_pencil_transpose
   use, intrinsic :: iso_c_binding
   use mpi_transpose
-  use y_line_solvers, only: ys_solve_ghost_system, ys_solve_ghost_field_with_y_pencil, ys_solve_ghost_field_reduced
+  use y_line_solvers, only: ys_solve_ghost_system, ys_solve_ghost_field_reduced
 #ifdef HAVE_MPI
   use mpi_f08
 #endif
@@ -24,7 +24,6 @@ program test_y_pencil_transpose
   complex(C_DOUBLE_COMPLEX), allocatable :: sol_xz(:, :, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable :: exact_field(:, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable :: dummy_field(:, :, :)
-  complex(C_DOUBLE_COMPLEX), allocatable :: gathered_field(:, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable :: reduced_field(:, :, :)
   real(C_DOUBLE) :: local_err, global_err, tol
   integer(C_INT) :: iy, iz, ix
@@ -67,7 +66,6 @@ program test_y_pencil_transpose
   allocate (sol_xz(ylB, 2*nz_test + 1, nxB, nsolve_fields))
   allocate (exact_field(ny_test + 3, 2*nz_test + 1, nxB))
   allocate (dummy_field(ny_test + 3, 2*nz_test + 1, nxB))
-  allocate (gathered_field(ny_test + 3, 2*nz_test + 1, nxB))
   allocate (reduced_field(ny_test + 3, 2*nz_test + 1, nxB))
 
   do ix = 1, nxB
@@ -171,7 +169,6 @@ program test_y_pencil_transpose
     end do
   end do
 
-  call ys_solve_ghost_field_with_y_pencil(exact_field, dummy_field, gathered_field, ny_test, nz_test, build_field_line)
   call ys_solve_ghost_field_reduced(exact_field, dummy_field, reduced_field, ny_test, nz_test, build_field_line)
 
   do ix = 1, nxB
@@ -180,9 +177,7 @@ program test_y_pencil_transpose
       global_z = iz
       call fill_exact_line(exact, 1_C_INT, global_z, global_x)
       do iy = 1, ny_test + 3
-        local_err = max(local_err, abs(gathered_field(iy, iz, ix) - exact(iy - 2)))
         local_err = max(local_err, abs(reduced_field(iy, iz, ix) - exact(iy - 2)))
-        local_err = max(local_err, abs(reduced_field(iy, iz, ix) - gathered_field(iy, iz, ix)))
       end do
     end do
   end do
@@ -197,7 +192,7 @@ program test_y_pencil_transpose
   end if
 
   deallocate (xz_field, y_pencil, xz_roundtrip, rhs_xz, rhs_y, sol_y, sol_xz)
-  deallocate (exact_field, dummy_field, gathered_field, reduced_field)
+  deallocate (exact_field, dummy_field, reduced_field)
   call MPI_Finalize()
 #endif
 

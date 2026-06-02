@@ -14,7 +14,7 @@ module y_line_solvers
 
   public :: ys_lu5decomp, ys_leftlu5div
   public :: ys_solve_compact_derivative, ys_solve_compact_system, ys_solve_ghost_system
-  public :: ys_solve_ghost_field, ys_solve_ghost_field_with_y_pencil, ys_solve_ghost_field_reduced
+  public :: ys_solve_ghost_field, ys_solve_ghost_field_reduced
 
   abstract interface
     subroutine ys_build_ghost_line(ix_global, iz_global, src0_line, src1_line, line, a, eqm1, eq0, eqn, eqnp1, ny)
@@ -37,11 +37,8 @@ contains
     complex(C_DOUBLE_COMPLEX), intent(out) :: dst(:, :, :)
     procedure(ys_build_ghost_line) :: build_line
 
-    if (npy_grid > 1 .and. ylB >= 4) then
-      call ys_solve_ghost_field_reduced(src0, src1, dst, ny, nz, build_line)
-    else
-      call ys_solve_ghost_field_with_y_pencil(src0, src1, dst, ny, nz, build_line)
-    end if
+    if (npy_grid > 1 .and. ylB < 4) error stop "ys_solve_ghost_field requires at least four y rows per rank"
+    call ys_solve_ghost_field_reduced(src0, src1, dst, ny, nz, build_line)
   end subroutine ys_solve_ghost_field
 
   subroutine ys_lu5decomp(a)

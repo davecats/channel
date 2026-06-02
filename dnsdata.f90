@@ -25,7 +25,8 @@ MODULE dnsdata
   USE rbmat
   USE mpi_transpose
   USE ffts
-  USE y_line_solvers, ONLY: ys_lu5decomp, ys_leftlu5div, ys_solve_compact_derivative, ys_solve_compact_system
+  USE y_line_solvers, ONLY: ys_lu5decomp, ys_leftlu5div, ys_solve_compact_derivative, ys_solve_compact_system, &
+                            ys_solve_ghost_field
 
   IMPLICIT NONE
 
@@ -440,38 +441,40 @@ CONTAINS
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), intent(in) :: src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    complex(C_DOUBLE_COMPLEX), allocatable :: field_xz(:, :, :), deriv_xz(:, :, :), deriv_xz_full(:, :, :)
-    complex(C_DOUBLE_COMPLEX), allocatable :: field_y(:, :, :), deriv_y(:, :, :)
-    integer(C_INT) :: ix, iz, ix_local, iz_local
+    complex(C_DOUBLE_COMPLEX) :: dummy(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
 
-    allocate (field_xz(ylB, 2*nz + 1, nxB), deriv_xz(ylB, 2*nz + 1, nxB))
-    allocate (deriv_xz_full(ny + 3, 2*nz + 1, nxB))
-    allocate (field_y(ny + 3, zpyB, nxB), deriv_y(ny + 3, zpyB, nxB))
+    dummy = (0.0d0, 0.0d0)
+    call ys_solve_ghost_field(src, dummy, dst, ny, nz, build_derivative_line)
+  contains
+    subroutine build_derivative_line(ix_global, iz_global, src0_line, src1_line, line, amat, eqm1, eq0, eqn, eqnp1, ny_line)
+      integer(C_INT), intent(in) :: ix_global, iz_global, ny_line
+      complex(C_DOUBLE_COMPLEX), intent(in) :: src0_line(:), src1_line(:)
+      complex(C_DOUBLE_COMPLEX), intent(out) :: line(-1:ny_line + 1)
+      real(C_DOUBLE), intent(out) :: amat(1:ny_line + 1, -2:2)
+      real(C_DOUBLE), intent(out) :: eqm1(-2:2), eq0(-2:2), eqn(-2:2), eqnp1(-2:2)
+      integer(C_INT) :: iy
 
-    do ix = nx0, nxN
-      do iz = -nz, nz
-        field_xz(:, iz + nz + 1, ix - nx0 + 1) = src(yl0 - 2:ylN - 2, iz, ix)
+      amat = 0.0d0
+      line = (0.0d0, 0.0d0)
+      do iy = 1, ny_line - 1
+        amat(iy, -2:2) = der(iy, 0, -2:2)
+        line(iy) = sum(der(iy, 1, -2:2)*src0_line(iy:iy + 4))
       end do
-    end do
 
-    call transpose_xz_to_y_pencil(field_xz, field_y)
+      line(0) = sum(d140(-2:2)*src0_line(1:5))
+      line(-1) = sum(d14m1(-2:2)*src0_line(1:5))
+      line(ny_line) = sum(d14n(-2:2)*src0_line(ny_line - 1:ny_line + 3))
+      line(ny_line + 1) = sum(d14np1(-2:2)*src0_line(ny_line - 1:ny_line + 3))
 
-    do ix_local = 1, nxB
-      do iz_local = 1, zpyB
-        call COMPLEXderiv(field_y(:, iz_local, ix_local), deriv_y(:, iz_local, ix_local), der, D0mat)
-      end do
-    end do
-
-    call transpose_y_pencil_to_xz(deriv_y, deriv_xz)
-    call allgather_y_blocks_to_xz_full(deriv_xz, deriv_xz_full)
-
-    do ix = nx0, nxN
-      do iz = -nz, nz
-        dst(:, iz, ix) = deriv_xz_full(:, iz + nz + 1, ix - nx0 + 1)
-      end do
-    end do
-
-    deallocate (field_xz, deriv_xz, deriv_xz_full, field_y, deriv_y)
+      eqm1 = 0.0d0
+      eq0 = 0.0d0
+      eqn = 0.0d0
+      eqnp1 = 0.0d0
+      eqm1(-2) = 1.0d0
+      eq0(-1) = 1.0d0
+      eqn(1) = 1.0d0
+      eqnp1(2) = 1.0d0
+    end subroutine build_derivative_line
   END SUBROUTINE apply_complex_derivative_with_y_pencil
 
   SUBROUTINE solve_compact_component_with_y_pencil(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
@@ -481,59 +484,42 @@ CONTAINS
     integer(C_INT), intent(in) :: component_index, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index
     real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
     real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
-    complex(C_DOUBLE_COMPLEX), allocatable :: field_xz(:, :, :), field_xz_full(:, :, :), field_y(:, :, :)
-    complex(C_DOUBLE_COMPLEX) :: line(-1:ny + 1)
-    real(C_DOUBLE) :: mat(1:ny + 1, -2:2)
-    integer(C_INT) :: ix, iz, iy, ix_local, iz_local, ix_global, iz_global
+    complex(C_DOUBLE_COMPLEX) :: dummy(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
 
-    allocate (field_xz(ylB, 2*nz + 1, nxB), field_xz_full(ny + 3, 2*nz + 1, nxB))
-    allocate (field_y(ny + 3, zpyB, nxB))
+    dummy = (0.0d0, 0.0d0)
+    call ys_solve_ghost_field(V(:, :, :, component_index), dummy, V(:, :, :, component_index), ny, nz, build_compact_line)
+  contains
+    subroutine build_compact_line(ix_global, iz_global, src0_line, src1_line, line, mat, eqm1, eq0, eqn, eqnp1, ny_line)
+      integer(C_INT), intent(in) :: ix_global, iz_global, ny_line
+      complex(C_DOUBLE_COMPLEX), intent(in) :: src0_line(:), src1_line(:)
+      complex(C_DOUBLE_COMPLEX), intent(out) :: line(-1:ny_line + 1)
+      real(C_DOUBLE), intent(out) :: mat(1:ny_line + 1, -2:2)
+      real(C_DOUBLE), intent(out) :: eqm1(-2:2), eq0(-2:2), eqn(-2:2), eqnp1(-2:2)
+      integer(C_INT) :: iy
 
-    do ix = nx0, nxN
-      do iz = -nz, nz
-        field_xz(:, iz + nz + 1, ix - nx0 + 1) = V(yl0 - 2:ylN - 2, iz, ix, component_index)
+      line = src0_line
+      mat = 0.0d0
+      do iy = 1, ny_line - 1
+        mat(iy, -2:2) = lambda_coeff*der(iy, 0, -2:2) - &
+                        diffusion_coeff*ni*(der(iy, 2, -2:2) - k2(iz_global, ix_global)*der(iy, 0, -2:2))
       end do
-    end do
-
-    call transpose_xz_to_y_pencil(field_xz, field_y)
-
-    do ix_local = 1, nxB
-      ix_global = nx0 + ix_local - 1
-      do iz_local = 1, zpyB
-        iz_global = zpy0 + iz_local - 1 - (nz + 1)
-        mat = 0.0d0
-        do iy = 1, ny - 1
-          mat(iy, -2:2) = lambda_coeff*der(iy, 0, -2:2) - &
-                          diffusion_coeff*ni*(der(iy, 2, -2:2) - k2(iz_global, ix_global)*der(iy, 0, -2:2))
+      if (component_index == 2_C_INT) then
+        do iy = 1, ny_line - 1
+          mat(iy, -2:2) = lambda_coeff*(der(iy, 2, -2:2) - k2(iz_global, ix_global)*der(iy, 0, -2:2)) - &
+                          ni*(der(iy, 3, -2:2) - 2.0d0*k2(iz_global, ix_global)*der(iy, 2, -2:2) + &
+                              k2(iz_global, ix_global)*k2(iz_global, ix_global)*der(iy, 0, -2:2))
         end do
-        if (component_index == 2_C_INT) then
-          do iy = 1, ny - 1
-            mat(iy, -2:2) = lambda_coeff*(der(iy, 2, -2:2) - k2(iz_global, ix_global)*der(iy, 0, -2:2)) - &
-                            ni*(der(iy, 3, -2:2) - 2.0d0*k2(iz_global, ix_global)*der(iy, 2, -2:2) + &
-                                k2(iz_global, ix_global)*k2(iz_global, ix_global)*der(iy, 0, -2:2))
-          end do
-        end if
+      end if
 
-        line = field_y(:, iz_local, ix_local)
-        call ys_solve_compact_system(line, mat, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
-                                     select_bc_rhs(iz_global, ix_global, lower_rhs_index), &
-                                     select_bc_rhs(iz_global, ix_global, lower_ghost_rhs_index), &
-                                     select_bc_rhs(iz_global, ix_global, upper_rhs_index), &
-                                     select_bc_rhs(iz_global, ix_global, upper_ghost_rhs_index), ny, 1_C_INT, ny - 1)
-        field_y(:, iz_local, ix_local) = line
-      end do
-    end do
-
-    call transpose_y_pencil_to_xz(field_y, field_xz)
-    call allgather_y_blocks_to_xz_full(field_xz, field_xz_full)
-
-    do ix = nx0, nxN
-      do iz = -nz, nz
-        V(:, iz, ix, component_index) = field_xz_full(:, iz + nz + 1, ix - nx0 + 1)
-      end do
-    end do
-
-    deallocate (field_xz, field_xz_full, field_y)
+      eqm1 = lower_ghost_bc
+      eq0 = lower_bc
+      eqn = upper_bc
+      eqnp1 = upper_ghost_bc
+      line(-1) = select_bc_rhs(iz_global, ix_global, lower_ghost_rhs_index)
+      line(0) = select_bc_rhs(iz_global, ix_global, lower_rhs_index)
+      line(ny_line) = select_bc_rhs(iz_global, ix_global, upper_rhs_index)
+      line(ny_line + 1) = select_bc_rhs(iz_global, ix_global, upper_ghost_rhs_index)
+    end subroutine build_compact_line
   END SUBROUTINE solve_compact_component_with_y_pencil
 
   COMPLEX(C_DOUBLE_COMPLEX) FUNCTION select_bc_rhs(iz, ix, rhs_index)
