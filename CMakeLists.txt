@@ -101,6 +101,16 @@ add_test(NAME regression_test_4rank
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
 set_tests_properties(regression_test_4rank PROPERTIES PROCESSORS 4)
+
+add_test(NAME regression_test_npy2_4rank
+    COMMAND ${MPIEXEC_EXECUTABLE}
+            ${MPIEXEC_NUMPROC_FLAG} 4
+            ${MPIEXEC_PREFLAGS}
+            $<TARGET_FILE:test_regression> tests/data/dns_test_npy2.in
+            ${MPIEXEC_POSTFLAGS}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(regression_test_npy2_4rank PROPERTIES PROCESSORS 4)
  
  add_test(NAME pressure_dpdy_1rank
     COMMAND ${MPIEXEC_EXECUTABLE}
