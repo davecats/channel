@@ -222,20 +222,31 @@ contains
     integer(C_INT), parameter :: niface = 4
     complex(C_DOUBLE_COMPLEX) :: c_local(niface), tl_local(niface, 2), tr_local(niface, 2)
     complex(C_DOUBLE_COMPLEX) :: u_left(2), u_right(2)
-    complex(C_DOUBLE_COMPLEX) :: factored_a(ylB, ylB)
-    complex(C_DOUBLE_COMPLEX) :: rhs_local(0:ylB - 1), left_couple(0:ylB - 1, 2), right_couple(0:ylB - 1, 2)
+    complex(C_DOUBLE_COMPLEX), allocatable :: factored_a(:, :)
+    complex(C_DOUBLE_COMPLEX), allocatable :: rhs_local(:), left_couple(:, :), right_couple(:, :)
+    complex(C_DOUBLE_COMPLEX) :: lower_rhsm1, upper_rhsnp1
+    integer(C_INT) :: row_start, row_end, active_n, local_half_bw
+    logical :: has_lower_boundary, has_upper_boundary
     complex(C_DOUBLE_COMPLEX), allocatable :: packed(:), gathered(:), mat(:, :), rhs(:), sol(:)
     integer(C_INT) :: iblock, row0
 
-    if (npy_grid == 1 .or. ylB < 4) then
+    row_start = max(0_C_INT, yl0 - 2)
+    row_end = min(ny, ylN - 2)
+    active_n = row_end - row_start + 1
+    has_lower_boundary = (row_start == 0)
+    has_upper_boundary = (row_end == ny)
+    if (npy_grid == 1 .or. active_n < 4) then
       call ys_solve_ghost_block_local(line, a, eqm1, eq0, eqn, eqnp1, ny, local_block)
       return
     end if
 
-    ! Reduce the local y block to its four interface unknowns:
-    ! first two rows and last two rows as functions of neighboring interface data.
+    ! Reduce the owned rows to their first/last two unknowns as functions of
+    ! neighboring interface values. Only the true wall ghost rows are kept out
+    ! of the local block, so the reduced operator stays pentadiagonal.
     call ys_build_local_reduction(line, a, eqm1, eq0, eqn, eqnp1, ny, c_local, tl_local, tr_local, &
-                                  factored_a, rhs_local, left_couple, right_couple)
+                                  factored_a, rhs_local, left_couple, right_couple, &
+                                  lower_rhsm1, upper_rhsnp1, local_half_bw, &
+                                  row_start, row_end, active_n, has_lower_boundary, has_upper_boundary)
 
 #ifdef HAVE_MPI
     allocate (packed(20), gathered(20*npy_grid))
@@ -275,8 +286,28 @@ contains
     u_right = (0.0d0, 0.0d0)
     if (ipy > 0) u_left = sol(row0 - 1:row0)
     if (ipy < npy_grid - 1) u_right = sol(row0 + 5:row0 + 6)
-    call ys_reconstruct_local_block(factored_a, rhs_local, left_couple, right_couple, u_left, u_right, local_block)
+
+    rhs_local = rhs_local - left_couple(:, 1)*u_left(1) - left_couple(:, 2)*u_left(2) - &
+                right_couple(:, 1)*u_right(1) - right_couple(:, 2)*u_right(2)
+    call ys_solve_factored_banded_dense(factored_a, rhs_local, local_half_bw)
+
+    local_block = (0.0d0, 0.0d0)
+    do iblock = row_start, row_end
+      local_block(iblock - (yl0 - 2) + 1) = rhs_local(iblock - row_start + 1)
+    end do
+
+    if (has_lower_boundary) then
+      local_block(1) = (lower_rhsm1 - sum(eqm1(-1:2)*[local_block(2), local_block(3), local_block(4), local_block(5)]))/eqm1(-2)
+    end if
+    if (has_upper_boundary) then
+      local_block(ny + 1 - (yl0 - 2) + 1) = (upper_rhsnp1 - sum(eqnp1(-2:1)*[ &
+                                                                local_block(ny - 3 - (yl0 - 2) + 1), &
+                                                                local_block(ny - 2 - (yl0 - 2) + 1), &
+                                                                local_block(ny - 1 - (yl0 - 2) + 1), &
+                                                                local_block(ny - (yl0 - 2) + 1)]))/eqnp1(2)
+    end if
     deallocate (packed, gathered, mat, rhs, sol)
+    deallocate (factored_a, rhs_local, left_couple, right_couple)
 #else
     call ys_solve_ghost_block_local(line, a, eqm1, eq0, eqn, eqnp1, ny, local_block)
 #endif
@@ -302,24 +333,90 @@ contains
   end subroutine ys_solve_ghost_block_local
 
   subroutine ys_build_local_reduction(line, a, eqm1, eq0, eqn, eqnp1, ny, c_local, tl_local, tr_local, factored_a, &
-                                      rhs_local, left_couple, right_couple)
+                                      rhs_local, left_couple, right_couple, lower_rhsm1, upper_rhsnp1, local_half_bw, &
+                                      row_start, row_end, active_n, has_lower_boundary, has_upper_boundary)
     integer(C_INT), intent(in) :: ny
     complex(C_DOUBLE_COMPLEX), intent(in) :: line(-1:ny + 1)
     real(C_DOUBLE), intent(in) :: a(1:ny + 1, -2:2)
     real(C_DOUBLE), intent(in) :: eqm1(-2:2), eq0(-2:2), eqn(-2:2), eqnp1(-2:2)
     complex(C_DOUBLE_COMPLEX), intent(out) :: c_local(4), tl_local(4, 2), tr_local(4, 2)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: factored_a(ylB, ylB)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: rhs_local(0:ylB - 1), left_couple(0:ylB - 1, 2), right_couple(0:ylB - 1, 2)
-    complex(C_DOUBLE_COMPLEX) :: rhs_work(ylB)
-    complex(C_DOUBLE_COMPLEX) :: particular(0:ylB - 1), left_resp(0:ylB - 1, 2), right_resp(0:ylB - 1, 2)
-    integer(C_INT), parameter :: local_half_bw = 4
+    complex(C_DOUBLE_COMPLEX), allocatable, intent(out) :: factored_a(:, :)
+    complex(C_DOUBLE_COMPLEX), allocatable, intent(out) :: rhs_local(:), left_couple(:, :), right_couple(:, :)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: lower_rhsm1, upper_rhsnp1
+    integer(C_INT), intent(out) :: local_half_bw
+    integer(C_INT), intent(in) :: row_start, row_end, active_n
+    logical, intent(in) :: has_lower_boundary, has_upper_boundary
+    complex(C_DOUBLE_COMPLEX) :: rhs_work(active_n)
+    complex(C_DOUBLE_COMPLEX) :: particular(active_n), left_resp(active_n, 2), right_resp(active_n, 2)
+    complex(C_DOUBLE_COMPLEX) :: row_left(2), row_right(2)
+    real(C_DOUBLE) :: row_coeffs(-2:2)
+    integer(C_INT) :: row, idx, col, global_col
 
-    if (ylB < 4) error stop "ys_build_local_reduction requires at least 4 local y rows"
+    if (active_n < 4) error stop "ys_build_local_reduction requires at least 4 active y rows"
 
-    call ys_build_local_block_system(line, a, eqm1, eq0, eqn, eqnp1, ny, factored_a, rhs_local, left_couple, right_couple)
+    allocate (factored_a(active_n, active_n), rhs_local(active_n), left_couple(active_n, 2), right_couple(active_n, 2))
+    factored_a = (0.0d0, 0.0d0)
+    rhs_local = (0.0d0, 0.0d0)
+    left_couple = (0.0d0, 0.0d0)
+    right_couple = (0.0d0, 0.0d0)
+    lower_rhsm1 = line(-1)
+    upper_rhsnp1 = line(ny + 1)
+    local_half_bw = 0
 
-    ! The local reduced operator is slightly wider than pentadiagonal once the
-    ! ghost rows are folded in, but it still has a small fixed half-bandwidth.
+    do row = row_start, row_end
+      idx = row - row_start + 1
+      row_left = (0.0d0, 0.0d0)
+      row_right = (0.0d0, 0.0d0)
+
+      if (row == 0) then
+        rhs_local(idx) = line(0) - line(-1)*eq0(-2)/eqm1(-2)
+        row_coeffs = eq0 - eqm1*eq0(-2)/eqm1(-2)
+        row_coeffs(-2) = 0.0d0
+      else if (row == ny) then
+        rhs_local(idx) = line(ny) - line(ny + 1)*eqn(2)/eqnp1(2)
+        row_coeffs = eqn - eqnp1*eqn(2)/eqnp1(2)
+        row_coeffs(2) = 0.0d0
+      else
+        rhs_local(idx) = line(row)
+        row_coeffs = a(row, -2:2)
+        if (has_lower_boundary .and. row == 1) then
+          rhs_local(idx) = rhs_local(idx) - line(-1)*a(1, -2)/eqm1(-2)
+          row_coeffs = row_coeffs - eqm1*a(1, -2)/eqm1(-2)
+          row_coeffs(-2) = 0.0d0
+        end if
+        if (has_upper_boundary .and. row == ny - 1) then
+          rhs_local(idx) = rhs_local(idx) - line(ny + 1)*a(ny - 1, 2)/eqnp1(2)
+          row_coeffs = row_coeffs - eqnp1*a(ny - 1, 2)/eqnp1(2)
+          row_coeffs(2) = 0.0d0
+        end if
+      end if
+
+      do col = -2, 2
+        if (row == 0) then
+          global_col = col + 1
+        else if (row == ny) then
+          global_col = ny + col - 1
+        else
+          global_col = row + col
+        end if
+
+        if (global_col < row_start) then
+          if (global_col == row_start - 2) row_left(1) = cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
+          if (global_col == row_start - 1) row_left(2) = cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
+        else if (global_col > row_end) then
+          if (global_col == row_end + 1) row_right(1) = cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
+          if (global_col == row_end + 2) row_right(2) = cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
+        else
+          factored_a(idx, global_col - row_start + 1) = cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
+          local_half_bw = max(local_half_bw, abs(global_col - row))
+        end if
+      end do
+      left_couple(idx, :) = row_left
+      right_couple(idx, :) = row_right
+    end do
+
+    ! Only the true wall ghost equations are kept outside the local block, so
+    ! the reduced operator keeps the original pentadiagonal stencil.
     call ys_factor_banded_dense(factored_a, local_half_bw)
 
     rhs_work = rhs_local
@@ -342,106 +439,12 @@ contains
     call ys_solve_factored_banded_dense(factored_a, rhs_work, local_half_bw)
     right_resp(:, 2) = rhs_work
 
-    c_local = [particular(0), particular(1), particular(ylB - 2), particular(ylB - 1)]
-    tl_local(:, 1) = [left_resp(0, 1), left_resp(1, 1), left_resp(ylB - 2, 1), left_resp(ylB - 1, 1)]
-    tl_local(:, 2) = [left_resp(0, 2), left_resp(1, 2), left_resp(ylB - 2, 2), left_resp(ylB - 1, 2)]
-    tr_local(:, 1) = [right_resp(0, 1), right_resp(1, 1), right_resp(ylB - 2, 1), right_resp(ylB - 1, 1)]
-    tr_local(:, 2) = [right_resp(0, 2), right_resp(1, 2), right_resp(ylB - 2, 2), right_resp(ylB - 1, 2)]
+    c_local = [particular(1), particular(2), particular(active_n - 1), particular(active_n)]
+    tl_local(:, 1) = [left_resp(1, 1), left_resp(2, 1), left_resp(active_n - 1, 1), left_resp(active_n, 1)]
+    tl_local(:, 2) = [left_resp(1, 2), left_resp(2, 2), left_resp(active_n - 1, 2), left_resp(active_n, 2)]
+    tr_local(:, 1) = [right_resp(1, 1), right_resp(2, 1), right_resp(active_n - 1, 1), right_resp(active_n, 1)]
+    tr_local(:, 2) = [right_resp(1, 2), right_resp(2, 2), right_resp(active_n - 1, 2), right_resp(active_n, 2)]
   end subroutine ys_build_local_reduction
-
-  subroutine ys_reconstruct_local_block(factored_a, rhs_local, left_couple, right_couple, u_left, u_right, local_block)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: factored_a(ylB, ylB)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: rhs_local(0:ylB - 1), left_couple(0:ylB - 1, 2), right_couple(0:ylB - 1, 2)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: u_left(2), u_right(2)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: local_block(ylB)
-    complex(C_DOUBLE_COMPLEX) :: rhs_work(ylB)
-    integer(C_INT), parameter :: local_half_bw = 4
-
-    rhs_work = rhs_local - left_couple(:, 1)*u_left(1) - left_couple(:, 2)*u_left(2) - &
-               right_couple(:, 1)*u_right(1) - right_couple(:, 2)*u_right(2)
-    call ys_solve_factored_banded_dense(factored_a, rhs_work, local_half_bw)
-    local_block = rhs_work
-  end subroutine ys_reconstruct_local_block
-
-  subroutine ys_build_local_block_system(line, a, eqm1, eq0, eqn, eqnp1, ny, local_a, rhs_local, left_couple, right_couple)
-    integer(C_INT), intent(in) :: ny
-    complex(C_DOUBLE_COMPLEX), intent(in) :: line(-1:ny + 1)
-    real(C_DOUBLE), intent(in) :: a(1:ny + 1, -2:2)
-    real(C_DOUBLE), intent(in) :: eqm1(-2:2), eq0(-2:2), eqn(-2:2), eqnp1(-2:2)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: local_a(ylB, ylB)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: rhs_local(0:ylB - 1), left_couple(0:ylB - 1, 2), right_couple(0:ylB - 1, 2)
-    integer(C_INT) :: row, idx, cols(5), k, col
-    complex(C_DOUBLE_COMPLEX) :: row_left(2), row_right(2)
-    real(C_DOUBLE) :: coeffs(5)
-
-    local_a = (0.0d0, 0.0d0)
-    rhs_local = (0.0d0, 0.0d0)
-    left_couple = (0.0d0, 0.0d0)
-    right_couple = (0.0d0, 0.0d0)
-
-    do row = yl0 - 2, ylN - 2
-      idx = row - (yl0 - 2)
-      call ys_get_ghost_row(row, ny, a, eqm1, eq0, eqn, eqnp1, cols, coeffs)
-      rhs_local(idx) = line(row)
-      call ys_scatter_row(cols, coeffs, row_left, row_right, ny)
-      left_couple(idx, :) = row_left
-      right_couple(idx, :) = row_right
-      do k = 1, 5
-        col = cols(k)
-        if (col >= yl0 - 2 .and. col <= ylN - 2) then
-          local_a(idx + 1, col - (yl0 - 2) + 1) = cmplx(coeffs(k), 0.0d0, kind=C_DOUBLE)
-        end if
-      end do
-    end do
-  end subroutine ys_build_local_block_system
-
-  subroutine ys_get_ghost_row(row, ny, a, eqm1, eq0, eqn, eqnp1, cols, coeffs)
-    integer(C_INT), intent(in) :: row, ny
-    real(C_DOUBLE), intent(in) :: a(1:ny + 1, -2:2)
-    real(C_DOUBLE), intent(in) :: eqm1(-2:2), eq0(-2:2), eqn(-2:2), eqnp1(-2:2)
-    integer(C_INT), intent(out) :: cols(5)
-    real(C_DOUBLE), intent(out) :: coeffs(5)
-    integer(C_INT) :: i
-
-    if (row == -1) then
-      cols = [(-1_C_INT + i, i=0_C_INT, 4_C_INT)]
-      coeffs = eqm1(-2:2)
-    else if (row == 0) then
-      cols = [(-1_C_INT + i, i=0_C_INT, 4_C_INT)]
-      coeffs = eq0(-2:2)
-    else if (row == ny) then
-      cols = [(ny - 3_C_INT + i, i=0_C_INT, 4_C_INT)]
-      coeffs = eqn(-2:2)
-    else if (row == ny + 1) then
-      cols = [(ny - 3_C_INT + i, i=0_C_INT, 4_C_INT)]
-      coeffs = eqnp1(-2:2)
-    else
-      cols = [(row - 2_C_INT + i, i=0_C_INT, 4_C_INT)]
-      coeffs = a(row, -2:2)
-    end if
-  end subroutine ys_get_ghost_row
-
-  subroutine ys_scatter_row(cols, coeffs, left_row, right_row, ny)
-    integer(C_INT), intent(in) :: cols(5), ny
-    real(C_DOUBLE), intent(in) :: coeffs(5)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: left_row(2), right_row(2)
-    integer(C_INT) :: k, col
-
-    left_row = (0.0d0, 0.0d0)
-    right_row = (0.0d0, 0.0d0)
-    do k = 1, 5
-      col = cols(k)
-      if (col == yl0 - 2 - 2 .and. col >= -1) then
-        left_row(1) = cmplx(coeffs(k), 0.0d0, kind=C_DOUBLE)
-      else if (col == yl0 - 2 - 1 .and. col >= -1) then
-        left_row(2) = cmplx(coeffs(k), 0.0d0, kind=C_DOUBLE)
-      else if (col == ylN - 2 + 1 .and. col <= ny + 1) then
-        right_row(1) = cmplx(coeffs(k), 0.0d0, kind=C_DOUBLE)
-      else if (col == ylN - 2 + 2 .and. col <= ny + 1) then
-        right_row(2) = cmplx(coeffs(k), 0.0d0, kind=C_DOUBLE)
-      end if
-    end do
-  end subroutine ys_scatter_row
 
   subroutine ys_pack_reduction(c_local, tl_local, tr_local, packed)
     complex(C_DOUBLE_COMPLEX), intent(in) :: c_local(4), tl_local(4, 2), tr_local(4, 2)
