@@ -551,8 +551,13 @@ CONTAINS
       mat(iy, -2:2) = lambda_coeff*der(iy, 0, -2:2) - &
                       diffusion_coeff*ni*(der(iy, 2, -2:2) - k2(0, 0)*der(iy, 0, -2:2))
     end do
-    call ys_solve_compact_system(x, mat, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
-                                 (0.0d0, 0.0d0), (0.0d0, 0.0d0), (0.0d0, 0.0d0), (0.0d0, 0.0d0), ny, 1_C_INT, ny - 1)
+    if (npy_grid == 1 .or. ipy == 0) then
+      call ys_solve_compact_system(x, mat, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
+                                   (0.0d0, 0.0d0), (0.0d0, 0.0d0), (0.0d0, 0.0d0), (0.0d0, 0.0d0), ny, 1_C_INT, ny - 1)
+    end if
+#ifdef HAVE_MPI
+    if (npy_grid > 1) call MPI_Bcast(x, ny + 3, MPI_DOUBLE_COMPLEX, 0, MPI_COMM_Y, ierr)
+#endif
   END SUBROUTINE solve_mean_correction_line
 
 ! Orr-Sommerfeld and Squire opearators
@@ -565,8 +570,10 @@ CONTAINS
     integer(C_INT) :: ix, iz, i, j, iPhi
     complex(C_DOUBLE_COMPLEX) :: temp
 
-call solve_compact_component_with_y_pencil(2_C_INT, v0bc, v0m1bc, vnbc, vnp1bc, 2_C_INT, 4_C_INT, -2_C_INT, -4_C_INT, lambda, 1.0d0)
-    call solve_compact_component_with_y_pencil(1_C_INT, eta0bc, eta0m1bc, etanbc, etanp1bc, 5_C_INT, 0_C_INT, -5_C_INT, 0_C_INT, lambda, 1.0d0)
+    call solve_compact_component_with_y_pencil(2_C_INT, v0bc, v0m1bc, vnbc, vnp1bc, &
+                                               2_C_INT, 4_C_INT, -2_C_INT, -4_C_INT, lambda, 1.0d0)
+    call solve_compact_component_with_y_pencil(1_C_INT, eta0bc, eta0m1bc, etanbc, etanp1bc, &
+                                               5_C_INT, 0_C_INT, -5_C_INT, 0_C_INT, lambda, 1.0d0)
     call apply_complex_derivative_with_y_pencil(V(:, :, :, 2), V(:, :, :, 3))
 
     !$omp target teams distribute parallel do collapse(2) default(none) &
@@ -626,7 +633,8 @@ call solve_compact_component_with_y_pencil(2_C_INT, v0bc, v0m1bc, vnbc, vnp1bc, 
           fr(3 + nPhi + iPhi) = yintegr(tcor(:, iPhi), y); 
           IF (abs(meantb) > 1.0d-7) THEN
             corrtx(iPhi) = (meantb - fr(3 + iPhi))/fr(3 + nPhi + iPhi)
-         V(:, 0, 0, 3 + iPhi) = dcmplx(dreal(V(:, 0, 0, 3 + iPhi)) + corrtx(iPhi)*dreal(tcor(:, iPhi)), dimag(V(:, 0, 0, 3 + iPhi)))
+            V(:, 0, 0, 3 + iPhi) = dcmplx(dreal(V(:, 0, 0, 3 + iPhi)) + corrtx(iPhi)*dreal(tcor(:, iPhi)), &
+                                          dimag(V(:, 0, 0, 3 + iPhi)))
           END IF
         END IF
       END DO
