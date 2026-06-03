@@ -85,7 +85,7 @@ MODULE dnsdata
   character(len=40) :: fname
   logical :: overlapping
 
-  public :: get_solver_memory_estimate, sync_velocity_to_device, apply_complex_derivative_with_y_pencil, refresh_y_ghost_field
+  public :: get_solver_memory_estimate, sync_velocity_to_device, apply_complex_derivative_with_y_pencil
 
 CONTAINS
 
@@ -505,7 +505,7 @@ CONTAINS
     !$omp target update from(ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
     !$omp target exit data map(delete: ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
 
-    call ys_solve_ghost_field(dst, ny, nz)
+    call ys_solve_ghost_field(dst(ny0:nyN, :, :), ny, nz)
     !$omp target update to(dst)
   END SUBROUTINE apply_complex_derivative_with_y_pencil
 
@@ -604,7 +604,7 @@ CONTAINS
     !$omp target update from(ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
     !$omp target exit data map(delete: ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
 
-    call ys_solve_ghost_field(V(:, :, :, component_index), ny, nz)
+    call ys_solve_ghost_field(V(ny0:nyN, :, :, component_index), ny, nz)
     !$omp target update to(V(:, :, :, component_index))
   END SUBROUTINE solve_compact_component_with_y_pencil
 
@@ -623,47 +623,25 @@ CONTAINS
 
   SUBROUTINE gather_full_y_line(local_line, full_line)
     IMPLICIT NONE
-    complex(C_DOUBLE_COMPLEX), intent(in) :: local_line(ny0 - 2:)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: full_line(-1:ny + 1)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: local_line(ny0:)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: full_line(1:ny - 1)
     complex(C_DOUBLE_COMPLEX), allocatable :: local_block(:, :, :), gathered_block(:, :, :)
 
-    if (lbound(local_line, 1) <= -1 .and. ubound(local_line, 1) >= ny + 1) then
-      full_line = local_line(-1:ny + 1)
+    if (lbound(local_line, 1) <= 1 .and. ubound(local_line, 1) >= ny - 1) then
+      full_line = local_line(1:ny - 1)
       return
     end if
 
-    allocate (local_block(ylB, 1, nxB), gathered_block(ny + 3, 1, nxB))
-    local_block = (0.0d0, 0.0d0)
-    local_block(:, 1, 1) = local_line(yl0 - 2:ylN - 2)
+    allocate (local_block(nyN - ny0 + 1, 1, nxB), gathered_block(ny - 1, 1, nxB))
+
+    local_block(:, 1, 1) = local_line(ny0:nyN)
+
     call allgather_y_blocks_to_xz_full(local_block, gathered_block)
+
     full_line = gathered_block(:, 1, 1)
+
     deallocate (local_block, gathered_block)
   END SUBROUTINE gather_full_y_line
-
-  SUBROUTINE refresh_y_ghost_field(local_field)
-    IMPLICIT NONE
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: local_field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    complex(C_DOUBLE_COMPLEX), allocatable :: local_block(:, :, :), full_field(:, :, :)
-    integer(C_INT) :: iy, iz, ix
-
-    allocate (local_block(ylB, 2*nz + 1, nxB), full_field(ny + 3, 2*nz + 1, nxB))
-    do ix = nx0, nxN
-      do iz = -nz, nz
-        do iy = yl0 - 2, ylN - 2
-          local_block(iy - (yl0 - 2) + 1, iz + nz + 1, ix - nx0 + 1) = local_field(iy, iz, ix)
-        end do
-      end do
-    end do
-    call allgather_y_blocks_to_xz_full(local_block, full_field)
-    do ix = nx0, nxN
-      do iz = -nz, nz
-        do iy = ny0 - 2, nyN + 2
-          local_field(iy, iz, ix) = full_field(iy + 2, iz + nz + 1, ix - nx0 + 1)
-        end do
-      end do
-    end do
-    deallocate (local_block, full_field)
-  END SUBROUTINE refresh_y_ghost_field
 
   SUBROUTINE scatter_full_y_line(full_line, local_line)
     IMPLICIT NONE
@@ -718,8 +696,6 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX) :: temp
     complex(C_DOUBLE_COMPLEX) :: zero_mode_u(-1:ny + 1), zero_mode_w(-1:ny + 1), zero_mode_ucor(-1:ny + 1)
 
-    call refresh_y_ghost_field(V(:, :, :, 1))
-    call refresh_y_ghost_field(V(:, :, :, 2))
     call solve_compact_component_with_y_pencil(2_C_INT, v0bc, v0m1bc, vnbc, vnp1bc, &
                                                2_C_INT, 4_C_INT, -2_C_INT, -4_C_INT, lambda, 1.0d0)
     call solve_compact_component_with_y_pencil(1_C_INT, eta0bc, eta0m1bc, etanbc, etanp1bc, &
@@ -771,7 +747,6 @@ CONTAINS
     integer(C_INT) :: ix, iz, i, j
     complex(C_DOUBLE_COMPLEX) :: temp
     complex(C_DOUBLE_COMPLEX) :: zero_mode_scalar(-1:ny + 1), zero_mode_tcor(-1:ny + 1)
-    call refresh_y_ghost_field(V(:, :, :, 3 + iPhi))
     call solve_compact_component_with_y_pencil(3_C_INT + iPhi, phi0bc, phi0m1bc, phinbc, phinp1bc, 5_C_INT + iPhi, 0_C_INT, &
                                                -(5_C_INT + iPhi), 0_C_INT, lambda, pra(iPhi))
 

@@ -4,11 +4,11 @@ MODULE pressure_output
 
   USE, intrinsic :: iso_c_binding
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
-  USE dnsdata, ONLY: V, der, k2, ialfa, ibeta, d140, d240, d24n, ni, alfa0, beta0, factor, refresh_y_ghost_field, &
+  USE dnsdata, ONLY: V, der, k2, ialfa, ibeta, d140, d240, d24n, ni, alfa0, beta0, factor, &
                      ny, nz, nxd, izd
   USE ffts, ONLY: FFT, IFT, RFT, HFT, VVdz, VVdx
 #else
-  USE dnsdata, ONLY: V, der, k2, ialfa, ibeta, d140, d240, d24n, ni, alfa0, beta0, factor, refresh_y_ghost_field, &
+  USE dnsdata, ONLY: V, der, k2, ialfa, ibeta, d140, d240, d24n, ni, alfa0, beta0, factor, &
                      ny, nz, nxd, izd, VVdz, VVdx
   USE ffts, ONLY: FFT, IFT, RFT, HFT
 #endif
@@ -172,8 +172,6 @@ CONTAINS
 
     call real_x_to_spectral_field(pressure_h0, pressure_src0)
     call real_x_to_spectral_field(pressure_h1, pressure_src1)
-    call refresh_y_ghost_field(pressure_src0)
-    call refresh_y_ghost_field(pressure_src1)
   END SUBROUTINE assemble_pressure_sources
 
   SUBROUTINE accumulate_h0_diagonal(dst, dudx, dwdz)
@@ -545,7 +543,7 @@ CONTAINS
     !$omp target update from(ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
     !$omp target exit data map(delete: ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
 
-    call ys_solve_ghost_field(p, ny, nz)
+    call ys_solve_ghost_field(p(ny0:nyN, :, :), ny, nz)
   END SUBROUTINE solve_pressure_field
 
   SUBROUTINE solve_dpdy_field(src0, src1, dpdy)
@@ -611,7 +609,7 @@ CONTAINS
     !$omp target update from(ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
     !$omp target exit data map(delete: ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
 
-    call ys_solve_ghost_field(dpdy, ny, nz)
+    call ys_solve_ghost_field(dpdy(ny0:nyN, :, :), ny, nz)
   END SUBROUTINE solve_dpdy_field
 
 END MODULE pressure_output

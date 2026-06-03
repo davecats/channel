@@ -82,10 +82,8 @@ MODULE mpi_transpose
 #endif
   integer(C_INT), save :: nproc, iproc, ierr, nzd, nx
   integer(C_INT), save :: npy_grid = 1, npxz = 1, ipy = 0, ipxz = 0
-  integer(C_INT), save :: nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN, miny, maxy, sendcount
-  integer(C_INT), save :: yl0 = 1, ylN = 1, ylB = 1
-  !$omp declare target(npy_grid, npxz, ipy, ipxz, nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN, yl0, ylN, ylB, sendcount)
-  integer, allocatable, save :: y_block_starts(:), y_block_counts(:)
+  integer(C_INT), save :: nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN, sendcount
+  !$omp declare target(npy_grid, npxz, ipy, ipxz, nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN, sendcount)
 
   logical, save :: has_terminal, has_average, fft_transpose_is_local
 #ifdef HAVE_MPI
@@ -105,25 +103,6 @@ CONTAINS
     if (part < rem) count = count + 1
     start = part*base + min(part, rem) + 1
   END SUBROUTINE split_block
-
-  SUBROUTINE y_owned_block_bounds(ny, nparts, part, start, count)
-    integer(C_INT), intent(in) :: ny, nparts, part
-    integer(C_INT), intent(out) :: start, count
-    integer(C_INT) :: part_ny0, part_nyN
-
-    part_ny0 = 1 + part*(ny - 1)/nparts
-    part_nyN = (part + 1)*(ny - 1)/nparts
-    start = part_ny0 + 2
-    count = part_nyN - part_ny0 + 1
-
-    if (part == 0) then
-      start = 1
-      count = count + 2
-    end if
-    if (part == nparts - 1) then
-      count = count + 2
-    end if
-  END SUBROUTINE y_owned_block_bounds
 
   SUBROUTINE repack_zTOx_local(Vz, Vx, ny)
     use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
@@ -274,33 +253,52 @@ CONTAINS
 #ifdef HAVE_MPI
     complex(C_DOUBLE_COMPLEX), allocatable :: recv(:)
     integer, allocatable :: recvcounts(:), recvdispls(:)
-    integer(C_INT) :: total_z, ix_local, iz_local, iy_local, src_rank, p, iy_global
+    integer(C_INT) :: total_z, ix_local, iz_local, iy_local
+    integer(C_INT) :: src_rank, p, iy_global
+    integer(C_INT) :: src_ny0, src_nyN, src_nyB
 
     total_z = int(size(src, 2), C_INT)
+
     dst = (0.0d0, 0.0d0)
+
     if (npy_grid == 1) then
       dst = src
       return
     end if
 
     allocate (recvcounts(0:npy_grid - 1), recvdispls(0:npy_grid - 1))
+
     recvdispls(0) = 0
+
     do src_rank = 0, npy_grid - 1
-      recvcounts(src_rank) = int(y_block_counts(src_rank + 1)*total_z*nxB)
-      if (src_rank > 0) recvdispls(src_rank) = recvdispls(src_rank - 1) + recvcounts(src_rank - 1)
+      src_ny0 = 1 + src_rank*(size(dst, 1))/npy_grid
+      src_nyN = (src_rank + 1)*(size(dst, 1))/npy_grid
+      src_nyB = src_nyN - src_ny0 + 1
+
+      recvcounts(src_rank) = int(src_nyB*total_z*nxB)
+
+      if (src_rank > 0) then
+        recvdispls(src_rank) = recvdispls(src_rank - 1) + recvcounts(src_rank - 1)
+      end if
     end do
+
     allocate (recv(sum(recvcounts)))
 
     call MPI_Allgatherv(src, int(size(src), kind=4), MPI_DOUBLE_COMPLEX, &
                         recv, recvcounts, recvdispls, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
 
     do src_rank = 0, npy_grid - 1
+      src_ny0 = 1 + src_rank*(size(dst, 1))/npy_grid
+      src_nyN = (src_rank + 1)*(size(dst, 1))/npy_grid
+      src_nyB = src_nyN - src_ny0 + 1
+
       p = recvdispls(src_rank)
+
       do ix_local = 1, nxB
         do iz_local = 1, total_z
-          do iy_local = 1, y_block_counts(src_rank + 1)
+          do iy_local = 1, src_nyB
             p = p + 1
-            iy_global = y_block_starts(src_rank + 1) + iy_local - 1
+            iy_global = src_ny0 + iy_local - 1
             dst(iy_global, iz_local, ix_local) = recv(p)
           end do
         end do
@@ -321,6 +319,7 @@ CONTAINS
     integer, parameter :: ndims = 4
     integer :: i, color, key
     integer :: array_of_sizes(ndims), array_of_subsizes(ndims), array_of_starts(ndims), ierror
+    integer(C_INT) :: miny_local, maxy_local
     type(c_ptr) :: sendptr, recvptr
     integer(c_size_t) :: sendsize, recvsize
     ! Define which process write on screen
@@ -353,37 +352,26 @@ CONTAINS
     key = ipy
     call MPI_Comm_split(MPI_COMM_WORLD, color, key, MPI_COMM_Y, ierr)
 #endif
-    ! Calculate domain division in wall-normal direction
+    ! Calculate domain division in wall-normal direction.
+    ! ny0:nyN are the only persistent y-partition variables.
     ny0 = 1 + ipy*(ny - 1)/npy_grid
     nyN = (ipy + 1)*(ny - 1)/npy_grid
-    if (ipy == 0) then
-      miny = ny0 - 2
-    else
-      miny = ny0
-    end if
-    if (ipy == npy_grid - 1) then
-      maxy = nyN + 2
-    else
-      maxy = nyN
-    end if
-    if (npy_grid == 1) then
-      miny = ny0 - 2
-      maxy = nyN + 2
-    end if
 
-    call y_owned_block_bounds(ny, npy_grid, ipy, yl0, ylB)
-    ylN = yl0 + ylB - 1
-    if (allocated(y_block_starts)) deallocate (y_block_starts, y_block_counts)
-    allocate (y_block_starts(npy_grid), y_block_counts(npy_grid))
-    do i = 0, npy_grid - 1
-      call y_owned_block_bounds(ny, npy_grid, i, y_block_starts(i + 1), y_block_counts(i + 1))
-    end do
+    ! Local write extent, including physical ghost rows only on the end ranks.
+    miny_local = ny0
+    maxy_local = nyN
+    if (ipy == 0) miny_local = ny0 - 2
+    if (ipy == npy_grid - 1) maxy_local = nyN + 2
+    if (npy_grid == 1) then
+      miny_local = ny0 - 2
+      maxy_local = nyN + 2
+    end if
 
     ! Calculate domain division
     nx0 = ipxz*(nxpp)/npxz; nxN = (ipxz + 1)*(nxpp)/npxz - 1; nxB = nxN - nx0 + 1; 
     nz0 = ipxz*nzd/npxz; nzN = (ipxz + 1)*nzd/npxz - 1; nzB = nzN - nz0 + 1; 
     has_average = (nx0 == 0)
-    !$omp target update to(npy_grid, npxz, ipy, ipxz, nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN, yl0, ylN, ylB)
+    !$omp target update to(npy_grid, npxz, ipy, ipxz, nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN)
     fft_transpose_is_local = (nzB == nzd)
 #ifdef HAVE_MPI
 #ifdef mpiverbose
@@ -437,14 +425,14 @@ CONTAINS
     CALL MPI_Type_commit(vel_field_type, ierror)
     ! For WRITING VELOCITY, SETTING VIEW: datatype to map distributed velocity array to file
     array_of_sizes = [ny + 3, 2*nz + 1, nxpp, 3 + nPhi] ! size along each dimension of the WHOLE array ON DISK
-    array_of_subsizes = [maxy - miny + 1, 2*nz + 1, nxB, 3 + nPhi] ! size of the PORTION of array TO BE WRITTEN BY EACH PROCESS
-    array_of_starts = [miny + 1, 0, nx0, 0] ! starting position of each component; !!! IT'S ZERO BASED !!!
+    array_of_subsizes = [maxy_local - miny_local + 1, 2*nz + 1, nxB, 3 + nPhi] ! size of the PORTION of array TO BE WRITTEN BY EACH PROCESS
+    array_of_starts = [miny_local + 1, 0, nx0, 0] ! starting position of each component; !!! IT'S ZERO BASED !!!
     CALL MPI_Type_create_subarray(ndims, array_of_sizes, array_of_subsizes, array_of_starts, MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, writeview_type, ierror)
     CALL MPI_Type_commit(writeview_type, ierror)
     ! For WRITING VELOCITY, SKIPPING HALO CELLS: datatype with holes to skip halo cells and select only data to be written
     array_of_sizes = [(nyN + 2) - (ny0 - 2) + 1, 2*nz + 1, nxB, 3 + nPhi] ! size along each dimension of the array IN MEMORY owned by each process
-    array_of_subsizes = [maxy - miny + 1, 2*nz + 1, nxB, 3 + nPhi] ! size of the PORTION of array TO BE WRITTEN BY EACH PROCESS
-    array_of_starts = [miny - (ny0 - 2), 0, 0, 0] ! starting position of each component; !!! IT'S ZERO BASED AND WRT TO ARRAY IN MEMORY !!!
+    array_of_subsizes = [maxy_local - miny_local + 1, 2*nz + 1, nxB, 3 + nPhi] ! size of the PORTION of array TO BE WRITTEN BY EACH PROCESS
+    array_of_starts = [miny_local - (ny0 - 2), 0, 0, 0] ! starting position of each component; !!! IT'S ZERO BASED AND WRT TO ARRAY IN MEMORY !!!
     CALL MPI_Type_create_subarray(ndims, array_of_sizes, array_of_subsizes, array_of_starts, MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, owned2write_type, ierror)
     CALL MPI_Type_commit(owned2write_type, ierror)
 #endif

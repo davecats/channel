@@ -3,8 +3,7 @@
 module y_line_solvers
 
   use, intrinsic :: iso_c_binding
-  use mpi_transpose, only: ny0, nyN, nx0, nxN, nxB, yl0, ylN, ylB, npy_grid, ierr, ipy, MPI_COMM_Y, &
-                           allgather_y_blocks_to_xz_full
+  use mpi_transpose, only: ny0, nyN, nx0, nxN, nxB, npy_grid, ierr, ipy, MPI_COMM_Y
 #ifdef HAVE_MPI
   use mpi_f08
 #endif
@@ -25,13 +24,9 @@ module y_line_solvers
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_rhs_store(:, :)
   real(C_DOUBLE), allocatable, save :: ys_matrix_store(:, :, :)
   real(C_DOUBLE), allocatable, save :: ys_eqm1_store(:, :), ys_eq0_store(:, :), ys_eqn_store(:, :), ys_eqnp1_store(:, :)
-  complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_dst_xz(:, :, :), ys_dst_xz_full(:, :, :)
   real(C_DOUBLE), allocatable, save :: ys_factored_store(:, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_reduced_store(:, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_packed_send(:, :), ys_left_u(:, :), ys_right_u(:, :)
-  real(C_DOUBLE), allocatable, save :: ys_lower_eq0_store(:, :), ys_upper_eqn_store(:, :)
-  complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_lower_rhsm1_store(:), ys_lower_rhs0_store(:), ys_upper_rhsn_store(:), &
-                                                  ys_upper_rhsnp1_store(:)
 
 contains
 
@@ -50,22 +45,18 @@ contains
 
     nlines = nx_lines*(2*nz + 1)
     if (allocated(ys_rhs_store)) then
-  if (ys_workspace_ny /= ny .or. ys_workspace_nz /= nz .or. ys_workspace_nx /= nx_lines .or. ys_workspace_active_n /= active_n) then
+      if (ys_workspace_ny /= ny .or. ys_workspace_nz /= nz .or. ys_workspace_nx /= nx_lines .or. &
+          ys_workspace_active_n /= active_n) then
         deallocate (ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
-        deallocate (ys_dst_xz, ys_dst_xz_full, ys_factored_store, ys_reduced_store, ys_packed_send, ys_left_u, ys_right_u)
-        deallocate (ys_lower_eq0_store, ys_upper_eqn_store)
-        deallocate (ys_lower_rhsm1_store, ys_lower_rhs0_store, ys_upper_rhsn_store, ys_upper_rhsnp1_store)
+        deallocate (ys_factored_store, ys_reduced_store, ys_packed_send, ys_left_u, ys_right_u)
       end if
     end if
 
     if (.not. allocated(ys_rhs_store)) then
       allocate (ys_rhs_store(-1:ny + 1, nlines), ys_matrix_store(1:ny + 1, -2:2, nlines))
       allocate (ys_eqm1_store(-2:2, nlines), ys_eq0_store(-2:2, nlines), ys_eqn_store(-2:2, nlines), ys_eqnp1_store(-2:2, nlines))
-      allocate (ys_dst_xz(ylB, 2*nz + 1, nx_lines), ys_dst_xz_full(ny + 3, 2*nz + 1, nx_lines))
       allocate (ys_factored_store(0:active_n - 1, -2:2, nlines), ys_reduced_store(0:active_n - 1, 5, nlines))
       allocate (ys_packed_send(20, nlines), ys_left_u(2, nlines), ys_right_u(2, nlines))
-      allocate (ys_lower_eq0_store(-2:2, nlines), ys_upper_eqn_store(-2:2, nlines))
-    allocate (ys_lower_rhsm1_store(nlines), ys_lower_rhs0_store(nlines), ys_upper_rhsn_store(nlines), ys_upper_rhsnp1_store(nlines))
     end if
 
     ys_workspace_ny = ny
@@ -80,19 +71,11 @@ contains
     ys_eq0_store = 0.0d0
     ys_eqn_store = 0.0d0
     ys_eqnp1_store = 0.0d0
-    ys_dst_xz = (0.0d0, 0.0d0)
-    ys_dst_xz_full = (0.0d0, 0.0d0)
     ys_factored_store = 0.0d0
     ys_reduced_store = (0.0d0, 0.0d0)
     ys_packed_send = (0.0d0, 0.0d0)
     ys_left_u = (0.0d0, 0.0d0)
     ys_right_u = (0.0d0, 0.0d0)
-    ys_lower_eq0_store = 0.0d0
-    ys_upper_eqn_store = 0.0d0
-    ys_lower_rhsm1_store = (0.0d0, 0.0d0)
-    ys_lower_rhs0_store = (0.0d0, 0.0d0)
-    ys_upper_rhsn_store = (0.0d0, 0.0d0)
-    ys_upper_rhsnp1_store = (0.0d0, 0.0d0)
   end subroutine ys_prepare_ghost_field_workspace
 
   subroutine ys_solve_ghost_field(dst, ny, nz)
@@ -242,12 +225,11 @@ contains
     implicit none
     integer(C_INT), intent(in) :: ny, nz
     complex(C_DOUBLE_COMPLEX), intent(out) :: dst(:, :, :)
-    complex(C_DOUBLE_COMPLEX) :: local_block(ylB)
+    complex(C_DOUBLE_COMPLEX) :: local_block(size(dst, 1))
     complex(C_DOUBLE_COMPLEX) :: u_left(2), u_right(2)
-    complex(C_DOUBLE_COMPLEX) :: lower_rhsm1, lower_rhs0, upper_rhsn, upper_rhsnp1
+    complex(C_DOUBLE_COMPLEX) :: lower_rhs0, upper_rhsn
     real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-2:2), upper_eqn(-2:2)
     integer(C_INT) :: ix, iz, iline, nlines, nlines_z, row_start, row_end, active_n, row, idx, col, global_col
-    integer(C_INT) :: dst_full_start, dst_full_end
     logical :: has_lower_boundary, has_upper_boundary
 
     row_start = ny0
@@ -256,38 +238,28 @@ contains
     has_lower_boundary = (row_start == 1)
     has_upper_boundary = (row_end == ny - 1)
     if (.not. allocated(ys_rhs_store)) error stop "ys_prepare_ghost_field_workspace must be called before ys_solve_ghost_field"
-    if (ys_workspace_ny /= ny .or. ys_workspace_nz /= nz .or. ys_workspace_nx /= size(dst, 3)) then
-      error stop "ys_solve_ghost_field workspace does not match requested solve dimensions"
+    if (ys_workspace_ny /= ny .or. ys_workspace_nz /= nz .or. ys_workspace_nx /= size(dst, 3) .or. &
+        ys_workspace_active_n /= size(dst, 1)) then
+      error stop "ys_solve_ghost_field workspace does not match requested local solve dimensions"
     end if
 
     nlines_z = 2*nz + 1
     nlines = ys_workspace_nlines
-    if (lbound(dst, 1) == 1 .and. ubound(dst, 1) == ny + 3) then
-      dst_full_start = 1
-      dst_full_end = ny + 3
-    else
-      dst_full_start = lbound(dst, 1) + 2
-      dst_full_end = ubound(dst, 1) + 2
-    end if
 
     do iline = 1, nlines
       ys_factored_store(:, :, iline) = 0.0d0
       ys_reduced_store(:, :, iline) = (0.0d0, 0.0d0)
 
-      lower_rhsm1 = (0.0d0, 0.0d0)
       lower_rhs0 = (0.0d0, 0.0d0)
       lower_eq0 = 0.0d0
       if (has_lower_boundary) then
-        lower_rhsm1 = ys_rhs_store(-1, iline)
         lower_rhs0 = ys_rhs_store(0, iline) - ys_rhs_store(-1, iline)*ys_eq0_store(-2, iline)/ys_eqm1_store(-2, iline)
         lower_eq0 = ys_eq0_store(:, iline) - ys_eqm1_store(:, iline)*ys_eq0_store(-2, iline)/ys_eqm1_store(-2, iline)
         lower_eq0(-2) = 0.0d0
       end if
-      upper_rhsnp1 = (0.0d0, 0.0d0)
       upper_rhsn = (0.0d0, 0.0d0)
       upper_eqn = 0.0d0
       if (has_upper_boundary) then
-        upper_rhsnp1 = ys_rhs_store(ny + 1, iline)
         upper_rhsn = ys_rhs_store(ny, iline) - ys_rhs_store(ny + 1, iline)*ys_eqn_store(2, iline)/ys_eqnp1_store(2, iline)
         upper_eqn = ys_eqn_store(:, iline) - ys_eqnp1_store(:, iline)*ys_eqn_store(2, iline)/ys_eqnp1_store(2, iline)
         upper_eqn(2) = 0.0d0
@@ -351,13 +323,6 @@ contains
       call ys_factor_penta(ys_factored_store(:, :, iline))
       call ys_solve_factored_penta_multi(ys_reduced_store(:, :, iline), ys_factored_store(:, :, iline))
 
-      ys_lower_eq0_store(:, iline) = lower_eq0
-      ys_upper_eqn_store(:, iline) = upper_eqn
-      ys_lower_rhsm1_store(iline) = lower_rhsm1
-      ys_lower_rhs0_store(iline) = lower_rhs0
-      ys_upper_rhsn_store(iline) = upper_rhsn
-      ys_upper_rhsnp1_store(iline) = upper_rhsnp1
-
       ys_packed_send(1:4, iline) = [ys_reduced_store(0, 1, iline), ys_reduced_store(1, 1, iline), &
                                     ys_reduced_store(active_n - 2, 1, iline), ys_reduced_store(active_n - 1, 1, iline)]
       ys_packed_send(5:12, iline) = [ys_reduced_store(0, 2, iline), ys_reduced_store(1, 2, iline), &
@@ -384,44 +349,13 @@ contains
 
         local_block = (0.0d0, 0.0d0)
         do row = row_start, row_end
-          local_block(row - (yl0 - 2) + 1) = ys_reduced_store(row - row_start, 1, iline)
+          local_block(row - row_start + 1) = ys_reduced_store(row - row_start, 1, iline)
         end do
 
-        if (has_lower_boundary) then
-          local_block(2) = (ys_lower_rhs0_store(iline) - &
-                            sum(ys_lower_eq0_store(0:2, iline)*[local_block(3), local_block(4), local_block(5)]))/ &
-                           ys_lower_eq0_store(-1, iline)
-          local_block(1) = (ys_lower_rhsm1_store(iline) - &
-                            sum(ys_eqm1_store(-1:2, iline)*[local_block(2), local_block(3), local_block(4), local_block(5)]))/ &
-                           ys_eqm1_store(-2, iline)
-        end if
-        if (has_upper_boundary) then
-          local_block(ny - (yl0 - 2) + 1) = (ys_upper_rhsn_store(iline) - &
-                                             sum(ys_upper_eqn_store(-2:0, iline)*[ &
-                                                 local_block(ny - 3 - (yl0 - 2) + 1), &
-                                                 local_block(ny - 2 - (yl0 - 2) + 1), &
-                                                 local_block(ny - 1 - (yl0 - 2) + 1)]))/ys_upper_eqn_store(1, iline)
-          local_block(ny + 1 - (yl0 - 2) + 1) = (ys_upper_rhsnp1_store(iline) - &
-                                                 sum(ys_eqnp1_store(-2:1, iline)*[ &
-                                                     local_block(ny - 3 - (yl0 - 2) + 1), &
-                                                     local_block(ny - 2 - (yl0 - 2) + 1), &
-                                                     local_block(ny - 1 - (yl0 - 2) + 1), &
-                                                     local_block(ny - (yl0 - 2) + 1)]))/ys_eqnp1_store(2, iline)
-        end if
-
-        ys_dst_xz(:, iz + nz + 1, ix - nx0 + 1) = local_block
+        dst(:, iz + nz + 1, ix - nx0 + 1) = local_block
       end do
     end do
 
-    call allgather_y_blocks_to_xz_full(ys_dst_xz, ys_dst_xz_full)
-
-    do ix = nx0, nxN
-      do iz = -nz, nz
-        do row = lbound(dst, 1), ubound(dst, 1)
-          dst(row, iz + nz + 1, ix - nx0 + 1) = ys_dst_xz_full(row - lbound(dst, 1) + dst_full_start, iz + nz + 1, ix - nx0 + 1)
-        end do
-      end do
-    end do
   end subroutine ys_solve_ghost_field_reduced
 
   subroutine ys_solve_reduced_interfaces(packed_send, left_u, right_u)
