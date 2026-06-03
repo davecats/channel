@@ -4,8 +4,9 @@ program test_y_reduced_known_good_local_dst
   use, intrinsic :: iso_c_binding
   use mpi_transpose
   use y_line_solvers, only: ys_prepare_ghost_field_workspace, ys_solve_ghost_field_reduced, &
-                            ys_rhs_store, ys_matrix_store, &
-                            ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store
+                            ys_local_rhs, ys_local_operator, &
+                            ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
+                            ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row
 #ifdef HAVE_MPI
   use mpi_f08
 #endif
@@ -151,13 +152,18 @@ contains
   subroutine clear_line_storage(iline)
     integer(C_INT), intent(in) :: iline
 
-    ys_rhs_store(:, iline) = (0.0d0, 0.0d0)
-    ys_matrix_store(:, :, iline) = 0.0d0
+    ys_local_rhs(:, iline) = (0.0d0, 0.0d0)
+    ys_local_operator(:, :, iline) = 0.0d0
 
-    ys_eqm1_store(:, iline) = 0.0d0
-    ys_eq0_store(:, iline) = 0.0d0
-    ys_eqn_store(:, iline) = 0.0d0
-    ys_eqnp1_store(:, iline) = 0.0d0
+    ys_lower_ghost_rhs(iline) = (0.0d0, 0.0d0)
+    ys_lower_boundary_rhs(iline) = (0.0d0, 0.0d0)
+    ys_upper_boundary_rhs(iline) = (0.0d0, 0.0d0)
+    ys_upper_ghost_rhs(iline) = (0.0d0, 0.0d0)
+
+    ys_lower_ghost_row(:, iline) = 0.0d0
+    ys_lower_boundary_row(:, iline) = 0.0d0
+    ys_upper_boundary_row(:, iline) = 0.0d0
+    ys_upper_ghost_row(:, iline) = 0.0d0
   end subroutine clear_line_storage
 
   subroutine assemble_owned_rows_from_exact(exact_line, iline)
@@ -167,40 +173,40 @@ contains
     integer(C_INT) :: jy
 
     do jy = ny0, nyN
-      ys_matrix_store(jy, -2, iline) = -0.05d0
-      ys_matrix_store(jy, -1, iline) = -0.25d0
-      ys_matrix_store(jy, 0, iline) = 2.50d0
-      ys_matrix_store(jy, 1, iline) = -0.25d0
-      ys_matrix_store(jy, 2, iline) = -0.05d0
+      ys_local_operator(jy, -2, iline) = -0.05d0
+      ys_local_operator(jy, -1, iline) = -0.25d0
+      ys_local_operator(jy, 0, iline) = 2.50d0
+      ys_local_operator(jy, 1, iline) = -0.25d0
+      ys_local_operator(jy, 2, iline) = -0.05d0
 
-      ys_rhs_store(jy, iline) = &
-        cmplx(ys_matrix_store(jy, -2, iline), 0.0d0, kind=C_DOUBLE)*exact_line(jy - 2) + &
-        cmplx(ys_matrix_store(jy, -1, iline), 0.0d0, kind=C_DOUBLE)*exact_line(jy - 1) + &
-        cmplx(ys_matrix_store(jy, 0, iline), 0.0d0, kind=C_DOUBLE)*exact_line(jy) + &
-        cmplx(ys_matrix_store(jy, 1, iline), 0.0d0, kind=C_DOUBLE)*exact_line(jy + 1) + &
-        cmplx(ys_matrix_store(jy, 2, iline), 0.0d0, kind=C_DOUBLE)*exact_line(jy + 2)
+      ys_local_rhs(jy, iline) = &
+        cmplx(ys_local_operator(jy, -2, iline), 0.0d0, kind=C_DOUBLE)*exact_line(jy - 2) + &
+        cmplx(ys_local_operator(jy, -1, iline), 0.0d0, kind=C_DOUBLE)*exact_line(jy - 1) + &
+        cmplx(ys_local_operator(jy, 0, iline), 0.0d0, kind=C_DOUBLE)*exact_line(jy) + &
+        cmplx(ys_local_operator(jy, 1, iline), 0.0d0, kind=C_DOUBLE)*exact_line(jy + 1) + &
+        cmplx(ys_local_operator(jy, 2, iline), 0.0d0, kind=C_DOUBLE)*exact_line(jy + 2)
     end do
 
     if (ny0 == 1) then
-      ys_rhs_store(-1, iline) = exact_line(-1)
-      ys_rhs_store(0, iline) = exact_line(0)
+      ys_lower_ghost_rhs(iline) = exact_line(-1)
+      ys_lower_boundary_rhs(iline) = exact_line(0)
 
-      ys_eqm1_store(:, iline) = 0.0d0
-      ys_eqm1_store(-2, iline) = 1.0d0
+      ys_lower_ghost_row(:, iline) = 0.0d0
+      ys_lower_ghost_row(-2, iline) = 1.0d0
 
-      ys_eq0_store(:, iline) = 0.0d0
-      ys_eq0_store(-1, iline) = 1.0d0
+      ys_lower_boundary_row(:, iline) = 0.0d0
+      ys_lower_boundary_row(-1, iline) = 1.0d0
     end if
 
     if (nyN == ny_test - 1) then
-      ys_rhs_store(ny_test, iline) = exact_line(ny_test)
-      ys_rhs_store(ny_test + 1, iline) = exact_line(ny_test + 1)
+      ys_upper_boundary_rhs(iline) = exact_line(ny_test)
+      ys_upper_ghost_rhs(iline) = exact_line(ny_test + 1)
 
-      ys_eqn_store(:, iline) = 0.0d0
-      ys_eqn_store(1, iline) = 1.0d0
+      ys_upper_boundary_row(:, iline) = 0.0d0
+      ys_upper_boundary_row(1, iline) = 1.0d0
 
-      ys_eqnp1_store(:, iline) = 0.0d0
-      ys_eqnp1_store(2, iline) = 1.0d0
+      ys_upper_ghost_row(:, iline) = 0.0d0
+      ys_upper_ghost_row(2, iline) = 1.0d0
     end if
   end subroutine assemble_owned_rows_from_exact
 

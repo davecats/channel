@@ -15,8 +15,9 @@ MODULE pressure_output
   USE mpi_transpose, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, ierr, &
                            sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, &
                            fft_transpose_is_local, repack_zTOx_local, repack_xTOz_local
-  USE y_line_solvers, ONLY: ys_prepare_ghost_field_workspace, ys_solve_ghost_field, ys_fill_ghost_padded_field, ys_rhs_store, ys_matrix_store, &
-                            ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store
+  USE y_line_solvers, ONLY: ys_prepare_ghost_field_workspace, ys_solve_ghost_field_reduced, ys_local_rhs, ys_local_operator, &
+                            ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
+                            ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row
 #ifdef HAVE_MPI
   USE mpi_f08
 #endif
@@ -114,7 +115,6 @@ CONTAINS
     if (.not. pressure_initialized) call init_pressure_output()
 
     ! Pressure is only needed on output steps, so we rebuild its source terms from the current spectral state.
-    !$omp target update from(V)
     call assemble_pressure_sources()
 
     if (present(p_out)) then
@@ -133,7 +133,7 @@ CONTAINS
     y_first = ny0
     y_last = nyN
 
-    !$omp parallel do collapse(3) default(none) &
+    !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp shared(pressure_h0, pressure_h1, ny, y_first, y_last, nzB, nxd) private(iy, iz, ix)
     do iy = y_first - 2, y_last + 2
       do iz = 1, nzB
@@ -143,8 +143,6 @@ CONTAINS
         end do
       end do
     end do
-    !$omp target update to(pressure_h0, pressure_h1)
-
     call build_pressure_real_x(iux, pressure_real0)
     call build_pressure_real_x(iwz, pressure_real1)
     call accumulate_h0_diagonal(pressure_h0, pressure_real0, pressure_real1)
@@ -237,7 +235,7 @@ CONTAINS
     y_first = ny0
     y_last = nyN
 
-    !$omp parallel do collapse(3) default(none) &
+    !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp shared(VVdz, nzd, nxB, y_first, y_last) private(iy, jx, izd_idx)
     do iy = y_first - 2, y_last + 2
       do jx = 1, nxB
@@ -249,7 +247,7 @@ CONTAINS
 
     select case (kind)
     case (iu)
-      !$omp parallel do collapse(3) default(none) &
+      !$omp target teams distribute parallel do collapse(3) default(none) &
       !$omp shared(VVdz, V, izd, ny, y_first, y_last, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
@@ -260,7 +258,7 @@ CONTAINS
         end do
       end do
     case (iv)
-      !$omp parallel do collapse(3) default(none) &
+      !$omp target teams distribute parallel do collapse(3) default(none) &
       !$omp shared(VVdz, V, izd, ny, y_first, y_last, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
@@ -271,7 +269,7 @@ CONTAINS
         end do
       end do
     case (iw)
-      !$omp parallel do collapse(3) default(none) &
+      !$omp target teams distribute parallel do collapse(3) default(none) &
       !$omp shared(VVdz, V, izd, ny, y_first, y_last, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
@@ -282,7 +280,7 @@ CONTAINS
         end do
       end do
     case (iux)
-      !$omp parallel do collapse(3) default(none) &
+      !$omp target teams distribute parallel do collapse(3) default(none) &
       !$omp shared(VVdz, V, ialfa, izd, ny, y_first, y_last, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
@@ -293,7 +291,7 @@ CONTAINS
         end do
       end do
     case (ivx)
-      !$omp parallel do collapse(3) default(none) &
+      !$omp target teams distribute parallel do collapse(3) default(none) &
       !$omp shared(VVdz, V, ialfa, izd, ny, y_first, y_last, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
@@ -304,7 +302,7 @@ CONTAINS
         end do
       end do
     case (ivz)
-      !$omp parallel do collapse(3) default(none) &
+      !$omp target teams distribute parallel do collapse(3) default(none) &
       !$omp shared(VVdz, V, ibeta, izd, ny, y_first, y_last, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
@@ -315,7 +313,7 @@ CONTAINS
         end do
       end do
     case (iwx)
-      !$omp parallel do collapse(3) default(none) &
+      !$omp target teams distribute parallel do collapse(3) default(none) &
       !$omp shared(VVdz, V, ialfa, izd, ny, y_first, y_last, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
@@ -326,7 +324,7 @@ CONTAINS
         end do
       end do
     case (iuz)
-      !$omp parallel do collapse(3) default(none) &
+      !$omp target teams distribute parallel do collapse(3) default(none) &
       !$omp shared(VVdz, V, ibeta, izd, ny, y_first, y_last, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
@@ -337,7 +335,7 @@ CONTAINS
         end do
       end do
     case (iwz)
-      !$omp parallel do collapse(3) default(none) &
+      !$omp target teams distribute parallel do collapse(3) default(none) &
       !$omp shared(VVdz, V, ibeta, izd, ny, y_first, y_last, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
@@ -348,7 +346,7 @@ CONTAINS
         end do
       end do
     case (iuxx)
-      !$omp parallel do collapse(3) default(none) &
+      !$omp target teams distribute parallel do collapse(3) default(none) &
       !$omp shared(VVdz, V, ialfa, izd, ny, y_first, y_last, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
@@ -359,7 +357,7 @@ CONTAINS
         end do
       end do
     case (iuxz)
-      !$omp parallel do collapse(3) default(none) &
+      !$omp target teams distribute parallel do collapse(3) default(none) &
       !$omp shared(VVdz, V, ialfa, ibeta, izd, ny, y_first, y_last, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
@@ -370,7 +368,7 @@ CONTAINS
         end do
       end do
     case (iwxz)
-      !$omp parallel do collapse(3) default(none) &
+      !$omp target teams distribute parallel do collapse(3) default(none) &
       !$omp shared(VVdz, V, ialfa, ibeta, izd, ny, y_first, y_last, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
@@ -381,7 +379,7 @@ CONTAINS
         end do
       end do
     case (iwzz)
-      !$omp parallel do collapse(3) default(none) &
+      !$omp target teams distribute parallel do collapse(3) default(none) &
       !$omp shared(VVdz, V, ibeta, izd, ny, y_first, y_last, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
@@ -392,7 +390,6 @@ CONTAINS
         end do
       end do
     end select
-    !$omp target update to(VVdz(:, :, :, 1))
   END SUBROUTINE load_pressure_field_to_zbuf
 
   SUBROUTINE spectral_field_to_real_x(rx)
@@ -453,9 +450,7 @@ CONTAINS
 #endif
     if (.not. fft_transpose_is_local) call unpack_xTOz(recvbuf(:, 1), VVdz(:, :, :, 1), ny)
     call FFT(VVdz(:, :, :, 1))
-    !$omp target update from(VVdz(:, :, :, 1))
-
-    !$omp parallel do collapse(3) default(none) &
+    !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp shared(VVdz, nx0, nxN, ny, y_first, y_last, nz, field) private(ix, iz, iy)
     do ix = nx0, nxN
       do iy = y_first - 2, y_last + 2
@@ -464,7 +459,7 @@ CONTAINS
         end do
       end do
     end do
-    !$omp parallel do collapse(3) default(none) &
+    !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp shared(VVdz,nx0, nxN, ny, y_first, y_last, nz, field, izd) private(ix, iz, iy)
     do ix = nx0, nxN
       do iy = y_first - 2, y_last + 2
@@ -473,7 +468,6 @@ CONTAINS
         end do
       end do
     end do
-    !$omp target update to(field)
   END SUBROUTINE real_x_to_spectral_field
 
   SUBROUTINE solve_pressure_field(src0, src1, p)
@@ -481,8 +475,8 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(in) :: src0(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(in) :: src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: p(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    integer(C_INT) :: ix, iz, iy, iline, nlines_z, ix_first, ix_last, iz_first, iz_last
-    integer(C_INT) :: src_y_first, src_y_last, rhs_y_first, rhs_y_last, mat_y_first, mat_y_last
+    integer(C_INT) :: ix, iz, iy, iline, nlines_z, ix_first, ix_last, iz_first, iz_last, row_start, row_end
+    integer(C_INT) :: src_y_first, src_y_last
 
     call ys_prepare_ghost_field_workspace(ny, nz, nxB)
     nlines_z = 2*nz + 1
@@ -490,69 +484,70 @@ CONTAINS
     ix_last = nxN
     iz_first = -nz
     iz_last = nz
+    row_start = ny0
+    row_end = nyN
     src_y_first = lbound(src0, 1)
     src_y_last = ubound(src0, 1)
-    rhs_y_first = lbound(ys_rhs_store, 1)
-    rhs_y_last = ubound(ys_rhs_store, 1)
-    mat_y_first = lbound(ys_matrix_store, 1)
-    mat_y_last = ubound(ys_matrix_store, 1)
-
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(src0, src1, V, der, k2, ialfa, ibeta, ni, d140, d240, d24n, ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, &
+    !$omp& ys_upper_boundary_rhs, ys_upper_ghost_rhs, ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ny, nlines_z, &
+    !$omp& ix_first, ix_last, iz_first, iz_last, src_y_first, src_y_last, row_start, row_end) private(ix, iz, iy, iline)
     do ix = ix_first, ix_last
       do iz = iz_first, iz_last
         iline = (ix - ix_first)*nlines_z + (iz - iz_first + 1)
 
-        do iy = rhs_y_first, rhs_y_last
-          ys_rhs_store(iy, iline) = (0.0d0, 0.0d0)
-        end do
-        do iy = mat_y_first, mat_y_last
-          ys_matrix_store(iy, -2:2, iline) = 0.0d0
-        end do
-        ys_eqm1_store(-2:2, iline) = 0.0d0
-        ys_eq0_store(-2:2, iline) = 0.0d0
-        ys_eqn_store(-2:2, iline) = 0.0d0
-        ys_eqnp1_store(-2:2, iline) = 0.0d0
+        ys_local_rhs(:, iline) = (0.0d0, 0.0d0)
+        ys_local_operator(:, :, iline) = 0.0d0
+        ys_lower_ghost_rhs(iline) = (0.0d0, 0.0d0)
+        ys_lower_boundary_rhs(iline) = (0.0d0, 0.0d0)
+        ys_upper_boundary_rhs(iline) = (0.0d0, 0.0d0)
+        ys_upper_ghost_rhs(iline) = (0.0d0, 0.0d0)
+        ys_lower_ghost_row(:, iline) = 0.0d0
+        ys_lower_boundary_row(:, iline) = 0.0d0
+        ys_upper_boundary_row(:, iline) = 0.0d0
+        ys_upper_ghost_row(:, iline) = 0.0d0
 
-        do iy = max(1_C_INT, src_y_first + 2), min(ny - 1, src_y_last - 2)
-          ys_rhs_store(iy, iline) = sum(der(iy, 0, -2:2)*src0(iy - 2:iy + 2, iz, ix)) + &
+        do iy = max(row_start, src_y_first + 2), min(row_end, src_y_last - 2)
+          ys_local_rhs(iy, iline) = sum(der(iy, 0, -2:2)*src0(iy - 2:iy + 2, iz, ix)) + &
                                     sum(der(iy, 1, -2:2)*src1(iy - 2:iy + 2, iz, ix))
         end do
 
         if (ix == 0 .and. iz == 0) then
-          do iy = max(1_C_INT, src_y_first + 2), min(ny - 1, src_y_last - 2)
-            ys_matrix_store(iy, -2:2, iline) = der(iy, 2, -2:2)
+          do iy = max(row_start, src_y_first + 2), min(row_end, src_y_last - 2)
+            ys_local_operator(iy, -2:2, iline) = der(iy, 2, -2:2)
           end do
-          if (src_y_first <= -1 .and. src_y_last >= 3) then
-            ys_eqm1_store(:, iline) = d140
-            ys_rhs_store(-1, iline) = ni*sum(d240(-2:2)*V(-1:3, iz, ix, 2))
-            ys_eq0_store(:, iline) = d240
-            ys_rhs_store(0, iline) = src0(0, iz, ix) + src1(0, iz, ix)
+          if (row_start == 1 .and. src_y_first <= -1 .and. src_y_last >= 3) then
+            ys_lower_ghost_row(:, iline) = d140
+            ys_lower_ghost_rhs(iline) = ni*sum(d240(-2:2)*V(-1:3, iz, ix, 2))
+            ys_lower_boundary_row(:, iline) = d240
+            ys_lower_boundary_rhs(iline) = src0(0, iz, ix) + src1(0, iz, ix)
           end if
-          ys_eqn_store(1, iline) = 1.0d0
-          if (src_y_first <= ny - 3 .and. src_y_last >= ny + 1) then
-            ys_eqnp1_store(:, iline) = der(ny - 1, 3, :)
+          ys_upper_boundary_row(1, iline) = 1.0d0
+          if (row_end == ny - 1 .and. src_y_first <= ny - 3 .and. src_y_last >= ny + 1) then
+            ys_upper_ghost_row(:, iline) = der(ny - 1, 3, :)
           end if
         else
-          do iy = max(1_C_INT, src_y_first + 2), min(ny - 1, src_y_last - 2)
-            ys_matrix_store(iy, -2:2, iline) = der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)
+          do iy = max(row_start, src_y_first + 2), min(row_end, src_y_last - 2)
+            ys_local_operator(iy, -2:2, iline) = der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)
           end do
-          if (src_y_first <= -1 .and. src_y_last >= 3) then
-            ys_eqm1_store(:, iline) = der(1, 3, :)
-            ys_rhs_store(0, iline) = -ni*(ialfa(ix)*sum(d240(-2:2)*V(-1:3, iz, ix, 1)) + &
-                                          ibeta(iz)*sum(d240(-2:2)*V(-1:3, iz, ix, 3)))/k2(iz, ix)
-            ys_eq0_store(-1, iline) = 1.0d0
+          if (row_start == 1 .and. src_y_first <= -1 .and. src_y_last >= 3) then
+            ys_lower_ghost_row(:, iline) = der(1, 3, :)
+            ys_lower_boundary_rhs(iline) = -ni*(ialfa(ix)*sum(d240(-2:2)*V(-1:3, iz, ix, 1)) + &
+                                                ibeta(iz)*sum(d240(-2:2)*V(-1:3, iz, ix, 3)))/k2(iz, ix)
+            ys_lower_boundary_row(-1, iline) = 1.0d0
           end if
-          if (src_y_first <= ny - 3 .and. src_y_last >= ny + 1) then
-            ys_rhs_store(ny, iline) = -ni*(ialfa(ix)*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 1)) + &
-                                           ibeta(iz)*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 3)))/k2(iz, ix)
-            ys_eqn_store(1, iline) = 1.0d0
-            ys_eqnp1_store(:, iline) = der(ny - 1, 3, :)
+          if (row_end == ny - 1 .and. src_y_first <= ny - 3 .and. src_y_last >= ny + 1) then
+            ys_upper_boundary_rhs(iline) = -ni*(ialfa(ix)*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 1)) + &
+                                                ibeta(iz)*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 3)))/k2(iz, ix)
+            ys_upper_boundary_row(1, iline) = 1.0d0
+            ys_upper_ghost_row(:, iline) = der(ny - 1, 3, :)
           end if
         end if
       end do
     end do
+    !$omp end target teams distribute parallel do
 
-    call ys_solve_ghost_field(p(ny0:nyN, :, :), ny, nz)
-    call ys_fill_ghost_padded_field(p, ny, nz)
+    call ys_solve_ghost_field_reduced(p, ny, nz)
   END SUBROUTINE solve_pressure_field
 
   SUBROUTINE solve_dpdy_field(src0, src1, dpdy)
@@ -560,8 +555,8 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(in) :: src0(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(in) :: src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dpdy(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    integer(C_INT) :: ix, iz, iy, iline, nlines_z, ix_first, ix_last, iz_first, iz_last
-    integer(C_INT) :: src_y_first, src_y_last, rhs_y_first, rhs_y_last, mat_y_first, mat_y_last
+    integer(C_INT) :: ix, iz, iy, iline, nlines_z, ix_first, ix_last, iz_first, iz_last, row_start, row_end
+    integer(C_INT) :: src_y_first, src_y_last
 
     call ys_prepare_ghost_field_workspace(ny, nz, nxB)
     nlines_z = 2*nz + 1
@@ -569,49 +564,50 @@ CONTAINS
     ix_last = nxN
     iz_first = -nz
     iz_last = nz
+    row_start = ny0
+    row_end = nyN
     src_y_first = lbound(src0, 1)
     src_y_last = ubound(src0, 1)
-    rhs_y_first = lbound(ys_rhs_store, 1)
-    rhs_y_last = ubound(ys_rhs_store, 1)
-    mat_y_first = lbound(ys_matrix_store, 1)
-    mat_y_last = ubound(ys_matrix_store, 1)
-
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(src0, src1, V, der, k2, ni, d240, d24n, ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, &
+    !$omp& ys_upper_ghost_rhs, ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ny, nlines_z, ix_first, ix_last, &
+    !$omp& iz_first, iz_last, src_y_first, src_y_last, row_start, row_end) private(ix, iz, iy, iline)
     do ix = ix_first, ix_last
       do iz = iz_first, iz_last
         iline = (ix - ix_first)*nlines_z + (iz - iz_first + 1)
 
-        do iy = rhs_y_first, rhs_y_last
-          ys_rhs_store(iy, iline) = (0.0d0, 0.0d0)
-        end do
-        do iy = mat_y_first, mat_y_last
-          ys_matrix_store(iy, -2:2, iline) = 0.0d0
-        end do
-        ys_eqm1_store(-2:2, iline) = 0.0d0
-        ys_eq0_store(-2:2, iline) = 0.0d0
-        ys_eqn_store(-2:2, iline) = 0.0d0
-        ys_eqnp1_store(-2:2, iline) = 0.0d0
+        ys_local_rhs(:, iline) = (0.0d0, 0.0d0)
+        ys_local_operator(:, :, iline) = 0.0d0
+        ys_lower_ghost_rhs(iline) = (0.0d0, 0.0d0)
+        ys_lower_boundary_rhs(iline) = (0.0d0, 0.0d0)
+        ys_upper_boundary_rhs(iline) = (0.0d0, 0.0d0)
+        ys_upper_ghost_rhs(iline) = (0.0d0, 0.0d0)
+        ys_lower_ghost_row(:, iline) = 0.0d0
+        ys_lower_boundary_row(:, iline) = 0.0d0
+        ys_upper_boundary_row(:, iline) = 0.0d0
+        ys_upper_ghost_row(:, iline) = 0.0d0
 
-        do iy = max(1_C_INT, src_y_first + 2), min(ny - 1, src_y_last - 2)
-          ys_matrix_store(iy, -2:2, iline) = der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)
-          ys_rhs_store(iy, iline) = sum(der(iy, 1, -2:2)*src0(iy - 2:iy + 2, iz, ix)) + &
+        do iy = max(row_start, src_y_first + 2), min(row_end, src_y_last - 2)
+          ys_local_operator(iy, -2:2, iline) = der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)
+          ys_local_rhs(iy, iline) = sum(der(iy, 1, -2:2)*src0(iy - 2:iy + 2, iz, ix)) + &
                                     sum(der(iy, 2, -2:2)*src1(iy - 2:iy + 2, iz, ix))
         end do
 
-        if (src_y_first <= -1 .and. src_y_last >= 3) then
-          ys_rhs_store(0, iline) = ni*sum(d240(-2:2)*V(-1:3, iz, ix, 2))
-          ys_eq0_store(-1, iline) = 1.0d0
-          ys_eqm1_store(:, iline) = der(1, 3, :)
+        if (row_start == 1 .and. src_y_first <= -1 .and. src_y_last >= 3) then
+          ys_lower_boundary_rhs(iline) = ni*sum(d240(-2:2)*V(-1:3, iz, ix, 2))
+          ys_lower_boundary_row(-1, iline) = 1.0d0
+          ys_lower_ghost_row(:, iline) = der(1, 3, :)
         end if
-        if (src_y_first <= ny - 3 .and. src_y_last >= ny + 1) then
-          ys_rhs_store(ny, iline) = ni*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 2))
-          ys_eqn_store(1, iline) = 1.0d0
-          ys_eqnp1_store(:, iline) = der(ny - 1, 3, :)
+        if (row_end == ny - 1 .and. src_y_first <= ny - 3 .and. src_y_last >= ny + 1) then
+          ys_upper_boundary_rhs(iline) = ni*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 2))
+          ys_upper_boundary_row(1, iline) = 1.0d0
+          ys_upper_ghost_row(:, iline) = der(ny - 1, 3, :)
         end if
       end do
     end do
+    !$omp end target teams distribute parallel do
 
-    call ys_solve_ghost_field(dpdy(ny0:nyN, :, :), ny, nz)
-    call ys_fill_ghost_padded_field(dpdy, ny, nz)
+    call ys_solve_ghost_field_reduced(dpdy, ny, nz)
   END SUBROUTINE solve_dpdy_field
 
 END MODULE pressure_output

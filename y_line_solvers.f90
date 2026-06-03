@@ -13,20 +13,28 @@ module y_line_solvers
 
   public :: ys_lu5decomp, ys_leftlu5div
   public :: ys_solve_compact_derivative, ys_solve_compact_system, ys_solve_ghost_system
-  public :: ys_prepare_ghost_field_workspace, ys_solve_ghost_field, ys_solve_ghost_field_reduced, ys_fill_ghost_padded_field
-  public :: ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store
+  public :: ys_prepare_ghost_field_workspace, ys_solve_ghost_field_reduced
+  public :: ys_local_rhs, ys_local_operator
+  public :: ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs
+  public :: ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row
 
   integer(C_INT), save :: ys_workspace_ny = -1
   integer(C_INT), save :: ys_workspace_nz = -1
   integer(C_INT), save :: ys_workspace_nx = -1
   integer(C_INT), save :: ys_workspace_nlines = 0
   integer(C_INT), save :: ys_workspace_active_n = 0
-  complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_rhs_store(:, :)
-  real(C_DOUBLE), allocatable, save :: ys_matrix_store(:, :, :)
-  real(C_DOUBLE), allocatable, save :: ys_eqm1_store(:, :), ys_eq0_store(:, :), ys_eqn_store(:, :), ys_eqnp1_store(:, :)
-  real(C_DOUBLE), allocatable, save :: ys_factored_store(:, :, :)
-  complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_reduced_store(:, :, :)
-  complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_packed_send(:, :), ys_left_u(:, :), ys_right_u(:, :)
+  integer(C_INT), save :: ys_workspace_npy = -1
+  complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_local_rhs(:, :)
+  real(C_DOUBLE), allocatable, save :: ys_local_operator(:, :, :)
+  complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_lower_ghost_rhs(:), ys_lower_boundary_rhs(:), ys_upper_boundary_rhs(:), ys_upper_ghost_rhs(:)
+  real(C_DOUBLE), allocatable, save :: ys_lower_ghost_row(:, :), ys_lower_boundary_row(:, :), ys_upper_boundary_row(:, :), ys_upper_ghost_row(:, :)
+  real(C_DOUBLE), allocatable, save :: ys_interior_lu(:, :, :)
+  complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_interior_response_columns(:, :, :)
+  complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_reduced_rows_send(:, :)
+  complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_left_interface_values(:, :), ys_right_interface_values(:, :)
+  complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_reduced_rows_recv(:, :, :)
+  complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_reduced_matrix_lu(:, :, :)
+  complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_reduced_rhs(:, :)
 
 contains
 
@@ -44,19 +52,29 @@ contains
     if (active_n < 4) error stop "ys_solve_ghost_field requires at least four active y rows"
 
     nlines = nx_lines*(2*nz + 1)
-    if (allocated(ys_rhs_store)) then
+    if (allocated(ys_local_rhs)) then
       if (ys_workspace_ny /= ny .or. ys_workspace_nz /= nz .or. ys_workspace_nx /= nx_lines .or. &
-          ys_workspace_active_n /= active_n) then
-        deallocate (ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
-        deallocate (ys_factored_store, ys_reduced_store, ys_packed_send, ys_left_u, ys_right_u)
+          ys_workspace_active_n /= active_n .or. ys_workspace_npy /= npy_grid) then
+        !$omp target exit data map(delete: ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
+        !$omp& ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ys_interior_lu, ys_interior_response_columns, &
+        !$omp& ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values, ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs)
+  deallocate (ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs)
+        deallocate (ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row)
+deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values)
+        deallocate (ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs)
       end if
     end if
 
-    if (.not. allocated(ys_rhs_store)) then
-      allocate (ys_rhs_store(-1:ny + 1, nlines), ys_matrix_store(1:ny + 1, -2:2, nlines))
-      allocate (ys_eqm1_store(-2:2, nlines), ys_eq0_store(-2:2, nlines), ys_eqn_store(-2:2, nlines), ys_eqnp1_store(-2:2, nlines))
-      allocate (ys_factored_store(0:active_n - 1, -2:2, nlines), ys_reduced_store(0:active_n - 1, 5, nlines))
-      allocate (ys_packed_send(20, nlines), ys_left_u(2, nlines), ys_right_u(2, nlines))
+    if (.not. allocated(ys_local_rhs)) then
+      allocate (ys_local_rhs(ny0:nyN, nlines), ys_local_operator(ny0:nyN, -2:2, nlines))
+     allocate (ys_lower_ghost_rhs(nlines), ys_lower_boundary_rhs(nlines), ys_upper_boundary_rhs(nlines), ys_upper_ghost_rhs(nlines))
+      allocate (ys_lower_ghost_row(-2:2, nlines), ys_lower_boundary_row(-2:2, nlines), ys_upper_boundary_row(-2:2, nlines), ys_upper_ghost_row(-2:2, nlines))
+      allocate (ys_interior_lu(0:active_n - 1, -2:2, nlines), ys_interior_response_columns(0:active_n - 1, 5, nlines))
+      allocate (ys_reduced_rows_send(20, nlines), ys_left_interface_values(2, nlines), ys_right_interface_values(2, nlines))
+      allocate (ys_reduced_rows_recv(20, nlines, npy_grid), ys_reduced_matrix_lu(4*npy_grid, 11, nlines), ys_reduced_rhs(4*npy_grid, nlines))
+      !$omp target enter data map(alloc: ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
+      !$omp& ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ys_interior_lu, ys_interior_response_columns, &
+      !$omp& ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values, ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs)
     end if
 
     ys_workspace_ny = ny
@@ -64,73 +82,27 @@ contains
     ys_workspace_nx = nx_lines
     ys_workspace_nlines = nlines
     ys_workspace_active_n = active_n
+    ys_workspace_npy = npy_grid
 
-    ys_rhs_store = (0.0d0, 0.0d0)
-    ys_matrix_store = 0.0d0
-    ys_eqm1_store = 0.0d0
-    ys_eq0_store = 0.0d0
-    ys_eqn_store = 0.0d0
-    ys_eqnp1_store = 0.0d0
-    ys_factored_store = 0.0d0
-    ys_reduced_store = (0.0d0, 0.0d0)
-    ys_packed_send = (0.0d0, 0.0d0)
-    ys_left_u = (0.0d0, 0.0d0)
-    ys_right_u = (0.0d0, 0.0d0)
+    ys_local_rhs = (0.0d0, 0.0d0)
+    ys_local_operator = 0.0d0
+    ys_lower_ghost_rhs = (0.0d0, 0.0d0)
+    ys_lower_boundary_rhs = (0.0d0, 0.0d0)
+    ys_upper_boundary_rhs = (0.0d0, 0.0d0)
+    ys_upper_ghost_rhs = (0.0d0, 0.0d0)
+    ys_lower_ghost_row = 0.0d0
+    ys_lower_boundary_row = 0.0d0
+    ys_upper_boundary_row = 0.0d0
+    ys_upper_ghost_row = 0.0d0
+    ys_interior_lu = 0.0d0
+    ys_interior_response_columns = (0.0d0, 0.0d0)
+    ys_reduced_rows_send = (0.0d0, 0.0d0)
+    ys_left_interface_values = (0.0d0, 0.0d0)
+    ys_right_interface_values = (0.0d0, 0.0d0)
+    ys_reduced_rows_recv = (0.0d0, 0.0d0)
+    ys_reduced_matrix_lu = (0.0d0, 0.0d0)
+    ys_reduced_rhs = (0.0d0, 0.0d0)
   end subroutine ys_prepare_ghost_field_workspace
-
-  subroutine ys_solve_ghost_field(dst, ny, nz)
-    implicit none
-    integer(C_INT), intent(in) :: ny, nz
-    complex(C_DOUBLE_COMPLEX), intent(out) :: dst(:, :, :)
-
-    call ys_solve_ghost_field_reduced(dst, ny, nz)
-  end subroutine ys_solve_ghost_field
-
-  subroutine ys_fill_ghost_padded_field(dst, ny, nz)
-    implicit none
-    integer(C_INT), intent(in) :: ny, nz
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    complex(C_DOUBLE_COMPLEX) :: lower_pair(2), upper_pair(2)
-    complex(C_DOUBLE_COMPLEX) :: lower_rhs0, upper_rhsn
-    real(C_DOUBLE) :: lower_eq0(-2:2), upper_eqn(-2:2)
-    integer(C_INT) :: ix, iz, iline, nlines_z
-
-   if (.not. allocated(ys_rhs_store)) error stop "ys_prepare_ghost_field_workspace must be called before ys_fill_ghost_padded_field"
-
-    nlines_z = 2*nz + 1
-
-    do ix = nx0, nxN
-      do iz = -nz, nz
-        iline = (ix - nx0)*nlines_z + (iz + nz + 1)
-        lower_pair = ys_left_u(:, iline)
-        upper_pair = ys_right_u(:, iline)
-
-        if (ny0 == 1) then
-          lower_rhs0 = ys_rhs_store(0, iline) - ys_rhs_store(-1, iline)*ys_eq0_store(-2, iline)/ys_eqm1_store(-2, iline)
-          lower_eq0 = ys_eq0_store(:, iline) - ys_eqm1_store(:, iline)*ys_eq0_store(-2, iline)/ys_eqm1_store(-2, iline)
-          lower_eq0(-2) = 0.0d0
-
-          dst(0, iz, ix) = (lower_rhs0 - sum(lower_eq0(0:2)*dst(1:3, iz, ix)))/lower_eq0(-1)
-          dst(-1, iz, ix) = (ys_rhs_store(-1, iline) - sum(ys_eqm1_store(-1:2, iline)*dst(0:3, iz, ix)))/ys_eqm1_store(-2, iline)
-        else
-          dst(ny0 - 2, iz, ix) = lower_pair(1)
-          dst(ny0 - 1, iz, ix) = lower_pair(2)
-        end if
-
-        if (nyN == ny - 1) then
-          upper_rhsn = ys_rhs_store(ny, iline) - ys_rhs_store(ny + 1, iline)*ys_eqn_store(2, iline)/ys_eqnp1_store(2, iline)
-          upper_eqn = ys_eqn_store(:, iline) - ys_eqnp1_store(:, iline)*ys_eqn_store(2, iline)/ys_eqnp1_store(2, iline)
-          upper_eqn(2) = 0.0d0
-
-          dst(ny, iz, ix) = (upper_rhsn - sum(upper_eqn(-2:0)*dst(ny - 3:ny - 1, iz, ix)))/upper_eqn(1)
-          dst(ny + 1, iz, ix) = (ys_rhs_store(ny + 1, iline) - sum(ys_eqnp1_store(-2:1, iline)*dst(ny - 3:ny, iz, ix)))/ys_eqnp1_store(2, iline)
-        else
-          dst(nyN + 1, iz, ix) = upper_pair(1)
-          dst(nyN + 2, iz, ix) = upper_pair(2)
-        end if
-      end do
-    end do
-  end subroutine ys_fill_ghost_padded_field
 
   subroutine ys_lu5decomp(a)
     real(C_DOUBLE), intent(inout) :: a(0:, -2:)
@@ -267,207 +239,275 @@ contains
   subroutine ys_solve_ghost_field_reduced(dst, ny, nz)
     implicit none
     integer(C_INT), intent(in) :: ny, nz
-    complex(C_DOUBLE_COMPLEX), intent(out) :: dst(:, :, :)
-    complex(C_DOUBLE_COMPLEX) :: local_block(size(dst, 1))
-    complex(C_DOUBLE_COMPLEX) :: u_left(2), u_right(2)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
     complex(C_DOUBLE_COMPLEX) :: lower_rhs0, upper_rhsn
     real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-2:2), upper_eqn(-2:2)
-    integer(C_INT) :: ix, iz, iline, nlines, nlines_z, row_start, row_end, active_n, row, idx, col, global_col
-    logical :: has_lower_boundary, has_upper_boundary
+    integer(C_INT) :: ix, iz, iline, nlines, nlines_z, row_start, row_end, active_n, row, local_idx, col, coupled_row
+    integer(C_INT) :: dst_row_base, lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3
+    logical :: has_lower_boundary, has_upper_boundary, has_padded_dst
 
     row_start = ny0
     row_end = nyN
     active_n = row_end - row_start + 1
     has_lower_boundary = (row_start == 1)
     has_upper_boundary = (row_end == ny - 1)
-    if (.not. allocated(ys_rhs_store)) error stop "ys_prepare_ghost_field_workspace must be called before ys_solve_ghost_field"
+    has_padded_dst = (size(dst, 1) == active_n + 4)
+    if (.not. has_padded_dst .and. size(dst, 1) /= active_n) then
+      error stop "ys_solve_ghost_field_reduced expected either local-only or ghost-padded dst"
+    end if
+    dst_row_base = 1
+    if (has_padded_dst) dst_row_base = 3
+    if (.not. allocated(ys_local_rhs)) error stop "ys_prepare_ghost_field_workspace must be called before ys_solve_ghost_field"
     if (ys_workspace_ny /= ny .or. ys_workspace_nz /= nz .or. ys_workspace_nx /= size(dst, 3) .or. &
-        ys_workspace_active_n /= size(dst, 1)) then
+        ys_workspace_active_n /= active_n) then
       error stop "ys_solve_ghost_field workspace does not match requested local solve dimensions"
     end if
 
     nlines_z = 2*nz + 1
     nlines = ys_workspace_nlines
 
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
+    !$omp& ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ys_interior_lu, ys_interior_response_columns, &
+    !$omp& ys_reduced_rows_send, row_start, row_end, active_n, has_lower_boundary, has_upper_boundary, nlines) &
+    !$omp private(iline, row, local_idx, col, coupled_row, lower_rhs0, upper_rhsn, row_coeffs, lower_eq0, upper_eqn)
     do iline = 1, nlines
-      ys_factored_store(:, :, iline) = 0.0d0
-      ys_reduced_store(:, :, iline) = (0.0d0, 0.0d0)
+      ys_interior_lu(:, :, iline) = 0.0d0
+      ys_interior_response_columns(:, :, iline) = (0.0d0, 0.0d0)
 
       lower_rhs0 = (0.0d0, 0.0d0)
       lower_eq0 = 0.0d0
       if (has_lower_boundary) then
-        lower_rhs0 = ys_rhs_store(0, iline) - ys_rhs_store(-1, iline)*ys_eq0_store(-2, iline)/ys_eqm1_store(-2, iline)
-        lower_eq0 = ys_eq0_store(:, iline) - ys_eqm1_store(:, iline)*ys_eq0_store(-2, iline)/ys_eqm1_store(-2, iline)
+lower_rhs0 = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
+        lower_eq0 = ys_lower_boundary_row(:, iline) - ys_lower_ghost_row(:, iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
         lower_eq0(-2) = 0.0d0
       end if
       upper_rhsn = (0.0d0, 0.0d0)
       upper_eqn = 0.0d0
       if (has_upper_boundary) then
-        upper_rhsn = ys_rhs_store(ny, iline) - ys_rhs_store(ny + 1, iline)*ys_eqn_store(2, iline)/ys_eqnp1_store(2, iline)
-        upper_eqn = ys_eqn_store(:, iline) - ys_eqnp1_store(:, iline)*ys_eqn_store(2, iline)/ys_eqnp1_store(2, iline)
+  upper_rhsn = ys_upper_boundary_rhs(iline) - ys_upper_ghost_rhs(iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
+        upper_eqn = ys_upper_boundary_row(:, iline) - ys_upper_ghost_row(:, iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
         upper_eqn(2) = 0.0d0
       end if
 
       do row = row_start, row_end
-        ys_reduced_store(row - row_start, 1, iline) = ys_rhs_store(row, iline)
+        local_idx = row - row_start
+        ys_interior_response_columns(local_idx, 1, iline) = ys_local_rhs(row, iline)
       end do
 
       if (has_lower_boundary) then
-        ys_reduced_store(0, 1, iline) = ys_reduced_store(0, 1, iline) - ys_rhs_store(-1, iline)*ys_matrix_store(1, -2, iline)/ys_eqm1_store(-2, iline)
-       row_coeffs = ys_matrix_store(1, -2:2, iline) - ys_eqm1_store(:, iline)*ys_matrix_store(1, -2, iline)/ys_eqm1_store(-2, iline)
+        ys_interior_response_columns(0, 1, iline) = ys_interior_response_columns(0, 1, iline) - &
+                                     ys_lower_ghost_rhs(iline)*ys_local_operator(row_start, -2, iline)/ys_lower_ghost_row(-2, iline)
+        row_coeffs = ys_local_operator(row_start, -2:2, iline) - ys_lower_ghost_row(:, iline)*ys_local_operator(row_start, -2, iline)/ys_lower_ghost_row(-2, iline)
         row_coeffs(-2) = 0.0d0
-        ys_reduced_store(0, 1, iline) = ys_reduced_store(0, 1, iline) - lower_rhs0*row_coeffs(-1)/lower_eq0(-1)
+     ys_interior_response_columns(0, 1, iline) = ys_interior_response_columns(0, 1, iline) - lower_rhs0*row_coeffs(-1)/lower_eq0(-1)
         row_coeffs = row_coeffs - lower_eq0*row_coeffs(-1)/lower_eq0(-1)
         row_coeffs(-1) = 0.0d0
-        ys_factored_store(0, 0:2, iline) = row_coeffs(0:2)
+        ys_interior_lu(0, 0:2, iline) = row_coeffs(0:2)
 
-        ys_reduced_store(1, 1, iline) = ys_reduced_store(1, 1, iline) - lower_rhs0*ys_matrix_store(2, -2, iline)/lower_eq0(-1)
-        row_coeffs = ys_matrix_store(2, -2:2, iline)
-        row_coeffs(-2:1) = row_coeffs(-2:1) - lower_eq0(-1:2)*ys_matrix_store(2, -2, iline)/lower_eq0(-1)
+        ys_interior_response_columns(1, 1, iline) = ys_interior_response_columns(1, 1, iline) - lower_rhs0*ys_local_operator(row_start + 1, -2, iline)/lower_eq0(-1)
+        row_coeffs = ys_local_operator(row_start + 1, -2:2, iline)
+        row_coeffs(-2:1) = row_coeffs(-2:1) - lower_eq0(-1:2)*ys_local_operator(row_start + 1, -2, iline)/lower_eq0(-1)
         row_coeffs(-2) = 0.0d0
-        ys_factored_store(1, -1:2, iline) = row_coeffs(-1:2)
+        ys_interior_lu(1, -1:2, iline) = row_coeffs(-1:2)
       end if
 
       if (has_upper_boundary) then
-        ys_reduced_store(active_n - 1, 1, iline) = ys_reduced_store(active_n - 1, 1, iline) - &
-                                              ys_rhs_store(ny + 1, iline)*ys_matrix_store(ny - 1, 2, iline)/ys_eqnp1_store(2, iline)
-        row_coeffs = ys_matrix_store(ny - 1, -2:2, iline) - ys_eqnp1_store(:, iline)*ys_matrix_store(ny - 1, 2, iline)/ys_eqnp1_store(2, iline)
+        ys_interior_response_columns(active_n - 1, 1, iline) = ys_interior_response_columns(active_n - 1, 1, iline) - &
+                                         ys_upper_ghost_rhs(iline)*ys_local_operator(row_end, 2, iline)/ys_upper_ghost_row(2, iline)
+        row_coeffs = ys_local_operator(row_end, -2:2, iline) - ys_upper_ghost_row(:, iline)*ys_local_operator(row_end, 2, iline)/ys_upper_ghost_row(2, iline)
         row_coeffs(2) = 0.0d0
-        ys_reduced_store(active_n - 1, 1, iline) = ys_reduced_store(active_n - 1, 1, iline) - upper_rhsn*row_coeffs(1)/upper_eqn(1)
+        ys_interior_response_columns(active_n - 1, 1, iline) = ys_interior_response_columns(active_n - 1, 1, iline) - upper_rhsn*row_coeffs(1)/upper_eqn(1)
         row_coeffs = row_coeffs - upper_eqn*row_coeffs(1)/upper_eqn(1)
         row_coeffs(1) = 0.0d0
-        ys_factored_store(active_n - 1, -2:0, iline) = row_coeffs(-2:0)
+        ys_interior_lu(active_n - 1, -2:0, iline) = row_coeffs(-2:0)
 
-        ys_reduced_store(active_n - 2, 1, iline) = ys_reduced_store(active_n - 2, 1, iline) - upper_rhsn*ys_matrix_store(ny - 2, 2, iline)/upper_eqn(1)
-        row_coeffs = ys_matrix_store(ny - 2, -2:2, iline)
-        row_coeffs(-1:2) = row_coeffs(-1:2) - upper_eqn(-2:1)*ys_matrix_store(ny - 2, 2, iline)/upper_eqn(1)
+        ys_interior_response_columns(active_n - 2, 1, iline) = ys_interior_response_columns(active_n - 2, 1, iline) - &
+                                                               upper_rhsn*ys_local_operator(row_end - 1, 2, iline)/upper_eqn(1)
+        row_coeffs = ys_local_operator(row_end - 1, -2:2, iline)
+        row_coeffs(-1:2) = row_coeffs(-1:2) - upper_eqn(-2:1)*ys_local_operator(row_end - 1, 2, iline)/upper_eqn(1)
         row_coeffs(2) = 0.0d0
-        ys_factored_store(active_n - 2, -2:1, iline) = row_coeffs(-2:1)
+        ys_interior_lu(active_n - 2, -2:1, iline) = row_coeffs(-2:1)
       end if
 
       do row = row_start, row_end
-        idx = row - row_start
-        if ((has_lower_boundary .and. row <= 2) .or. (has_upper_boundary .and. row >= ny - 2)) cycle
-        row_coeffs = ys_matrix_store(row, -2:2, iline)
+        local_idx = row - row_start
+        if ((has_lower_boundary .and. row <= row_start + 1) .or. (has_upper_boundary .and. row >= row_end - 1)) cycle
+        row_coeffs = ys_local_operator(row, -2:2, iline)
         do col = -2, 2
-          global_col = row + col
-          if (global_col < row_start) then
-            if (global_col == row_start - 2) ys_reduced_store(idx, 2, iline) = -cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
-            if (global_col == row_start - 1) ys_reduced_store(idx, 3, iline) = -cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
-          else if (global_col > row_end) then
-            if (global_col == row_end + 1) ys_reduced_store(idx, 4, iline) = -cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
-            if (global_col == row_end + 2) ys_reduced_store(idx, 5, iline) = -cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
+          coupled_row = row + col
+          if (coupled_row < row_start) then
+ if (coupled_row == row_start - 2) ys_interior_response_columns(local_idx, 2, iline) = -cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
+ if (coupled_row == row_start - 1) ys_interior_response_columns(local_idx, 3, iline) = -cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
+          else if (coupled_row > row_end) then
+   if (coupled_row == row_end + 1) ys_interior_response_columns(local_idx, 4, iline) = -cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
+   if (coupled_row == row_end + 2) ys_interior_response_columns(local_idx, 5, iline) = -cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
           else
-            ys_factored_store(idx, col, iline) = row_coeffs(col)
+            ys_interior_lu(local_idx, col, iline) = row_coeffs(col)
           end if
         end do
       end do
 
-      call ys_factor_penta(ys_factored_store(:, :, iline))
-      call ys_solve_factored_penta_multi(ys_reduced_store(:, :, iline), ys_factored_store(:, :, iline))
+      call ys_factor_penta(ys_interior_lu(:, :, iline))
+      call ys_solve_factored_penta_multi(ys_interior_response_columns(:, :, iline), ys_interior_lu(:, :, iline))
 
-      ys_packed_send(1:4, iline) = [ys_reduced_store(0, 1, iline), ys_reduced_store(1, 1, iline), &
-                                    ys_reduced_store(active_n - 2, 1, iline), ys_reduced_store(active_n - 1, 1, iline)]
-      ys_packed_send(5:12, iline) = [ys_reduced_store(0, 2, iline), ys_reduced_store(1, 2, iline), &
-                                     ys_reduced_store(active_n - 2, 2, iline), ys_reduced_store(active_n - 1, 2, iline), &
-                                     ys_reduced_store(0, 3, iline), ys_reduced_store(1, 3, iline), &
-                                     ys_reduced_store(active_n - 2, 3, iline), ys_reduced_store(active_n - 1, 3, iline)]
-      ys_packed_send(13:20, iline) = [ys_reduced_store(0, 4, iline), ys_reduced_store(1, 4, iline), &
-                                      ys_reduced_store(active_n - 2, 4, iline), ys_reduced_store(active_n - 1, 4, iline), &
-                                      ys_reduced_store(0, 5, iline), ys_reduced_store(1, 5, iline), &
-                                      ys_reduced_store(active_n - 2, 5, iline), ys_reduced_store(active_n - 1, 5, iline)]
+      ys_reduced_rows_send(1:4, iline) = [ys_interior_response_columns(0, 1, iline), ys_interior_response_columns(1, 1, iline), &
+                         ys_interior_response_columns(active_n - 2, 1, iline), ys_interior_response_columns(active_n - 1, 1, iline)]
+      ys_reduced_rows_send(5:12, iline) = [ys_interior_response_columns(0, 2, iline), ys_interior_response_columns(1, 2, iline), &
+                       ys_interior_response_columns(active_n - 2, 2, iline), ys_interior_response_columns(active_n - 1, 2, iline), &
+                                           ys_interior_response_columns(0, 3, iline), ys_interior_response_columns(1, 3, iline), &
+                         ys_interior_response_columns(active_n - 2, 3, iline), ys_interior_response_columns(active_n - 1, 3, iline)]
+      ys_reduced_rows_send(13:20, iline) = [ys_interior_response_columns(0, 4, iline), ys_interior_response_columns(1, 4, iline), &
+                       ys_interior_response_columns(active_n - 2, 4, iline), ys_interior_response_columns(active_n - 1, 4, iline), &
+                                            ys_interior_response_columns(0, 5, iline), ys_interior_response_columns(1, 5, iline), &
+                         ys_interior_response_columns(active_n - 2, 5, iline), ys_interior_response_columns(active_n - 1, 5, iline)]
     end do
+    !$omp end target teams distribute parallel do
 
-    call ys_solve_reduced_interfaces(ys_packed_send, ys_left_u, ys_right_u)
+    lower_inner0 = dst_row_base
+    lower_inner2 = dst_row_base + 2
+    upper_inner0 = active_n + dst_row_base - 3
+    upper_inner2 = upper_inner0 + 2
+    upper_inner3 = upper_inner0 + 3
 
+    call ys_solve_reduced_interfaces()
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(dst, ys_interior_response_columns, ys_left_interface_values, ys_right_interface_values, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, &
+    !$omp& ys_upper_ghost_rhs, ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, nx0, nxN, nz, nlines_z, dst_row_base, &
+    !$omp& has_padded_dst, has_lower_boundary, has_upper_boundary, active_n, &
+    !$omp& lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3) &
+    !$omp private(ix, iz, iline, row, lower_rhs0, upper_rhsn, lower_eq0, upper_eqn)
     do ix = nx0, nxN
       do iz = -nz, nz
         iline = (ix - nx0)*nlines_z + (iz + nz + 1)
-        u_left = ys_left_u(:, iline)
-        u_right = ys_right_u(:, iline)
 
-        ys_reduced_store(:, 1, iline) = ys_reduced_store(:, 1, iline) + ys_reduced_store(:, 2, iline)*u_left(1) + &
-                                        ys_reduced_store(:, 3, iline)*u_left(2) + ys_reduced_store(:, 4, iline)*u_right(1) + &
-                                        ys_reduced_store(:, 5, iline)*u_right(2)
+        ys_interior_response_columns(:, 1, iline) = ys_interior_response_columns(:, 1, iline) + &
+                                                    ys_interior_response_columns(:, 2, iline)*ys_left_interface_values(1, iline) + &
+                                                    ys_interior_response_columns(:, 3, iline)*ys_left_interface_values(2, iline) + &
+                                                   ys_interior_response_columns(:, 4, iline)*ys_right_interface_values(1, iline) + &
+                                                    ys_interior_response_columns(:, 5, iline)*ys_right_interface_values(2, iline)
 
-        local_block = (0.0d0, 0.0d0)
-        do row = row_start, row_end
-          local_block(row - row_start + 1) = ys_reduced_store(row - row_start, 1, iline)
+        do row = 0, active_n - 1
+          dst(row + dst_row_base, iz + nz + 1, ix - nx0 + 1) = ys_interior_response_columns(row, 1, iline)
         end do
 
-        dst(:, iz + nz + 1, ix - nx0 + 1) = local_block
+        if (has_padded_dst) then
+          if (has_lower_boundary) then
+lower_rhs0 = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
+            lower_eq0 = ys_lower_boundary_row(:, iline) - ys_lower_ghost_row(:, iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
+            lower_eq0(-2) = 0.0d0
+
+            dst(2, iz + nz + 1, ix - nx0 + 1) = (lower_rhs0 - sum(lower_eq0(0:2)*dst(lower_inner0:lower_inner2, iz + nz + 1, ix - nx0 + 1)))/lower_eq0(-1)
+            dst(1, iz + nz + 1, ix - nx0 + 1) = (ys_lower_ghost_rhs(iline) - &
+                             sum(ys_lower_ghost_row(-1:2, iline)*dst(2:5, iz + nz + 1, ix - nx0 + 1)))/ys_lower_ghost_row(-2, iline)
+          else
+            dst(1, iz + nz + 1, ix - nx0 + 1) = ys_left_interface_values(1, iline)
+            dst(2, iz + nz + 1, ix - nx0 + 1) = ys_left_interface_values(2, iline)
+          end if
+
+          if (has_upper_boundary) then
+  upper_rhsn = ys_upper_boundary_rhs(iline) - ys_upper_ghost_rhs(iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
+            upper_eqn = ys_upper_boundary_row(:, iline) - ys_upper_ghost_row(:, iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
+            upper_eqn(2) = 0.0d0
+
+            dst(active_n + 3, iz + nz + 1, ix - nx0 + 1) = (upper_rhsn - &
+                                        sum(upper_eqn(-2:0)*dst(upper_inner0:upper_inner2, iz + nz + 1, ix - nx0 + 1)))/upper_eqn(1)
+            dst(active_n + 4, iz + nz + 1, ix - nx0 + 1) = (ys_upper_ghost_rhs(iline) - &
+        sum(ys_upper_ghost_row(-2:1, iline)*dst(upper_inner0:upper_inner3, iz + nz + 1, ix - nx0 + 1)))/ys_upper_ghost_row(2, iline)
+          else
+            dst(active_n + 3, iz + nz + 1, ix - nx0 + 1) = ys_right_interface_values(1, iline)
+            dst(active_n + 4, iz + nz + 1, ix - nx0 + 1) = ys_right_interface_values(2, iline)
+          end if
+        end if
       end do
     end do
+    !$omp end target teams distribute parallel do
+    !$omp target update from(dst)
 
   end subroutine ys_solve_ghost_field_reduced
 
-  subroutine ys_solve_reduced_interfaces(packed_send, left_u, right_u)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: packed_send(:, :)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: left_u(:, :), right_u(:, :)
-    complex(C_DOUBLE_COMPLEX), allocatable :: packed_recv(:, :, :), band_a(:, :), rhs(:)
-    complex(C_DOUBLE_COMPLEX) :: packed_remote(20)
+  subroutine ys_solve_reduced_interfaces()
     integer(C_INT), parameter :: bw = 5
-    integer(C_INT) :: nlines, niface, iline, iblock, row0
+    complex(C_DOUBLE_COMPLEX) :: solve_piv, solve_factor, packed_remote(20)
+    integer(C_INT) :: nlines, niface, iline, iblock, row0, i, j, t
 
-    nlines = size(packed_send, 2)
+    nlines = size(ys_reduced_rows_send, 2)
     niface = 4*npy_grid
-    allocate (packed_recv(20, nlines, npy_grid), band_a(1:niface, 1:2*bw + 1), rhs(niface))
 
 #ifdef HAVE_MPI
-    call MPI_Allgather(packed_send, 20*nlines, MPI_DOUBLE_COMPLEX, packed_recv, 20*nlines, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
+#ifndef HAVE_HIP
+    !$omp target data use_device_ptr(ys_reduced_rows_send, ys_reduced_rows_recv)
+#endif
+    call MPI_Allgather(ys_reduced_rows_send, 20*nlines, MPI_DOUBLE_COMPLEX, ys_reduced_rows_recv, 20*nlines, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
+#ifndef HAVE_HIP
+    !$omp end target data
+#endif
 #else
-    packed_recv(:, :, 1) = packed_send
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(ys_reduced_rows_send, ys_reduced_rows_recv, nlines) private(iline, i)
+    do iline = 1, nlines
+      do i = 1, 20
+        ys_reduced_rows_recv(i, iline, 1) = ys_reduced_rows_send(i, iline)
+      end do
+    end do
+    !$omp end target teams distribute parallel do
 #endif
 
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs, ys_left_interface_values, ys_right_interface_values, nlines, niface, npy_grid, ipy) &
+    !$omp private(iline, iblock, row0, packed_remote, i, j, t, solve_piv, solve_factor)
     do iline = 1, nlines
-      band_a = (0.0d0, 0.0d0)
-      rhs = (0.0d0, 0.0d0)
+      ys_reduced_matrix_lu(:, :, iline) = (0.0d0, 0.0d0)
+      ys_reduced_rhs(:, iline) = (0.0d0, 0.0d0)
       do iblock = 0, npy_grid - 1
         row0 = 4*iblock
-        packed_remote = packed_recv(:, iline, iblock + 1)
-        band_a(row0 + 1, bw + 1) = (1.0d0, 0.0d0)
-        band_a(row0 + 2, bw + 1) = (1.0d0, 0.0d0)
-        band_a(row0 + 3, bw + 1) = (1.0d0, 0.0d0)
-        band_a(row0 + 4, bw + 1) = (1.0d0, 0.0d0)
-        rhs(row0 + 1:row0 + 4) = packed_remote(1:4)
+        packed_remote = ys_reduced_rows_recv(:, iline, iblock + 1)
+        ys_reduced_matrix_lu(row0 + 1, bw + 1, iline) = (1.0d0, 0.0d0)
+        ys_reduced_matrix_lu(row0 + 2, bw + 1, iline) = (1.0d0, 0.0d0)
+        ys_reduced_matrix_lu(row0 + 3, bw + 1, iline) = (1.0d0, 0.0d0)
+        ys_reduced_matrix_lu(row0 + 4, bw + 1, iline) = (1.0d0, 0.0d0)
+        ys_reduced_rhs(row0 + 1:row0 + 4, iline) = packed_remote(1:4)
         if (iblock > 0) then
-          band_a(row0 + 1, bw - 1) = -packed_remote(5)
-          band_a(row0 + 2, bw - 2) = -packed_remote(6)
-          band_a(row0 + 3, bw - 3) = -packed_remote(7)
-          band_a(row0 + 4, bw - 4) = -packed_remote(8)
-          band_a(row0 + 1, bw) = -packed_remote(9)
-          band_a(row0 + 2, bw - 1) = -packed_remote(10)
-          band_a(row0 + 3, bw - 2) = -packed_remote(11)
-          band_a(row0 + 4, bw - 3) = -packed_remote(12)
+          ys_reduced_matrix_lu(row0 + 1, bw - 1, iline) = -packed_remote(5)
+          ys_reduced_matrix_lu(row0 + 2, bw - 2, iline) = -packed_remote(6)
+          ys_reduced_matrix_lu(row0 + 3, bw - 3, iline) = -packed_remote(7)
+          ys_reduced_matrix_lu(row0 + 4, bw - 4, iline) = -packed_remote(8)
+          ys_reduced_matrix_lu(row0 + 1, bw, iline) = -packed_remote(9)
+          ys_reduced_matrix_lu(row0 + 2, bw - 1, iline) = -packed_remote(10)
+          ys_reduced_matrix_lu(row0 + 3, bw - 2, iline) = -packed_remote(11)
+          ys_reduced_matrix_lu(row0 + 4, bw - 3, iline) = -packed_remote(12)
         end if
         if (iblock < npy_grid - 1) then
-          band_a(row0 + 1, bw + 5) = -packed_remote(13)
-          band_a(row0 + 2, bw + 4) = -packed_remote(14)
-          band_a(row0 + 3, bw + 3) = -packed_remote(15)
-          band_a(row0 + 4, bw + 2) = -packed_remote(16)
-          band_a(row0 + 1, bw + 6) = -packed_remote(17)
-          band_a(row0 + 2, bw + 5) = -packed_remote(18)
-          band_a(row0 + 3, bw + 4) = -packed_remote(19)
-          band_a(row0 + 4, bw + 3) = -packed_remote(20)
+          ys_reduced_matrix_lu(row0 + 1, bw + 5, iline) = -packed_remote(13)
+          ys_reduced_matrix_lu(row0 + 2, bw + 4, iline) = -packed_remote(14)
+          ys_reduced_matrix_lu(row0 + 3, bw + 3, iline) = -packed_remote(15)
+          ys_reduced_matrix_lu(row0 + 4, bw + 2, iline) = -packed_remote(16)
+          ys_reduced_matrix_lu(row0 + 1, bw + 6, iline) = -packed_remote(17)
+          ys_reduced_matrix_lu(row0 + 2, bw + 5, iline) = -packed_remote(18)
+          ys_reduced_matrix_lu(row0 + 3, bw + 4, iline) = -packed_remote(19)
+          ys_reduced_matrix_lu(row0 + 4, bw + 3, iline) = -packed_remote(20)
         end if
       end do
 
-      call ys_factor_banded_complex(band_a)
-      call ys_solve_factored_banded_complex(rhs, band_a)
-      left_u(:, iline) = (0.0d0, 0.0d0)
-      right_u(:, iline) = (0.0d0, 0.0d0)
+      call ys_factor_banded_complex(ys_reduced_matrix_lu(:, :, iline))
+      call ys_solve_factored_banded_complex(ys_reduced_rhs(:, iline), ys_reduced_matrix_lu(:, :, iline))
+
+      ys_left_interface_values(:, iline) = (0.0d0, 0.0d0)
+      ys_right_interface_values(:, iline) = (0.0d0, 0.0d0)
       row0 = 4*ipy
       if (ipy > 0) then
-        left_u(:, iline) = rhs(row0 - 1:row0)
+        ys_left_interface_values(:, iline) = ys_reduced_rhs(row0 - 1:row0, iline)
       end if
       if (ipy < npy_grid - 1) then
-        right_u(:, iline) = rhs(row0 + 5:row0 + 6)
+        ys_right_interface_values(:, iline) = ys_reduced_rhs(row0 + 5:row0 + 6, iline)
       end if
     end do
-
-    deallocate (packed_recv, band_a, rhs)
+    !$omp end target teams distribute parallel do
   end subroutine ys_solve_reduced_interfaces
 
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+  !$omp declare target(ys_factor_banded_complex)
+#endif
   subroutine ys_factor_banded_complex(a)
     complex(C_DOUBLE_COMPLEX), intent(inout) :: a(:, :)
     integer(C_INT), parameter :: bw = 5
@@ -488,6 +528,9 @@ contains
     end do
   end subroutine ys_factor_banded_complex
 
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+  !$omp declare target(ys_solve_factored_banded_complex)
+#endif
   subroutine ys_solve_factored_banded_complex(rhs, a)
     complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs(:)
     complex(C_DOUBLE_COMPLEX), intent(in) :: a(:, :)
@@ -509,6 +552,9 @@ contains
     end do
   end subroutine ys_solve_factored_banded_complex
 
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+  !$omp declare target(ys_factor_penta)
+#endif
   subroutine ys_factor_penta(a)
     real(C_DOUBLE), intent(inout) :: a(0:, -2:)
     integer(C_INT) :: n, i
@@ -538,6 +584,9 @@ contains
     end do
   end subroutine ys_factor_penta
 
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+  !$omp declare target(ys_solve_factored_penta_multi)
+#endif
   subroutine ys_solve_factored_penta_multi(rhs, a)
     complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs(0:, :)
     real(C_DOUBLE), intent(in) :: a(0:, -2:)
