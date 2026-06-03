@@ -42,6 +42,7 @@ CONTAINS
     integer(C_INT64_T) :: solver_floats, fft_floats, pressure_floats, convvelo_floats
     integer :: iy, iPhi, num_dev, dev
     logical :: run_solver
+    complex(C_DOUBLE_COMPLEX), allocatable :: zero_mode(:)
 
     run_solver = .true.
     if (present(solveNS)) run_solver = solveNS
@@ -138,6 +139,8 @@ CONTAINS
       print *, "Overlapping communication and computation:", overlapping
     END IF
 
+    allocate (zero_mode(-1:ny + 1))
+
     if (run_solver) then
       ! Compute CFL
       if (deltat == 0.0) deltat = 1.0
@@ -147,9 +150,10 @@ CONTAINS
       print *, "CFL", deltat, cfl
       ! Compute flow rate
       IF (has_average) THEN
-        fr(1) = yintegr(V(:, 0, 0, 1), y); fr(2) = yintegr(V(:, 0, 0, 3), y); 
+        call gather_full_y_line(ny, V(:, 0, 0, 1), zero_mode); fr(1) = yintegr(zero_mode, y); 
+        call gather_full_y_line(ny, V(:, 0, 0, 3), zero_mode); fr(2) = yintegr(zero_mode, y); 
         DO iPhi = 1, nPhi
-          fr(3 + iPhi) = yintegr(V(:, 0, 0, 3 + iPhi), y)
+          call gather_full_y_line(ny, V(:, 0, 0, 3 + iPhi), zero_mode); fr(3 + iPhi) = yintegr(zero_mode, y); 
         END DO
       END IF
       CALL outstats()

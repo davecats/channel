@@ -388,12 +388,12 @@ CONTAINS
 #endif
   PURE FUNCTION yintegr(f, y) result(II)
     IMPLICIT NONE
-    complex(C_DOUBLE_COMPLEX), intent(in) :: f(ny0 - 2:nyN + 2)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: f(-1:ny + 1)
     real(C_DOUBLE), intent(in) :: y(-1:ny + 1)
     real(C_DOUBLE) :: II, yp1, ym1, a1, a2, a3
     integer(C_INT) :: iy
     II = 0.0d0
-    DO iy = (ny0/2)*2 + 1, nyN, 2
+    DO iy = 1, ny, 2
       yp1 = y(iy + 1) - y(iy); ym1 = y(iy - 1) - y(iy)
       a1 = -1.0d0/3.0d0*ym1 + 1.0d0/6.0d0*yp1 + 1.0d0/6.0d0*yp1*yp1/ym1
       a3 = +1.0d0/3.0d0*yp1 - 1.0d0/6.0d0*ym1 - 1.0d0/6.0d0*ym1*ym1/yp1
@@ -623,49 +623,6 @@ CONTAINS
     end if
   END FUNCTION select_bc_rhs
 
-  SUBROUTINE gather_full_y_line(local_line, full_line)
-    IMPLICIT NONE
-    complex(C_DOUBLE_COMPLEX), intent(in) :: local_line(ny0:)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: full_line(-1:ny + 1)
-    complex(C_DOUBLE_COMPLEX), allocatable :: local_block(:, :, :), gathered_block(:, :, :)
-#ifdef HAVE_MPI
-    complex(C_DOUBLE_COMPLEX) :: lower_ghosts(2), upper_ghosts(2)
-#endif
-    integer(C_INT) :: local_n
-
-    local_n = size(local_line, 1)
-
-    if (local_n == ny + 3) then
-      full_line(-1:ny + 1) = local_line
-      return
-    end if
-
-    full_line(-1:ny + 1) = (0.0d0, 0.0d0)
-    allocate (local_block(nyN - ny0 + 1, 1, nxB), gathered_block(ny - 1, 1, nxB))
-
-    local_block(:, 1, 1) = local_line(ny0:nyN)
-
-    call allgather_y_blocks_to_xz_full(local_block, gathered_block)
-
-    full_line(1:ny - 1) = gathered_block(:, 1, 1)
-
-#ifdef HAVE_MPI
-    lower_ghosts = (0.0d0, 0.0d0)
-    upper_ghosts = (0.0d0, 0.0d0)
-    if (ipy == 0) lower_ghosts = local_line(1:2)
-    if (ipy == npy_grid - 1) upper_ghosts = local_line(local_n - 1:local_n)
-    call MPI_Bcast(lower_ghosts, 2, MPI_DOUBLE_COMPLEX, 0, MPI_COMM_Y, ierr)
-    call MPI_Bcast(upper_ghosts, 2, MPI_DOUBLE_COMPLEX, npy_grid - 1, MPI_COMM_Y, ierr)
-    full_line(-1:0) = lower_ghosts
-    full_line(ny:ny + 1) = upper_ghosts
-#else
-    full_line(-1:0) = local_line(1:2)
-    full_line(ny:ny + 1) = local_line(local_n - 1:local_n)
-#endif
-
-    deallocate (local_block, gathered_block)
-  END SUBROUTINE gather_full_y_line
-
   SUBROUTINE scatter_full_y_line(full_line, local_line)
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), intent(in) :: full_line(-1:ny + 1)
@@ -726,7 +683,11 @@ CONTAINS
     call apply_complex_derivative_with_y_pencil(V(:, :, :, 2), V(:, :, :, 3))
 
     if (nx0 == 0) then
-      call gather_full_y_line(V(:, 0, 0, 1), zero_mode_u)
+      call gather_full_y_line(ny, V(:, 0, 0, 1), zero_mode_u)
+      !zero_mode_u = dcmplx(dreal(zero_mode_u), 0.d0)
+      call gather_full_y_line(ny, V(:, 0, 0, 3), zero_mode_w)
+      !zero_mode_w = dcmplx(dreal(zero_mode_w), 0.d0)
+      ! why?
       zero_mode_w = dcmplx(dimag(zero_mode_u), 0.d0)
       zero_mode_u = dcmplx(dreal(zero_mode_u), 0.d0)
       call solve_mean_correction_line(zero_mode_ucor, eta0bc, eta0m1bc, etanbc, etanp1bc, lambda, 1.0d0)
@@ -734,6 +695,7 @@ CONTAINS
       fr(1) = yintegr(zero_mode_u, y)
       fr(2) = yintegr(zero_mode_w, y)
       fr(3) = yintegr(zero_mode_ucor, y)
+      print *, "meanflowx, meanflowz, corrpx, corrpz: ", meanflowx, meanflowz, fr(1), fr(2), fr(3)
       IF (abs(meanflowx) > 1.0d-7) THEN
         corrpx = (meanflowx - fr(1))/fr(3)
         zero_mode_u = dcmplx(dreal(zero_mode_u) + corrpx*dreal(zero_mode_ucor), dimag(zero_mode_u))
@@ -774,7 +736,7 @@ CONTAINS
                                                -(5_C_INT + iPhi), 0_C_INT, lambda, pra(iPhi))
 
     if (nx0 == 0) then
-      call gather_full_y_line(V(:, 0, 0, 3 + iPhi), zero_mode_scalar)
+      call gather_full_y_line(ny, V(:, 0, 0, 3 + iPhi), zero_mode_scalar)
       call solve_mean_correction_line(zero_mode_tcor, phi0bc, phi0m1bc, phinbc, phinp1bc, lambda, pra(iPhi))
       fr(3 + iPhi) = yintegr(zero_mode_scalar, y)
       fr(3 + nPhi + iPhi) = yintegr(zero_mode_tcor, y)
@@ -1389,8 +1351,8 @@ CONTAINS
     if (has_average) then
       !$omp target update from(V(ny0 - 2:nyN + 2, 0, 0, 1))
       !$omp target update from(V(ny0 - 2:nyN + 2, 0, 0, 3))
-      call gather_full_y_line(V(:, 0, 0, 1), mean_line_u)
-      call gather_full_y_line(V(:, 0, 0, 3), mean_line_w)
+      call gather_full_y_line(ny, V(:, 0, 0, 1), mean_line_u)
+      call gather_full_y_line(ny, V(:, 0, 0, 3), mean_line_w)
     end if
 #ifdef HAVE_MPI
     CALL MPI_Allreduce(cfl, runtime_global, 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD); cfl = 0; 
@@ -1403,7 +1365,7 @@ CONTAINS
       dudy(2, 2) = -sum(d14n(-2:2)*dreal(mean_line_w(ny - 3:ny + 1)))
       DO iPhi = 1, nPhi
         !$omp target update from(V(ny0 - 2:nyN + 2, 0, 0, 3 + iPhi))
-        call gather_full_y_line(V(:, 0, 0, 3 + iPhi), mean_line_scalar)
+        call gather_full_y_line(ny, V(:, 0, 0, 3 + iPhi), mean_line_scalar)
         dudy(2 + iPhi, 2) = sum(d14n(-2:2)*dreal(mean_line_scalar(ny - 3:ny + 1)))
         dudy(2 + iPhi, 1) = sum(d140(-2:2)*dreal(mean_line_scalar(-1:3)))
       END DO

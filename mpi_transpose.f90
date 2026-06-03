@@ -247,71 +247,37 @@ CONTAINS
 
   END SUBROUTINE alltoall
 
-  SUBROUTINE allgather_y_blocks_to_xz_full(src, dst)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: src(:, :, :)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: dst(:, :, :)
+  SUBROUTINE gather_full_y_line(ny, local_line, full_line)
+    IMPLICIT NONE
+    integer(C_INT), intent(in) :: ny
+    complex(C_DOUBLE_COMPLEX), intent(in) :: local_line(ny0 - 2:nyN + 2)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: full_line(-1:ny + 1)
+
 #ifdef HAVE_MPI
-    complex(C_DOUBLE_COMPLEX), allocatable :: recv(:)
-    integer, allocatable :: recvcounts(:), recvdispls(:)
-    integer(C_INT) :: total_z, ix_local, iz_local, iy_local
-    integer(C_INT) :: src_rank, p, iy_global
-    integer(C_INT) :: src_ny0, src_nyN, src_nyB
-
-    total_z = int(size(src, 2), C_INT)
-
-    dst = (0.0d0, 0.0d0)
-
-    if (npy_grid == 1) then
-      dst = src
-      return
-    end if
-
-    allocate (recvcounts(0:npy_grid - 1), recvdispls(0:npy_grid - 1))
-
-    recvdispls(0) = 0
-
-    do src_rank = 0, npy_grid - 1
-      src_ny0 = 1 + src_rank*(size(dst, 1))/npy_grid
-      src_nyN = (src_rank + 1)*(size(dst, 1))/npy_grid
-      src_nyB = src_nyN - src_ny0 + 1
-
-      recvcounts(src_rank) = int(src_nyB*total_z*nxB)
-
-      if (src_rank > 0) then
-        recvdispls(src_rank) = recvdispls(src_rank - 1) + recvcounts(src_rank - 1)
-      end if
-    end do
-
-    allocate (recv(sum(recvcounts)))
-
-    call MPI_Allgatherv(src, int(size(src), kind=4), MPI_DOUBLE_COMPLEX, &
-                        recv, recvcounts, recvdispls, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
-
-    do src_rank = 0, npy_grid - 1
-      src_ny0 = 1 + src_rank*(size(dst, 1))/npy_grid
-      src_nyN = (src_rank + 1)*(size(dst, 1))/npy_grid
-      src_nyB = src_nyN - src_ny0 + 1
-
-      p = recvdispls(src_rank)
-
-      do ix_local = 1, nxB
-        do iz_local = 1, total_z
-          do iy_local = 1, src_nyB
-            p = p + 1
-            iy_global = src_ny0 + iy_local - 1
-            dst(iy_global, iz_local, ix_local) = recv(p)
-          end do
-        end do
-      end do
-    end do
-
-    deallocate (recv, recvcounts, recvdispls)
+    complex(C_DOUBLE_COMPLEX) :: send_line(-1:ny + 1)
+    integer(C_INT) :: send_start, send_end
 #else
-    dst = src
+    integer(C_INT) :: send_start, send_end
 #endif
-  END SUBROUTINE allgather_y_blocks_to_xz_full
 
-  !------- Divide the problem in 1D slices -------!
+    send_start = ny0
+    send_end = nyN
+
+    if (ipy == 0) send_start = -1
+    if (ipy == npy_grid - 1) send_end = ny + 1
+
+#ifdef HAVE_MPI
+    send_line = (0.0d0, 0.0d0)
+
+    send_line(send_start:send_end) = local_line(send_start:send_end)
+
+    call MPI_Allreduce(send_line, full_line, ny + 3, MPI_DOUBLE_COMPLEX, MPI_SUM, MPI_COMM_Y, ierr)
+#else
+    full_line(-1:ny + 1) = local_line(-1:ny + 1)
+#endif
+  END SUBROUTINE gather_full_y_line
+
+  !------- Divide the problem in pencils ---------!
   !-----------------------------------------------!
   SUBROUTINE init_MPI(nxpp, nz, ny, nxd, nzd, nPhi, overlapping, npy_requested)
     integer(C_INT), intent(in)  :: nxpp, nz, ny, nxd, nzd, nPhi, npy_requested
