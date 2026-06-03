@@ -684,10 +684,6 @@ CONTAINS
 
     if (nx0 == 0) then
       call gather_full_y_line(ny, V(:, 0, 0, 1), zero_mode_u)
-      !zero_mode_u = dcmplx(dreal(zero_mode_u), 0.d0)
-      call gather_full_y_line(ny, V(:, 0, 0, 3), zero_mode_w)
-      !zero_mode_w = dcmplx(dreal(zero_mode_w), 0.d0)
-      ! why?
       zero_mode_w = dcmplx(dimag(zero_mode_u), 0.d0)
       zero_mode_u = dcmplx(dreal(zero_mode_u), 0.d0)
       call solve_mean_correction_line(zero_mode_ucor, eta0bc, eta0m1bc, etanbc, etanp1bc, lambda, 1.0d0)
@@ -695,7 +691,6 @@ CONTAINS
       fr(1) = yintegr(zero_mode_u, y)
       fr(2) = yintegr(zero_mode_w, y)
       fr(3) = yintegr(zero_mode_ucor, y)
-      print *, "meanflowx, meanflowz, corrpx, corrpz: ", meanflowx, meanflowz, fr(1), fr(2), fr(3)
       IF (abs(meanflowx) > 1.0d-7) THEN
         corrpx = (meanflowx - fr(1))/fr(3)
         zero_mode_u = dcmplx(dreal(zero_mode_u) + corrpx*dreal(zero_mode_ucor), dimag(zero_mode_u))

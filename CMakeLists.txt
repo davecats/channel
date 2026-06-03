@@ -189,7 +189,7 @@ set_tests_properties(convvelo_runtime_minimal_1rank PROPERTIES PROCESSORS 1)
     COMMAND ${MPIEXEC_EXECUTABLE}
             ${MPIEXEC_NUMPROC_FLAG} 1
             ${MPIEXEC_PREFLAGS}
-            $<TARGET_FILE:test_regression_scalar>
+            $<TARGET_FILE:test_regression_scalar> tests/data/dns_test_scalar.in
             ${MPIEXEC_POSTFLAGS}
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
@@ -200,11 +200,22 @@ add_test(NAME regression_test_scalar_4rank
     COMMAND ${MPIEXEC_EXECUTABLE}
             ${MPIEXEC_NUMPROC_FLAG} 2
             ${MPIEXEC_PREFLAGS}
-            $<TARGET_FILE:test_regression_scalar>
+            $<TARGET_FILE:test_regression_scalar> tests/data/dns_test_scalar.in
             ${MPIEXEC_POSTFLAGS}
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
 set_tests_properties(regression_test_scalar_4rank PROPERTIES PROCESSORS 4)
+
+# 4-rank regression test
+add_test(NAME regression_test_scalar_6rank_np4
+    COMMAND ${MPIEXEC_EXECUTABLE}
+            ${MPIEXEC_NUMPROC_FLAG} 6
+            ${MPIEXEC_PREFLAGS}
+            $<TARGET_FILE:test_regression_scalar> tests/data/dns_test_scalar_npy3.in
+            ${MPIEXEC_POSTFLAGS}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(regression_test_scalar_4rank PROPERTIES PROCESSORS 8)
 
 set(POST_PRESSURE_NPROCS 1)
 set(POST_PRESSURE_EXE ${CMAKE_CURRENT_BINARY_DIR}/post_pressure)
