@@ -450,7 +450,6 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(out) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     logical, optional, intent(in) :: update_device
     integer(C_INT) :: ix, iz, iy, iline, nlines_z, ix_first, ix_last, iz_first, iz_last, row_start, row_end
-    integer(C_INT) :: src_y_first, src_y_last
     logical :: do_update_device
 
     nlines_z = 2*nz + 1
@@ -460,22 +459,20 @@ CONTAINS
     iz_last = nz
     row_start = ny0
     row_end = nyN
-    src_y_first = lbound(src, 1)
-    src_y_last = ubound(src, 1)
     !$omp target teams distribute parallel do collapse(2) default(none) &
     !$omp shared(src, der, d140, d14m1, d14n, d14np1, ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, &
     !$omp& ys_upper_ghost_rhs, ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ny, nz, nlines_z, ix_first, ix_last, &
-    !$omp& iz_first, iz_last, src_y_first, src_y_last, row_start, row_end) private(ix, iz, iy, iline)
+    !$omp& iz_first, iz_last, row_start, row_end) private(ix, iz, iy, iline)
     do ix = ix_first, ix_last
       do iz = iz_first, iz_last
         iline = (ix - ix_first)*nlines_z + (iz - iz_first + 1)
 
-        do iy = max(row_start, src_y_first + 2), min(row_end, src_y_last - 2)
+        do iy = row_start, row_end
           ys_local_operator(iy, -2:2, iline) = der(iy, 0, -2:2)
           ys_local_rhs(iy, iline) = sum(der(iy, 1, -2:2)*src(iy - 2:iy + 2, iz, ix))
         end do
 
-        if (row_start == 1 .and. src_y_first <= -1 .and. src_y_last >= 3) then
+        if (row_start == 1) then
           ys_lower_ghost_row(:, iline) = 0.0d0
           ys_lower_boundary_row(:, iline) = 0.0d0
           ys_lower_boundary_rhs(iline) = sum(d140(-2:2)*src(-1:3, iz, ix))
@@ -483,7 +480,7 @@ CONTAINS
           ys_lower_ghost_row(-2, iline) = 1.0d0
           ys_lower_boundary_row(-1, iline) = 1.0d0
         end if
-        if (row_end == ny - 1 .and. src_y_first <= ny - 3 .and. src_y_last >= ny + 1) then
+        if (row_end == ny - 1) then
           ys_upper_boundary_row(:, iline) = 0.0d0
           ys_upper_ghost_row(:, iline) = 0.0d0
           ys_upper_boundary_rhs(iline) = sum(d14n(-2:2)*src(ny - 3:ny + 1, iz, ix))
@@ -514,8 +511,6 @@ CONTAINS
     real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
     real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
     integer(C_INT) :: ix, iz, iy, iline, nlines_z, ix_first, ix_last, iz_first, iz_last, row_start, row_end
-    integer(C_INT) :: v_y_first, v_y_last
-
     nlines_z = 2*nz + 1
     ix_first = nx0
     ix_last = nxN
@@ -523,13 +518,11 @@ CONTAINS
     iz_last = nz
     row_start = ny0
     row_end = nyN
-    v_y_first = lbound(V, 1)
-    v_y_last = ubound(V, 1)
     !$omp target teams distribute parallel do collapse(2) default(none) &
     !$omp shared(V, der, k2, ni, lambda_coeff, diffusion_coeff, component_index, ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, &
     !$omp& ys_upper_boundary_rhs, ys_upper_ghost_rhs, ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, lower_bc, &
     !$omp& lower_ghost_bc, upper_bc, upper_ghost_bc, bc0, bcn, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, nlines_z, ny, &
-    !$omp& ix_first, ix_last, iz_first, iz_last, v_y_first, v_y_last, row_start, row_end) private(ix, iz, iy, iline)
+    !$omp& ix_first, ix_last, iz_first, iz_last, row_start, row_end) private(ix, iz, iy, iline)
     do ix = ix_first, ix_last
       do iz = iz_first, iz_last
         iline = (ix - ix_first)*nlines_z + (iz - iz_first + 1)
@@ -539,20 +532,17 @@ CONTAINS
         ys_upper_boundary_row(:, iline) = upper_bc
         ys_upper_ghost_row(:, iline) = upper_ghost_bc
 
-        do iy = max(row_start, v_y_first), min(row_end, v_y_last)
+        do iy = row_start, row_end
           ys_local_rhs(iy, iline) = V(iy, iz, ix, component_index)
-        end do
-        do iy = max(row_start, v_y_first + 2), min(row_end, v_y_last - 2)
-          ys_local_operator(iy, -2:2, iline) = lambda_coeff*der(iy, 0, -2:2) - &
-                                               diffusion_coeff*ni*(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2))
-        end do
-        if (component_index == 2_C_INT) then
-          do iy = max(row_start, v_y_first + 2), min(row_end, v_y_last - 2)
+          if (component_index == 2_C_INT) then
             ys_local_operator(iy, -2:2, iline) = lambda_coeff*(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)) - &
                                                  ni*(der(iy, 3, -2:2) - 2.0d0*k2(iz, ix)*der(iy, 2, -2:2) + &
                                                      k2(iz, ix)*k2(iz, ix)*der(iy, 0, -2:2))
-          end do
-        end if
+          else
+            ys_local_operator(iy, -2:2, iline) = lambda_coeff*der(iy, 0, -2:2) - &
+                                                 diffusion_coeff*ni*(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2))
+          end if
+        end do
 
         if (lower_ghost_rhs_index == 0_C_INT) then
           ys_lower_ghost_rhs(iline) = (0.0d0, 0.0d0)

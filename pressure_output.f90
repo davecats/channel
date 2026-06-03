@@ -476,8 +476,6 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(in) :: src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: p(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     integer(C_INT) :: ix, iz, iy, iline, nlines_z, ix_first, ix_last, iz_first, iz_last, row_start, row_end
-    integer(C_INT) :: src_y_first, src_y_last
-
     nlines_z = 2*nz + 1
     ix_first = nx0
     ix_last = nxN
@@ -485,26 +483,24 @@ CONTAINS
     iz_last = nz
     row_start = ny0
     row_end = nyN
-    src_y_first = lbound(src0, 1)
-    src_y_last = ubound(src0, 1)
     !$omp target teams distribute parallel do collapse(2) default(none) &
     !$omp shared(src0, src1, V, der, k2, ialfa, ibeta, ni, d140, d240, d24n, ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, &
     !$omp& ys_upper_boundary_rhs, ys_upper_ghost_rhs, ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ny, nlines_z, &
-    !$omp& ix_first, ix_last, iz_first, iz_last, src_y_first, src_y_last, row_start, row_end) private(ix, iz, iy, iline)
+    !$omp& ix_first, ix_last, iz_first, iz_last, row_start, row_end) private(ix, iz, iy, iline)
     do ix = ix_first, ix_last
       do iz = iz_first, iz_last
         iline = (ix - ix_first)*nlines_z + (iz - iz_first + 1)
 
-        do iy = max(row_start, src_y_first + 2), min(row_end, src_y_last - 2)
+        do iy = row_start, row_end
           ys_local_rhs(iy, iline) = sum(der(iy, 0, -2:2)*src0(iy - 2:iy + 2, iz, ix)) + &
                                     sum(der(iy, 1, -2:2)*src1(iy - 2:iy + 2, iz, ix))
         end do
 
         if (ix == 0 .and. iz == 0) then
-          do iy = max(row_start, src_y_first + 2), min(row_end, src_y_last - 2)
+          do iy = row_start, row_end
             ys_local_operator(iy, -2:2, iline) = der(iy, 2, -2:2)
           end do
-          if (row_start == 1 .and. src_y_first <= -1 .and. src_y_last >= 3) then
+          if (row_start == 1) then
             ys_lower_ghost_row(:, iline) = d140
             ys_lower_ghost_rhs(iline) = ni*sum(d240(-2:2)*V(-1:3, iz, ix, 2))
             ys_lower_boundary_row(:, iline) = d240
@@ -516,14 +512,14 @@ CONTAINS
             ys_upper_boundary_rhs(iline) = (0.0d0, 0.0d0)
             ys_upper_ghost_rhs(iline) = (0.0d0, 0.0d0)
           end if
-          if (row_end == ny - 1 .and. src_y_first <= ny - 3 .and. src_y_last >= ny + 1) then
+          if (row_end == ny - 1) then
             ys_upper_ghost_row(:, iline) = der(ny - 1, 3, :)
           end if
         else
-          do iy = max(row_start, src_y_first + 2), min(row_end, src_y_last - 2)
+          do iy = row_start, row_end
             ys_local_operator(iy, -2:2, iline) = der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)
           end do
-          if (row_start == 1 .and. src_y_first <= -1 .and. src_y_last >= 3) then
+          if (row_start == 1) then
             ys_lower_ghost_row(:, iline) = der(1, 3, :)
             ys_lower_boundary_row(:, iline) = 0.0d0
             ys_lower_ghost_rhs(iline) = (0.0d0, 0.0d0)
@@ -531,7 +527,7 @@ CONTAINS
                                                 ibeta(iz)*sum(d240(-2:2)*V(-1:3, iz, ix, 3)))/k2(iz, ix)
             ys_lower_boundary_row(-1, iline) = 1.0d0
           end if
-          if (row_end == ny - 1 .and. src_y_first <= ny - 3 .and. src_y_last >= ny + 1) then
+          if (row_end == ny - 1) then
             ys_upper_boundary_row(:, iline) = 0.0d0
             ys_upper_ghost_rhs(iline) = (0.0d0, 0.0d0)
             ys_upper_boundary_rhs(iline) = -ni*(ialfa(ix)*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 1)) + &
@@ -553,8 +549,6 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(in) :: src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dpdy(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     integer(C_INT) :: ix, iz, iy, iline, nlines_z, ix_first, ix_last, iz_first, iz_last, row_start, row_end
-    integer(C_INT) :: src_y_first, src_y_last
-
     nlines_z = 2*nz + 1
     ix_first = nx0
     ix_last = nxN
@@ -562,30 +556,28 @@ CONTAINS
     iz_last = nz
     row_start = ny0
     row_end = nyN
-    src_y_first = lbound(src0, 1)
-    src_y_last = ubound(src0, 1)
     !$omp target teams distribute parallel do collapse(2) default(none) &
     !$omp shared(src0, src1, V, der, k2, ni, d240, d24n, ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, &
     !$omp& ys_upper_ghost_rhs, ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ny, nlines_z, ix_first, ix_last, &
-    !$omp& iz_first, iz_last, src_y_first, src_y_last, row_start, row_end) private(ix, iz, iy, iline)
+    !$omp& iz_first, iz_last, row_start, row_end) private(ix, iz, iy, iline)
     do ix = ix_first, ix_last
       do iz = iz_first, iz_last
         iline = (ix - ix_first)*nlines_z + (iz - iz_first + 1)
 
-        do iy = max(row_start, src_y_first + 2), min(row_end, src_y_last - 2)
+        do iy = row_start, row_end
           ys_local_operator(iy, -2:2, iline) = der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)
           ys_local_rhs(iy, iline) = sum(der(iy, 1, -2:2)*src0(iy - 2:iy + 2, iz, ix)) + &
                                     sum(der(iy, 2, -2:2)*src1(iy - 2:iy + 2, iz, ix))
         end do
 
-        if (row_start == 1 .and. src_y_first <= -1 .and. src_y_last >= 3) then
+        if (row_start == 1) then
           ys_lower_boundary_row(:, iline) = 0.0d0
           ys_lower_ghost_rhs(iline) = (0.0d0, 0.0d0)
           ys_lower_boundary_rhs(iline) = ni*sum(d240(-2:2)*V(-1:3, iz, ix, 2))
           ys_lower_boundary_row(-1, iline) = 1.0d0
           ys_lower_ghost_row(:, iline) = der(1, 3, :)
         end if
-        if (row_end == ny - 1 .and. src_y_first <= ny - 3 .and. src_y_last >= ny + 1) then
+        if (row_end == ny - 1) then
           ys_upper_boundary_row(:, iline) = 0.0d0
           ys_upper_ghost_rhs(iline) = (0.0d0, 0.0d0)
           ys_upper_boundary_rhs(iline) = ni*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 2))
