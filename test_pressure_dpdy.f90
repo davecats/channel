@@ -114,17 +114,17 @@ program test_pressure_dpdy
 
   if (iproc == 0) then
     write (*, *) 'Sample p(:,0,0) computed/refo at iy=0,1,8,15,16 = '
-    write (*, *) p(0, 0, 0), p_ref(0, 0, 0)
-    write (*, *) p(1, 0, 0), p_ref(1, 0, 0)
-    write (*, *) p(8, 0, 0), p_ref(8, 0, 0)
-    write (*, *) p(15, 0, 0), p_ref(15, 0, 0)
-    write (*, *) p(16, 0, 0), p_ref(16, 0, 0)
+    if (lbound(p, 1) <= 0 .and. ubound(p, 1) >= 0) write (*, *) p(0, 0, 0), p_ref(0, 0, 0)
+    if (lbound(p, 1) <= 1 .and. ubound(p, 1) >= 1) write (*, *) p(1, 0, 0), p_ref(1, 0, 0)
+    if (lbound(p, 1) <= 8 .and. ubound(p, 1) >= 8) write (*, *) p(8, 0, 0), p_ref(8, 0, 0)
+    if (lbound(p, 1) <= 15 .and. ubound(p, 1) >= 15) write (*, *) p(15, 0, 0), p_ref(15, 0, 0)
+    if (lbound(p, 1) <= 16 .and. ubound(p, 1) >= 16) write (*, *) p(16, 0, 0), p_ref(16, 0, 0)
     write (*, *) 'Sample dpdy(:,0,0) computed/refo at iy=0,1,8,15,16 = '
-    write (*, *) dpdy(0, 0, 0), dpdy_ref(0, 0, 0)
-    write (*, *) dpdy(1, 0, 0), dpdy_ref(1, 0, 0)
-    write (*, *) dpdy(8, 0, 0), dpdy_ref(8, 0, 0)
-    write (*, *) dpdy(15, 0, 0), dpdy_ref(15, 0, 0)
-    write (*, *) dpdy(16, 0, 0), dpdy_ref(16, 0, 0)
+    if (lbound(dpdy, 1) <= 0 .and. ubound(dpdy, 1) >= 0) write (*, *) dpdy(0, 0, 0), dpdy_ref(0, 0, 0)
+    if (lbound(dpdy, 1) <= 1 .and. ubound(dpdy, 1) >= 1) write (*, *) dpdy(1, 0, 0), dpdy_ref(1, 0, 0)
+    if (lbound(dpdy, 1) <= 8 .and. ubound(dpdy, 1) >= 8) write (*, *) dpdy(8, 0, 0), dpdy_ref(8, 0, 0)
+    if (lbound(dpdy, 1) <= 15 .and. ubound(dpdy, 1) >= 15) write (*, *) dpdy(15, 0, 0), dpdy_ref(15, 0, 0)
+    if (lbound(dpdy, 1) <= 16 .and. ubound(dpdy, 1) >= 16) write (*, *) dpdy(16, 0, 0), dpdy_ref(16, 0, 0)
   end if
 
   tol = 1.0e-12_C_DOUBLE
@@ -160,12 +160,12 @@ contains
     integer(MPI_OFFSET_KIND) :: disp
 
     sizes = [ny + 3, 2*nz + 1, nx + 1]
-    subsizes = [ny + 3, 2*nz + 1, nxN - nx0 + 1]
-    starts = [0, 0, nx0]
+    subsizes = [nyN - ny0 + 5, 2*nz + 1, nxN - nx0 + 1]
+    starts = [ny0 - 1, 0, nx0]
     call MPI_Type_create_subarray(ndims, sizes, subsizes, starts, MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, file_type, ierror)
     call MPI_Type_commit(file_type, ierror)
 
-    sizes = [ny + 3, 2*nz + 1, nxN - nx0 + 1]
+    sizes = [nyN - ny0 + 5, 2*nz + 1, nxN - nx0 + 1]
     subsizes = sizes
     starts = [0, 0, 0]
     call MPI_Type_create_subarray(ndims, sizes, subsizes, starts, MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, mem_type, ierror)

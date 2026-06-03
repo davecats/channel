@@ -3,7 +3,7 @@
 module y_line_solvers
 
   use, intrinsic :: iso_c_binding
-  use mpi_transpose, only: ny0, nx0, nxN, nxB, yl0, ylN, ylB, npy_grid, ierr, ipy, MPI_COMM_Y, &
+  use mpi_transpose, only: ny0, nyN, nx0, nxN, nxB, yl0, ylN, ylB, npy_grid, ierr, ipy, MPI_COMM_Y, &
                            allgather_y_blocks_to_xz_full
 #ifdef HAVE_MPI
   use mpi_f08
@@ -42,9 +42,9 @@ contains
 
     ! The reduced interface solve keeps two boundary-adjacent unknowns per side,
     ! so each rank must own at least four physical/ghost rows.
-    if (npy_grid > 1 .and. ylB < 4) error stop "ys_solve_ghost_field requires at least four y rows per rank"
-    row_start = max(1_C_INT, yl0 - 2)
-    row_end = min(ny - 1, ylN - 2)
+    if (npy_grid > 1 .and. nyN - ny0 + 1 < 4) error stop "ys_solve_ghost_field requires at least four y rows per rank"
+    row_start = ny0
+    row_end = nyN
     active_n = row_end - row_start + 1
     if (active_n < 4) error stop "ys_solve_ghost_field requires at least four active y rows"
 
@@ -247,10 +247,11 @@ contains
     complex(C_DOUBLE_COMPLEX) :: lower_rhsm1, lower_rhs0, upper_rhsn, upper_rhsnp1
     real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-2:2), upper_eqn(-2:2)
     integer(C_INT) :: ix, iz, iline, nlines, nlines_z, row_start, row_end, active_n, row, idx, col, global_col
+    integer(C_INT) :: dst_full_start, dst_full_end
     logical :: has_lower_boundary, has_upper_boundary
 
-    row_start = max(1_C_INT, yl0 - 2)
-    row_end = min(ny - 1, ylN - 2)
+    row_start = ny0
+    row_end = nyN
     active_n = row_end - row_start + 1
     has_lower_boundary = (row_start == 1)
     has_upper_boundary = (row_end == ny - 1)
@@ -261,19 +262,36 @@ contains
 
     nlines_z = 2*nz + 1
     nlines = ys_workspace_nlines
+    if (lbound(dst, 1) == 1 .and. ubound(dst, 1) == ny + 3) then
+      dst_full_start = 1
+      dst_full_end = ny + 3
+    else
+      dst_full_start = lbound(dst, 1) + 2
+      dst_full_end = ubound(dst, 1) + 2
+    end if
 
     do iline = 1, nlines
       ys_factored_store(:, :, iline) = 0.0d0
       ys_reduced_store(:, :, iline) = (0.0d0, 0.0d0)
 
-      lower_rhsm1 = ys_rhs_store(-1, iline)
-      lower_rhs0 = ys_rhs_store(0, iline) - ys_rhs_store(-1, iline)*ys_eq0_store(-2, iline)/ys_eqm1_store(-2, iline)
-      lower_eq0 = ys_eq0_store(:, iline) - ys_eqm1_store(:, iline)*ys_eq0_store(-2, iline)/ys_eqm1_store(-2, iline)
-      lower_eq0(-2) = 0.0d0
-      upper_rhsnp1 = ys_rhs_store(ny + 1, iline)
-      upper_rhsn = ys_rhs_store(ny, iline) - ys_rhs_store(ny + 1, iline)*ys_eqn_store(2, iline)/ys_eqnp1_store(2, iline)
-      upper_eqn = ys_eqn_store(:, iline) - ys_eqnp1_store(:, iline)*ys_eqn_store(2, iline)/ys_eqnp1_store(2, iline)
-      upper_eqn(2) = 0.0d0
+      lower_rhsm1 = (0.0d0, 0.0d0)
+      lower_rhs0 = (0.0d0, 0.0d0)
+      lower_eq0 = 0.0d0
+      if (has_lower_boundary) then
+        lower_rhsm1 = ys_rhs_store(-1, iline)
+        lower_rhs0 = ys_rhs_store(0, iline) - ys_rhs_store(-1, iline)*ys_eq0_store(-2, iline)/ys_eqm1_store(-2, iline)
+        lower_eq0 = ys_eq0_store(:, iline) - ys_eqm1_store(:, iline)*ys_eq0_store(-2, iline)/ys_eqm1_store(-2, iline)
+        lower_eq0(-2) = 0.0d0
+      end if
+      upper_rhsnp1 = (0.0d0, 0.0d0)
+      upper_rhsn = (0.0d0, 0.0d0)
+      upper_eqn = 0.0d0
+      if (has_upper_boundary) then
+        upper_rhsnp1 = ys_rhs_store(ny + 1, iline)
+        upper_rhsn = ys_rhs_store(ny, iline) - ys_rhs_store(ny + 1, iline)*ys_eqn_store(2, iline)/ys_eqnp1_store(2, iline)
+        upper_eqn = ys_eqn_store(:, iline) - ys_eqnp1_store(:, iline)*ys_eqn_store(2, iline)/ys_eqnp1_store(2, iline)
+        upper_eqn(2) = 0.0d0
+      end if
 
       do row = row_start, row_end
         ys_reduced_store(row - row_start, 1, iline) = ys_rhs_store(row, iline)
@@ -399,7 +417,9 @@ contains
 
     do ix = nx0, nxN
       do iz = -nz, nz
-        dst(:, iz + nz + 1, ix - nx0 + 1) = ys_dst_xz_full(:, iz + nz + 1, ix - nx0 + 1)
+        do row = lbound(dst, 1), ubound(dst, 1)
+          dst(row, iz + nz + 1, ix - nx0 + 1) = ys_dst_xz_full(row - lbound(dst, 1) + dst_full_start, iz + nz + 1, ix - nx0 + 1)
+        end do
       end do
     end do
   end subroutine ys_solve_ghost_field_reduced

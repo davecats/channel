@@ -4,15 +4,15 @@ MODULE pressure_output
 
   USE, intrinsic :: iso_c_binding
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
-  USE dnsdata, ONLY: V, der, k2, ialfa, ibeta, d140, d240, d24n, ni, alfa0, beta0, factor, &
+  USE dnsdata, ONLY: V, der, k2, ialfa, ibeta, d140, d240, d24n, ni, alfa0, beta0, factor, refresh_y_ghost_field, &
                      ny, nz, nxd, izd
   USE ffts, ONLY: FFT, IFT, RFT, HFT, VVdz, VVdx
 #else
-  USE dnsdata, ONLY: V, der, k2, ialfa, ibeta, d140, d240, d24n, ni, alfa0, beta0, factor, &
+  USE dnsdata, ONLY: V, der, k2, ialfa, ibeta, d140, d240, d24n, ni, alfa0, beta0, factor, refresh_y_ghost_field, &
                      ny, nz, nxd, izd, VVdz, VVdx
   USE ffts, ONLY: FFT, IFT, RFT, HFT
 #endif
-  USE mpi_transpose, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, ierr, yl0, ylN, ylB, &
+  USE mpi_transpose, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, ierr, &
                            sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, &
                            fft_transpose_is_local, repack_zTOx_local, repack_xTOz_local
   USE y_line_solvers, ONLY: ys_prepare_ghost_field_workspace, ys_solve_ghost_field, ys_rhs_store, ys_matrix_store, &
@@ -116,7 +116,6 @@ CONTAINS
     ! Pressure is only needed on output steps, so we rebuild its source terms from the current spectral state.
     !$omp target update from(V)
     call assemble_pressure_sources()
-    !$omp target update from(pressure_src0, pressure_src1)
 
     if (present(p_out)) then
       call solve_pressure_field(pressure_src0, pressure_src1, p_out)
@@ -173,6 +172,8 @@ CONTAINS
 
     call real_x_to_spectral_field(pressure_h0, pressure_src0)
     call real_x_to_spectral_field(pressure_h1, pressure_src1)
+    call refresh_y_ghost_field(pressure_src0)
+    call refresh_y_ghost_field(pressure_src1)
   END SUBROUTINE assemble_pressure_sources
 
   SUBROUTINE accumulate_h0_diagonal(dst, dudx, dwdz)
@@ -245,7 +246,7 @@ CONTAINS
       !$omp shared(VVdz, V, izd, ny, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
-          do iy = -1, ny + 1
+          do iy = ny0 - 2, nyN + 2
             jx = ix - nx0 + 1
             VVdz(izd(iz) + 1, jx, iy + 2, 1) = V(iy, iz, ix, 1)
           end do
@@ -256,7 +257,7 @@ CONTAINS
       !$omp shared(VVdz, V, izd, ny, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
-          do iy = -1, ny + 1
+          do iy = ny0 - 2, nyN + 2
             jx = ix - nx0 + 1
             VVdz(izd(iz) + 1, jx, iy + 2, 1) = V(iy, iz, ix, 2)
           end do
@@ -267,7 +268,7 @@ CONTAINS
       !$omp shared(VVdz, V, izd, ny, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
-          do iy = -1, ny + 1
+          do iy = ny0 - 2, nyN + 2
             jx = ix - nx0 + 1
             VVdz(izd(iz) + 1, jx, iy + 2, 1) = V(iy, iz, ix, 3)
           end do
@@ -278,7 +279,7 @@ CONTAINS
       !$omp shared(VVdz, V, ialfa, izd, ny, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
-          do iy = -1, ny + 1
+          do iy = ny0 - 2, nyN + 2
             jx = ix - nx0 + 1
             VVdz(izd(iz) + 1, jx, iy + 2, 1) = ialfa(ix)*V(iy, iz, ix, 1)
           end do
@@ -289,7 +290,7 @@ CONTAINS
       !$omp shared(VVdz, V, ialfa, izd, ny, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
-          do iy = -1, ny + 1
+          do iy = ny0 - 2, nyN + 2
             jx = ix - nx0 + 1
             VVdz(izd(iz) + 1, jx, iy + 2, 1) = ialfa(ix)*V(iy, iz, ix, 2)
           end do
@@ -300,7 +301,7 @@ CONTAINS
       !$omp shared(VVdz, V, ibeta, izd, ny, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
-          do iy = -1, ny + 1
+          do iy = ny0 - 2, nyN + 2
             jx = ix - nx0 + 1
             VVdz(izd(iz) + 1, jx, iy + 2, 1) = ibeta(iz)*V(iy, iz, ix, 2)
           end do
@@ -311,7 +312,7 @@ CONTAINS
       !$omp shared(VVdz, V, ialfa, izd, ny, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
-          do iy = -1, ny + 1
+          do iy = ny0 - 2, nyN + 2
             jx = ix - nx0 + 1
             VVdz(izd(iz) + 1, jx, iy + 2, 1) = ialfa(ix)*V(iy, iz, ix, 3)
           end do
@@ -322,7 +323,7 @@ CONTAINS
       !$omp shared(VVdz, V, ibeta, izd, ny, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
-          do iy = -1, ny + 1
+          do iy = ny0 - 2, nyN + 2
             jx = ix - nx0 + 1
             VVdz(izd(iz) + 1, jx, iy + 2, 1) = ibeta(iz)*V(iy, iz, ix, 1)
           end do
@@ -333,7 +334,7 @@ CONTAINS
       !$omp shared(VVdz, V, ibeta, izd, ny, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
-          do iy = -1, ny + 1
+          do iy = ny0 - 2, nyN + 2
             jx = ix - nx0 + 1
             VVdz(izd(iz) + 1, jx, iy + 2, 1) = ibeta(iz)*V(iy, iz, ix, 3)
           end do
@@ -344,7 +345,7 @@ CONTAINS
       !$omp shared(VVdz, V, ialfa, izd, ny, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
-          do iy = -1, ny + 1
+          do iy = ny0 - 2, nyN + 2
             jx = ix - nx0 + 1
             VVdz(izd(iz) + 1, jx, iy + 2, 1) = ialfa(ix)*ialfa(ix)*V(iy, iz, ix, 1)
           end do
@@ -355,7 +356,7 @@ CONTAINS
       !$omp shared(VVdz, V, ialfa, ibeta, izd, ny, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
-          do iy = -1, ny + 1
+          do iy = ny0 - 2, nyN + 2
             jx = ix - nx0 + 1
             VVdz(izd(iz) + 1, jx, iy + 2, 1) = ialfa(ix)*ibeta(iz)*V(iy, iz, ix, 1)
           end do
@@ -366,7 +367,7 @@ CONTAINS
       !$omp shared(VVdz, V, ialfa, ibeta, izd, ny, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
-          do iy = -1, ny + 1
+          do iy = ny0 - 2, nyN + 2
             jx = ix - nx0 + 1
             VVdz(izd(iz) + 1, jx, iy + 2, 1) = ialfa(ix)*ibeta(iz)*V(iy, iz, ix, 3)
           end do
@@ -377,7 +378,7 @@ CONTAINS
       !$omp shared(VVdz, V, ibeta, izd, ny, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
-          do iy = -1, ny + 1
+          do iy = ny0 - 2, nyN + 2
             jx = ix - nx0 + 1
             VVdz(izd(iz) + 1, jx, iy + 2, 1) = ibeta(iz)*ibeta(iz)*V(iy, iz, ix, 3)
           end do
@@ -444,7 +445,7 @@ CONTAINS
     !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp shared(VVdz, nx0, nxN, ny, nz, field) private(ix, iz, iy)
     do ix = nx0, nxN
-      do iy = -1, ny + 1
+      do iy = ny0 - 2, nyN + 2
         do iz = 0, nz
           field(iy, iz, ix) = VVdz(iz + 1, ix - nx0 + 1, iy + 2, 1)
         end do
@@ -453,7 +454,7 @@ CONTAINS
     !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp shared(VVdz,nx0, nxN, ny, nz, field, izd) private(ix, iz, iy)
     do ix = nx0, nxN
-      do iy = -1, ny + 1
+      do iy = ny0 - 2, nyN + 2
         do iz = -nz, -1
           field(iy, iz, ix) = VVdz(izd(iz) + 1, ix - nx0 + 1, iy + 2, 1)
         end do
@@ -466,47 +467,83 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(in) :: src0(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(in) :: src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: p(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    integer(C_INT) :: ix, iz, iy, iline, nlines_z
-    complex(C_DOUBLE_COMPLEX) :: tmp, tmp2
+    integer(C_INT) :: ix, iz, iy, iline, nlines_z, ix_first, ix_last, iz_first, iz_last
+    integer(C_INT) :: src_y_first, src_y_last, rhs_y_first, rhs_y_last, mat_y_first, mat_y_last
 
     call ys_prepare_ghost_field_workspace(ny, nz, nxB)
     nlines_z = 2*nz + 1
+    ix_first = nx0
+    ix_last = nxN
+    iz_first = -nz
+    iz_last = nz
+    src_y_first = lbound(src0, 1)
+    src_y_last = ubound(src0, 1)
+    rhs_y_first = lbound(ys_rhs_store, 1)
+    rhs_y_last = ubound(ys_rhs_store, 1)
+    mat_y_first = lbound(ys_matrix_store, 1)
+    mat_y_last = ubound(ys_matrix_store, 1)
 
-    do ix = nx0, nxN
-      do iz = -nz, nz
-        iline = (ix - nx0)*nlines_z + (iz + nz + 1)
-        do iy = 1, ny - 1
+    !$omp target enter data map(alloc: ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(src0, src1, V, der, d140, d240, d24n, ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store, &
+    !$omp& k2, ialfa, ibeta, ni, ny, ix_first, ix_last, iz_first, iz_last, nlines_z, src_y_first, src_y_last, rhs_y_first, rhs_y_last, &
+    !$omp& mat_y_first, mat_y_last) private(ix, iz, iy, iline)
+    do ix = ix_first, ix_last
+      do iz = iz_first, iz_last
+        iline = (ix - ix_first)*nlines_z + (iz - iz_first + 1)
+
+        do iy = rhs_y_first, rhs_y_last
+          ys_rhs_store(iy, iline) = (0.0d0, 0.0d0)
+        end do
+        do iy = mat_y_first, mat_y_last
+          ys_matrix_store(iy, -2:2, iline) = 0.0d0
+        end do
+        ys_eqm1_store(-2:2, iline) = 0.0d0
+        ys_eq0_store(-2:2, iline) = 0.0d0
+        ys_eqn_store(-2:2, iline) = 0.0d0
+        ys_eqnp1_store(-2:2, iline) = 0.0d0
+
+        do iy = max(1_C_INT, src_y_first + 2), min(ny - 1, src_y_last - 2)
           ys_rhs_store(iy, iline) = sum(der(iy, 0, -2:2)*src0(iy - 2:iy + 2, iz, ix)) + &
                                     sum(der(iy, 1, -2:2)*src1(iy - 2:iy + 2, iz, ix))
         end do
 
         if (ix == 0 .and. iz == 0) then
-          do iy = 1, ny - 1
+          do iy = max(1_C_INT, src_y_first + 2), min(ny - 1, src_y_last - 2)
             ys_matrix_store(iy, -2:2, iline) = der(iy, 2, -2:2)
           end do
-          ys_eqm1_store(:, iline) = d140
-          ys_rhs_store(-1, iline) = ni*sum(d240(-2:2)*V(-1:3, iz, ix, 2))
-          ys_eq0_store(:, iline) = d240
-          ys_rhs_store(0, iline) = src0(0, iz, ix) + src1(0, iz, ix)
+          if (src_y_first <= -1 .and. src_y_last >= 3) then
+            ys_eqm1_store(:, iline) = d140
+            ys_rhs_store(-1, iline) = ni*sum(d240(-2:2)*V(-1:3, iz, ix, 2))
+            ys_eq0_store(:, iline) = d240
+            ys_rhs_store(0, iline) = src0(0, iz, ix) + src1(0, iz, ix)
+          end if
           ys_eqn_store(1, iline) = 1.0d0
-          ys_eqnp1_store(:, iline) = der(ny - 1, 3, :)
+          if (src_y_first <= ny - 3 .and. src_y_last >= ny + 1) then
+            ys_eqnp1_store(:, iline) = der(ny - 1, 3, :)
+          end if
         else
-          do iy = 1, ny - 1
+          do iy = max(1_C_INT, src_y_first + 2), min(ny - 1, src_y_last - 2)
             ys_matrix_store(iy, -2:2, iline) = der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)
           end do
-          ys_eqm1_store(:, iline) = der(1, 3, :)
-          tmp = sum(d240(-2:2)*V(-1:3, iz, ix, 1))
-          tmp2 = sum(d240(-2:2)*V(-1:3, iz, ix, 3))
-          ys_rhs_store(0, iline) = -ni*(ialfa(ix)*tmp + ibeta(iz)*tmp2)/k2(iz, ix)
-          ys_eq0_store(-1, iline) = 1.0d0
-          tmp = sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 1))
-          tmp2 = sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 3))
-          ys_rhs_store(ny, iline) = -ni*(ialfa(ix)*tmp + ibeta(iz)*tmp2)/k2(iz, ix)
-          ys_eqn_store(1, iline) = 1.0d0
-          ys_eqnp1_store(:, iline) = der(ny - 1, 3, :)
+          if (src_y_first <= -1 .and. src_y_last >= 3) then
+            ys_eqm1_store(:, iline) = der(1, 3, :)
+            ys_rhs_store(0, iline) = -ni*(ialfa(ix)*sum(d240(-2:2)*V(-1:3, iz, ix, 1)) + &
+                                          ibeta(iz)*sum(d240(-2:2)*V(-1:3, iz, ix, 3)))/k2(iz, ix)
+            ys_eq0_store(-1, iline) = 1.0d0
+          end if
+          if (src_y_first <= ny - 3 .and. src_y_last >= ny + 1) then
+            ys_rhs_store(ny, iline) = -ni*(ialfa(ix)*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 1)) + &
+                                           ibeta(iz)*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 3)))/k2(iz, ix)
+            ys_eqn_store(1, iline) = 1.0d0
+            ys_eqnp1_store(:, iline) = der(ny - 1, 3, :)
+          end if
         end if
       end do
     end do
+    !$omp end target teams distribute parallel do
+    !$omp target update from(ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
+    !$omp target exit data map(delete: ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
 
     call ys_solve_ghost_field(p, ny, nz)
   END SUBROUTINE solve_pressure_field
@@ -516,28 +553,63 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(in) :: src0(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(in) :: src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dpdy(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    integer(C_INT) :: ix, iz, iy, iline, nlines_z
+    integer(C_INT) :: ix, iz, iy, iline, nlines_z, ix_first, ix_last, iz_first, iz_last
+    integer(C_INT) :: src_y_first, src_y_last, rhs_y_first, rhs_y_last, mat_y_first, mat_y_last
 
     call ys_prepare_ghost_field_workspace(ny, nz, nxB)
     nlines_z = 2*nz + 1
+    ix_first = nx0
+    ix_last = nxN
+    iz_first = -nz
+    iz_last = nz
+    src_y_first = lbound(src0, 1)
+    src_y_last = ubound(src0, 1)
+    rhs_y_first = lbound(ys_rhs_store, 1)
+    rhs_y_last = ubound(ys_rhs_store, 1)
+    mat_y_first = lbound(ys_matrix_store, 1)
+    mat_y_last = ubound(ys_matrix_store, 1)
 
-    do ix = nx0, nxN
-      do iz = -nz, nz
-        iline = (ix - nx0)*nlines_z + (iz + nz + 1)
-        do iy = 1, ny - 1
+    !$omp target enter data map(alloc: ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(src0, src1, V, der, d240, d24n, ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store, &
+    !$omp& k2, ni, ny, ix_first, ix_last, iz_first, iz_last, nlines_z, src_y_first, src_y_last, rhs_y_first, rhs_y_last, mat_y_first, mat_y_last) &
+    !$omp& private(ix, iz, iy, iline)
+    do ix = ix_first, ix_last
+      do iz = iz_first, iz_last
+        iline = (ix - ix_first)*nlines_z + (iz - iz_first + 1)
+
+        do iy = rhs_y_first, rhs_y_last
+          ys_rhs_store(iy, iline) = (0.0d0, 0.0d0)
+        end do
+        do iy = mat_y_first, mat_y_last
+          ys_matrix_store(iy, -2:2, iline) = 0.0d0
+        end do
+        ys_eqm1_store(-2:2, iline) = 0.0d0
+        ys_eq0_store(-2:2, iline) = 0.0d0
+        ys_eqn_store(-2:2, iline) = 0.0d0
+        ys_eqnp1_store(-2:2, iline) = 0.0d0
+
+        do iy = max(1_C_INT, src_y_first + 2), min(ny - 1, src_y_last - 2)
           ys_matrix_store(iy, -2:2, iline) = der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)
           ys_rhs_store(iy, iline) = sum(der(iy, 1, -2:2)*src0(iy - 2:iy + 2, iz, ix)) + &
                                     sum(der(iy, 2, -2:2)*src1(iy - 2:iy + 2, iz, ix))
         end do
 
-        ys_rhs_store(0, iline) = ni*sum(d240(-2:2)*V(-1:3, iz, ix, 2))
-        ys_eq0_store(-1, iline) = 1.0d0
-        ys_eqm1_store(:, iline) = der(1, 3, :)
-        ys_rhs_store(ny, iline) = ni*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 2))
-        ys_eqn_store(1, iline) = 1.0d0
-        ys_eqnp1_store(:, iline) = der(ny - 1, 3, :)
+        if (src_y_first <= -1 .and. src_y_last >= 3) then
+          ys_rhs_store(0, iline) = ni*sum(d240(-2:2)*V(-1:3, iz, ix, 2))
+          ys_eq0_store(-1, iline) = 1.0d0
+          ys_eqm1_store(:, iline) = der(1, 3, :)
+        end if
+        if (src_y_first <= ny - 3 .and. src_y_last >= ny + 1) then
+          ys_rhs_store(ny, iline) = ni*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 2))
+          ys_eqn_store(1, iline) = 1.0d0
+          ys_eqnp1_store(:, iline) = der(ny - 1, 3, :)
+        end if
       end do
     end do
+    !$omp end target teams distribute parallel do
+    !$omp target update from(ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
+    !$omp target exit data map(delete: ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
 
     call ys_solve_ghost_field(dpdy, ny, nz)
   END SUBROUTINE solve_dpdy_field

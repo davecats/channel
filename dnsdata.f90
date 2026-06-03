@@ -85,7 +85,7 @@ MODULE dnsdata
   character(len=40) :: fname
   logical :: overlapping
 
-  public :: get_solver_memory_estimate, sync_velocity_to_device, apply_complex_derivative_with_y_pencil
+  public :: get_solver_memory_estimate, sync_velocity_to_device, apply_complex_derivative_with_y_pencil, refresh_y_ghost_field
 
 CONTAINS
 
@@ -315,7 +315,8 @@ CONTAINS
     t = 0; t(3) = 1; d14np1(-2:2) = M.bs.t
     t = 0; t(2) = 2; d24np1(-2:2) = M.bs.t
     d04n = 0; d04n(1) = 1; 
-    FORALL (iy=1:ny - 1) D0mat(iy, -2:2) = der(iy, 0, -2:2); 
+    D0mat = 0.0d0
+    FORALL (iy=max(1_C_INT, ny0):min(ny - 1, nyN)) D0mat(iy, -2:2) = der(iy, 0, -2:2)
     call ys_lu5decomp(D0mat)
     !$omp target update to(d14np1, d14n, d14m1, d140)
     !$omp target enter data map(to: d240, d24m1, d04n, d14n, d24n, d24np1, D0mat, der)
@@ -445,31 +446,64 @@ CONTAINS
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), intent(in) :: src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    integer(C_INT) :: ix, iz, iy, iline, nlines_z
+    integer(C_INT) :: ix, iz, iy, iline, nlines_z, ix_first, ix_last, iz_first, iz_last
+    integer(C_INT) :: src_y_first, src_y_last, rhs_y_first, rhs_y_last, mat_y_first, mat_y_last
 
-    !$omp target update from(src)
     call ys_prepare_ghost_field_workspace(ny, nz, nxB)
     nlines_z = 2*nz + 1
+    ix_first = nx0
+    ix_last = nxN
+    iz_first = -nz
+    iz_last = nz
+    src_y_first = lbound(src, 1)
+    src_y_last = ubound(src, 1)
+    rhs_y_first = lbound(ys_rhs_store, 1)
+    rhs_y_last = ubound(ys_rhs_store, 1)
+    mat_y_first = lbound(ys_matrix_store, 1)
+    mat_y_last = ubound(ys_matrix_store, 1)
 
-    do ix = nx0, nxN
-      do iz = -nz, nz
-        iline = (ix - nx0)*nlines_z + (iz + nz + 1)
-        do iy = 1, ny - 1
+    !$omp target enter data map(alloc: ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(src, der, d140, d14m1, d14n, d14np1, ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store, &
+    !$omp& ny, nz, nlines_z, ix_first, ix_last, iz_first, iz_last, src_y_first, src_y_last, rhs_y_first, rhs_y_last, mat_y_first, mat_y_last) &
+    !$omp& private(ix, iz, iy, iline)
+    do ix = ix_first, ix_last
+      do iz = iz_first, iz_last
+        iline = (ix - ix_first)*nlines_z + (iz - iz_first + 1)
+
+        do iy = rhs_y_first, rhs_y_last
+          ys_rhs_store(iy, iline) = (0.0d0, 0.0d0)
+        end do
+        do iy = mat_y_first, mat_y_last
+          ys_matrix_store(iy, -2:2, iline) = 0.0d0
+        end do
+        ys_eqm1_store(-2:2, iline) = 0.0d0
+        ys_eq0_store(-2:2, iline) = 0.0d0
+        ys_eqn_store(-2:2, iline) = 0.0d0
+        ys_eqnp1_store(-2:2, iline) = 0.0d0
+
+        do iy = max(1_C_INT, src_y_first + 2), min(ny - 1, src_y_last - 2)
           ys_matrix_store(iy, -2:2, iline) = der(iy, 0, -2:2)
           ys_rhs_store(iy, iline) = sum(der(iy, 1, -2:2)*src(iy - 2:iy + 2, iz, ix))
         end do
 
-        ys_rhs_store(0, iline) = sum(d140(-2:2)*src(-1:3, iz, ix))
-        ys_rhs_store(-1, iline) = sum(d14m1(-2:2)*src(-1:3, iz, ix))
-        ys_rhs_store(ny, iline) = sum(d14n(-2:2)*src(ny - 3:ny + 1, iz, ix))
-        ys_rhs_store(ny + 1, iline) = sum(d14np1(-2:2)*src(ny - 3:ny + 1, iz, ix))
-
-        ys_eqm1_store(-2, iline) = 1.0d0
-        ys_eq0_store(-1, iline) = 1.0d0
-        ys_eqn_store(1, iline) = 1.0d0
-        ys_eqnp1_store(2, iline) = 1.0d0
+        if (src_y_first <= -1 .and. src_y_last >= 3) then
+          ys_rhs_store(0, iline) = sum(d140(-2:2)*src(-1:3, iz, ix))
+          ys_rhs_store(-1, iline) = sum(d14m1(-2:2)*src(-1:3, iz, ix))
+          ys_eqm1_store(-2, iline) = 1.0d0
+          ys_eq0_store(-1, iline) = 1.0d0
+        end if
+        if (src_y_first <= ny - 3 .and. src_y_last >= ny + 1) then
+          ys_rhs_store(ny, iline) = sum(d14n(-2:2)*src(ny - 3:ny + 1, iz, ix))
+          ys_rhs_store(ny + 1, iline) = sum(d14np1(-2:2)*src(ny - 3:ny + 1, iz, ix))
+          ys_eqn_store(1, iline) = 1.0d0
+          ys_eqnp1_store(2, iline) = 1.0d0
+        end if
       end do
     end do
+    !$omp end target teams distribute parallel do
+    !$omp target update from(ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
+    !$omp target exit data map(delete: ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
 
     call ys_solve_ghost_field(dst, ny, nz)
     !$omp target update to(dst)
@@ -484,38 +518,91 @@ CONTAINS
     integer(C_INT), intent(in) :: component_index, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index
     real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
     real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
-    integer(C_INT) :: ix, iz, iy, iline, nlines_z
+    integer(C_INT) :: ix, iz, iy, iline, nlines_z, ix_first, ix_last, iz_first, iz_last
+    integer(C_INT) :: v_y_first, v_y_last, rhs_y_first, rhs_y_last, mat_y_first, mat_y_last
 
-    !$omp target update from(V(:, :, :, component_index))
     call ys_prepare_ghost_field_workspace(ny, nz, nxB)
     nlines_z = 2*nz + 1
+    ix_first = nx0
+    ix_last = nxN
+    iz_first = -nz
+    iz_last = nz
+    v_y_first = lbound(V, 1)
+    v_y_last = ubound(V, 1)
+    rhs_y_first = lbound(ys_rhs_store, 1)
+    rhs_y_last = ubound(ys_rhs_store, 1)
+    mat_y_first = lbound(ys_matrix_store, 1)
+    mat_y_last = ubound(ys_matrix_store, 1)
 
-    do ix = nx0, nxN
-      do iz = -nz, nz
-        iline = (ix - nx0)*nlines_z + (iz + nz + 1)
-        ys_rhs_store(-1:ny + 1, iline) = V(-1:ny + 1, iz, ix, component_index)
-        do iy = 1, ny - 1
+    !$omp target enter data map(alloc: ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(V, der, k2, ni, lambda_coeff, diffusion_coeff, component_index, ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, &
+    !$omp& ys_eqn_store, ys_eqnp1_store, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, bc0, bcn, lower_rhs_index, lower_ghost_rhs_index, &
+    !$omp& upper_rhs_index, upper_ghost_rhs_index, nlines_z, ny, ix_first, ix_last, iz_first, iz_last, v_y_first, v_y_last, rhs_y_first, rhs_y_last, &
+    !$omp& mat_y_first, mat_y_last) private(ix, iz, iy, iline)
+    do ix = ix_first, ix_last
+      do iz = iz_first, iz_last
+        iline = (ix - ix_first)*nlines_z + (iz - iz_first + 1)
+
+        do iy = max(rhs_y_first, v_y_first), min(rhs_y_last, v_y_last)
+          ys_rhs_store(iy, iline) = V(iy, iz, ix, component_index)
+        end do
+        do iy = mat_y_first, mat_y_last
+          ys_matrix_store(iy, -2:2, iline) = 0.0d0
+        end do
+        ys_eqm1_store(-2:2, iline) = lower_ghost_bc
+        ys_eq0_store(-2:2, iline) = lower_bc
+        ys_eqn_store(-2:2, iline) = upper_bc
+        ys_eqnp1_store(-2:2, iline) = upper_ghost_bc
+
+        do iy = max(1_C_INT, v_y_first + 2), min(ny - 1, v_y_last - 2)
           ys_matrix_store(iy, -2:2, iline) = lambda_coeff*der(iy, 0, -2:2) - &
                                              diffusion_coeff*ni*(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2))
         end do
         if (component_index == 2_C_INT) then
-          do iy = 1, ny - 1
+          do iy = max(1_C_INT, v_y_first + 2), min(ny - 1, v_y_last - 2)
             ys_matrix_store(iy, -2:2, iline) = lambda_coeff*(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)) - &
                                                ni*(der(iy, 3, -2:2) - 2.0d0*k2(iz, ix)*der(iy, 2, -2:2) + &
                                                    k2(iz, ix)*k2(iz, ix)*der(iy, 0, -2:2))
           end do
         end if
 
-        ys_eqm1_store(:, iline) = lower_ghost_bc
-        ys_eq0_store(:, iline) = lower_bc
-        ys_eqn_store(:, iline) = upper_bc
-        ys_eqnp1_store(:, iline) = upper_ghost_bc
-        ys_rhs_store(-1, iline) = select_bc_rhs(iz, ix, lower_ghost_rhs_index)
-        ys_rhs_store(0, iline) = select_bc_rhs(iz, ix, lower_rhs_index)
-        ys_rhs_store(ny, iline) = select_bc_rhs(iz, ix, upper_rhs_index)
-        ys_rhs_store(ny + 1, iline) = select_bc_rhs(iz, ix, upper_ghost_rhs_index)
+        if (lower_ghost_rhs_index == 0_C_INT) then
+          ys_rhs_store(-1, iline) = (0.0d0, 0.0d0)
+        else if (lower_ghost_rhs_index > 0_C_INT) then
+          ys_rhs_store(-1, iline) = bc0(iz, ix, lower_ghost_rhs_index)
+        else
+          ys_rhs_store(-1, iline) = bcn(iz, ix, -lower_ghost_rhs_index)
+        end if
+
+        if (lower_rhs_index == 0_C_INT) then
+          ys_rhs_store(0, iline) = (0.0d0, 0.0d0)
+        else if (lower_rhs_index > 0_C_INT) then
+          ys_rhs_store(0, iline) = bc0(iz, ix, lower_rhs_index)
+        else
+          ys_rhs_store(0, iline) = bcn(iz, ix, -lower_rhs_index)
+        end if
+
+        if (upper_rhs_index == 0_C_INT) then
+          ys_rhs_store(ny, iline) = (0.0d0, 0.0d0)
+        else if (upper_rhs_index > 0_C_INT) then
+          ys_rhs_store(ny, iline) = bc0(iz, ix, upper_rhs_index)
+        else
+          ys_rhs_store(ny, iline) = bcn(iz, ix, -upper_rhs_index)
+        end if
+
+        if (upper_ghost_rhs_index == 0_C_INT) then
+          ys_rhs_store(ny + 1, iline) = (0.0d0, 0.0d0)
+        else if (upper_ghost_rhs_index > 0_C_INT) then
+          ys_rhs_store(ny + 1, iline) = bc0(iz, ix, upper_ghost_rhs_index)
+        else
+          ys_rhs_store(ny + 1, iline) = bcn(iz, ix, -upper_ghost_rhs_index)
+        end if
       end do
     end do
+    !$omp end target teams distribute parallel do
+    !$omp target update from(ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
+    !$omp target exit data map(delete: ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
 
     call ys_solve_ghost_field(V(:, :, :, component_index), ny, nz)
     !$omp target update to(V(:, :, :, component_index))
@@ -533,6 +620,66 @@ CONTAINS
       select_bc_rhs = bcn(iz, ix, -rhs_index)
     end if
   END FUNCTION select_bc_rhs
+
+  SUBROUTINE gather_full_y_line(local_line, full_line)
+    IMPLICIT NONE
+    complex(C_DOUBLE_COMPLEX), intent(in) :: local_line(ny0 - 2:)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: full_line(-1:ny + 1)
+    complex(C_DOUBLE_COMPLEX), allocatable :: local_block(:, :, :), gathered_block(:, :, :)
+
+    if (lbound(local_line, 1) <= -1 .and. ubound(local_line, 1) >= ny + 1) then
+      full_line = local_line(-1:ny + 1)
+      return
+    end if
+
+    allocate (local_block(ylB, 1, nxB), gathered_block(ny + 3, 1, nxB))
+    local_block = (0.0d0, 0.0d0)
+    local_block(:, 1, 1) = local_line(yl0 - 2:ylN - 2)
+    call allgather_y_blocks_to_xz_full(local_block, gathered_block)
+    full_line = gathered_block(:, 1, 1)
+    deallocate (local_block, gathered_block)
+  END SUBROUTINE gather_full_y_line
+
+  SUBROUTINE refresh_y_ghost_field(local_field)
+    IMPLICIT NONE
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: local_field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    complex(C_DOUBLE_COMPLEX), allocatable :: local_block(:, :, :), full_field(:, :, :)
+    integer(C_INT) :: iy, iz, ix
+
+    allocate (local_block(ylB, 2*nz + 1, nxB), full_field(ny + 3, 2*nz + 1, nxB))
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        do iy = yl0 - 2, ylN - 2
+          local_block(iy - (yl0 - 2) + 1, iz + nz + 1, ix - nx0 + 1) = local_field(iy, iz, ix)
+        end do
+      end do
+    end do
+    call allgather_y_blocks_to_xz_full(local_block, full_field)
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        do iy = ny0 - 2, nyN + 2
+          local_field(iy, iz, ix) = full_field(iy + 2, iz + nz + 1, ix - nx0 + 1)
+        end do
+      end do
+    end do
+    deallocate (local_block, full_field)
+  END SUBROUTINE refresh_y_ghost_field
+
+  SUBROUTINE scatter_full_y_line(full_line, local_line)
+    IMPLICIT NONE
+    complex(C_DOUBLE_COMPLEX), intent(in) :: full_line(-1:ny + 1)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: local_line(ny0 - 2:)
+    integer(C_INT) :: local_y_first, local_y_last
+
+    if (lbound(local_line, 1) <= -1 .and. ubound(local_line, 1) >= ny + 1) then
+      local_line(-1:ny + 1) = full_line(-1:ny + 1)
+      return
+    end if
+
+    local_y_first = lbound(local_line, 1)
+    local_y_last = ubound(local_line, 1)
+    local_line(local_y_first:local_y_last) = full_line(local_y_first:local_y_last)
+  END SUBROUTINE scatter_full_y_line
 
   SUBROUTINE solve_mean_correction_line(x, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, lambda_coeff, diffusion_coeff)
     use y_line_solvers, only: ys_solve_compact_system
@@ -569,7 +716,10 @@ CONTAINS
     real(C_DOUBLE), intent(in) :: lambda
     integer(C_INT) :: ix, iz, i, j, iPhi
     complex(C_DOUBLE_COMPLEX) :: temp
+    complex(C_DOUBLE_COMPLEX) :: zero_mode_u(-1:ny + 1), zero_mode_w(-1:ny + 1), zero_mode_ucor(-1:ny + 1)
 
+    call refresh_y_ghost_field(V(:, :, :, 1))
+    call refresh_y_ghost_field(V(:, :, :, 2))
     call solve_compact_component_with_y_pencil(2_C_INT, v0bc, v0m1bc, vnbc, vnp1bc, &
                                                2_C_INT, 4_C_INT, -2_C_INT, -4_C_INT, lambda, 1.0d0)
     call solve_compact_component_with_y_pencil(1_C_INT, eta0bc, eta0m1bc, etanbc, etanp1bc, &
@@ -577,21 +727,24 @@ CONTAINS
     call apply_complex_derivative_with_y_pencil(V(:, :, :, 2), V(:, :, :, 3))
 
     if (nx0 == 0) then
-      V(:, 0, 0, 3) = dcmplx(dimag(V(:, 0, 0, 1)), 0.d0)
-      V(:, 0, 0, 1) = dcmplx(dreal(V(:, 0, 0, 1)), 0.d0)
-      call solve_mean_correction_line(ucor, eta0bc, eta0m1bc, etanbc, etanp1bc, lambda, 1.0d0)
+      call gather_full_y_line(V(:, 0, 0, 1), zero_mode_u)
+      zero_mode_w = dcmplx(dimag(zero_mode_u), 0.d0)
+      zero_mode_u = dcmplx(dreal(zero_mode_u), 0.d0)
+      call solve_mean_correction_line(zero_mode_ucor, eta0bc, eta0m1bc, etanbc, etanp1bc, lambda, 1.0d0)
 
-      fr(1) = yintegr(V(:, 0, 0, 1), y)
-      fr(2) = yintegr(V(:, 0, 0, 3), y)
-      fr(3) = yintegr(ucor, y)
+      fr(1) = yintegr(zero_mode_u, y)
+      fr(2) = yintegr(zero_mode_w, y)
+      fr(3) = yintegr(zero_mode_ucor, y)
       IF (abs(meanflowx) > 1.0d-7) THEN
         corrpx = (meanflowx - fr(1))/fr(3)
-        V(:, 0, 0, 1) = dcmplx(dreal(V(:, 0, 0, 1)) + corrpx*dreal(ucor), dimag(V(:, 0, 0, 1)))
+        zero_mode_u = dcmplx(dreal(zero_mode_u) + corrpx*dreal(zero_mode_ucor), dimag(zero_mode_u))
       END IF
       IF (abs(meanflowz) > 1.0d-7) THEN
         corrpz = (meanflowz - fr(2))/fr(3)
-        V(:, 0, 0, 3) = dcmplx(dreal(V(:, 0, 0, 3)) + corrpz*dreal(ucor), dimag(V(:, 0, 0, 3)))
+        zero_mode_w = dcmplx(dreal(zero_mode_w) + corrpz*dreal(zero_mode_ucor), dimag(zero_mode_w))
       END IF
+      call scatter_full_y_line(zero_mode_u, V(:, 0, 0, 1))
+      call scatter_full_y_line(zero_mode_w, V(:, 0, 0, 3))
       !$omp target update to(V(:, 0, 0, 1), V(:, 0, 0, 3))
     end if
 
@@ -617,18 +770,21 @@ CONTAINS
     real(C_DOUBLE), intent(in) :: lambda
     integer(C_INT) :: ix, iz, i, j
     complex(C_DOUBLE_COMPLEX) :: temp
+    complex(C_DOUBLE_COMPLEX) :: zero_mode_scalar(-1:ny + 1), zero_mode_tcor(-1:ny + 1)
+    call refresh_y_ghost_field(V(:, :, :, 3 + iPhi))
     call solve_compact_component_with_y_pencil(3_C_INT + iPhi, phi0bc, phi0m1bc, phinbc, phinp1bc, 5_C_INT + iPhi, 0_C_INT, &
                                                -(5_C_INT + iPhi), 0_C_INT, lambda, pra(iPhi))
 
     if (nx0 == 0) then
-      call solve_mean_correction_line(tcor(:, iPhi), phi0bc, phi0m1bc, phinbc, phinp1bc, lambda, pra(iPhi))
-      fr(3 + iPhi) = yintegr(V(:, 0, 0, 3 + iPhi), y)
-      fr(3 + nPhi + iPhi) = yintegr(tcor(:, iPhi), y)
+      call gather_full_y_line(V(:, 0, 0, 3 + iPhi), zero_mode_scalar)
+      call solve_mean_correction_line(zero_mode_tcor, phi0bc, phi0m1bc, phinbc, phinp1bc, lambda, pra(iPhi))
+      fr(3 + iPhi) = yintegr(zero_mode_scalar, y)
+      fr(3 + nPhi + iPhi) = yintegr(zero_mode_tcor, y)
       IF (abs(meantb) > 1.0d-7) THEN
         corrtx(iPhi) = (meantb - fr(3 + iPhi))/fr(3 + nPhi + iPhi)
-        V(:, 0, 0, 3 + iPhi) = dcmplx(dreal(V(:, 0, 0, 3 + iPhi)) + corrtx(iPhi)*dreal(tcor(:, iPhi)), &
-                                      dimag(V(:, 0, 0, 3 + iPhi)))
+        zero_mode_scalar = dcmplx(dreal(zero_mode_scalar) + corrtx(iPhi)*dreal(zero_mode_tcor), dimag(zero_mode_scalar))
       END IF
+      call scatter_full_y_line(zero_mode_scalar, V(:, 0, 0, 3 + iPhi))
       !$omp target update to(V(:, 0, 0, 3 + iPhi))
     end if
 
@@ -655,12 +811,21 @@ CONTAINS
     DO i = 1, ny + 3
       DO j = 1, nxB
         DO k = 1, nzd
+          VVdz(k, j, i, to) = 0.0d0
+        END DO
+      END DO
+    END DO
+    !$omp target teams distribute parallel do collapse(3) default(none) &
+    !$omp shared(V, VVdz) shared(nx0, nxN, nz, nzd, ny0, nyN, m, to) private(i,j,k)
+    DO i = ny0 - 2, nyN + 2
+      DO j = nx0, nxN
+        DO k = 1, nzd
           IF (k <= nz + 1) THEN
-            VVdz(k, j, i, to) = V(i - 2, k - 1, j + nx0 - 1, m)
+            VVdz(k, j - nx0 + 1, i + 2, to) = V(i, k - 1, j, m)
           ELSEIF (k >= nz + 2 .AND. k <= nzd - nz) THEN
-            VVdz(k, j, i, to) = 0.0
+            VVdz(k, j - nx0 + 1, i + 2, to) = 0.0d0
           ELSE
-            VVdz(k, j, i, to) = V(i - 2, k - nzd - 1, j + nx0 - 1, m)
+            VVdz(k, j - nx0 + 1, i + 2, to) = V(i, k - nzd - 1, j, m)
           END IF
         END DO
       END DO
@@ -877,7 +1042,7 @@ CONTAINS
     !$omp shared(meanpx, meanpz, ni, deltat, ode) shared(vvdz, v, pra)
     DO iz = -nz, nz
       DO ix = nx0, nxN
-        DO iy = 1, ny - 1
+        DO iy = ny0, nyN
           unkn = D2(V, 2) - k2(iz, ix)*D0(V, 2)
           tmp = 0.0
           DO k = -2, 2
@@ -897,7 +1062,7 @@ CONTAINS
     !$omp shared(meanpx, meanpz, ni, deltat, ode) shared(vvdz, v, pra)
     DO iz = -nz, nz
       DO ix = nx0, nxN
-        DO iy = 1, ny - 1
+        DO iy = ny0, nyN
           IF (ix == 0 .AND. iz == 0) THEN
             unkn = rD0(V, 1, 3)
             tmp = ni*rD2(V, 1, 3)
@@ -921,7 +1086,7 @@ CONTAINS
     !$omp shared(meanpx, meanpz, ni, deltat, ode) shared(vvdz, v, pra)
     DO iz = -nz, nz
       DO ix = nx0, nxN
-        DO iy = 1, ny - 1
+        DO iy = ny0, nyN
 
           if (ix == 0 .AND. iz == 0) then
             timescheme_accum(newrhs(iy, iz, ix, 1), oldrhs(iy, iz, ix, 1), dcmplx(meanpx, meanpz))
@@ -941,7 +1106,7 @@ CONTAINS
       !$omp shared(nz, nx0, nxN, ny, pra, V, memrhs, ode, deltat, oldrhs, iphi, der, k2, ni)
       DO iz = -nz, nz
         DO ix = nx0, nxN
-          DO iy = 1, ny - 1
+          DO iy = ny0, nyN
             tmp = 0.0
             DO k = -2, 2
               tmp = tmp + SQ(iy, k)*V(iy + k, iz, ix, 3 + iPhi)
@@ -958,7 +1123,7 @@ CONTAINS
     !$omp shared(memrhs, V) shared(nz, nx0, nxN, ny, nPhi) private(iy, ix, iz, iPhi)
     DO iz = -nz, nz
     DO ix = nx0, nxN
-    DO iy = 1, ny - 1
+    DO iy = ny0, nyN
       V(iy, iz, ix, 1) = newrhs(iy, iz, ix, 1); 
       V(iy, iz, ix, 2) = newrhs(iy, iz, ix, 2); 
       DO iPhi = 1, nPhi
@@ -984,7 +1149,7 @@ CONTAINS
       !$omp shared(nz, nx0, nxN, ny, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode) shared(vvdz)
       DO iz = -nz, nz
         DO ix = nx0, nxN
-          DO iy = 1, ny - 1
+          DO iy = ny0, nyN
 
             rhsu = -ialfa(ix)*DD(0, from); rhsw = 0.0
             expl = ialfa(ix)*ialfa(ix)*DD(1, from)
@@ -1001,7 +1166,7 @@ CONTAINS
       !$omp shared(nz, nx0, nxN, ny, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
       DO iz = -nz, nz
         DO ix = nx0, nxN
-          DO iy = 1, ny - 1
+          DO iy = ny0, nyN
 
             expl = DD(1, from)*k2(iz, ix)
             ACCUM_D2V(V, expl)
@@ -1015,7 +1180,7 @@ CONTAINS
       !$omp shared(nz, nx0, nxN, ny, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
       DO iz = -nz, nz
         DO ix = nx0, nxN
-          DO iy = 1, ny - 1
+          DO iy = ny0, nyN
             rhsw = -ibeta(iz)*DD(0, from); rhsu = 0.0
             expl = ibeta(iz)*ibeta(iz)*DD(1, from)
 
@@ -1031,7 +1196,7 @@ CONTAINS
       !$omp shared(nz, nx0, nxN, ny, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
       DO iz = -nz, nz
         DO ix = nx0, nxN
-          DO iy = 1, ny - 1
+          DO iy = ny0, nyN
 
             rhsu = -DD(1, from); rhsw = 0.0
             expl = ialfa(ix)*DD(2, from) + ialfa(ix)*DD(0, from)*k2(iz, ix)
@@ -1048,7 +1213,7 @@ CONTAINS
       !$omp shared(nz, nx0, nxN, ny, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
       DO iz = -nz, nz
         DO ix = nx0, nxN
-          DO iy = 1, ny - 1
+          DO iy = ny0, nyN
 
             ! contribution from VVdz(:,:,:,5)
             rhsw = -DD(1, from); rhsu = 0.0
@@ -1066,7 +1231,7 @@ CONTAINS
       !$omp shared(nz, nx0, nxN, ny, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
       DO iz = -nz, nz
         DO ix = nx0, nxN
-          DO iy = 1, ny - 1
+          DO iy = ny0, nyN
 
             rhsu = -ibeta(iz)*DD(0, from)
             rhsw = -ialfa(ix)*DD(0, from)
@@ -1087,7 +1252,7 @@ CONTAINS
         !$omp shared(nz, nx0, nxN, ny, ialfa, V, ode, der, oldrhs, iphi, vvdz, izd, from)
         DO iz = -nz, nz
           DO ix = nx0, nxN
-            DO iy = 1, ny - 1
+            DO iy = ny0, nyN
               rhst = -ialfa(ix)*DD(0, from)
               timescheme_accum(V(iy, iz, ix, 3 + iPhi), oldrhs(iy, iz, ix, 2 + iPhi), rhst)
             END DO
@@ -1099,7 +1264,7 @@ CONTAINS
         !$omp shared(nz, nx0, nxN, ny, V, ode, der, oldrhs, iphi, vvdz, izd, from)
         DO iz = -nz, nz
           DO ix = nx0, nxN
-            DO iy = 1, ny - 1
+            DO iy = ny0, nyN
 
               rhst = -DD(1, from)
               timescheme_accum(V(iy, iz, ix, 3 + iPhi), oldrhs(iy, iz, ix, 2 + iPhi), rhst)
@@ -1112,7 +1277,7 @@ CONTAINS
         !$omp shared(nz, nx0, nxN, ny, ibeta,V, ode, der, oldrhs, iphi, vvdz, izd, from)
         DO iz = -nz, nz
           DO ix = nx0, nxN
-            DO iy = 1, ny - 1
+            DO iy = ny0, nyN
               rhst = -ibeta(iz)*DD(0, from)
               timescheme_accum(V(iy, iz, ix, 3 + iPhi), oldrhs(iy, iz, ix, 2 + iPhi), rhst)
             END DO
@@ -1221,10 +1386,14 @@ CONTAINS
     real(C_DOUBLE) :: runtime_global, dudy(1:2 + nPhi, 1:2)   !cfl
     character(len=40) :: istring, filename
     integer :: iPhi
+    complex(C_DOUBLE_COMPLEX) :: mean_line_u(-1:ny + 1), mean_line_w(-1:ny + 1), mean_line_scalar(-1:ny + 1)
 
-    !$omp target update from(V(ny-3:ny+1, 0, 0, 1))
-    !$omp target update from(V(ny-3:ny+1, 0, 0, 2))
-    !$omp target update from(V(ny-3:ny+1, 0, 0, 3))
+    if (has_average) then
+      !$omp target update from(V(ny0 - 2:nyN + 2, 0, 0, 1))
+      !$omp target update from(V(ny0 - 2:nyN + 2, 0, 0, 3))
+      call gather_full_y_line(V(:, 0, 0, 1), mean_line_u)
+      call gather_full_y_line(V(:, 0, 0, 3), mean_line_w)
+    end if
 #ifdef HAVE_MPI
     CALL MPI_Allreduce(cfl, runtime_global, 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD); cfl = 0; 
 #else
@@ -1232,16 +1401,16 @@ CONTAINS
 #endif
     IF (cflmax > 0) deltat = cflmax/runtime_global
     IF (has_average) THEN
-      dudy(1, 2) = -sum(d14n(-2:2)*dreal(V(ny - 3:ny + 1, 0, 0, 1)))
-      dudy(2, 2) = -sum(d14n(-2:2)*dreal(V(ny - 3:ny + 1, 0, 0, 3)))
+      dudy(1, 2) = -sum(d14n(-2:2)*dreal(mean_line_u(ny - 3:ny + 1)))
+      dudy(2, 2) = -sum(d14n(-2:2)*dreal(mean_line_w(ny - 3:ny + 1)))
       DO iPhi = 1, nPhi
-        dudy(2 + iPhi, 2) = sum(d14n(-2:2)*dreal(V(ny - 3:ny + 1, 0, 0, 3 + iPhi)))
+        !$omp target update from(V(ny0 - 2:nyN + 2, 0, 0, 3 + iPhi))
+        call gather_full_y_line(V(:, 0, 0, 3 + iPhi), mean_line_scalar)
+        dudy(2 + iPhi, 2) = sum(d14n(-2:2)*dreal(mean_line_scalar(ny - 3:ny + 1)))
+        dudy(2 + iPhi, 1) = sum(d140(-2:2)*dreal(mean_line_scalar(-1:3)))
       END DO
-      dudy(1, 1) = sum(d140(-2:2)*dreal(V(-1:3, 0, 0, 1)))
-      dudy(2, 1) = sum(d140(-2:2)*dreal(V(-1:3, 0, 0, 3)))
-      DO iPhi = 1, nPhi
-        dudy(2 + iPhi, 1) = sum(d140(-2:2)*dreal(V(-1:3, 0, 0, 3 + iPhi)))
-      END DO
+      dudy(1, 1) = sum(d140(-2:2)*dreal(mean_line_u(-1:3)))
+      dudy(2, 1) = sum(d140(-2:2)*dreal(mean_line_w(-1:3)))
     END IF
     IF (has_terminal) THEN
       !$omp target update from(fr)

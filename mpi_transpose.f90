@@ -106,6 +106,25 @@ CONTAINS
     start = part*base + min(part, rem) + 1
   END SUBROUTINE split_block
 
+  SUBROUTINE y_owned_block_bounds(ny, nparts, part, start, count)
+    integer(C_INT), intent(in) :: ny, nparts, part
+    integer(C_INT), intent(out) :: start, count
+    integer(C_INT) :: part_ny0, part_nyN
+
+    part_ny0 = 1 + part*(ny - 1)/nparts
+    part_nyN = (part + 1)*(ny - 1)/nparts
+    start = part_ny0 + 2
+    count = part_nyN - part_ny0 + 1
+
+    if (part == 0) then
+      start = 1
+      count = count + 2
+    end if
+    if (part == nparts - 1) then
+      count = count + 2
+    end if
+  END SUBROUTINE y_owned_block_bounds
+
   SUBROUTINE repack_zTOx_local(Vz, Vx, ny)
     use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
     implicit none
@@ -335,13 +354,29 @@ CONTAINS
     call MPI_Comm_split(MPI_COMM_WORLD, color, key, MPI_COMM_Y, ierr)
 #endif
     ! Calculate domain division in wall-normal direction
-    ny0 = 1; nyN = ny - 1; miny = ny0 - 2; maxy = nyN + 2
-    call split_block(ny + 3, npy_grid, ipy, yl0, ylB)
+    ny0 = 1 + ipy*(ny - 1)/npy_grid
+    nyN = (ipy + 1)*(ny - 1)/npy_grid
+    if (ipy == 0) then
+      miny = ny0 - 2
+    else
+      miny = ny0
+    end if
+    if (ipy == npy_grid - 1) then
+      maxy = nyN + 2
+    else
+      maxy = nyN
+    end if
+    if (npy_grid == 1) then
+      miny = ny0 - 2
+      maxy = nyN + 2
+    end if
+
+    call y_owned_block_bounds(ny, npy_grid, ipy, yl0, ylB)
     ylN = yl0 + ylB - 1
     if (allocated(y_block_starts)) deallocate (y_block_starts, y_block_counts)
     allocate (y_block_starts(npy_grid), y_block_counts(npy_grid))
     do i = 0, npy_grid - 1
-      call split_block(ny + 3, npy_grid, i, y_block_starts(i + 1), y_block_counts(i + 1))
+      call y_owned_block_bounds(ny, npy_grid, i, y_block_starts(i + 1), y_block_counts(i + 1))
     end do
 
     ! Calculate domain division

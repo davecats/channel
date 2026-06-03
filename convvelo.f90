@@ -428,22 +428,30 @@ contains
     !$omp shared(convvelo_work, V, component_index, d240, d24m1, d24n, d24np1, der, D0mat, ny0, nyN, ny, nx0, nxN, nz) private(ix, iz, iy, row_lo, row_hi, upper_bw)
     do ix = nx0, nxN
       do iz = -nz, nz
-        convvelo_work(0, iz, ix) = sum(d240(-2:2)*V(-1:3, iz, ix, component_index))
-        convvelo_work(-1, iz, ix) = sum(d24m1(-2:2)*V(-1:3, iz, ix, component_index))
-        convvelo_work(ny, iz, ix) = sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, component_index))
-        convvelo_work(ny + 1, iz, ix) = sum(d24np1(-2:2)*V(ny - 3:ny + 1, iz, ix, component_index))
+        if (ny0 <= 1 .and. nyN >= 3) then
+          convvelo_work(0, iz, ix) = sum(d240(-2:2)*V(-1:3, iz, ix, component_index))
+          convvelo_work(-1, iz, ix) = sum(d24m1(-2:2)*V(-1:3, iz, ix, component_index))
+        end if
+        if (ny0 <= ny - 3 .and. nyN >= ny - 1) then
+          convvelo_work(ny, iz, ix) = sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, component_index))
+          convvelo_work(ny + 1, iz, ix) = sum(d24np1(-2:2)*V(ny - 3:ny + 1, iz, ix, component_index))
+        end if
         do iy = ny0, nyN
           convvelo_work(iy, iz, ix) = sum(der(iy, 2, -2:2)*V(iy - 2:iy + 2, iz, ix, component_index))
         end do
-        convvelo_work(1, iz, ix) = convvelo_work(1, iz, ix) - ( &
-                                   der(1, 0, -1)*convvelo_work(0, iz, ix) + &
-                                   der(1, 0, -2)*convvelo_work(-1, iz, ix))
-        convvelo_work(2, iz, ix) = convvelo_work(2, iz, ix) - der(2, 0, -2)*convvelo_work(0, iz, ix)
-        convvelo_work(ny - 1, iz, ix) = convvelo_work(ny - 1, iz, ix) - ( &
-                                        der(ny - 1, 0, 1)*convvelo_work(ny, iz, ix) + &
-                                        der(ny - 1, 0, 2)*convvelo_work(ny + 1, iz, ix))
-        convvelo_work(ny - 2, iz, ix) = convvelo_work(ny - 2, iz, ix) - &
-                                        der(ny - 2, 0, 2)*convvelo_work(ny, iz, ix)
+        if (ny0 <= 1 .and. nyN >= 2) then
+          convvelo_work(1, iz, ix) = convvelo_work(1, iz, ix) - ( &
+                                     der(1, 0, -1)*convvelo_work(0, iz, ix) + &
+                                     der(1, 0, -2)*convvelo_work(-1, iz, ix))
+          convvelo_work(2, iz, ix) = convvelo_work(2, iz, ix) - der(2, 0, -2)*convvelo_work(0, iz, ix)
+        end if
+        if (ny0 <= ny - 2 .and. nyN >= ny - 1) then
+          convvelo_work(ny - 1, iz, ix) = convvelo_work(ny - 1, iz, ix) - ( &
+                                          der(ny - 1, 0, 1)*convvelo_work(ny, iz, ix) + &
+                                          der(ny - 1, 0, 2)*convvelo_work(ny + 1, iz, ix))
+          convvelo_work(ny - 2, iz, ix) = convvelo_work(ny - 2, iz, ix) - &
+                                          der(ny - 2, 0, 2)*convvelo_work(ny, iz, ix)
+        end if
         row_lo = lbound(D0mat, 1)
         row_hi = ubound(D0mat, 1)
         upper_bw = ubound(D0mat, 2)
@@ -494,7 +502,7 @@ contains
     !$omp shared(VVdz, V, izd, ny, nz, nx0, nxN, component_index) private(ix, iz, iy, jx)
     do ix = nx0, nxN
       do iz = -nz, nz
-        do iy = -1, ny + 1
+        do iy = ny0 - 2, nyN + 2
           jx = ix - nx0 + 1
           VVdz(izd(iz) + 1, jx, iy + 2, 1) = V(iy, iz, ix, component_index)
         end do
@@ -560,7 +568,7 @@ contains
     !$omp target teams distribute parallel do collapse(3) &
     !$omp shared(VVdz, nx0, nxN, ny, nz, field) private(ix, iz, iy)
     do ix = nx0, nxN
-      do iy = -1, ny + 1
+      do iy = ny0 - 2, nyN + 2
         do iz = 0, nz
           field(iy, iz, ix) = VVdz(iz + 1, ix - nx0 + 1, iy + 2, 1)
         end do
@@ -569,7 +577,7 @@ contains
     !$omp target teams distribute parallel do collapse(3) &
     !$omp shared(VVdz, nx0, nxN, ny, nz, field, izd) private(ix, iz, iy)
     do ix = nx0, nxN
-      do iy = -1, ny + 1
+      do iy = ny0 - 2, nyN + 2
         do iz = -nz, -1
           field(iy, iz, ix) = VVdz(izd(iz) + 1, ix - nx0 + 1, iy + 2, 1)
         end do
