@@ -111,10 +111,12 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(out) :: Vx(1:, 1:, :)
     integer(C_INT), intent(in) :: ny
     integer(C_SIZE_T) :: iy, ix, iz
+    integer(C_INT) :: ny_batch
 
+    ny_batch = size(Vz, 3)
     !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(Vz, Vx) shared(ny, nxB, nzd) private(iy, ix, iz)
-    do iy = 1, ny + 3
+    !$omp shared(Vz, Vx) shared(ny_batch, nxB, nzd) private(iy, ix, iz)
+    do iy = 1, ny_batch
       do ix = 1, nxB
         do iz = 1, nzd
           Vx(ix, iz, iy) = Vz(iz, ix, iy)
@@ -130,10 +132,12 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(out) :: Vz(1:, 1:, :)
     integer(C_INT), intent(in) :: ny
     integer(C_SIZE_T) :: iy, ix, iz
+    integer(C_INT) :: ny_batch
 
+    ny_batch = size(Vx, 3)
     !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(Vx, Vz) shared(ny, nxB, nzd) private(iy, ix, iz)
-    do iy = 1, ny + 3
+    !$omp shared(Vx, Vz) shared(ny_batch, nxB, nzd) private(iy, ix, iz)
+    do iy = 1, ny_batch
       do iz = 1, nzd
         do ix = 1, nxB
           Vz(iz, ix, iy) = Vx(ix, iz, iy)
@@ -149,11 +153,13 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(out) :: send(:)
     integer(C_INT), intent(in)  :: ny
     integer(C_SIZE_T) :: iy, ix, iz, dest, p
+    integer(C_INT) :: ny_batch
 
+    ny_batch = size(Vz, 3)
     !$omp target teams distribute parallel do collapse(4) default(none) &
-    !$omp shared(Vz, send) shared(ny, nxB, nzB, npxz, sendcount) private(iy, ix, iz, dest, p)
+    !$omp shared(Vz, send) shared(ny_batch, nxB, nzB, npxz, sendcount) private(iy, ix, iz, dest, p)
     do dest = 0, npxz - 1
-      do iy = 1, ny + 3
+      do iy = 1, ny_batch
         do ix = 1, nxB
           do iz = 1, nzB
             p = dest*sendcount + iz + (nzB*(ix - 1)) + (nzB*nxB*(iy - 1))
@@ -172,11 +178,13 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(out) :: Vx(1:, 1:, :)
     integer(C_INT), intent(in)  :: ny
     integer(C_SIZE_T) :: iy, ix, iz, src, p
+    integer(C_INT) :: ny_batch
 
+    ny_batch = size(Vx, 3)
     !$omp target teams distribute parallel do collapse(4) default(none) &
-    !$omp shared(Vx, recv) shared(ny, nxB, nzB, npxz, sendcount) private(iy, ix, iz, src, p)
+    !$omp shared(Vx, recv) shared(ny_batch, nxB, nzB, npxz, sendcount) private(iy, ix, iz, src, p)
     do src = 0, npxz - 1
-      do iy = 1, ny + 3
+      do iy = 1, ny_batch
         do ix = 1, nxB
           do iz = 1, nzB
             p = src*sendcount + iz + (nzB*(ix - 1)) + (nzB*nxB*(iy - 1))
@@ -194,11 +202,13 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(out) :: send(:)
     integer(C_INT), intent(in)  :: ny
     integer(C_SIZE_T) :: iy, ix, iz, dest, p
+    integer(C_INT) :: ny_batch
 
+    ny_batch = size(Vx, 3)
     !$omp target teams distribute parallel do collapse(4) default(none) &
-    !$omp shared(Vx, send) shared(ny, nxB, nzB, npxz, sendcount) private(iy, ix, iz, dest, p)
+    !$omp shared(Vx, send) shared(ny_batch, nxB, nzB, npxz, sendcount) private(iy, ix, iz, dest, p)
     do dest = 0, npxz - 1
-      do iy = 1, ny + 3
+      do iy = 1, ny_batch
         do iz = 1, nzB
           do ix = 1, nxB
             p = dest*sendcount + ix + (nxB*(iz - 1)) + (nxB*nzB*(iy - 1))
@@ -216,11 +226,13 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(out) :: Vz(1:, 1:, :)
     integer(C_INT), intent(in)  :: ny
     integer(C_SIZE_T) :: iy, ix, iz, src, p
+    integer(C_INT) :: ny_batch
 
+    ny_batch = size(Vz, 3)
     !$omp target teams distribute parallel do collapse(4) default(none) &
-    !$omp shared(Vz, recv) shared(ny, nxB, nzB, npxz, sendcount) private(iy, ix, iz, src, p)
+    !$omp shared(Vz, recv) shared(ny_batch, nxB, nzB, npxz, sendcount) private(iy, ix, iz, src, p)
     do src = 0, npxz - 1
-      do iy = 1, ny + 3
+      do iy = 1, ny_batch
         do iz = 1, nzB
           do ix = 1, nxB
             p = src*sendcount + ix + (nxB*(iz - 1)) + (nxB*nzB*(iy - 1))
@@ -357,16 +369,16 @@ CONTAINS
       end if
       CALL MPI_Abort(MPI_COMM_WORLD, 1, ierror)
     end if
-    if (int(npxz, 8)*int(nxB, 8)*int(nzB, 8)*int(ny + 3, 8) > huge(0_C_INT)) then
+    if (int(npxz, 8)*int(nxB, 8)*int(nzB, 8)*int(nyN - ny0 + 5, 8) > huge(0_C_INT)) then
       if (has_terminal) then
         print *, "Error: problem too large for MPI transpose (integer overflow). Try to increase the number of processes."
       end if
       CALL MPI_Abort(MPI_COMM_WORLD, 1, ierror)
     end if
-    sendsize = npxz*nxB*nzB*(ny + 3)
-    recvsize = npxz*nxB*nzB*(ny + 3)
+    sendsize = npxz*nxB*nzB*(nyN - ny0 + 5)
+    recvsize = npxz*nxB*nzB*(nyN - ny0 + 5)
 
-    sendcount = nxB*nzB*(ny + 3)
+    sendcount = nxB*nzB*(nyN - ny0 + 5)
     !$omp target update to(sendcount)
 
     ! Allocate buffers for transposes*int(16, c_size_t)

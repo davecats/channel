@@ -23,6 +23,7 @@ MODULE ffts
   use hipfort_hipfft
 #endif
   USE, intrinsic :: iso_c_binding
+  use mpi_transpose, only: ny0, nyN
   IMPLICIT NONE
 
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
@@ -32,13 +33,16 @@ MODULE ffts
   INCLUDE 'fftw3.f03'
   integer, save        :: plan_type = FFTW_PATIENT
   real(C_DOUBLE), dimension(:, :, :, :), pointer :: products
-  TYPE(C_PTR), save    :: pFFT, pIFT, pRFT, pHFT, ptrVVdx, ptrVVdz, ptrFdx, ptrFdz
+  TYPE(C_PTR), save    :: pFFT, pIFT, pRFT, pHFT
+  complex(C_DOUBLE_COMPLEX), target, allocatable, save :: fftw_VVdz(:, :, :, :), fftw_VVdx(:, :, :, :)
+  real(C_DOUBLE), target, allocatable, save :: fftw_rVVdx(:, :, :, :)
 #endif
 #ifdef HAVE_CUDA
   integer :: cu_pFFT, cu_pIFT, cu_pRFT, cu_pHFT
 #elif HAVE_HIP
   type(c_ptr) :: hip_pFFT, hip_pIFT, hip_pRFT, hip_pHFT
 #endif
+  integer(C_INT), save :: fft_y0, fft_yN, fft_ny
 
 CONTAINS
 
@@ -48,14 +52,16 @@ CONTAINS
     logical, intent(in) :: overlapping
     integer(C_INT64_T), intent(out) :: n_floats
     integer(C_INT64_T) :: nflds
+    integer(C_INT64_T) :: local_y
 
     nflds = int(merge(2, 1, overlapping), C_INT64_T)
+    local_y = int(nyN - ny0 + 5, C_INT64_T)
 
     n_floats = 0_C_INT64_T
-    n_floats = n_floats + 2_C_INT64_T*int(nzd, C_INT64_T)*int(nxB, C_INT64_T)*int(ny + 3, C_INT64_T)*nflds
-    n_floats = n_floats + 2_C_INT64_T*int(nxd + 1, C_INT64_T)*int(nzB, C_INT64_T)*int(ny + 3, C_INT64_T)*nflds
-    n_floats = n_floats + int(2*(nxd + 1), C_INT64_T)*int(nzB, C_INT64_T)*int(ny + 3, C_INT64_T)*int(3 + nPhi, C_INT64_T)
-    n_floats = n_floats + int(2*(nxd + 1), C_INT64_T)*int(nzB, C_INT64_T)*int(ny + 3, C_INT64_T)*nflds
+    n_floats = n_floats + 2_C_INT64_T*int(nzd, C_INT64_T)*int(nxB, C_INT64_T)*local_y*nflds
+    n_floats = n_floats + 2_C_INT64_T*int(nxd + 1, C_INT64_T)*int(nzB, C_INT64_T)*local_y*nflds
+    n_floats = n_floats + int(2*(nxd + 1), C_INT64_T)*int(nzB, C_INT64_T)*local_y*int(3 + nPhi, C_INT64_T)
+    n_floats = n_floats + int(2*(nxd + 1), C_INT64_T)*int(nzB, C_INT64_T)*local_y*nflds
   end subroutine get_fft_memory_estimate
 
 #ifdef HAVE_FFTW
@@ -67,7 +73,6 @@ CONTAINS
     logical, optional, intent(in) :: odd_n_real
     integer, dimension(2), optional :: s
     integer, dimension(2) :: sn = 6
-
     integer(C_INT), dimension(1) :: n_z, n_x, rn_x
     integer :: nflds
     n_z = [nzd]; n_x = [nxd]; rn_x = [2*nxd]; 
@@ -79,28 +84,28 @@ CONTAINS
     if (present(s)) sn = s
 
     nflds = merge(2, 1, overlapping)
+    fft_y0 = ny0 - 2
+    fft_yN = nyN + 2
+    fft_ny = fft_yN - fft_y0 + 1
 
-    sn(2) = ny + 3
+    sn(2) = fft_ny
     sn(1) = 6 + 3*nPhi
-    !Allocate aligned memory
-    ptrVVdz = fftw_alloc_complex(int(nxB*nzd*nflds*sn(2), C_SIZE_T))
-    ptrVVdx = fftw_alloc_complex(int((nxd + 1)*nzB*nflds*sn(2), C_SIZE_T))
-    ptrFdx = fftw_alloc_real(int(2*(nxd + 1)*nzB*(3 + nPhi)*sn(2), C_SIZE_T))
-
-    !Convert C to F pointer
-    CALL c_f_pointer(ptrVVdz, VVdz, [nzd, nxB, sn(2), nflds]); 
-    CALL c_f_pointer(ptrVVdx, VVdx, [nxd + 1, nzB, sn(2), nflds])
-    CALL c_f_pointer(ptrFdx, rVVdx, [2*(nxd + 1), nzB, sn(2), 3 + nPhi])
-    allocate (products(2*(nxd + 1), nzB, sn(2), nflds))
+    allocate (fftw_VVdz(nzd, nxB, fft_y0:fft_yN, nflds))
+    allocate (fftw_VVdx(nxd + 1, nzB, fft_y0:fft_yN, nflds))
+    allocate (fftw_rVVdx(2*(nxd + 1), nzB, fft_y0:fft_yN, 3 + nPhi))
+    VVdz => fftw_VVdz
+    VVdx => fftw_VVdx
+    rVVdx => fftw_rVVdx
+    allocate (products(2*(nxd + 1), nzB, fft_y0:fft_yN, nflds))
 
     !$omp target enter data map(to: VVdz)
     !FFTs plans
-    pFFT = fftw_plan_many_dft(1, n_z, nxB, VVdz(:, :, 1, 1), n_z, 1, nzd, VVdz(:, :, 1, 1), n_z, 1, nzd, FFTW_FORWARD, plan_type)
-    pIFT = fftw_plan_many_dft(1, n_z, nxB, VVdz(:, :, 1, 1), n_z, 1, nzd, VVdz(:, :, 1, 1), n_z, 1, nzd, FFTW_BACKWARD, plan_type)
-    pRFT = fftw_plan_many_dft_c2r(1, rn_x, nzB, VVdx(:, :, 1, 1), n_x + 1, 1, (nxd + 1), &
-                                  rVVdx(:, :, 1, 1), 2*(n_x + 1), 1, 2*(nxd + 1), plan_type)
-    pHFT = fftw_plan_many_dft_r2c(1, rn_x, nzB, rVVdx(:, :, 1, 1), 2*(n_x + 1), 1, 2*(nxd + 1), &
-                                  VVdx(:, :, 1, 1), n_x + 1, 1, (nxd + 1), plan_type)
+    pFFT = fftw_plan_many_dft(1, n_z, nxB, VVdz(:, :, fft_y0, 1), n_z, 1, nzd, VVdz(:, :, fft_y0, 1), n_z, 1, nzd, FFTW_FORWARD, plan_type)
+    pIFT = fftw_plan_many_dft(1, n_z, nxB, VVdz(:, :, fft_y0, 1), n_z, 1, nzd, VVdz(:, :, fft_y0, 1), n_z, 1, nzd, FFTW_BACKWARD, plan_type)
+    pRFT = fftw_plan_many_dft_c2r(1, rn_x, nzB, VVdx(:, :, fft_y0, 1), n_x + 1, 1, (nxd + 1), &
+                                  rVVdx(:, :, fft_y0, 1), 2*(n_x + 1), 1, 2*(nxd + 1), plan_type)
+    pHFT = fftw_plan_many_dft_r2c(1, rn_x, nzB, rVVdx(:, :, fft_y0, 1), 2*(n_x + 1), 1, 2*(nxd + 1), &
+                                  VVdx(:, :, fft_y0, 1), n_x + 1, 1, (nxd + 1), plan_type)
   END SUBROUTINE init_fft
 #elif defined HAVE_CUDA
   SUBROUTINE init_cufft(nxd, nxB, ny, nzd, nzB, nPhi, overlapping)
@@ -114,24 +119,27 @@ CONTAINS
     integer :: nflds
 
     nflds = merge(2, 1, overlapping)
+    fft_y0 = ny0 - 2
+    fft_yN = nyN + 2
+    fft_ny = fft_yN - fft_y0 + 1
 
-    allocate (VVdz(nzd, nxB, ny + 3, nflds))
-    allocate (VVdx(nxd + 1, nzB, ny + 3, nflds))
-    allocate (rVVdx(2*(nxd + 1), nzB, ny + 3, 3 + nPhi))
-    allocate (products(2*(nxd + 1), nzB, ny + 3, nflds))
+    allocate (VVdz(nzd, nxB, fft_y0:fft_yN, nflds))
+    allocate (VVdx(nxd + 1, nzB, fft_y0:fft_yN, nflds))
+    allocate (rVVdx(2*(nxd + 1), nzB, fft_y0:fft_yN, 3 + nPhi))
+    allocate (products(2*(nxd + 1), nzB, fft_y0:fft_yN, nflds))
     !$omp target enter data map(to: VVdz, VVdx, rVVdx, products)
 
     !FFTs plans
     istat = cufftCreate(cu_pIFT)
     istat = cufftSetAutoAllocation(cu_pIFT, 0)
-    istat = cufftPlan1d(cu_pIFT, nzd, CUFFT_Z2Z, (ny + 3)*nxB)
+    istat = cufftPlan1d(cu_pIFT, nzd, CUFFT_Z2Z, fft_ny*nxB)
 
     istat = cufftCreate(cu_pFFT)
     istat = cufftSetAutoAllocation(cu_pFFT, 0)
-    istat = cufftPlan1d(cu_pFFT, nzd, CUFFT_Z2Z, (ny + 3)*nxB)
+    istat = cufftPlan1d(cu_pFFT, nzd, CUFFT_Z2Z, fft_ny*nxB)
 
     n(1) = 2*nxd            ! length
-    batch = nzB*(ny + 3)
+    batch = nzB*fft_ny
     istride = 1                  ! contiguous along x
     ostride = 1
     idist = nxd + 1            ! distance between consecutive complex transforms
@@ -147,7 +155,7 @@ CONTAINS
     istat = cufftCreate(cu_pHFT)
     istat = cufftSetAutoAllocation(cu_pHFT, 0)
     istat = cufftPlanMany(cu_pHFT, 1, n, onembed, ostride, odist, &
-                          inembed, istride, idist, CUFFT_D2Z, nzB*(ny + 3))
+                          inembed, istride, idist, CUFFT_D2Z, nzB*fft_ny)
 
   END SUBROUTINE init_cufft
 #elif defined(HAVE_HIP)
@@ -163,24 +171,27 @@ CONTAINS
     integer :: nflds
 
     nflds = merge(2, 1, overlapping)
+    fft_y0 = ny0 - 2
+    fft_yN = nyN + 2
+    fft_ny = fft_yN - fft_y0 + 1
 
-    allocate (VVdz(nzd, nxB, ny + 3, nflds))
-    allocate (VVdx(nxd + 1, nzB, ny + 3, nflds))
-    allocate (rVVdx(2*(nxd + 1), nzB, ny + 3, 3 + nPhi))
-    allocate (products(2*(nxd + 1), nzB, ny + 3, nflds))
+    allocate (VVdz(nzd, nxB, fft_y0:fft_yN, nflds))
+    allocate (VVdx(nxd + 1, nzB, fft_y0:fft_yN, nflds))
+    allocate (rVVdx(2*(nxd + 1), nzB, fft_y0:fft_yN, 3 + nPhi))
+    allocate (products(2*(nxd + 1), nzB, fft_y0:fft_yN, nflds))
     !$omp target enter data map(to: VVdz, VVdx, rVVdx, products)
 
     !FFTs plans
     istat = hipfftCreate(hip_pIFT)
     istat = hipfftSetAutoAllocation(hip_pIFT, 0)
-    istat = hipfftPlan1d(hip_pIFT, nzd, HIPFFT_Z2Z, (ny + 3)*nxB)
+    istat = hipfftPlan1d(hip_pIFT, nzd, HIPFFT_Z2Z, fft_ny*nxB)
 
     istat = hipfftCreate(hip_pFFT)
     istat = hipfftSetAutoAllocation(hip_pFFT, 0)
-    istat = hipfftPlan1d(hip_pFFT, nzd, HIPFFT_Z2Z, (ny + 3)*nxB)
+    istat = hipfftPlan1d(hip_pFFT, nzd, HIPFFT_Z2Z, fft_ny*nxB)
 
     n(1) = 2*nxd            ! length
-    batch = nzB*(ny + 3)
+    batch = nzB*fft_ny
     istride = 1                  ! contiguous along x
     ostride = 1
     idist = nxd + 1            ! distance between consecutive complex transforms
@@ -196,7 +207,7 @@ CONTAINS
     istat = hipfftCreate(hip_pHFT)
     istat = hipfftSetAutoAllocation(hip_pHFT, 0)
     istat = hipfftPlanMany(hip_pHFT, int(1, c_int), c_loc(n), c_loc(onembed), ostride, odist, &
-                           c_loc(inembed), istride, idist, HIPFFT_D2Z, int(nzB*(ny + 3), c_int))
+                           c_loc(inembed), istride, idist, HIPFFT_D2Z, int(nzB*fft_ny, c_int))
 
   END SUBROUTINE init_hipfft
 #endif
@@ -211,13 +222,12 @@ CONTAINS
     isFIT = ((j == 1) .OR. (j == 3))
   END FUNCTION fftFIT
 
-  SUBROUTINE FFT(x, ny)
+  SUBROUTINE FFT(x)
 #if defined(HAVE_HIP)
-    complex(C_DOUBLE_COMPLEX), intent(inout), target :: x(:, :, :)
+    complex(C_DOUBLE_COMPLEX), intent(inout), target :: x(:, :, ny0 - 2:)
 #else
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, :)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, ny0 - 2:)
 #endif
-    integer(C_INT), intent(in) :: ny
     integer :: i, istat
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(x)
@@ -232,19 +242,18 @@ CONTAINS
     istat = hipDeviceSynchronize()
     !$omp end target data
 #elif defined(HAVE_FFTW)
-    DO i = 1, ny + 3
+    DO i = fft_y0, fft_yN
       CALL fftw_execute_dft(pFFT, x(:, :, i), x(:, :, i)); 
     END DO
 #endif
   END SUBROUTINE FFT
 
-  SUBROUTINE IFT(x, ny)
+  SUBROUTINE IFT(x)
 #if defined(HAVE_HIP)
-    complex(C_DOUBLE_COMPLEX), intent(inout), target :: x(:, :, :)
+    complex(C_DOUBLE_COMPLEX), intent(inout), target :: x(:, :, ny0 - 2:)
 #else
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, :)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, ny0 - 2:)
 #endif
-    integer(C_INT), intent(in) :: ny
     integer :: i, istat
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(x)
@@ -259,22 +268,21 @@ CONTAINS
     istat = hipDeviceSynchronize()
     !$omp end target data
 #elif defined(HAVE_FFTW)
-    DO i = 1, ny + 3
+    DO i = fft_y0, fft_yN
       CALL fftw_execute_dft(pIFT, x(:, :, i), x(:, :, i))
     END DO
 #endif
   END SUBROUTINE IFT
 
-  SUBROUTINE RFT(x, rx, ny)
+  SUBROUTINE RFT(x, rx)
     IMPLICIT NONE
 #if defined(HAVE_HIP)
-    complex(C_DOUBLE_COMPLEX), target :: x(:, :, :)
-    real(C_DOUBLE), target :: rx(:, :, :)
+    complex(C_DOUBLE_COMPLEX), target :: x(:, :, ny0 - 2:)
+    real(C_DOUBLE), target :: rx(:, :, ny0 - 2:)
 #else
-    complex(C_DOUBLE_COMPLEX) :: x(:, :, :)
-    real(C_DOUBLE) :: rx(:, :, :)
+    complex(C_DOUBLE_COMPLEX) :: x(:, :, ny0 - 2:)
+    real(C_DOUBLE) :: rx(:, :, ny0 - 2:)
 #endif
-    integer(C_INT), intent(in) :: ny
     integer :: i, istat
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(x, rx)
@@ -289,22 +297,21 @@ CONTAINS
     istat = hipDeviceSynchronize()
     !$omp end target data
 #elif defined(HAVE_FFTW)
-    DO i = 1, ny + 3
+    DO i = fft_y0, fft_yN
       CALL fftw_execute_dft_c2r(pRFT, x(:, :, i), rx(:, :, i))
     END DO
 #endif
   END SUBROUTINE RFT
 
-  SUBROUTINE HFT(rx, x, ny)
+  SUBROUTINE HFT(rx, x)
     IMPLICIT NONE
 #if defined(HAVE_HIP)
-    complex(C_DOUBLE_COMPLEX), target :: x(:, :, :)
-    real(C_DOUBLE), target :: rx(:, :, :)
+    complex(C_DOUBLE_COMPLEX), target :: x(:, :, ny0 - 2:)
+    real(C_DOUBLE), target :: rx(:, :, ny0 - 2:)
 #else
-    complex(C_DOUBLE_COMPLEX) :: x(:, :, :)
-    real(C_DOUBLE) :: rx(:, :, :)
+    complex(C_DOUBLE_COMPLEX) :: x(:, :, ny0 - 2:)
+    real(C_DOUBLE) :: rx(:, :, ny0 - 2:)
 #endif
-    integer(C_INT), intent(in) :: ny
     integer :: i, istat
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(rx, x)
@@ -319,7 +326,7 @@ CONTAINS
     istat = hipDeviceSynchronize()
     !$omp end target data
 #elif defined(HAVE_FFTW)
-    DO i = 1, ny + 3
+    DO i = fft_y0, fft_yN
       CALL fftw_execute_dft_r2c(pHFT, rx(:, :, i), x(:, :, i)); 
     END DO
 #endif
@@ -332,7 +339,9 @@ CONTAINS
 
     !$omp target exit data map(from: VVdz)
     if (associated(products)) deallocate (products)
-    CALL fftw_free(ptrFdx); CALL fftw_free(ptrVVdx); CALL fftw_free(ptrVVdz); 
+    if (allocated(fftw_rVVdx)) deallocate (fftw_rVVdx)
+    if (allocated(fftw_VVdx)) deallocate (fftw_VVdx)
+    if (allocated(fftw_VVdz)) deallocate (fftw_VVdz)
   END SUBROUTINE free_fft
 #endif
 

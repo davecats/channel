@@ -147,7 +147,7 @@ contains
 
     local_y = int(nyN - ny0 + 5, C_INT64_T)
     spectral_planes = local_y*int(2*nz + 1, C_INT64_T)*int(nxN - nx0 + 1, C_INT64_T)
-    real_planes = int(2*(nxd + 1), C_INT64_T)*int(nzB, C_INT64_T)*int(ny + 3, C_INT64_T)
+    real_planes = int(2*(nxd + 1), C_INT64_T)*int(nzB, C_INT64_T)*int(nyN - ny0 + 5, C_INT64_T)
     if (convvelo_write_full_fields) then
       n_fields = int(n_convvelo_velocity_fields_total + nPhi*n_convvelo_scalar_fields_total, C_INT64_T)
     else
@@ -170,9 +170,9 @@ contains
     allocate (convvelo_stats(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, n_convvelo_fields))
     allocate (convvelo_work(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
     allocate (component_means(ny0 - 2:nyN + 2, 1:3 + nPhi))
-    allocate (convvelo_real0(2*(nxd + 1), nzB, ny + 3))
-    allocate (convvelo_real1(2*(nxd + 1), nzB, ny + 3))
-    allocate (convvelo_real_prod(2*(nxd + 1), nzB, ny + 3))
+    allocate (convvelo_real0(2*(nxd + 1), nzB, ny0 - 2:nyN + 2))
+    allocate (convvelo_real1(2*(nxd + 1), nzB, ny0 - 2:nyN + 2))
+    allocate (convvelo_real_prod(2*(nxd + 1), nzB, ny0 - 2:nyN + 2))
     allocate (n_field_samples(n_convvelo_fields))
 
     convvelo_stats = (0.0d0, 0.0d0)
@@ -490,8 +490,8 @@ contains
     integer(C_INT) :: iy, iz, ix, jx, izd_idx
 
     !$omp target teams distribute parallel do collapse(3) &
-    !$omp shared(VVdz, nzd, nxB, ny) private(iy, jx, izd_idx)
-    do iy = 1, ny + 3
+    !$omp shared(VVdz, nzd, nxB) private(iy, jx, izd_idx)
+    do iy = ny0 - 2, nyN + 2
       do jx = 1, nxB
         do izd_idx = 1, nzd
           VVdz(izd_idx, jx, iy, 1) = (0.0d0, 0.0d0)
@@ -504,7 +504,7 @@ contains
       do iz = -nz, nz
         do iy = ny0 - 2, nyN + 2
           jx = ix - nx0 + 1
-          VVdz(izd(iz) + 1, jx, iy + 2, 1) = V(iy, iz, ix, component_index)
+          VVdz(izd(iz) + 1, jx, iy, 1) = V(iy, iz, ix, component_index)
         end do
       end do
     end do
@@ -512,14 +512,14 @@ contains
 
   subroutine spectral_field_to_real_x(rx)
     implicit none
-    real(C_DOUBLE), intent(out) :: rx(2*(nxd + 1), nzB, ny + 3)
+    real(C_DOUBLE), intent(out) :: rx(:, :, ny0 - 2:)
 #ifdef HAVE_MPI
     type(MPI_Request) :: request
     type(MPI_Status) :: status
 #endif
     integer(C_INT) :: ix, iz, iy
 
-    call IFT(VVdz(:, :, :, 1), ny)
+    call IFT(VVdz(:, :, :, 1))
     if (fft_transpose_is_local) then
       call repack_zTOx_local(VVdz(:, :, :, 1), VVdx(:, :, :, 1), ny)
     else
@@ -531,20 +531,20 @@ contains
 #endif
     if (.not. fft_transpose_is_local) call unpack_zTOx(recvbuf(:, 1), VVdx(:, :, :, 1), ny)
     !$omp target teams distribute parallel do collapse(3) &
-    !$omp shared(VVdx, nx, nxd, nzB, ny) private(ix, iz, iy)
-    do iy = 1, ny + 3
+    !$omp shared(VVdx, nx, nxd, nzB) private(ix, iz, iy)
+    do iy = ny0 - 2, nyN + 2
       do iz = 1, nzB
         do ix = nx + 2, nxd + 1
           VVdx(ix, iz, iy, 1) = (0.0d0, 0.0d0)
         end do
       end do
     end do
-    call RFT(VVdx(:, :, :, 1), rx, ny)
+    call RFT(VVdx(:, :, :, 1), rx)
   end subroutine spectral_field_to_real_x
 
   subroutine real_x_to_spectral_field(rx, field)
     implicit none
-    real(C_DOUBLE), intent(in) :: rx(2*(nxd + 1), nzB, ny + 3)
+    real(C_DOUBLE), intent(in) :: rx(:, :, ny0 - 2:)
     complex(C_DOUBLE_COMPLEX), intent(out) :: field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
 #ifdef HAVE_MPI
     type(MPI_Request) :: request
@@ -552,7 +552,7 @@ contains
 #endif
     integer(C_INT) :: ix, iz, iy
 
-    call HFT(rx, VVdx(:, :, :, 1), ny)
+    call HFT(rx, VVdx(:, :, :, 1))
     if (fft_transpose_is_local) then
       call repack_xTOz_local(VVdx(:, :, :, 1), VVdz(:, :, :, 1), ny)
     else
@@ -563,14 +563,14 @@ contains
     if (.not. fft_transpose_is_local) call MPI_Wait(request, status, ierr)
 #endif
     if (.not. fft_transpose_is_local) call unpack_xTOz(recvbuf(:, 1), VVdz(:, :, :, 1), ny)
-    call FFT(VVdz(:, :, :, 1), ny)
+    call FFT(VVdz(:, :, :, 1))
 
     !$omp target teams distribute parallel do collapse(3) &
     !$omp shared(VVdz, nx0, nxN, ny, nz, field) private(ix, iz, iy)
     do ix = nx0, nxN
       do iy = ny0 - 2, nyN + 2
         do iz = 0, nz
-          field(iy, iz, ix) = VVdz(iz + 1, ix - nx0 + 1, iy + 2, 1)
+          field(iy, iz, ix) = VVdz(iz + 1, ix - nx0 + 1, iy, 1)
         end do
       end do
     end do
@@ -579,7 +579,7 @@ contains
     do ix = nx0, nxN
       do iy = ny0 - 2, nyN + 2
         do iz = -nz, -1
-          field(iy, iz, ix) = VVdz(izd(iz) + 1, ix - nx0 + 1, iy + 2, 1)
+          field(iy, iz, ix) = VVdz(izd(iz) + 1, ix - nx0 + 1, iy, 1)
         end do
       end do
     end do
@@ -659,8 +659,8 @@ contains
     call load_convvelo_field_to_zbuf(rhs1)
     call spectral_field_to_real_x(convvelo_real1)
     !$omp target teams distribute parallel do collapse(3) &
-    !$omp shared(convvelo_real_prod, convvelo_real0, convvelo_real1, factor, nxd, nzB, ny) private(ix, iz, iy)
-    do iy = 1, ny + 3
+    !$omp shared(convvelo_real_prod, convvelo_real0, convvelo_real1, factor, nxd, nzB) private(ix, iz, iy)
+    do iy = ny0 - 2, nyN + 2
       do iz = 1, nzB
         do ix = 1, 2*(nxd + 1)
           convvelo_real_prod(ix, iz, iy) = factor*convvelo_real0(ix, iz, iy)*convvelo_real1(ix, iz, iy)
