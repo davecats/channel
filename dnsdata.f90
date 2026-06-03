@@ -441,7 +441,7 @@ CONTAINS
   END SUBROUTINE COMPLEXderiv
 
   SUBROUTINE apply_complex_derivative_with_y_pencil(src, dst)
-    use y_line_solvers, only: ys_prepare_ghost_field_workspace, ys_solve_ghost_field, ys_rhs_store, ys_matrix_store, &
+    use y_line_solvers, only: ys_prepare_ghost_field_workspace, ys_solve_ghost_field, ys_fill_ghost_padded_field, ys_rhs_store, ys_matrix_store, &
                               ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), intent(in) :: src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
@@ -506,13 +506,14 @@ CONTAINS
     !$omp target exit data map(delete: ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
 
     call ys_solve_ghost_field(dst(ny0:nyN, :, :), ny, nz)
+    call ys_fill_ghost_padded_field(dst, ny, nz)
     !$omp target update to(dst)
   END SUBROUTINE apply_complex_derivative_with_y_pencil
 
   SUBROUTINE solve_compact_component_with_y_pencil(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
                                                    lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
                                                    lambda_coeff, diffusion_coeff)
-    use y_line_solvers, only: ys_prepare_ghost_field_workspace, ys_solve_ghost_field, ys_rhs_store, ys_matrix_store, &
+    use y_line_solvers, only: ys_prepare_ghost_field_workspace, ys_solve_ghost_field, ys_fill_ghost_padded_field, ys_rhs_store, ys_matrix_store, &
                               ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store
     IMPLICIT NONE
     integer(C_INT), intent(in) :: component_index, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index
@@ -605,6 +606,7 @@ CONTAINS
     !$omp target exit data map(delete: ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
 
     call ys_solve_ghost_field(V(ny0:nyN, :, :, component_index), ny, nz)
+    call ys_fill_ghost_padded_field(V(:, :, :, component_index), ny, nz)
     !$omp target update to(V(:, :, :, component_index))
   END SUBROUTINE solve_compact_component_with_y_pencil
 
@@ -624,21 +626,42 @@ CONTAINS
   SUBROUTINE gather_full_y_line(local_line, full_line)
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), intent(in) :: local_line(ny0:)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: full_line(1:ny - 1)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: full_line(-1:ny + 1)
     complex(C_DOUBLE_COMPLEX), allocatable :: local_block(:, :, :), gathered_block(:, :, :)
+#ifdef HAVE_MPI
+    complex(C_DOUBLE_COMPLEX) :: lower_ghosts(2), upper_ghosts(2)
+#endif
+    integer(C_INT) :: local_n
 
-    if (lbound(local_line, 1) <= 1 .and. ubound(local_line, 1) >= ny - 1) then
-      full_line = local_line(1:ny - 1)
+    local_n = size(local_line, 1)
+
+    if (local_n == ny + 3) then
+      full_line(-1:ny + 1) = local_line
       return
     end if
 
+    full_line(-1:ny + 1) = (0.0d0, 0.0d0)
     allocate (local_block(nyN - ny0 + 1, 1, nxB), gathered_block(ny - 1, 1, nxB))
 
     local_block(:, 1, 1) = local_line(ny0:nyN)
 
     call allgather_y_blocks_to_xz_full(local_block, gathered_block)
 
-    full_line = gathered_block(:, 1, 1)
+    full_line(1:ny - 1) = gathered_block(:, 1, 1)
+
+#ifdef HAVE_MPI
+    lower_ghosts = (0.0d0, 0.0d0)
+    upper_ghosts = (0.0d0, 0.0d0)
+    if (ipy == 0) lower_ghosts = local_line(1:2)
+    if (ipy == npy_grid - 1) upper_ghosts = local_line(local_n - 1:local_n)
+    call MPI_Bcast(lower_ghosts, 2, MPI_DOUBLE_COMPLEX, 0, MPI_COMM_Y, ierr)
+    call MPI_Bcast(upper_ghosts, 2, MPI_DOUBLE_COMPLEX, npy_grid - 1, MPI_COMM_Y, ierr)
+    full_line(-1:0) = lower_ghosts
+    full_line(ny:ny + 1) = upper_ghosts
+#else
+    full_line(-1:0) = local_line(1:2)
+    full_line(ny:ny + 1) = local_line(local_n - 1:local_n)
+#endif
 
     deallocate (local_block, gathered_block)
   END SUBROUTINE gather_full_y_line

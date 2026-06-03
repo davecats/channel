@@ -13,7 +13,7 @@ module y_line_solvers
 
   public :: ys_lu5decomp, ys_leftlu5div
   public :: ys_solve_compact_derivative, ys_solve_compact_system, ys_solve_ghost_system
-  public :: ys_prepare_ghost_field_workspace, ys_solve_ghost_field, ys_solve_ghost_field_reduced
+  public :: ys_prepare_ghost_field_workspace, ys_solve_ghost_field, ys_solve_ghost_field_reduced, ys_fill_ghost_padded_field
   public :: ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store
 
   integer(C_INT), save :: ys_workspace_ny = -1
@@ -85,6 +85,52 @@ contains
 
     call ys_solve_ghost_field_reduced(dst, ny, nz)
   end subroutine ys_solve_ghost_field
+
+  subroutine ys_fill_ghost_padded_field(dst, ny, nz)
+    implicit none
+    integer(C_INT), intent(in) :: ny, nz
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    complex(C_DOUBLE_COMPLEX) :: lower_pair(2), upper_pair(2)
+    complex(C_DOUBLE_COMPLEX) :: lower_rhs0, upper_rhsn
+    real(C_DOUBLE) :: lower_eq0(-2:2), upper_eqn(-2:2)
+    integer(C_INT) :: ix, iz, iline, nlines_z
+
+   if (.not. allocated(ys_rhs_store)) error stop "ys_prepare_ghost_field_workspace must be called before ys_fill_ghost_padded_field"
+
+    nlines_z = 2*nz + 1
+
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        iline = (ix - nx0)*nlines_z + (iz + nz + 1)
+        lower_pair = ys_left_u(:, iline)
+        upper_pair = ys_right_u(:, iline)
+
+        if (ny0 == 1) then
+          lower_rhs0 = ys_rhs_store(0, iline) - ys_rhs_store(-1, iline)*ys_eq0_store(-2, iline)/ys_eqm1_store(-2, iline)
+          lower_eq0 = ys_eq0_store(:, iline) - ys_eqm1_store(:, iline)*ys_eq0_store(-2, iline)/ys_eqm1_store(-2, iline)
+          lower_eq0(-2) = 0.0d0
+
+          dst(0, iz, ix) = (lower_rhs0 - sum(lower_eq0(0:2)*dst(1:3, iz, ix)))/lower_eq0(-1)
+          dst(-1, iz, ix) = (ys_rhs_store(-1, iline) - sum(ys_eqm1_store(-1:2, iline)*dst(0:3, iz, ix)))/ys_eqm1_store(-2, iline)
+        else
+          dst(ny0 - 2, iz, ix) = lower_pair(1)
+          dst(ny0 - 1, iz, ix) = lower_pair(2)
+        end if
+
+        if (nyN == ny - 1) then
+          upper_rhsn = ys_rhs_store(ny, iline) - ys_rhs_store(ny + 1, iline)*ys_eqn_store(2, iline)/ys_eqnp1_store(2, iline)
+          upper_eqn = ys_eqn_store(:, iline) - ys_eqnp1_store(:, iline)*ys_eqn_store(2, iline)/ys_eqnp1_store(2, iline)
+          upper_eqn(2) = 0.0d0
+
+          dst(ny, iz, ix) = (upper_rhsn - sum(upper_eqn(-2:0)*dst(ny - 3:ny - 1, iz, ix)))/upper_eqn(1)
+          dst(ny + 1, iz, ix) = (ys_rhs_store(ny + 1, iline) - sum(ys_eqnp1_store(-2:1, iline)*dst(ny - 3:ny, iz, ix)))/ys_eqnp1_store(2, iline)
+        else
+          dst(nyN + 1, iz, ix) = upper_pair(1)
+          dst(nyN + 2, iz, ix) = upper_pair(2)
+        end if
+      end do
+    end do
+  end subroutine ys_fill_ghost_padded_field
 
   !$omp begin declare target
   subroutine ys_lu5decomp(a)

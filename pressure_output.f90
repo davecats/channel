@@ -15,7 +15,7 @@ MODULE pressure_output
   USE mpi_transpose, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, ierr, &
                            sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, &
                            fft_transpose_is_local, repack_zTOx_local, repack_xTOz_local
-  USE y_line_solvers, ONLY: ys_prepare_ghost_field_workspace, ys_solve_ghost_field, ys_rhs_store, ys_matrix_store, &
+  USE y_line_solvers, ONLY: ys_prepare_ghost_field_workspace, ys_solve_ghost_field, ys_fill_ghost_padded_field, ys_rhs_store, ys_matrix_store, &
                             ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store
 #ifdef HAVE_MPI
   USE mpi_f08
@@ -544,6 +544,7 @@ CONTAINS
     !$omp target exit data map(delete: ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
 
     call ys_solve_ghost_field(p(ny0:nyN, :, :), ny, nz)
+    call ys_fill_ghost_padded_field(p, ny, nz)
   END SUBROUTINE solve_pressure_field
 
   SUBROUTINE solve_dpdy_field(src0, src1, dpdy)
@@ -610,6 +611,7 @@ CONTAINS
     !$omp target exit data map(delete: ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
 
     call ys_solve_ghost_field(dpdy(ny0:nyN, :, :), ny, nz)
+    call ys_fill_ghost_padded_field(dpdy, ny, nz)
   END SUBROUTINE solve_dpdy_field
 
 END MODULE pressure_output
