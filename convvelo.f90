@@ -11,7 +11,6 @@ module convvelo
   use mpi_transpose, only: ny0, nyN, nx0, nxN, nxB, nzB, nx, has_average, ierr, sendbuf, recvbuf, &
                            pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, nzd, fft_transpose_is_local, &
                            repack_zTOx_local, repack_xTOz_local
-  use y_line_solvers, only: ys_leftlu5div
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
   use ffts, only: IFT, RFT, HFT, FFT, VVdx, VVdz
 #else
@@ -423,10 +422,10 @@ contains
   subroutine apply_dyy_to_work(component_index)
     implicit none
     integer(C_INT), intent(in) :: component_index
-    integer(C_INT) :: iy, iz, ix
+    integer(C_INT) :: iy, iz, ix, hi1, hi2
 
     !$omp target teams distribute parallel do collapse(2) &
-    !$omp shared(convvelo_work, V, component_index, d240, d24m1, d24n, d24np1, der, D0mat, ny0, nyN, ny, nx0, nxN, nz) private(ix, iz, iy)
+    !$omp shared(convvelo_work, V, component_index, d240, d24m1, d24n, d24np1, der, D0mat, ny0, nyN, ny, nx0, nxN, nz) private(ix, iz, iy, hi1, hi2)
     do ix = nx0, nxN
       do iz = -nz, nz
         convvelo_work(0, iz, ix) = sum(d240(-2:2)*V(-1:3, iz, ix, component_index))
@@ -445,7 +444,17 @@ contains
                                         der(ny - 1, 0, 2)*convvelo_work(ny + 1, iz, ix))
         convvelo_work(ny - 2, iz, ix) = convvelo_work(ny - 2, iz, ix) - &
                                         der(ny - 2, 0, 2)*convvelo_work(ny, iz, ix)
-        call ys_leftlu5div(convvelo_work(:, iz, ix), D0mat)
+        hi1 = size(D0mat, 1) - 1
+        hi2 = size(D0mat, 2) - 3
+        do iy = hi1 - hi2, 0, -1
+          convvelo_work(iy, iz, ix) = convvelo_work(iy, iz, ix) - &
+                                      (D0mat(iy, 1)*convvelo_work(iy + 1, iz, ix) + D0mat(iy, 2)*convvelo_work(iy + 2, iz, ix))
+          convvelo_work(iy, iz, ix) = convvelo_work(iy, iz, ix)*D0mat(iy, 0)
+        end do
+        do iy = 0, hi1
+          convvelo_work(iy, iz, ix) = convvelo_work(iy, iz, ix) - &
+                                      (D0mat(iy, -2)*convvelo_work(iy - 2, iz, ix) + D0mat(iy, -1)*convvelo_work(iy - 1, iz, ix))
+        end do
       end do
     end do
   end subroutine apply_dyy_to_work

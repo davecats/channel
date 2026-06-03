@@ -103,6 +103,7 @@ contains
     call ys_solve_ghost_field_reduced(dst, ny, nz)
   end subroutine ys_solve_ghost_field
 
+  !$omp begin declare target
   subroutine ys_lu5decomp(a)
     real(C_DOUBLE), intent(inout) :: a(0:, -2:)
     integer(C_INT) :: hi1, hi2
@@ -168,6 +169,7 @@ contains
     f1(ny - 2) = f1(ny - 2) - der(ny - 2, 0, 2)*f1(ny)
     call ys_leftlu5div(f1, d0mat)
   end subroutine ys_solve_compact_derivative
+  !$omp end declare target
 
   subroutine ys_solve_compact_system(x, a, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
                                      rhs_lower, rhs_lower_ghost, rhs_upper, rhs_upper_ghost, ny, ny0, nyN)
@@ -469,6 +471,7 @@ contains
     deallocate (packed_recv, band_a, rhs)
   end subroutine ys_solve_reduced_interfaces
 
+  !$omp begin declare target
   subroutine ys_factor_banded_complex(a)
     complex(C_DOUBLE_COMPLEX), intent(inout) :: a(:, :)
     integer(C_INT), parameter :: bw = 5
@@ -558,5 +561,6 @@ contains
       rhs(i, 1:nrhs) = rhs(i, 1:nrhs)*a(i, 0)
     end do
   end subroutine ys_solve_factored_penta_multi
+  !$omp end declare target
 
 end module y_line_solvers

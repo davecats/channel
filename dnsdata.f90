@@ -25,9 +25,6 @@ MODULE dnsdata
   USE rbmat
   USE mpi_transpose
   USE ffts
-  USE y_line_solvers, ONLY: ys_lu5decomp, ys_leftlu5div, ys_solve_compact_derivative, ys_solve_compact_system, &
-                            ys_prepare_ghost_field_workspace, ys_solve_ghost_field, ys_rhs_store, ys_matrix_store, &
-                            ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store
 
   IMPLICIT NONE
 
@@ -287,6 +284,7 @@ CONTAINS
   !--------------------------------------------------------------!
   !--------------- Set-up the compact derivatives ---------------!
   SUBROUTINE setup_derivatives()
+    use y_line_solvers, only: ys_lu5decomp
     IMPLICIT NONE
     real(C_DOUBLE)    :: M(0:4, 0:4), t(0:4)
     integer(C_INT)    :: iy, i, j
@@ -431,6 +429,7 @@ CONTAINS
   !$omp declare target(COMPLEXderiv)
 #endif
   SUBROUTINE COMPLEXderiv(f0, f1, der, D0mat)
+    use y_line_solvers, only: ys_solve_compact_derivative
     complex(C_DOUBLE_COMPLEX), intent(in)  :: f0(-1:ny + 1)
     complex(C_DOUBLE_COMPLEX), intent(out) :: f1(-1:ny + 1)
     real(C_DOUBLE), DIMENSION(:, :), intent(in) :: der(ny0:nyN, 0:3, -2:2)
@@ -440,6 +439,8 @@ CONTAINS
   END SUBROUTINE COMPLEXderiv
 
   SUBROUTINE apply_complex_derivative_with_y_pencil(src, dst)
+    use y_line_solvers, only: ys_prepare_ghost_field_workspace, ys_solve_ghost_field, ys_rhs_store, ys_matrix_store, &
+                              ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), intent(in) :: src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
@@ -474,6 +475,8 @@ CONTAINS
   SUBROUTINE solve_compact_component_with_y_pencil(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
                                                    lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
                                                    lambda_coeff, diffusion_coeff)
+    use y_line_solvers, only: ys_prepare_ghost_field_workspace, ys_solve_ghost_field, ys_rhs_store, ys_matrix_store, &
+                              ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store
     IMPLICIT NONE
     integer(C_INT), intent(in) :: component_index, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index
     real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
@@ -527,6 +530,7 @@ CONTAINS
   END FUNCTION select_bc_rhs
 
   SUBROUTINE solve_mean_correction_line(x, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, lambda_coeff, diffusion_coeff)
+    use y_line_solvers, only: ys_solve_compact_system
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), intent(inout) :: x(-1:ny + 1)
     real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
@@ -567,37 +571,36 @@ CONTAINS
                                                5_C_INT, 0_C_INT, -5_C_INT, 0_C_INT, lambda, 1.0d0)
     call apply_complex_derivative_with_y_pencil(V(:, :, :, 2), V(:, :, :, 3))
 
+    if (nx0 == 0) then
+      V(:, 0, 0, 3) = dcmplx(dimag(V(:, 0, 0, 1)), 0.d0)
+      V(:, 0, 0, 1) = dcmplx(dreal(V(:, 0, 0, 1)), 0.d0)
+      call solve_mean_correction_line(ucor, eta0bc, eta0m1bc, etanbc, etanp1bc, lambda, 1.0d0)
+
+      fr(1) = yintegr(V(:, 0, 0, 1), y)
+      fr(2) = yintegr(V(:, 0, 0, 3), y)
+      fr(3) = yintegr(ucor, y)
+      IF (abs(meanflowx) > 1.0d-7) THEN
+        corrpx = (meanflowx - fr(1))/fr(3)
+        V(:, 0, 0, 1) = dcmplx(dreal(V(:, 0, 0, 1)) + corrpx*dreal(ucor), dimag(V(:, 0, 0, 1)))
+      END IF
+      IF (abs(meanflowz) > 1.0d-7) THEN
+        corrpz = (meanflowz - fr(2))/fr(3)
+        V(:, 0, 0, 3) = dcmplx(dreal(V(:, 0, 0, 3)) + corrpz*dreal(ucor), dimag(V(:, 0, 0, 3)))
+      END IF
+    end if
+
     !$omp target teams distribute parallel do collapse(2) default(none) &
     !$omp shared(ny, ny0, nyN, nz, nx0, nxN) &
-    !$omp shared(V, eta0bc, eta0m1bc, etanbc, etanp1bc) &
-    !$omp shared(D0mat, der, k2, ialfa, ibeta, y, fr, ucor, meanflowx, meanflowz, corrpx, corrpz, lambda) &
+    !$omp shared(V, k2, ialfa, ibeta) &
     !$omp private(ix, iz, j, temp)
     DO ix = nx0, nxN
       DO iz = -nz, nz
-        ! Correct flow rate
-        IF (ix == 0 .AND. iz == 0) THEN
-          V(:, 0, 0, 3) = dcmplx(dimag(V(:, 0, 0, 1)), 0.d0); 
-          V(:, 0, 0, 1) = dcmplx(dreal(V(:, 0, 0, 1)), 0.d0); 
-          call solve_mean_correction_line(ucor, eta0bc, eta0m1bc, etanbc, etanp1bc, lambda, 1.0d0)
-
-          fr(1) = yintegr(V(:, 0, 0, 1), y)
-          fr(2) = yintegr(V(:, 0, 0, 3), y)
-          fr(3) = yintegr(ucor, y)
-          IF (abs(meanflowx) > 1.0d-7) THEN
-            corrpx = (meanflowx - fr(1))/fr(3)
-            V(:, 0, 0, 1) = dcmplx(dreal(V(:, 0, 0, 1)) + corrpx*dreal(ucor), dimag(V(:, 0, 0, 1)))
-          END IF
-          IF (abs(meanflowz) > 1.0d-7) THEN
-            corrpz = (meanflowz - fr(2))/fr(3)
-            V(:, 0, 0, 3) = dcmplx(dreal(V(:, 0, 0, 3)) + corrpz*dreal(ucor), dimag(V(:, 0, 0, 3)))
-          END IF
-        ELSE
-          do j = ny0 - 2, nyN + 2
-            temp = (ialfa(ix)*V(j, iz, ix, 3) - ibeta(iz)*V(j, iz, ix, 1))/k2(iz, ix)
-            V(j, iz, ix, 3) = (ibeta(iz)*V(j, iz, ix, 3) + ialfa(ix)*V(j, iz, ix, 1))/k2(iz, ix)
-            V(j, iz, ix, 1) = temp
-          end do
-        END IF
+        if (ix == 0 .and. iz == 0) cycle
+        do j = ny0 - 2, nyN + 2
+          temp = (ialfa(ix)*V(j, iz, ix, 3) - ibeta(iz)*V(j, iz, ix, 1))/k2(iz, ix)
+          V(j, iz, ix, 3) = (ibeta(iz)*V(j, iz, ix, 3) + ialfa(ix)*V(j, iz, ix, 1))/k2(iz, ix)
+          V(j, iz, ix, 1) = temp
+        end do
       END DO
     END DO
   END SUBROUTINE linsolve
@@ -611,23 +614,23 @@ CONTAINS
     call solve_compact_component_with_y_pencil(3_C_INT + iPhi, phi0bc, phi0m1bc, phinbc, phinp1bc, 5_C_INT + iPhi, 0_C_INT, &
                                                -(5_C_INT + iPhi), 0_C_INT, lambda, pra(iPhi))
 
+    if (nx0 == 0) then
+      call solve_mean_correction_line(tcor(:, iPhi), phi0bc, phi0m1bc, phinbc, phinp1bc, lambda, pra(iPhi))
+      fr(3 + iPhi) = yintegr(V(:, 0, 0, 3 + iPhi), y)
+      fr(3 + nPhi + iPhi) = yintegr(tcor(:, iPhi), y)
+      IF (abs(meantb) > 1.0d-7) THEN
+        corrtx(iPhi) = (meantb - fr(3 + iPhi))/fr(3 + nPhi + iPhi)
+        V(:, 0, 0, 3 + iPhi) = dcmplx(dreal(V(:, 0, 0, 3 + iPhi)) + corrtx(iPhi)*dreal(tcor(:, iPhi)), &
+                                      dimag(V(:, 0, 0, 3 + iPhi)))
+      END IF
+    end if
+
     !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(ny, ny0, nyN, nz, nx0, nxN, nPhi) &
-    !$omp shared(V, phi0bc, phi0m1bc, phinbc, phinp1bc, tcor, y, fr, corrtx, meantb, iPhi, lambda, pra) &
+    !$omp shared(ny, ny0, nyN, nz, nx0, nxN, nPhi, V) &
     !$omp private(ix, iz, temp)
     DO ix = nx0, nxN
       DO iz = -nz, nz
-        ! Correct flow rate
-        IF (ix == 0 .AND. iz == 0) THEN
-          call solve_mean_correction_line(tcor(:, iPhi), phi0bc, phi0m1bc, phinbc, phinp1bc, lambda, pra(iPhi))
-          fr(3 + iPhi) = yintegr(V(:, 0, 0, 3 + iPhi), y); 
-          fr(3 + nPhi + iPhi) = yintegr(tcor(:, iPhi), y); 
-          IF (abs(meantb) > 1.0d-7) THEN
-            corrtx(iPhi) = (meantb - fr(3 + iPhi))/fr(3 + nPhi + iPhi)
-            V(:, 0, 0, 3 + iPhi) = dcmplx(dreal(V(:, 0, 0, 3 + iPhi)) + corrtx(iPhi)*dreal(tcor(:, iPhi)), &
-                                          dimag(V(:, 0, 0, 3 + iPhi)))
-          END IF
-        END IF
+        if (ix == 0 .and. iz == 0) cycle
       END DO
     END DO
   END SUBROUTINE linsolve_scalar
