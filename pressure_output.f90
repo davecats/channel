@@ -15,7 +15,8 @@ MODULE pressure_output
   USE mpi_transpose, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, ierr, yl0, ylN, ylB, &
                            sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, &
                            fft_transpose_is_local, repack_zTOx_local, repack_xTOz_local
-  USE y_line_solvers, ONLY: ys_solve_ghost_field
+  USE y_line_solvers, ONLY: ys_prepare_ghost_field_workspace, ys_solve_ghost_field, ys_rhs_store, ys_matrix_store, &
+                            ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store
 #ifdef HAVE_MPI
   USE mpi_f08
 #endif
@@ -458,7 +459,49 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(in) :: src0(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(in) :: src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: p(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    call ys_solve_ghost_field(src0, src1, p, ny, nz, build_pressure_line)
+    integer(C_INT) :: ix, iz, iy, iline, nlines_z
+    complex(C_DOUBLE_COMPLEX) :: tmp, tmp2
+
+    call ys_prepare_ghost_field_workspace(ny, nz, nxB)
+    nlines_z = 2*nz + 1
+
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        iline = (ix - nx0)*nlines_z + (iz + nz + 1)
+        do iy = 1, ny - 1
+          ys_rhs_store(iy, iline) = sum(der(iy, 0, -2:2)*src0(iy - 2:iy + 2, iz, ix)) + &
+                                    sum(der(iy, 1, -2:2)*src1(iy - 2:iy + 2, iz, ix))
+        end do
+
+        if (ix == 0 .and. iz == 0) then
+          do iy = 1, ny - 1
+            ys_matrix_store(iy, -2:2, iline) = der(iy, 2, -2:2)
+          end do
+          ys_eqm1_store(:, iline) = d140
+          ys_rhs_store(-1, iline) = ni*sum(d240(-2:2)*V(-1:3, iz, ix, 2))
+          ys_eq0_store(:, iline) = d240
+          ys_rhs_store(0, iline) = src0(0, iz, ix) + src1(0, iz, ix)
+          ys_eqn_store(1, iline) = 1.0d0
+          ys_eqnp1_store(:, iline) = der(ny - 1, 3, :)
+        else
+          do iy = 1, ny - 1
+            ys_matrix_store(iy, -2:2, iline) = der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)
+          end do
+          ys_eqm1_store(:, iline) = der(1, 3, :)
+          tmp = sum(d240(-2:2)*V(-1:3, iz, ix, 1))
+          tmp2 = sum(d240(-2:2)*V(-1:3, iz, ix, 3))
+          ys_rhs_store(0, iline) = -ni*(ialfa(ix)*tmp + ibeta(iz)*tmp2)/k2(iz, ix)
+          ys_eq0_store(-1, iline) = 1.0d0
+          tmp = sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 1))
+          tmp2 = sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 3))
+          ys_rhs_store(ny, iline) = -ni*(ialfa(ix)*tmp + ibeta(iz)*tmp2)/k2(iz, ix)
+          ys_eqn_store(1, iline) = 1.0d0
+          ys_eqnp1_store(:, iline) = der(ny - 1, 3, :)
+        end if
+      end do
+    end do
+
+    call ys_solve_ghost_field(p, ny, nz)
   END SUBROUTINE solve_pressure_field
 
   SUBROUTINE solve_dpdy_field(src0, src1, dpdy)
@@ -466,84 +509,30 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(in) :: src0(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(in) :: src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dpdy(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    call ys_solve_ghost_field(src0, src1, dpdy, ny, nz, build_dpdy_line)
+    integer(C_INT) :: ix, iz, iy, iline, nlines_z
+
+    call ys_prepare_ghost_field_workspace(ny, nz, nxB)
+    nlines_z = 2*nz + 1
+
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        iline = (ix - nx0)*nlines_z + (iz + nz + 1)
+        do iy = 1, ny - 1
+          ys_matrix_store(iy, -2:2, iline) = der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)
+          ys_rhs_store(iy, iline) = sum(der(iy, 1, -2:2)*src0(iy - 2:iy + 2, iz, ix)) + &
+                                    sum(der(iy, 2, -2:2)*src1(iy - 2:iy + 2, iz, ix))
+        end do
+
+        ys_rhs_store(0, iline) = ni*sum(d240(-2:2)*V(-1:3, iz, ix, 2))
+        ys_eq0_store(-1, iline) = 1.0d0
+        ys_eqm1_store(:, iline) = der(1, 3, :)
+        ys_rhs_store(ny, iline) = ni*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 2))
+        ys_eqn_store(1, iline) = 1.0d0
+        ys_eqnp1_store(:, iline) = der(ny - 1, 3, :)
+      end do
+    end do
+
+    call ys_solve_ghost_field(dpdy, ny, nz)
   END SUBROUTINE solve_dpdy_field
-
-  SUBROUTINE build_pressure_line(ix_global, iz_global, src0_line, src1_line, line, pmat, eqm1, eq0, eqn, eqnp1, ny_line)
-    IMPLICIT NONE
-    integer(C_INT), intent(in) :: ix_global, iz_global, ny_line
-    complex(C_DOUBLE_COMPLEX), intent(in) :: src0_line(:), src1_line(:)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: line(-1:ny_line + 1)
-    real(C_DOUBLE), intent(out) :: pmat(1:ny_line + 1, -2:2), eqm1(-2:2), eq0(-2:2), eqn(-2:2), eqnp1(-2:2)
-    complex(C_DOUBLE_COMPLEX) :: tmp, tmp2
-    integer(C_INT) :: iy
-
-    pmat = 0.0d0
-    line = (0.0d0, 0.0d0)
-
-    do iy = 1, ny_line - 1
-      line(iy) = sum(der(iy, 0, -2:2)*src0_line(iy:iy + 4)) + &
-                 sum(der(iy, 1, -2:2)*src1_line(iy:iy + 4))
-    end do
-
-    if (ix_global == 0 .and. iz_global == 0) then
-      do iy = 1, ny_line - 1
-        pmat(iy, -2:2) = der(iy, 2, -2:2)
-      end do
-      eqm1(:) = d140
-      line(-1) = ni*sum(d240(-2:2)*V(-1:3, iz_global, ix_global, 2))
-      eq0(:) = d240
-      line(0) = src0_line(2) + src1_line(2)
-      line(ny_line) = 0.0d0
-      eqn(:) = 0.0d0
-      eqn(1) = 1.0d0
-      eqnp1(:) = der(ny_line - 1, 3, :)
-      line(ny_line + 1) = 0.0d0
-    else
-      do iy = 1, ny_line - 1
-        pmat(iy, -2:2) = der(iy, 2, -2:2) - k2(iz_global, ix_global)*der(iy, 0, -2:2)
-      end do
-      eqm1(:) = der(1, 3, :)
-      line(-1) = 0.0d0
-      tmp = sum(d240(-2:2)*V(-1:3, iz_global, ix_global, 1))
-      tmp2 = sum(d240(-2:2)*V(-1:3, iz_global, ix_global, 3))
-      line(0) = -ni*(ialfa(ix_global)*tmp + ibeta(iz_global)*tmp2)/k2(iz_global, ix_global)
-      eq0(:) = 0.0d0
-      eq0(-1) = 1.0d0
-      tmp = sum(d24n(-2:2)*V(ny_line - 3:ny_line + 1, iz_global, ix_global, 1))
-      tmp2 = sum(d24n(-2:2)*V(ny_line - 3:ny_line + 1, iz_global, ix_global, 3))
-      line(ny_line) = -ni*(ialfa(ix_global)*tmp + ibeta(iz_global)*tmp2)/k2(iz_global, ix_global)
-      eqn(:) = 0.0d0
-      eqn(1) = 1.0d0
-      line(ny_line + 1) = 0.0d0
-      eqnp1(:) = der(ny_line - 1, 3, :)
-    end if
-  END SUBROUTINE build_pressure_line
-
-  SUBROUTINE build_dpdy_line(ix_global, iz_global, src0_line, src1_line, line, pmat, eqm1, eq0, eqn, eqnp1, ny_line)
-    IMPLICIT NONE
-    integer(C_INT), intent(in) :: ix_global, iz_global, ny_line
-    complex(C_DOUBLE_COMPLEX), intent(in) :: src0_line(:), src1_line(:)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: line(-1:ny_line + 1)
-    real(C_DOUBLE), intent(out) :: pmat(1:ny_line + 1, -2:2), eqm1(-2:2), eq0(-2:2), eqn(-2:2), eqnp1(-2:2)
-    integer(C_INT) :: iy
-
-    do iy = 1, ny_line - 1
-      pmat(iy, -2:2) = der(iy, 2, -2:2) - k2(iz_global, ix_global)*der(iy, 0, -2:2)
-      line(iy) = sum(der(iy, 1, -2:2)*src0_line(iy:iy + 4)) + &
-                 sum(der(iy, 2, -2:2)*src1_line(iy:iy + 4))
-    end do
-
-    line(0) = ni*sum(d240(-2:2)*V(-1:3, iz_global, ix_global, 2))
-    eq0 = 0.0d0
-    eq0(-1) = 1.0d0
-    line(-1) = 0.0d0
-    eqm1 = der(1, 3, :)
-    line(ny_line) = ni*sum(d24n(-2:2)*V(ny_line - 3:ny_line + 1, iz_global, ix_global, 2))
-    eqn = 0.0d0
-    eqn(1) = 1.0d0
-    line(ny_line + 1) = 0.0d0
-    eqnp1 = der(ny_line - 1, 3, :)
-  END SUBROUTINE build_dpdy_line
 
 END MODULE pressure_output

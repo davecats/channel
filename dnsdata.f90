@@ -26,7 +26,8 @@ MODULE dnsdata
   USE mpi_transpose
   USE ffts
   USE y_line_solvers, ONLY: ys_lu5decomp, ys_leftlu5div, ys_solve_compact_derivative, ys_solve_compact_system, &
-                            ys_solve_ghost_field
+                            ys_prepare_ghost_field_workspace, ys_solve_ghost_field, ys_rhs_store, ys_matrix_store, &
+                            ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store
 
   IMPLICIT NONE
 
@@ -35,6 +36,7 @@ MODULE dnsdata
   integer(C_INT) :: ny, nz, nxd, nPhi
   !$omp declare target(ny)
   real(C_DOUBLE) :: alfa0, beta0, ni, a, ymin, ymax, deltat, cflmax, time, time0 = 0, dt_field, dt_save, t_max, gamma
+  !$omp declare target(ni)
   real(C_DOUBLE) :: u0, uN, t0, tN
   real(C_DOUBLE) :: meanpx, meanpz, meanflowx, meanflowz, meantx, meantb
   integer(C_INT), allocatable :: izd(:)
@@ -441,40 +443,32 @@ CONTAINS
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), intent(in) :: src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    complex(C_DOUBLE_COMPLEX) :: dummy(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    integer(C_INT) :: ix, iz, iy, iline, nlines_z
 
-    dummy = (0.0d0, 0.0d0)
-    call ys_solve_ghost_field(src, dummy, dst, ny, nz, build_derivative_line)
-  contains
-    subroutine build_derivative_line(ix_global, iz_global, src0_line, src1_line, line, amat, eqm1, eq0, eqn, eqnp1, ny_line)
-      integer(C_INT), intent(in) :: ix_global, iz_global, ny_line
-      complex(C_DOUBLE_COMPLEX), intent(in) :: src0_line(:), src1_line(:)
-      complex(C_DOUBLE_COMPLEX), intent(out) :: line(-1:ny_line + 1)
-      real(C_DOUBLE), intent(out) :: amat(1:ny_line + 1, -2:2)
-      real(C_DOUBLE), intent(out) :: eqm1(-2:2), eq0(-2:2), eqn(-2:2), eqnp1(-2:2)
-      integer(C_INT) :: iy
+    call ys_prepare_ghost_field_workspace(ny, nz, nxB)
+    nlines_z = 2*nz + 1
 
-      amat = 0.0d0
-      line = (0.0d0, 0.0d0)
-      do iy = 1, ny_line - 1
-        amat(iy, -2:2) = der(iy, 0, -2:2)
-        line(iy) = sum(der(iy, 1, -2:2)*src0_line(iy:iy + 4))
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        iline = (ix - nx0)*nlines_z + (iz + nz + 1)
+        do iy = 1, ny - 1
+          ys_matrix_store(iy, -2:2, iline) = der(iy, 0, -2:2)
+          ys_rhs_store(iy, iline) = sum(der(iy, 1, -2:2)*src(iy - 2:iy + 2, iz, ix))
+        end do
+
+        ys_rhs_store(0, iline) = sum(d140(-2:2)*src(-1:3, iz, ix))
+        ys_rhs_store(-1, iline) = sum(d14m1(-2:2)*src(-1:3, iz, ix))
+        ys_rhs_store(ny, iline) = sum(d14n(-2:2)*src(ny - 3:ny + 1, iz, ix))
+        ys_rhs_store(ny + 1, iline) = sum(d14np1(-2:2)*src(ny - 3:ny + 1, iz, ix))
+
+        ys_eqm1_store(-2, iline) = 1.0d0
+        ys_eq0_store(-1, iline) = 1.0d0
+        ys_eqn_store(1, iline) = 1.0d0
+        ys_eqnp1_store(2, iline) = 1.0d0
       end do
+    end do
 
-      line(0) = sum(d140(-2:2)*src0_line(1:5))
-      line(-1) = sum(d14m1(-2:2)*src0_line(1:5))
-      line(ny_line) = sum(d14n(-2:2)*src0_line(ny_line - 1:ny_line + 3))
-      line(ny_line + 1) = sum(d14np1(-2:2)*src0_line(ny_line - 1:ny_line + 3))
-
-      eqm1 = 0.0d0
-      eq0 = 0.0d0
-      eqn = 0.0d0
-      eqnp1 = 0.0d0
-      eqm1(-2) = 1.0d0
-      eq0(-1) = 1.0d0
-      eqn(1) = 1.0d0
-      eqnp1(2) = 1.0d0
-    end subroutine build_derivative_line
+    call ys_solve_ghost_field(dst, ny, nz)
   END SUBROUTINE apply_complex_derivative_with_y_pencil
 
   SUBROUTINE solve_compact_component_with_y_pencil(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
@@ -484,42 +478,39 @@ CONTAINS
     integer(C_INT), intent(in) :: component_index, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index
     real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
     real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
-    complex(C_DOUBLE_COMPLEX) :: dummy(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    integer(C_INT) :: ix, iz, iy, iline, nlines_z
 
-    dummy = (0.0d0, 0.0d0)
-    call ys_solve_ghost_field(V(:, :, :, component_index), dummy, V(:, :, :, component_index), ny, nz, build_compact_line)
-  contains
-    subroutine build_compact_line(ix_global, iz_global, src0_line, src1_line, line, mat, eqm1, eq0, eqn, eqnp1, ny_line)
-      integer(C_INT), intent(in) :: ix_global, iz_global, ny_line
-      complex(C_DOUBLE_COMPLEX), intent(in) :: src0_line(:), src1_line(:)
-      complex(C_DOUBLE_COMPLEX), intent(out) :: line(-1:ny_line + 1)
-      real(C_DOUBLE), intent(out) :: mat(1:ny_line + 1, -2:2)
-      real(C_DOUBLE), intent(out) :: eqm1(-2:2), eq0(-2:2), eqn(-2:2), eqnp1(-2:2)
-      integer(C_INT) :: iy
+    call ys_prepare_ghost_field_workspace(ny, nz, nxB)
+    nlines_z = 2*nz + 1
 
-      line = src0_line
-      mat = 0.0d0
-      do iy = 1, ny_line - 1
-        mat(iy, -2:2) = lambda_coeff*der(iy, 0, -2:2) - &
-                        diffusion_coeff*ni*(der(iy, 2, -2:2) - k2(iz_global, ix_global)*der(iy, 0, -2:2))
-      end do
-      if (component_index == 2_C_INT) then
-        do iy = 1, ny_line - 1
-          mat(iy, -2:2) = lambda_coeff*(der(iy, 2, -2:2) - k2(iz_global, ix_global)*der(iy, 0, -2:2)) - &
-                          ni*(der(iy, 3, -2:2) - 2.0d0*k2(iz_global, ix_global)*der(iy, 2, -2:2) + &
-                              k2(iz_global, ix_global)*k2(iz_global, ix_global)*der(iy, 0, -2:2))
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        iline = (ix - nx0)*nlines_z + (iz + nz + 1)
+        ys_rhs_store(-1:ny + 1, iline) = V(-1:ny + 1, iz, ix, component_index)
+        do iy = 1, ny - 1
+          ys_matrix_store(iy, -2:2, iline) = lambda_coeff*der(iy, 0, -2:2) - &
+                                             diffusion_coeff*ni*(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2))
         end do
-      end if
+        if (component_index == 2_C_INT) then
+          do iy = 1, ny - 1
+            ys_matrix_store(iy, -2:2, iline) = lambda_coeff*(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)) - &
+                                               ni*(der(iy, 3, -2:2) - 2.0d0*k2(iz, ix)*der(iy, 2, -2:2) + &
+                                                   k2(iz, ix)*k2(iz, ix)*der(iy, 0, -2:2))
+          end do
+        end if
 
-      eqm1 = lower_ghost_bc
-      eq0 = lower_bc
-      eqn = upper_bc
-      eqnp1 = upper_ghost_bc
-      line(-1) = select_bc_rhs(iz_global, ix_global, lower_ghost_rhs_index)
-      line(0) = select_bc_rhs(iz_global, ix_global, lower_rhs_index)
-      line(ny_line) = select_bc_rhs(iz_global, ix_global, upper_rhs_index)
-      line(ny_line + 1) = select_bc_rhs(iz_global, ix_global, upper_ghost_rhs_index)
-    end subroutine build_compact_line
+        ys_eqm1_store(:, iline) = lower_ghost_bc
+        ys_eq0_store(:, iline) = lower_bc
+        ys_eqn_store(:, iline) = upper_bc
+        ys_eqnp1_store(:, iline) = upper_ghost_bc
+        ys_rhs_store(-1, iline) = select_bc_rhs(iz, ix, lower_ghost_rhs_index)
+        ys_rhs_store(0, iline) = select_bc_rhs(iz, ix, lower_rhs_index)
+        ys_rhs_store(ny, iline) = select_bc_rhs(iz, ix, upper_rhs_index)
+        ys_rhs_store(ny + 1, iline) = select_bc_rhs(iz, ix, upper_ghost_rhs_index)
+      end do
+    end do
+
+    call ys_solve_ghost_field(V(:, :, :, component_index), ny, nz)
   END SUBROUTINE solve_compact_component_with_y_pencil
 
   COMPLEX(C_DOUBLE_COMPLEX) FUNCTION select_bc_rhs(iz, ix, rhs_index)
@@ -872,8 +863,8 @@ CONTAINS
     ! contribution known a-priori
     !$omp target teams distribute parallel do collapse(3) default(none)  &
     !$omp private(iz, ix, iy, tmp, k, unkn) &
-    !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) shared(meanpx, meanpz, ni, deltat, ode) &
-    !$omp shared(vvdz, v, pra)
+    !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) &
+    !$omp shared(meanpx, meanpz, ni, deltat, ode) shared(vvdz, v, pra)
     DO iz = -nz, nz
       DO ix = nx0, nxN
         DO iy = 1, ny - 1
@@ -892,8 +883,8 @@ CONTAINS
 
     !$omp target teams distribute parallel do collapse(3) default(none)  &
     !$omp private(iz, ix, iy, tmp, k, unkn) &
-    !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) shared(meanpx, meanpz, ni, deltat, ode) &
-    !$omp shared(vvdz, v, pra)
+    !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) &
+    !$omp shared(meanpx, meanpz, ni, deltat, ode) shared(vvdz, v, pra)
     DO iz = -nz, nz
       DO ix = nx0, nxN
         DO iy = 1, ny - 1
@@ -916,8 +907,8 @@ CONTAINS
 
     !$omp target teams distribute parallel do collapse(3) default(none)  &
     !$omp private(rhsu, rhsw, expl) private(iz, ix, iy, tmp, k, unkn) &
-    !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) shared(meanpx, meanpz, ni, deltat, ode) &
-    !$omp shared(vvdz, v, pra)
+    !$omp shared(nz, nx0, nxN, ny) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) &
+    !$omp shared(meanpx, meanpz, ni, deltat, ode) shared(vvdz, v, pra)
     DO iz = -nz, nz
       DO ix = nx0, nxN
         DO iy = 1, ny - 1
@@ -954,7 +945,7 @@ CONTAINS
     END DO
 
     !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(memrhs, V) shared(nz, nx0, nxN, ny, nPhi) private(iy, ix, iz)
+    !$omp shared(memrhs, V) shared(nz, nx0, nxN, ny, nPhi) private(iy, ix, iz, iPhi)
     DO iz = -nz, nz
     DO ix = nx0, nxN
     DO iy = 1, ny - 1

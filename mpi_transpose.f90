@@ -84,7 +84,7 @@ MODULE mpi_transpose
   integer(C_INT), save :: npy_grid = 1, npxz = 1, ipy = 0, ipxz = 0
   integer(C_INT), save :: nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN, miny, maxy, sendcount
   integer(C_INT), save :: yl0 = 1, ylN = 1, ylB = 1
-  !$omp declare target(ny0, nyN)
+  !$omp declare target(npy_grid, npxz, ipy, ipxz, nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN, yl0, ylN, ylB, sendcount)
   integer, allocatable, save :: y_block_starts(:), y_block_counts(:)
 
   logical, save :: has_terminal, has_average, fft_transpose_is_local
@@ -336,7 +336,6 @@ CONTAINS
 #endif
     ! Calculate domain division in wall-normal direction
     ny0 = 1; nyN = ny - 1; miny = ny0 - 2; maxy = nyN + 2
-    !$omp target update to(ny0, nyN)
     call split_block(ny + 3, npy_grid, ipy, yl0, ylB)
     ylN = yl0 + ylB - 1
     if (allocated(y_block_starts)) deallocate (y_block_starts, y_block_counts)
@@ -349,6 +348,7 @@ CONTAINS
     nx0 = ipxz*(nxpp)/npxz; nxN = (ipxz + 1)*(nxpp)/npxz - 1; nxB = nxN - nx0 + 1; 
     nz0 = ipxz*nzd/npxz; nzN = (ipxz + 1)*nzd/npxz - 1; nzB = nzN - nz0 + 1; 
     has_average = (nx0 == 0)
+    !$omp target update to(npy_grid, npxz, ipy, ipxz, nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN, yl0, ylN, ylB)
     fft_transpose_is_local = (nzB == nzd)
 #ifdef HAVE_MPI
 #ifdef mpiverbose
@@ -378,6 +378,7 @@ CONTAINS
     recvsize = npxz*nxB*nzB*(ny + 3)
 
     sendcount = nxB*nzB*(ny + 3)
+    !$omp target update to(sendcount)
 
     ! Allocate buffers for transposes*int(16, c_size_t)
 #if defined(HAVE_HIP)
