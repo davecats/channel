@@ -640,6 +640,7 @@ CONTAINS
   END SUBROUTINE scatter_full_y_line
 
   SUBROUTINE solve_mean_correction_line(x, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, lambda_coeff, diffusion_coeff)
+    !!! THIS OPERATES ON A FULL Y LINE (ASSEMBLED FROM ALL PROCESSES) !!!
     use y_line_solvers, only: ys_solve_compact_system
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), intent(inout) :: x(-1:ny + 1)
@@ -656,13 +657,8 @@ CONTAINS
       mat(iy, -2:2) = lambda_coeff*der(iy, 0, -2:2) - &
                       diffusion_coeff*ni*(der(iy, 2, -2:2) - k2(0, 0)*der(iy, 0, -2:2))
     end do
-    if (npy_grid == 1 .or. ipy == 0) then
-      call ys_solve_compact_system(x, mat, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
-                                   (0.0d0, 0.0d0), (0.0d0, 0.0d0), (0.0d0, 0.0d0), (0.0d0, 0.0d0), ny, 1_C_INT, ny - 1)
-    end if
-#ifdef HAVE_MPI
-    if (npy_grid > 1) call MPI_Bcast(x, ny + 3, MPI_DOUBLE_COMPLEX, 0, MPI_COMM_Y, ierr)
-#endif
+    call ys_solve_compact_system(x, mat, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
+                                 (0.0d0, 0.0d0), (0.0d0, 0.0d0), (0.0d0, 0.0d0), (0.0d0, 0.0d0), ny, 1_C_INT, ny - 1)
   END SUBROUTINE solve_mean_correction_line
 
 ! Orr-Sommerfeld and Squire opearators
