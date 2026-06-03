@@ -74,9 +74,6 @@ target_link_libraries(test_post_convvelo PRIVATE channel_core)
 add_executable(test_y_pencil_transpose test_y_pencil_transpose.f90)
 target_link_libraries(test_y_pencil_transpose PRIVATE channel_core)
 
-add_executable(test_xz_transpose test_xz_transpose.f90)
-target_link_libraries(test_xz_transpose PRIVATE channel_core)
-
 add_executable(test_mean_correction test_mean_correction.f90)
 target_link_libraries(test_mean_correction PRIVATE channel_core)
 
@@ -239,16 +236,6 @@ add_test(NAME reduced_ghost_backend_2rank
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
 set_tests_properties(reduced_ghost_backend_2rank PROPERTIES PROCESSORS 2)
-
-add_test(NAME xz_transpose_2rank
-    COMMAND ${MPIEXEC_EXECUTABLE}
-            ${MPIEXEC_NUMPROC_FLAG} 2
-            ${MPIEXEC_PREFLAGS}
-            $<TARGET_FILE:test_xz_transpose>
-            ${MPIEXEC_POSTFLAGS}
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-)
-set_tests_properties(xz_transpose_2rank PROPERTIES PROCESSORS 2)
 
 add_test(NAME mean_correction_npy2_2rank
     COMMAND ${MPIEXEC_EXECUTABLE}

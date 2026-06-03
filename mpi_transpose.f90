@@ -65,10 +65,8 @@ MODULE mpi_transpose
 #ifdef HAVE_MPI
   USE mpi_f08
 #endif
-#if defined(HAVE_HIP) || defined(HAVE_CUDA)
+#if defined(HAVE_HIP)
   use omp_lib
-#endif
-#ifdef HAVE_HIP
   use roctx
 #endif
 
@@ -77,7 +75,7 @@ MODULE mpi_transpose
 #ifdef HAVE_MPI
   TYPE(MPI_Comm) :: MPI_CART_COMM, MPI_COMM_X, MPI_COMM_Y
 #endif
-#if defined(HAVE_HIP) || defined(HAVE_CUDA)
+#if defined(HAVE_HIP)
   complex(C_DOUBLE_COMPLEX), pointer:: sendbuf(:, :), recvbuf(:, :)
 #else
   complex(C_DOUBLE_COMPLEX), allocatable :: sendbuf(:, :), recvbuf(:, :)
@@ -86,7 +84,7 @@ MODULE mpi_transpose
   integer(C_INT), save :: npy_grid = 1, npxz = 1, ipy = 0, ipxz = 0
   integer(C_INT), save :: nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN, miny, maxy, sendcount
   integer(C_INT), save :: yl0 = 1, ylN = 1, ylB = 1
-  !$omp declare target(nx, nzd, npy_grid, npxz, ipy, ipxz, nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN, yl0, ylN, ylB, sendcount)
+  !$omp declare target(ny0, nyN)
   integer, allocatable, save :: y_block_starts(:), y_block_counts(:)
 
   logical, save :: has_terminal, has_average, fft_transpose_is_local
@@ -240,28 +238,24 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(out) :: recv(:)
     complex(C_DOUBLE_COMPLEX), intent(in)  :: send(:)
     type(MPI_Request), intent(inout) :: request
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
-    call MPI_IALLTOALL(send, sendcount, MPI_C_DOUBLE_COMPLEX, &
-                       recv, sendcount, MPI_C_DOUBLE_COMPLEX, MPI_COMM_X, request, ierr)
-#else
-    !$omp target data use_device_addr(send, recv)
-    call MPI_IALLTOALL(send, sendcount, MPI_C_DOUBLE_COMPLEX, &
-                       recv, sendcount, MPI_C_DOUBLE_COMPLEX, MPI_COMM_X, request, ierr)
+#ifndef HAVE_HIP
+    !$omp target data use_device_ptr(send, recv)
+#endif
+    call MPI_IALLTOALL(send, sendcount, MPI_DOUBLE_COMPLEX, &
+                       recv, sendcount, MPI_DOUBLE_COMPLEX, MPI_COMM_X, request, ierr)
+#ifndef HAVE_HIP
     !$omp end target data
 #endif
 
   END SUBROUTINE alltoall
 
   SUBROUTINE allgather_y_blocks_to_xz_full(src, dst)
-    complex(C_DOUBLE_COMPLEX), intent(in), target :: src(:, :, :)
-    complex(C_DOUBLE_COMPLEX), intent(out), target :: dst(:, :, :)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: src(:, :, :)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: dst(:, :, :)
 #ifdef HAVE_MPI
-    complex(C_DOUBLE_COMPLEX), allocatable, target :: recv(:)
+    complex(C_DOUBLE_COMPLEX), allocatable :: recv(:)
     integer, allocatable :: recvcounts(:), recvdispls(:)
     integer(C_INT) :: total_z, ix_local, iz_local, iy_local, src_rank, p, iy_global
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
-    logical :: src_on_device
-#endif
 
     total_z = int(size(src, 2), C_INT)
     dst = (0.0d0, 0.0d0)
@@ -277,51 +271,9 @@ CONTAINS
       if (src_rank > 0) recvdispls(src_rank) = recvdispls(src_rank - 1) + recvcounts(src_rank - 1)
     end do
     allocate (recv(sum(recvcounts)))
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
-    src_on_device = omp_target_is_present(c_loc(src(1, 1, 1)), omp_get_default_device()) /= 0
-    if (src_on_device) then
-      !$omp target enter data map(alloc: recv)
-      !$omp target data use_device_addr(src, recv)
-      call MPI_Allgatherv(src, int(size(src), kind=4), MPI_C_DOUBLE_COMPLEX, &
-                          recv, recvcounts, recvdispls, MPI_C_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
-      !$omp end target data
 
-      !$omp target teams distribute parallel do collapse(4) default(none) &
-      !$omp shared(dst, recv, recvdispls, y_block_counts, y_block_starts) shared(npy_grid, nxB, total_z) &
-      !$omp private(src_rank, ix_local, iz_local, iy_local, p, iy_global)
-      do src_rank = 0, npy_grid - 1
-        do ix_local = 1, nxB
-          do iz_local = 1, total_z
-            do iy_local = 1, y_block_counts(src_rank + 1)
-              p = recvdispls(src_rank) + iy_local + y_block_counts(src_rank + 1)*(iz_local - 1) + &
-                  y_block_counts(src_rank + 1)*total_z*(ix_local - 1)
-              iy_global = y_block_starts(src_rank + 1) + iy_local - 1
-              dst(iy_global, iz_local, ix_local) = recv(p)
-            end do
-          end do
-        end do
-      end do
-      !$omp target exit data map(delete: recv)
-    else
-      call MPI_Allgatherv(src, int(size(src), kind=4), MPI_C_DOUBLE_COMPLEX, &
-                          recv, recvcounts, recvdispls, MPI_C_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
-
-      do src_rank = 0, npy_grid - 1
-        p = recvdispls(src_rank)
-        do ix_local = 1, nxB
-          do iz_local = 1, total_z
-            do iy_local = 1, y_block_counts(src_rank + 1)
-              p = p + 1
-              iy_global = y_block_starts(src_rank + 1) + iy_local - 1
-              dst(iy_global, iz_local, ix_local) = recv(p)
-            end do
-          end do
-        end do
-      end do
-    end if
-#else
-    call MPI_Allgatherv(src, int(size(src), kind=4), MPI_C_DOUBLE_COMPLEX, &
-                        recv, recvcounts, recvdispls, MPI_C_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
+    call MPI_Allgatherv(src, int(size(src), kind=4), MPI_DOUBLE_COMPLEX, &
+                        recv, recvcounts, recvdispls, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
 
     do src_rank = 0, npy_grid - 1
       p = recvdispls(src_rank)
@@ -335,7 +287,6 @@ CONTAINS
         end do
       end do
     end do
-#endif
 
     deallocate (recv, recvcounts, recvdispls)
 #else
@@ -345,8 +296,8 @@ CONTAINS
 
   !------- Divide the problem in 1D slices -------!
   !-----------------------------------------------!
-  SUBROUTINE init_MPI(nxpp, nz, ny, nxd, nzd_in, nPhi, overlapping, npy_requested)
-    integer(C_INT), intent(in)  :: nxpp, nz, ny, nxd, nzd_in, nPhi, npy_requested
+  SUBROUTINE init_MPI(nxpp, nz, ny, nxd, nzd, nPhi, overlapping, npy_requested)
+    integer(C_INT), intent(in)  :: nxpp, nz, ny, nxd, nzd, nPhi, npy_requested
     logical, intent(in) :: overlapping
     integer, parameter :: ndims = 4
     integer :: i, color, key
@@ -371,8 +322,6 @@ CONTAINS
 #else
     if (npy_grid /= 1) error stop "init_MPI: npy > 1 requires MPI"
 #endif
-    nx = nxpp - 1
-    nzd = nzd_in
     npxz = nproc/npy_grid
     ipy = iproc/npxz
     ipxz = mod(iproc, npxz)
@@ -387,6 +336,7 @@ CONTAINS
 #endif
     ! Calculate domain division in wall-normal direction
     ny0 = 1; nyN = ny - 1; miny = ny0 - 2; maxy = nyN + 2
+    !$omp target update to(ny0, nyN)
     call split_block(ny + 3, npy_grid, ipy, yl0, ylB)
     ylN = yl0 + ylB - 1
     if (allocated(y_block_starts)) deallocate (y_block_starts, y_block_counts)
@@ -400,7 +350,6 @@ CONTAINS
     nz0 = ipxz*nzd/npxz; nzN = (ipxz + 1)*nzd/npxz - 1; nzB = nzN - nz0 + 1; 
     has_average = (nx0 == 0)
     fft_transpose_is_local = (nzB == nzd)
-    !$omp target update to(nx, nzd, npy_grid, npxz, ipy, ipxz, nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN, yl0, ylN, ylB)
 #ifdef HAVE_MPI
 #ifdef mpiverbose
     DO i = 0, nproc - 1
@@ -425,13 +374,13 @@ CONTAINS
       end if
       CALL MPI_Abort(MPI_COMM_WORLD, 1, ierror)
     end if
+    sendsize = npxz*nxB*nzB*(ny + 3)
+    recvsize = npxz*nxB*nzB*(ny + 3)
+
     sendcount = nxB*nzB*(ny + 3)
-    sendsize = npxz*sendcount
-    recvsize = npxz*sendcount
-    !$omp target update to(sendcount)
 
     ! Allocate buffers for transposes*int(16, c_size_t)
-#if defined(HAVE_HIP) || defined(HAVE_CUDA)
+#if defined(HAVE_HIP)
     ! On HIP with HSA_XNACK=1, the use_device_ptr statements around the MPI calls are ignored.
     ! Hence, MPI does a CPU mpi copy! So we need to allocate it explicity on the device.
     sendptr = omp_target_alloc(sendsize*int(16*merge(2, 1, overlapping), c_size_t), omp_get_default_device())
