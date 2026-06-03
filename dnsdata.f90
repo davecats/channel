@@ -377,6 +377,7 @@ CONTAINS
         bcn(iz, ix, 2) = bcn(iz, ix, 2) - vnbc(2)*bcn(iz, ix, 4)/vnp1bc(2)
       END DO
     END DO
+    !$omp target update from(bc0, bcn)
   END SUBROUTINE setup_boundary_conditions
 
   !--------------------------------------------------------------!
@@ -446,6 +447,7 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(out) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     integer(C_INT) :: ix, iz, iy, iline, nlines_z
 
+    !$omp target update from(src)
     call ys_prepare_ghost_field_workspace(ny, nz, nxB)
     nlines_z = 2*nz + 1
 
@@ -470,6 +472,7 @@ CONTAINS
     end do
 
     call ys_solve_ghost_field(dst, ny, nz)
+    !$omp target update to(dst)
   END SUBROUTINE apply_complex_derivative_with_y_pencil
 
   SUBROUTINE solve_compact_component_with_y_pencil(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
@@ -483,6 +486,7 @@ CONTAINS
     real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
     integer(C_INT) :: ix, iz, iy, iline, nlines_z
 
+    !$omp target update from(V(:, :, :, component_index))
     call ys_prepare_ghost_field_workspace(ny, nz, nxB)
     nlines_z = 2*nz + 1
 
@@ -514,6 +518,7 @@ CONTAINS
     end do
 
     call ys_solve_ghost_field(V(:, :, :, component_index), ny, nz)
+    !$omp target update to(V(:, :, :, component_index))
   END SUBROUTINE solve_compact_component_with_y_pencil
 
   COMPLEX(C_DOUBLE_COMPLEX) FUNCTION select_bc_rhs(iz, ix, rhs_index)
@@ -587,6 +592,7 @@ CONTAINS
         corrpz = (meanflowz - fr(2))/fr(3)
         V(:, 0, 0, 3) = dcmplx(dreal(V(:, 0, 0, 3)) + corrpz*dreal(ucor), dimag(V(:, 0, 0, 3)))
       END IF
+      !$omp target update to(V(:, 0, 0, 1), V(:, 0, 0, 3))
     end if
 
     !$omp target teams distribute parallel do collapse(2) default(none) &
@@ -623,6 +629,7 @@ CONTAINS
         V(:, 0, 0, 3 + iPhi) = dcmplx(dreal(V(:, 0, 0, 3 + iPhi)) + corrtx(iPhi)*dreal(tcor(:, iPhi)), &
                                       dimag(V(:, 0, 0, 3 + iPhi)))
       END IF
+      !$omp target update to(V(:, 0, 0, 3 + iPhi))
     end if
 
     !$omp target teams distribute parallel do collapse(2) default(none) &

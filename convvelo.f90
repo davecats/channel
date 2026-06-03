@@ -422,10 +422,10 @@ contains
   subroutine apply_dyy_to_work(component_index)
     implicit none
     integer(C_INT), intent(in) :: component_index
-    integer(C_INT) :: iy, iz, ix, hi1, hi2
+    integer(C_INT) :: iy, iz, ix, row_lo, row_hi, upper_bw
 
     !$omp target teams distribute parallel do collapse(2) &
-    !$omp shared(convvelo_work, V, component_index, d240, d24m1, d24n, d24np1, der, D0mat, ny0, nyN, ny, nx0, nxN, nz) private(ix, iz, iy, hi1, hi2)
+    !$omp shared(convvelo_work, V, component_index, d240, d24m1, d24n, d24np1, der, D0mat, ny0, nyN, ny, nx0, nxN, nz) private(ix, iz, iy, row_lo, row_hi, upper_bw)
     do ix = nx0, nxN
       do iz = -nz, nz
         convvelo_work(0, iz, ix) = sum(d240(-2:2)*V(-1:3, iz, ix, component_index))
@@ -444,14 +444,15 @@ contains
                                         der(ny - 1, 0, 2)*convvelo_work(ny + 1, iz, ix))
         convvelo_work(ny - 2, iz, ix) = convvelo_work(ny - 2, iz, ix) - &
                                         der(ny - 2, 0, 2)*convvelo_work(ny, iz, ix)
-        hi1 = size(D0mat, 1) - 1
-        hi2 = size(D0mat, 2) - 3
-        do iy = hi1 - hi2, 0, -1
+        row_lo = lbound(D0mat, 1)
+        row_hi = ubound(D0mat, 1)
+        upper_bw = ubound(D0mat, 2)
+        do iy = row_hi - upper_bw, row_lo, -1
           convvelo_work(iy, iz, ix) = convvelo_work(iy, iz, ix) - &
                                       (D0mat(iy, 1)*convvelo_work(iy + 1, iz, ix) + D0mat(iy, 2)*convvelo_work(iy + 2, iz, ix))
           convvelo_work(iy, iz, ix) = convvelo_work(iy, iz, ix)*D0mat(iy, 0)
         end do
-        do iy = 0, hi1
+        do iy = row_lo, row_hi
           convvelo_work(iy, iz, ix) = convvelo_work(iy, iz, ix) - &
                                       (D0mat(iy, -2)*convvelo_work(iy - 2, iz, ix) + D0mat(iy, -1)*convvelo_work(iy - 1, iz, ix))
         end do
@@ -668,6 +669,7 @@ contains
     allocate (deriv(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
     call apply_complex_derivative_with_y_pencil(convvelo_work, deriv)
     convvelo_work = deriv
+    !$omp target update to(convvelo_work)
     deallocate (deriv)
   end subroutine apply_dy_to_existing_work
 
