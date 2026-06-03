@@ -15,7 +15,7 @@ MODULE pressure_output
   USE mpi_transpose, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, ierr, &
                            sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, &
                            fft_transpose_is_local, repack_zTOx_local, repack_xTOz_local
-  USE y_line_solvers, ONLY: ys_prepare_ghost_field_workspace, ys_solve_ghost_field_reduced, ys_local_rhs, ys_local_operator, &
+  USE y_line_solvers, ONLY: ys_solve_ghost_field_reduced, ys_local_rhs, ys_local_operator, &
                             ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
                             ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row
 #ifdef HAVE_MPI
@@ -478,7 +478,6 @@ CONTAINS
     integer(C_INT) :: ix, iz, iy, iline, nlines_z, ix_first, ix_last, iz_first, iz_last, row_start, row_end
     integer(C_INT) :: src_y_first, src_y_last
 
-    call ys_prepare_ghost_field_workspace(ny, nz, nxB)
     nlines_z = 2*nz + 1
     ix_first = nx0
     ix_last = nxN
@@ -496,17 +495,6 @@ CONTAINS
       do iz = iz_first, iz_last
         iline = (ix - ix_first)*nlines_z + (iz - iz_first + 1)
 
-        ys_local_rhs(:, iline) = (0.0d0, 0.0d0)
-        ys_local_operator(:, :, iline) = 0.0d0
-        ys_lower_ghost_rhs(iline) = (0.0d0, 0.0d0)
-        ys_lower_boundary_rhs(iline) = (0.0d0, 0.0d0)
-        ys_upper_boundary_rhs(iline) = (0.0d0, 0.0d0)
-        ys_upper_ghost_rhs(iline) = (0.0d0, 0.0d0)
-        ys_lower_ghost_row(:, iline) = 0.0d0
-        ys_lower_boundary_row(:, iline) = 0.0d0
-        ys_upper_boundary_row(:, iline) = 0.0d0
-        ys_upper_ghost_row(:, iline) = 0.0d0
-
         do iy = max(row_start, src_y_first + 2), min(row_end, src_y_last - 2)
           ys_local_rhs(iy, iline) = sum(der(iy, 0, -2:2)*src0(iy - 2:iy + 2, iz, ix)) + &
                                     sum(der(iy, 1, -2:2)*src1(iy - 2:iy + 2, iz, ix))
@@ -522,7 +510,12 @@ CONTAINS
             ys_lower_boundary_row(:, iline) = d240
             ys_lower_boundary_rhs(iline) = src0(0, iz, ix) + src1(0, iz, ix)
           end if
-          ys_upper_boundary_row(1, iline) = 1.0d0
+          if (row_end == ny - 1) then
+            ys_upper_boundary_row(:, iline) = 0.0d0
+            ys_upper_boundary_row(1, iline) = 1.0d0
+            ys_upper_boundary_rhs(iline) = (0.0d0, 0.0d0)
+            ys_upper_ghost_rhs(iline) = (0.0d0, 0.0d0)
+          end if
           if (row_end == ny - 1 .and. src_y_first <= ny - 3 .and. src_y_last >= ny + 1) then
             ys_upper_ghost_row(:, iline) = der(ny - 1, 3, :)
           end if
@@ -532,11 +525,15 @@ CONTAINS
           end do
           if (row_start == 1 .and. src_y_first <= -1 .and. src_y_last >= 3) then
             ys_lower_ghost_row(:, iline) = der(1, 3, :)
+            ys_lower_boundary_row(:, iline) = 0.0d0
+            ys_lower_ghost_rhs(iline) = (0.0d0, 0.0d0)
             ys_lower_boundary_rhs(iline) = -ni*(ialfa(ix)*sum(d240(-2:2)*V(-1:3, iz, ix, 1)) + &
                                                 ibeta(iz)*sum(d240(-2:2)*V(-1:3, iz, ix, 3)))/k2(iz, ix)
             ys_lower_boundary_row(-1, iline) = 1.0d0
           end if
           if (row_end == ny - 1 .and. src_y_first <= ny - 3 .and. src_y_last >= ny + 1) then
+            ys_upper_boundary_row(:, iline) = 0.0d0
+            ys_upper_ghost_rhs(iline) = (0.0d0, 0.0d0)
             ys_upper_boundary_rhs(iline) = -ni*(ialfa(ix)*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 1)) + &
                                                 ibeta(iz)*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 3)))/k2(iz, ix)
             ys_upper_boundary_row(1, iline) = 1.0d0
@@ -558,7 +555,6 @@ CONTAINS
     integer(C_INT) :: ix, iz, iy, iline, nlines_z, ix_first, ix_last, iz_first, iz_last, row_start, row_end
     integer(C_INT) :: src_y_first, src_y_last
 
-    call ys_prepare_ghost_field_workspace(ny, nz, nxB)
     nlines_z = 2*nz + 1
     ix_first = nx0
     ix_last = nxN
@@ -576,17 +572,6 @@ CONTAINS
       do iz = iz_first, iz_last
         iline = (ix - ix_first)*nlines_z + (iz - iz_first + 1)
 
-        ys_local_rhs(:, iline) = (0.0d0, 0.0d0)
-        ys_local_operator(:, :, iline) = 0.0d0
-        ys_lower_ghost_rhs(iline) = (0.0d0, 0.0d0)
-        ys_lower_boundary_rhs(iline) = (0.0d0, 0.0d0)
-        ys_upper_boundary_rhs(iline) = (0.0d0, 0.0d0)
-        ys_upper_ghost_rhs(iline) = (0.0d0, 0.0d0)
-        ys_lower_ghost_row(:, iline) = 0.0d0
-        ys_lower_boundary_row(:, iline) = 0.0d0
-        ys_upper_boundary_row(:, iline) = 0.0d0
-        ys_upper_ghost_row(:, iline) = 0.0d0
-
         do iy = max(row_start, src_y_first + 2), min(row_end, src_y_last - 2)
           ys_local_operator(iy, -2:2, iline) = der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)
           ys_local_rhs(iy, iline) = sum(der(iy, 1, -2:2)*src0(iy - 2:iy + 2, iz, ix)) + &
@@ -594,11 +579,15 @@ CONTAINS
         end do
 
         if (row_start == 1 .and. src_y_first <= -1 .and. src_y_last >= 3) then
+          ys_lower_boundary_row(:, iline) = 0.0d0
+          ys_lower_ghost_rhs(iline) = (0.0d0, 0.0d0)
           ys_lower_boundary_rhs(iline) = ni*sum(d240(-2:2)*V(-1:3, iz, ix, 2))
           ys_lower_boundary_row(-1, iline) = 1.0d0
           ys_lower_ghost_row(:, iline) = der(1, 3, :)
         end if
         if (row_end == ny - 1 .and. src_y_first <= ny - 3 .and. src_y_last >= ny + 1) then
+          ys_upper_boundary_row(:, iline) = 0.0d0
+          ys_upper_ghost_rhs(iline) = (0.0d0, 0.0d0)
           ys_upper_boundary_rhs(iline) = ni*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 2))
           ys_upper_boundary_row(1, iline) = 1.0d0
           ys_upper_ghost_row(:, iline) = der(ny - 1, 3, :)

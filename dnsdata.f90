@@ -173,6 +173,7 @@ CONTAINS
   !--------------------------------------------------------------!
   !---------------- Allocate memory for solution ----------------!
   SUBROUTINE init_memory(solveNS)
+    use y_line_solvers, only: ys_prepare_ghost_field_workspace
     IMPLICIT NONE
     INTEGER(C_INT) :: ix, iz
     logical, intent(IN) :: solveNS
@@ -220,6 +221,7 @@ CONTAINS
     IF (solveNS .AND. has_terminal) OPEN (UNIT=121, FILE='Runtimedata', ACTION='write')
 
     allocate (fr(3 + 2*nPhi)); fr = 0.0
+    call ys_prepare_ghost_field_workspace(ny, nz, nxB)
   END SUBROUTINE init_memory
 
   SUBROUTINE get_solver_memory_estimate(solveNS, n_floats)
@@ -252,6 +254,7 @@ CONTAINS
   !--------------------------------------------------------------!
   !--------------- Deallocate memory for solution ---------------!
   SUBROUTINE free_memory(solveNS)
+    use y_line_solvers, only: ys_release_ghost_field_workspace
     IMPLICIT NONE
     LOGICAL, intent(IN) :: solveNS
     !$omp target exit data map(delete: d240, d24m1, d04n, d24n, d24np1, D0mat)
@@ -273,6 +276,7 @@ CONTAINS
       CLOSE (UNIT=195)
       IF (has_terminal) CLOSE (UNIT=121)
     END IF
+    call ys_release_ghost_field_workspace()
   END SUBROUTINE free_memory
 
   SUBROUTINE sync_velocity_to_device()
@@ -438,7 +442,7 @@ CONTAINS
   END SUBROUTINE COMPLEXderiv
 
   SUBROUTINE apply_complex_derivative_with_y_pencil(src, dst, update_device)
-    use y_line_solvers, only: ys_prepare_ghost_field_workspace, ys_solve_ghost_field_reduced, ys_local_rhs, ys_local_operator, &
+    use y_line_solvers, only: ys_solve_ghost_field_reduced, ys_local_rhs, ys_local_operator, &
                               ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
                               ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row
     IMPLICIT NONE
@@ -449,7 +453,6 @@ CONTAINS
     integer(C_INT) :: src_y_first, src_y_last
     logical :: do_update_device
 
-    call ys_prepare_ghost_field_workspace(ny, nz, nxB)
     nlines_z = 2*nz + 1
     ix_first = nx0
     ix_last = nxN
@@ -467,29 +470,22 @@ CONTAINS
       do iz = iz_first, iz_last
         iline = (ix - ix_first)*nlines_z + (iz - iz_first + 1)
 
-        ys_local_rhs(:, iline) = (0.0d0, 0.0d0)
-        ys_local_operator(:, :, iline) = 0.0d0
-        ys_lower_ghost_rhs(iline) = (0.0d0, 0.0d0)
-        ys_lower_boundary_rhs(iline) = (0.0d0, 0.0d0)
-        ys_upper_boundary_rhs(iline) = (0.0d0, 0.0d0)
-        ys_upper_ghost_rhs(iline) = (0.0d0, 0.0d0)
-        ys_lower_ghost_row(:, iline) = 0.0d0
-        ys_lower_boundary_row(:, iline) = 0.0d0
-        ys_upper_boundary_row(:, iline) = 0.0d0
-        ys_upper_ghost_row(:, iline) = 0.0d0
-
         do iy = max(row_start, src_y_first + 2), min(row_end, src_y_last - 2)
           ys_local_operator(iy, -2:2, iline) = der(iy, 0, -2:2)
           ys_local_rhs(iy, iline) = sum(der(iy, 1, -2:2)*src(iy - 2:iy + 2, iz, ix))
         end do
 
         if (row_start == 1 .and. src_y_first <= -1 .and. src_y_last >= 3) then
+          ys_lower_ghost_row(:, iline) = 0.0d0
+          ys_lower_boundary_row(:, iline) = 0.0d0
           ys_lower_boundary_rhs(iline) = sum(d140(-2:2)*src(-1:3, iz, ix))
           ys_lower_ghost_rhs(iline) = sum(d14m1(-2:2)*src(-1:3, iz, ix))
           ys_lower_ghost_row(-2, iline) = 1.0d0
           ys_lower_boundary_row(-1, iline) = 1.0d0
         end if
         if (row_end == ny - 1 .and. src_y_first <= ny - 3 .and. src_y_last >= ny + 1) then
+          ys_upper_boundary_row(:, iline) = 0.0d0
+          ys_upper_ghost_row(:, iline) = 0.0d0
           ys_upper_boundary_rhs(iline) = sum(d14n(-2:2)*src(ny - 3:ny + 1, iz, ix))
           ys_upper_ghost_rhs(iline) = sum(d14np1(-2:2)*src(ny - 3:ny + 1, iz, ix))
           ys_upper_boundary_row(1, iline) = 1.0d0
@@ -510,7 +506,7 @@ CONTAINS
   SUBROUTINE solve_compact_component_with_y_pencil(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
                                                    lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
                                                    lambda_coeff, diffusion_coeff)
-    use y_line_solvers, only: ys_prepare_ghost_field_workspace, ys_solve_ghost_field_reduced, ys_local_rhs, ys_local_operator, &
+    use y_line_solvers, only: ys_solve_ghost_field_reduced, ys_local_rhs, ys_local_operator, &
                               ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
                               ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row
     IMPLICIT NONE
@@ -520,7 +516,6 @@ CONTAINS
     integer(C_INT) :: ix, iz, iy, iline, nlines_z, ix_first, ix_last, iz_first, iz_last, row_start, row_end
     integer(C_INT) :: v_y_first, v_y_last
 
-    call ys_prepare_ghost_field_workspace(ny, nz, nxB)
     nlines_z = 2*nz + 1
     ix_first = nx0
     ix_last = nxN
@@ -539,12 +534,6 @@ CONTAINS
       do iz = iz_first, iz_last
         iline = (ix - ix_first)*nlines_z + (iz - iz_first + 1)
 
-        ys_local_rhs(:, iline) = (0.0d0, 0.0d0)
-        ys_local_operator(:, :, iline) = 0.0d0
-        ys_lower_ghost_rhs(iline) = (0.0d0, 0.0d0)
-        ys_lower_boundary_rhs(iline) = (0.0d0, 0.0d0)
-        ys_upper_boundary_rhs(iline) = (0.0d0, 0.0d0)
-        ys_upper_ghost_rhs(iline) = (0.0d0, 0.0d0)
         ys_lower_ghost_row(:, iline) = lower_ghost_bc
         ys_lower_boundary_row(:, iline) = lower_bc
         ys_upper_boundary_row(:, iline) = upper_bc

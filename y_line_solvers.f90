@@ -13,7 +13,7 @@ module y_line_solvers
 
   public :: ys_lu5decomp, ys_leftlu5div
   public :: ys_solve_compact_derivative, ys_solve_compact_system, ys_solve_ghost_system
-  public :: ys_prepare_ghost_field_workspace, ys_solve_ghost_field_reduced
+  public :: ys_prepare_ghost_field_workspace, ys_release_ghost_field_workspace, ys_solve_ghost_field_reduced
   public :: ys_local_rhs, ys_local_operator
   public :: ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs
   public :: ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row
@@ -103,6 +103,27 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     ys_reduced_matrix_lu = (0.0d0, 0.0d0)
     ys_reduced_rhs = (0.0d0, 0.0d0)
   end subroutine ys_prepare_ghost_field_workspace
+
+  subroutine ys_release_ghost_field_workspace()
+    implicit none
+
+    if (.not. allocated(ys_local_rhs)) return
+
+    !$omp target exit data map(delete: ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
+    !$omp& ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ys_interior_lu, ys_interior_response_columns, &
+    !$omp& ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values, ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs)
+  deallocate (ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs)
+    deallocate (ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row)
+deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values)
+    deallocate (ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs)
+
+    ys_workspace_ny = -1
+    ys_workspace_nz = -1
+    ys_workspace_nx = -1
+    ys_workspace_nlines = 0
+    ys_workspace_active_n = 0
+    ys_workspace_npy = -1
+  end subroutine ys_release_ghost_field_workspace
 
   subroutine ys_lu5decomp(a)
     real(C_DOUBLE), intent(inout) :: a(0:, -2:)
