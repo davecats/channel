@@ -228,17 +228,18 @@ CONTAINS
 #else
     complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, ny0 - 2:)
 #endif
-    integer :: i, istat
+    integer :: i, istat, y0
+    y0 = lbound(x, 3)
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(x)
     istat = cudaDeviceSynchronize()
-    istat = cufftExecZ2Z(cu_pFFT, x(1, 1, 1), x(1, 1, 1), CUFFT_FORWARD)
+    istat = cufftExecZ2Z(cu_pFFT, x(1, 1, y0), x(1, 1, y0), CUFFT_FORWARD)
     istat = cudaDeviceSynchronize()
     !$omp end target data
 #elif defined(HAVE_HIP)
     !$omp target data use_device_addr(x)
     istat = hipDeviceSynchronize()
-    istat = hipfftExecZ2Z(hip_pFFT, c_loc(x(1, 1, 1)), c_loc(x(1, 1, 1)), HIPFFT_FORWARD)
+    istat = hipfftExecZ2Z(hip_pFFT, c_loc(x(1, 1, y0)), c_loc(x(1, 1, y0)), HIPFFT_FORWARD)
     istat = hipDeviceSynchronize()
     !$omp end target data
 #elif defined(HAVE_FFTW)
@@ -254,17 +255,18 @@ CONTAINS
 #else
     complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, ny0 - 2:)
 #endif
-    integer :: i, istat
+    integer :: i, istat, y0
+    y0 = lbound(x, 3)
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(x)
     istat = cudaDeviceSynchronize()
-    istat = cufftExecZ2Z(cu_pIFT, x(1, 1, 1), x(1, 1, 1), CUFFT_INVERSE)
+    istat = cufftExecZ2Z(cu_pIFT, x(1, 1, y0), x(1, 1, y0), CUFFT_INVERSE)
     istat = cudaDeviceSynchronize()
     !$omp end target data
 #elif defined(HAVE_HIP)
     !$omp target data use_device_addr(x)
     istat = hipDeviceSynchronize()
-    istat = hipfftExecZ2Z(hip_pIFT, c_loc(x(1, 1, 1)), c_loc(x(1, 1, 1)), HIPFFT_INVERSE)
+    istat = hipfftExecZ2Z(hip_pIFT, c_loc(x(1, 1, y0)), c_loc(x(1, 1, y0)), HIPFFT_INVERSE)
     istat = hipDeviceSynchronize()
     !$omp end target data
 #elif defined(HAVE_FFTW)
@@ -283,17 +285,19 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX) :: x(:, :, ny0 - 2:)
     real(C_DOUBLE) :: rx(:, :, ny0 - 2:)
 #endif
-    integer :: i, istat
+    integer :: i, istat, x_y0, rx_y0
+    x_y0 = lbound(x, 3)
+    rx_y0 = lbound(rx, 3)
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(x, rx)
     istat = cudaDeviceSynchronize()
-    istat = cufftExecZ2D(cu_pRFT, x(1, 1, 1), rx(1, 1, 1))
+    istat = cufftExecZ2D(cu_pRFT, x(1, 1, x_y0), rx(1, 1, rx_y0))
     istat = cudaDeviceSynchronize()
     !$omp end target data
 #elif defined(HAVE_HIP)
     !$omp target data use_device_addr(x, rx)
     istat = hipDeviceSynchronize()
-    istat = hipfftExecZ2D(hip_pRFT, c_loc(x(1, 1, 1)), c_loc(rx(1, 1, 1)))
+    istat = hipfftExecZ2D(hip_pRFT, c_loc(x(1, 1, x_y0)), c_loc(rx(1, 1, rx_y0)))
     istat = hipDeviceSynchronize()
     !$omp end target data
 #elif defined(HAVE_FFTW)
@@ -312,17 +316,19 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX) :: x(:, :, ny0 - 2:)
     real(C_DOUBLE) :: rx(:, :, ny0 - 2:)
 #endif
-    integer :: i, istat
+    integer :: i, istat, x_y0, rx_y0
+    x_y0 = lbound(x, 3)
+    rx_y0 = lbound(rx, 3)
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(rx, x)
     istat = cudaDeviceSynchronize()
-    istat = cufftExecD2Z(cu_pHFT, rx(1, 1, 1), x(1, 1, 1))
+    istat = cufftExecD2Z(cu_pHFT, rx(1, 1, rx_y0), x(1, 1, x_y0))
     istat = cudaDeviceSynchronize()
     !$omp end target data
 #elif defined(HAVE_HIP)
     !$omp target data use_device_addr(rx, x)
     istat = hipDeviceSynchronize()
-    istat = hipfftExecD2Z(hip_pHFT, c_loc(rx(1, 1, 1)), c_loc(x(1, 1, 1)))
+    istat = hipfftExecD2Z(hip_pHFT, c_loc(rx(1, 1, rx_y0)), c_loc(x(1, 1, x_y0)))
     istat = hipDeviceSynchronize()
     !$omp end target data
 #elif defined(HAVE_FFTW)

@@ -624,6 +624,7 @@ contains
     else
       call compute_poisson(convvelo_work)
     end if
+    !$omp target update to(convvelo_work)
     call multiply_work_by_conjugate(lhs_component)
     call finish_convvelo_field(field_index)
   end subroutine accumulate_cross_pressure
@@ -675,7 +676,7 @@ contains
     complex(C_DOUBLE_COMPLEX), allocatable :: deriv(:, :, :)
 
     allocate (deriv(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
-    call apply_complex_derivative_with_y_pencil(convvelo_work, deriv)
+    call apply_complex_derivative_with_y_pencil(convvelo_work, deriv, update_device=.false.)
     convvelo_work = deriv
     !$omp target update to(convvelo_work)
     deallocate (deriv)

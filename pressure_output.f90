@@ -129,11 +129,13 @@ CONTAINS
 
   SUBROUTINE assemble_pressure_sources()
     IMPLICIT NONE
-    integer(C_INT) :: iy, iz, ix
+    integer(C_INT) :: iy, iz, ix, y_first, y_last
+    y_first = ny0
+    y_last = nyN
 
-    !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(pressure_h0, pressure_h1, ny, nzB, nxd) private(iy, iz, ix)
-    do iy = ny0 - 2, nyN + 2
+    !$omp parallel do collapse(3) default(none) &
+    !$omp shared(pressure_h0, pressure_h1, ny, y_first, y_last, nzB, nxd) private(iy, iz, ix)
+    do iy = y_first - 2, y_last + 2
       do iz = 1, nzB
         do ix = 1, 2*(nxd + 1)
           pressure_h0(ix, iz, iy) = 0.0d0
@@ -141,6 +143,7 @@ CONTAINS
         end do
       end do
     end do
+    !$omp target update to(pressure_h0, pressure_h1)
 
     call build_pressure_real_x(iux, pressure_real0)
     call build_pressure_real_x(iwz, pressure_real1)
@@ -179,11 +182,13 @@ CONTAINS
     real(C_DOUBLE), intent(inout) :: dst(:, :, ny0 - 2:)
     real(C_DOUBLE), intent(in) :: dudx(:, :, ny0 - 2:)
     real(C_DOUBLE), intent(in) :: dwdz(:, :, ny0 - 2:)
-    integer(C_INT) :: iy, iz, ix
+    integer(C_INT) :: iy, iz, ix, y_first, y_last
+    y_first = ny0
+    y_last = nyN
 
     !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(dst, dudx, dwdz, ny, nzB, nxd, factor) private(iy, iz, ix)
-    do iy = ny0 - 2, nyN + 2
+    !$omp shared(dst, dudx, dwdz, ny, y_first, y_last, nzB, nxd, factor) private(iy, iz, ix)
+    do iy = y_first - 2, y_last + 2
       do iz = 1, nzB
         do ix = 1, 2*nxd
           dst(ix, iz, iy) = dst(ix, iz, iy) - 2.0d0*( &
@@ -201,11 +206,13 @@ CONTAINS
     real(C_DOUBLE), intent(in) :: lhs(:, :, ny0 - 2:)
     real(C_DOUBLE), intent(in) :: rhs(:, :, ny0 - 2:)
     real(C_DOUBLE), intent(in) :: scale
-    integer(C_INT) :: iy, iz, ix
+    integer(C_INT) :: iy, iz, ix, y_first, y_last
+    y_first = ny0
+    y_last = nyN
 
     !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(dst, lhs, rhs, scale, ny, nzB, nxd) private(iy, iz, ix)
-    do iy = ny0 - 2, nyN + 2
+    !$omp shared(dst, lhs, rhs, scale, ny, y_first, y_last, nzB, nxd) private(iy, iz, ix)
+    do iy = y_first - 2, y_last + 2
       do iz = 1, nzB
         do ix = 1, 2*nxd
           dst(ix, iz, iy) = dst(ix, iz, iy) + scale*lhs(ix, iz, iy)*rhs(ix, iz, iy)
@@ -226,11 +233,13 @@ CONTAINS
   SUBROUTINE load_pressure_field_to_zbuf(kind)
     IMPLICIT NONE
     integer, intent(in) :: kind
-    integer(C_INT) :: ix, iz, iy, jx, izd_idx
+    integer(C_INT) :: ix, iz, iy, jx, izd_idx, y_first, y_last
+    y_first = ny0
+    y_last = nyN
 
-    !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(VVdz, nzd, nxB) private(iy, jx, izd_idx)
-    do iy = ny0 - 2, nyN + 2
+    !$omp parallel do collapse(3) default(none) &
+    !$omp shared(VVdz, nzd, nxB, y_first, y_last) private(iy, jx, izd_idx)
+    do iy = y_first - 2, y_last + 2
       do jx = 1, nxB
         do izd_idx = 1, nzd
           VVdz(izd_idx, jx, iy, 1) = (0.0d0, 0.0d0)
@@ -240,149 +249,150 @@ CONTAINS
 
     select case (kind)
     case (iu)
-      !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(VVdz, V, izd, ny, nz, nx0, nxN) private(ix, iz, iy, jx)
+      !$omp parallel do collapse(3) default(none) &
+      !$omp shared(VVdz, V, izd, ny, y_first, y_last, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
-          do iy = ny0 - 2, nyN + 2
+          do iy = y_first - 2, y_last + 2
             jx = ix - nx0 + 1
             VVdz(izd(iz) + 1, jx, iy, 1) = V(iy, iz, ix, 1)
           end do
         end do
       end do
     case (iv)
-      !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(VVdz, V, izd, ny, nz, nx0, nxN) private(ix, iz, iy, jx)
+      !$omp parallel do collapse(3) default(none) &
+      !$omp shared(VVdz, V, izd, ny, y_first, y_last, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
-          do iy = ny0 - 2, nyN + 2
+          do iy = y_first - 2, y_last + 2
             jx = ix - nx0 + 1
             VVdz(izd(iz) + 1, jx, iy, 1) = V(iy, iz, ix, 2)
           end do
         end do
       end do
     case (iw)
-      !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(VVdz, V, izd, ny, nz, nx0, nxN) private(ix, iz, iy, jx)
+      !$omp parallel do collapse(3) default(none) &
+      !$omp shared(VVdz, V, izd, ny, y_first, y_last, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
-          do iy = ny0 - 2, nyN + 2
+          do iy = y_first - 2, y_last + 2
             jx = ix - nx0 + 1
             VVdz(izd(iz) + 1, jx, iy, 1) = V(iy, iz, ix, 3)
           end do
         end do
       end do
     case (iux)
-      !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(VVdz, V, ialfa, izd, ny, nz, nx0, nxN) private(ix, iz, iy, jx)
+      !$omp parallel do collapse(3) default(none) &
+      !$omp shared(VVdz, V, ialfa, izd, ny, y_first, y_last, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
-          do iy = ny0 - 2, nyN + 2
+          do iy = y_first - 2, y_last + 2
             jx = ix - nx0 + 1
             VVdz(izd(iz) + 1, jx, iy, 1) = ialfa(ix)*V(iy, iz, ix, 1)
           end do
         end do
       end do
     case (ivx)
-      !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(VVdz, V, ialfa, izd, ny, nz, nx0, nxN) private(ix, iz, iy, jx)
+      !$omp parallel do collapse(3) default(none) &
+      !$omp shared(VVdz, V, ialfa, izd, ny, y_first, y_last, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
-          do iy = ny0 - 2, nyN + 2
+          do iy = y_first - 2, y_last + 2
             jx = ix - nx0 + 1
             VVdz(izd(iz) + 1, jx, iy, 1) = ialfa(ix)*V(iy, iz, ix, 2)
           end do
         end do
       end do
     case (ivz)
-      !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(VVdz, V, ibeta, izd, ny, nz, nx0, nxN) private(ix, iz, iy, jx)
+      !$omp parallel do collapse(3) default(none) &
+      !$omp shared(VVdz, V, ibeta, izd, ny, y_first, y_last, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
-          do iy = ny0 - 2, nyN + 2
+          do iy = y_first - 2, y_last + 2
             jx = ix - nx0 + 1
             VVdz(izd(iz) + 1, jx, iy, 1) = ibeta(iz)*V(iy, iz, ix, 2)
           end do
         end do
       end do
     case (iwx)
-      !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(VVdz, V, ialfa, izd, ny, nz, nx0, nxN) private(ix, iz, iy, jx)
+      !$omp parallel do collapse(3) default(none) &
+      !$omp shared(VVdz, V, ialfa, izd, ny, y_first, y_last, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
-          do iy = ny0 - 2, nyN + 2
+          do iy = y_first - 2, y_last + 2
             jx = ix - nx0 + 1
             VVdz(izd(iz) + 1, jx, iy, 1) = ialfa(ix)*V(iy, iz, ix, 3)
           end do
         end do
       end do
     case (iuz)
-      !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(VVdz, V, ibeta, izd, ny, nz, nx0, nxN) private(ix, iz, iy, jx)
+      !$omp parallel do collapse(3) default(none) &
+      !$omp shared(VVdz, V, ibeta, izd, ny, y_first, y_last, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
-          do iy = ny0 - 2, nyN + 2
+          do iy = y_first - 2, y_last + 2
             jx = ix - nx0 + 1
             VVdz(izd(iz) + 1, jx, iy, 1) = ibeta(iz)*V(iy, iz, ix, 1)
           end do
         end do
       end do
     case (iwz)
-      !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(VVdz, V, ibeta, izd, ny, nz, nx0, nxN) private(ix, iz, iy, jx)
+      !$omp parallel do collapse(3) default(none) &
+      !$omp shared(VVdz, V, ibeta, izd, ny, y_first, y_last, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
-          do iy = ny0 - 2, nyN + 2
+          do iy = y_first - 2, y_last + 2
             jx = ix - nx0 + 1
             VVdz(izd(iz) + 1, jx, iy, 1) = ibeta(iz)*V(iy, iz, ix, 3)
           end do
         end do
       end do
     case (iuxx)
-      !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(VVdz, V, ialfa, izd, ny, nz, nx0, nxN) private(ix, iz, iy, jx)
+      !$omp parallel do collapse(3) default(none) &
+      !$omp shared(VVdz, V, ialfa, izd, ny, y_first, y_last, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
-          do iy = ny0 - 2, nyN + 2
+          do iy = y_first - 2, y_last + 2
             jx = ix - nx0 + 1
             VVdz(izd(iz) + 1, jx, iy, 1) = ialfa(ix)*ialfa(ix)*V(iy, iz, ix, 1)
           end do
         end do
       end do
     case (iuxz)
-      !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(VVdz, V, ialfa, ibeta, izd, ny, nz, nx0, nxN) private(ix, iz, iy, jx)
+      !$omp parallel do collapse(3) default(none) &
+      !$omp shared(VVdz, V, ialfa, ibeta, izd, ny, y_first, y_last, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
-          do iy = ny0 - 2, nyN + 2
+          do iy = y_first - 2, y_last + 2
             jx = ix - nx0 + 1
             VVdz(izd(iz) + 1, jx, iy, 1) = ialfa(ix)*ibeta(iz)*V(iy, iz, ix, 1)
           end do
         end do
       end do
     case (iwxz)
-      !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(VVdz, V, ialfa, ibeta, izd, ny, nz, nx0, nxN) private(ix, iz, iy, jx)
+      !$omp parallel do collapse(3) default(none) &
+      !$omp shared(VVdz, V, ialfa, ibeta, izd, ny, y_first, y_last, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
-          do iy = ny0 - 2, nyN + 2
+          do iy = y_first - 2, y_last + 2
             jx = ix - nx0 + 1
             VVdz(izd(iz) + 1, jx, iy, 1) = ialfa(ix)*ibeta(iz)*V(iy, iz, ix, 3)
           end do
         end do
       end do
     case (iwzz)
-      !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(VVdz, V, ibeta, izd, ny, nz, nx0, nxN) private(ix, iz, iy, jx)
+      !$omp parallel do collapse(3) default(none) &
+      !$omp shared(VVdz, V, ibeta, izd, ny, y_first, y_last, nz, nx0, nxN) private(ix, iz, iy, jx)
       do ix = nx0, nxN
         do iz = -nz, nz
-          do iy = ny0 - 2, nyN + 2
+          do iy = y_first - 2, y_last + 2
             jx = ix - nx0 + 1
             VVdz(izd(iz) + 1, jx, iy, 1) = ibeta(iz)*ibeta(iz)*V(iy, iz, ix, 3)
           end do
         end do
       end do
     end select
+    !$omp target update to(VVdz(:, :, :, 1))
   END SUBROUTINE load_pressure_field_to_zbuf
 
   SUBROUTINE spectral_field_to_real_x(rx)
@@ -392,7 +402,9 @@ CONTAINS
     type(MPI_Request) :: request
     type(MPI_Status) :: status
 #endif
-    integer(C_INT) :: ix, iz, iy, jx
+    integer(C_INT) :: ix, iz, iy, jx, y_first, y_last
+    y_first = ny0
+    y_last = nyN
 
     call IFT(VVdz(:, :, :, 1))
     if (fft_transpose_is_local) then
@@ -406,8 +418,8 @@ CONTAINS
 #endif
     if (.not. fft_transpose_is_local) call unpack_zTOx(recvbuf(:, 1), VVdx(:, :, :, 1), ny)
     !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(VVdx, nx, nxd, nzB) private(ix, iz, iy)
-    do iy = ny0 - 2, nyN + 2
+    !$omp shared(VVdx, nx, nxd, nzB, y_first, y_last) private(ix, iz, iy)
+    do iy = y_first - 2, y_last + 2
       do iz = 1, nzB
         do ix = nx + 2, nxd + 1
           VVdx(ix, iz, iy, 1) = (0.0d0, 0.0d0)
@@ -425,7 +437,9 @@ CONTAINS
     type(MPI_Request) :: request
     type(MPI_Status) :: status
 #endif
-    integer(C_INT) :: ix, iz, iy
+    integer(C_INT) :: ix, iz, iy, y_first, y_last
+    y_first = ny0
+    y_last = nyN
 
     call HFT(rx, VVdx(:, :, :, 1))
     if (fft_transpose_is_local) then
@@ -439,25 +453,27 @@ CONTAINS
 #endif
     if (.not. fft_transpose_is_local) call unpack_xTOz(recvbuf(:, 1), VVdz(:, :, :, 1), ny)
     call FFT(VVdz(:, :, :, 1))
+    !$omp target update from(VVdz(:, :, :, 1))
 
-    !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(VVdz, nx0, nxN, ny, nz, field) private(ix, iz, iy)
+    !$omp parallel do collapse(3) default(none) &
+    !$omp shared(VVdz, nx0, nxN, ny, y_first, y_last, nz, field) private(ix, iz, iy)
     do ix = nx0, nxN
-      do iy = ny0 - 2, nyN + 2
+      do iy = y_first - 2, y_last + 2
         do iz = 0, nz
           field(iy, iz, ix) = VVdz(iz + 1, ix - nx0 + 1, iy, 1)
         end do
       end do
     end do
-    !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(VVdz,nx0, nxN, ny, nz, field, izd) private(ix, iz, iy)
+    !$omp parallel do collapse(3) default(none) &
+    !$omp shared(VVdz,nx0, nxN, ny, y_first, y_last, nz, field, izd) private(ix, iz, iy)
     do ix = nx0, nxN
-      do iy = ny0 - 2, nyN + 2
+      do iy = y_first - 2, y_last + 2
         do iz = -nz, -1
           field(iy, iz, ix) = VVdz(izd(iz) + 1, ix - nx0 + 1, iy, 1)
         end do
       end do
     end do
+    !$omp target update to(field)
   END SUBROUTINE real_x_to_spectral_field
 
   SUBROUTINE solve_pressure_field(src0, src1, p)
@@ -481,11 +497,6 @@ CONTAINS
     mat_y_first = lbound(ys_matrix_store, 1)
     mat_y_last = ubound(ys_matrix_store, 1)
 
-    !$omp target enter data map(alloc: ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
-    !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(src0, src1, V, der, d140, d240, d24n, ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store, &
-    !$omp& k2, ialfa, ibeta, ni, ny, ix_first, ix_last, iz_first, iz_last, nlines_z, src_y_first, src_y_last, rhs_y_first, rhs_y_last, &
-    !$omp& mat_y_first, mat_y_last) private(ix, iz, iy, iline)
     do ix = ix_first, ix_last
       do iz = iz_first, iz_last
         iline = (ix - ix_first)*nlines_z + (iz - iz_first + 1)
@@ -539,9 +550,6 @@ CONTAINS
         end if
       end do
     end do
-    !$omp end target teams distribute parallel do
-    !$omp target update from(ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
-    !$omp target exit data map(delete: ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
 
     call ys_solve_ghost_field(p(ny0:nyN, :, :), ny, nz)
     call ys_fill_ghost_padded_field(p, ny, nz)
@@ -568,11 +576,6 @@ CONTAINS
     mat_y_first = lbound(ys_matrix_store, 1)
     mat_y_last = ubound(ys_matrix_store, 1)
 
-    !$omp target enter data map(alloc: ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
-    !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(src0, src1, V, der, d240, d24n, ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store, &
-    !$omp& k2, ni, ny, ix_first, ix_last, iz_first, iz_last, nlines_z, src_y_first, src_y_last, rhs_y_first, rhs_y_last, mat_y_first, mat_y_last) &
-    !$omp& private(ix, iz, iy, iline)
     do ix = ix_first, ix_last
       do iz = iz_first, iz_last
         iline = (ix - ix_first)*nlines_z + (iz - iz_first + 1)
@@ -606,9 +609,6 @@ CONTAINS
         end if
       end do
     end do
-    !$omp end target teams distribute parallel do
-    !$omp target update from(ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
-    !$omp target exit data map(delete: ys_rhs_store, ys_matrix_store, ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
 
     call ys_solve_ghost_field(dpdy(ny0:nyN, :, :), ny, nz)
     call ys_fill_ghost_padded_field(dpdy, ny, nz)

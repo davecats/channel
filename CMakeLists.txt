@@ -215,7 +215,7 @@ add_test(NAME regression_test_scalar_6rank_np4
             ${MPIEXEC_POSTFLAGS}
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
-set_tests_properties(regression_test_scalar_4rank PROPERTIES PROCESSORS 8)
+set_tests_properties(regression_test_scalar_6rank_np4 PROPERTIES PROCESSORS 8)
 
 set(POST_PRESSURE_NPROCS 1)
 set(POST_PRESSURE_EXE ${CMAKE_CURRENT_BINARY_DIR}/post_pressure)
