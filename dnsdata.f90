@@ -821,9 +821,15 @@ CONTAINS
 
       ! Step 1: assemble, pack, post alltoall (only if in range)
       if (m <= 3 + nPhi) then
+        call roctxPush("transform_to_physical assemble_vvdz")
         CALL assemble_vvdz(m, to)
+        call roctxPop("transform_to_physical assemble_vvdz")
+        call roctxPush("transform_to_physical IFT")
         CALL IFT(VVdz(:, :, :, to), ny)
+        call roctxPop("transform_to_physical IFT")
+        call roctxPush("transform_to_physical pack_zTOx")
         CALL pack_zTOx(VVdz(:, :, :, to), sendbuf(:, to), ny)
+        call roctxPop("transform_to_physical pack_zTOx")
         CALL alltoall(sendbuf(:, to), recvbuf(:, to), requests(m), "zTOx transform_to_physical")
       end if
 
@@ -832,9 +838,15 @@ CONTAINS
         call roctxPush("MPI_Wait zTOx transform_to_physical")
         CALL MPI_WAIT(requests(mm1), status, ierr)
         call roctxPop("MPI_Wait zTOx transform_to_physical")
+        call roctxPush("transform_to_physical unpack_zTOx")
         CALL unpack_zTOx(recvbuf(:, from), VVdx(:, :, :, from), ny)
+        call roctxPop("transform_to_physical unpack_zTOx")
+        call roctxPush("transform_to_physical zero_vvdx_hft")
         CALL zero_vvdx_hft(from)
+        call roctxPop("transform_to_physical zero_vvdx_hft")
+        call roctxPush("transform_to_physical RFT")
         CALL RFT(VVdx(:, :, :, from), rVVdx(:, :, :, mm1), ny)
+        call roctxPop("transform_to_physical RFT")
       end if
     END DO
   END SUBROUTINE transform_to_physical
@@ -857,9 +869,15 @@ CONTAINS
 
       ! Step 1: Build, HFT, pack, and post alltoall
       if (m <= 6 + 3*nPhi) then
+        call roctxPush("transform_back build_products")
         call build_products(m, to)
+        call roctxPop("transform_back build_products")
+        call roctxPush("transform_back HFT")
         call HFT(products(:, :, :, to), VVdx(:, :, :, to), ny)
+        call roctxPop("transform_back HFT")
+        call roctxPush("transform_back pack_xTOz")
         call pack_xTOz(VVdx(:, :, :, to), sendbuf(:, to), ny)
+        call roctxPop("transform_back pack_xTOz")
         call alltoall(sendbuf(:, to), recvbuf(:, to), requests(m), "xTOz transform_back_and_build_rhs")
       end if
 
@@ -868,9 +886,15 @@ CONTAINS
         call roctxPush("MPI_Wait xTOz transform_back_and_build_rhs")
         call MPI_WAIT(requests(mm1), status, ierr)
         call roctxPop("MPI_Wait xTOz transform_back_and_build_rhs")
+        call roctxPush("transform_back unpack_xTOz")
         call unpack_xTOz(recvbuf(:, from), VVdz(:, :, :, from), ny)
+        call roctxPop("transform_back unpack_xTOz")
+        call roctxPush("transform_back FFT")
         call FFT(VVdz(:, :, :, from), ny)
+        call roctxPop("transform_back FFT")
+        call roctxPush("transform_back buildrhs")
         call buildrhs(ODE, mm1, from)
+        call roctxPop("transform_back buildrhs")
       end if
     END DO
   END SUBROUTINE transform_back_and_build_rhs
