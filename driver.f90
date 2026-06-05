@@ -164,6 +164,7 @@ CONTAINS
   SUBROUTINE timeloop()
     USE dnsdata
     USE convvelo, only: advance_convvelo_runtime
+    USE roctx, only: roctxPush, roctxPop
     IMPLICIT NONE
     integer:: iPhi, ix, iz, i, ic
 #ifdef chron
@@ -176,7 +177,9 @@ CONTAINS
 #ifdef chron
       CALL CPU_TIME(timei)
 #endif
+      call roctxPush("timestep")
       ! apply boundary conditions from input file (Couette-like)
+      call roctxPush("boundary_conditions")
       IF (has_average) THEN
         bc0(0, 0, 1) = u0; bcn(0, 0, 1) = uN
       END IF
@@ -194,36 +197,55 @@ CONTAINS
         END DO
       END DO
       !$omp target update to(bc0, bcn)
+      call roctxPop("boundary_conditions")
       ! Increment number of steps
       istep = istep + 1
 
       ! Loop over sub timestep
       do i = 1, 3
+        call roctxPush("rk_substep")
         time = time + 2.0/RK_rai(1, i)*deltat
+        call roctxPush("transform_to_physical")
         CALL transform_to_physical()
+        call roctxPop("transform_to_physical")
 
         if (i .eq. 3) THEN
+          call roctxPush("compute_cfl")
           call compute_cfl
+          call roctxPop("compute_cfl")
         END IF
 
         !only depends on data from the previous substep, updates V(:, :, :, 1:2) and oldrhs(:, :, :, 1:2)
         !can be done in parallel to FFTs
+        call roctxPush("buildrhs_prepare")
         CALL buildrhs_prepare(RK_rai(:, i))
+        call roctxPop("buildrhs_prepare")
 
+        call roctxPush("transform_back_and_build_rhs")
         CALL transform_back_and_build_rhs(RK_rai(:, i))
+        call roctxPop("transform_back_and_build_rhs")
 
         !depends on V(:, :, :, 1:2), updates V(:, :, :, 1:3)
+        call roctxPush("linsolve_velocity")
         CALL linsolve(RK_rai(1, i)/deltat)
+        call roctxPop("linsolve_velocity")
+        call roctxPush("linsolve_scalar")
         do iPhi = 1, nPhi
           !depends on (V(:, :, :, 3+iPhi), updates V(:, :, :, 3+iPhi)
           CALL linsolve_scalar(RK_rai(1, i)/deltat, iPhi)
         end do
+        call roctxPop("linsolve_scalar")
+        call roctxPop("rk_substep")
       end do
 
+      call roctxPush("convvelo_runtime")
       call advance_convvelo_runtime()
+      call roctxPop("convvelo_runtime")
 
       ! Write runtime file
+      call roctxPush("outstats")
       CALL outstats()
+      call roctxPop("outstats")
 
 #ifdef chron
       CALL CPU_TIME(timee)
@@ -233,6 +255,7 @@ CONTAINS
           " ELAPSED RUN TIME ", elapsed_run_time
       end if
 #endif
+      call roctxPop("timestep")
     END DO
   END SUBROUTINE timeloop
 
@@ -241,10 +264,12 @@ CONTAINS
     USE convvelo, only: finalize_convvelo_runtime
     USE pressure_output
     IMPLICIT NONE
-    CHARACTER(len=40) :: end_filename
-
-    IF (has_terminal) WRITE (*, *) "End of time/iterations loop: writing restart file at time ", time
-    end_filename = "Dati.cart.out"; CALL save_restart_file(end_filename, V)
+    if (disable_restart_write) then
+      IF (has_terminal) WRITE (*, *) "End of time/iterations loop: restart write disabled for benchmark profiling at time ", time
+    else
+      IF (has_terminal) WRITE (*, *) "End of time/iterations loop: writing restart file at time ", time
+      CALL save_restart_file("Dati.cart.out", V)
+    end if
 
     IF (has_terminal) CLOSE (102)
     call finalize_convvelo_runtime()

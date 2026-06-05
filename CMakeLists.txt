@@ -15,6 +15,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 add_library(channel_core
     config.f90
     rbmat.f90
+    roctx.f90
     y_line_solvers.f90
     mpi_transpose.f90
     ffts.f90
@@ -280,7 +281,12 @@ elseif (CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
     endif()
 
     target_include_directories(channel_core PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-    target_link_libraries(channel_core PUBLIC CUDA::cufft CUDA::cudart)
+    target_link_libraries(channel_core PUBLIC CUDA::cufft CUDA::cudart CUDA::cusparse)
+    if(TARGET CUDA::nvToolsExt)
+        target_link_libraries(channel_core PUBLIC CUDA::nvToolsExt)
+    elseif(CUDA_nvToolsExt_LIBRARY)
+        target_link_libraries(channel_core PUBLIC ${CUDA_nvToolsExt_LIBRARY})
+    endif()
 
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cpp -O3 -mp -mp=gpu -Minfo=mp -Mcache_align -cuda") #
     target_compile_definitions(channel_core PRIVATE HAVE_CUDA)

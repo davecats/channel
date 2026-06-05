@@ -15,6 +15,7 @@ MODULE pressure_output
   USE mpi_transpose, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, ierr, &
                            sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, &
                            fft_transpose_is_local, repack_zTOx_local, repack_xTOz_local
+  USE roctx, ONLY: roctxPush, roctxPop
   USE y_line_solvers, ONLY: ys_solve_ghost_field_reduced, ys_local_rhs, ys_local_operator, &
                             ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
                             ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row
@@ -408,10 +409,14 @@ CONTAINS
       call repack_zTOx_local(VVdz(:, :, :, 1), VVdx(:, :, :, 1), ny)
     else
       call pack_zTOx(VVdz(:, :, :, 1), sendbuf(:, 1), ny)
-      call alltoall(sendbuf(:, 1), recvbuf(:, 1), request)
+      call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "zTOx pressure_spectral_to_real")
     end if
 #ifdef HAVE_MPI
-    if (.not. fft_transpose_is_local) call MPI_Wait(request, status, ierr)
+    if (.not. fft_transpose_is_local) then
+      call roctxPush("MPI_Wait zTOx pressure_spectral_to_real")
+      call MPI_Wait(request, status, ierr)
+      call roctxPop("MPI_Wait zTOx pressure_spectral_to_real")
+    end if
 #endif
     if (.not. fft_transpose_is_local) call unpack_zTOx(recvbuf(:, 1), VVdx(:, :, :, 1), ny)
     !$omp target teams distribute parallel do collapse(3) default(none) &
@@ -443,10 +448,14 @@ CONTAINS
       call repack_xTOz_local(VVdx(:, :, :, 1), VVdz(:, :, :, 1), ny)
     else
       call pack_xTOz(VVdx(:, :, :, 1), sendbuf(:, 1), ny)
-      call alltoall(sendbuf(:, 1), recvbuf(:, 1), request)
+      call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "xTOz pressure_real_to_spectral")
     end if
 #ifdef HAVE_MPI
-    if (.not. fft_transpose_is_local) call MPI_Wait(request, status, ierr)
+    if (.not. fft_transpose_is_local) then
+      call roctxPush("MPI_Wait xTOz pressure_real_to_spectral")
+      call MPI_Wait(request, status, ierr)
+      call roctxPop("MPI_Wait xTOz pressure_real_to_spectral")
+    end if
 #endif
     if (.not. fft_transpose_is_local) call unpack_xTOz(recvbuf(:, 1), VVdz(:, :, :, 1), ny)
     call FFT(VVdz(:, :, :, 1))
