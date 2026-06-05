@@ -4,8 +4,12 @@ module y_line_solvers
 
   use, intrinsic :: iso_c_binding
   use mpi_transpose, only: ny0, nyN, nx0, nxN, nxB, npy_grid, ierr, ipy, MPI_COMM_Y
+  use roctx, only: roctxPush, roctxPop
 #ifdef HAVE_MPI
   use mpi_f08
+#endif
+#ifdef HAVE_CUDA
+  use cusparse
 #endif
 
   implicit none
@@ -17,6 +21,14 @@ module y_line_solvers
   public :: ys_local_rhs, ys_local_operator
   public :: ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs
   public :: ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row
+#ifdef HAVE_CUDA
+  public :: ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x
+  public :: ys_gpsv_lower_rhs0, ys_gpsv_upper_rhsn, ys_gpsv_lower_eq, ys_gpsv_upper_eq
+  public :: ys_prepare_gpsv_workspace, ys_solve_packed_gpsv
+  public :: ys_solve_ghost_field_single_rank_cusparse_packed
+  public :: ys_solve_ghost_field_reduced_const_operator
+  public :: ys_solve_ghost_field_reduced_symmetric_operator
+#endif
 
   integer(C_INT), save :: ys_workspace_ny = -1
   integer(C_INT), save :: ys_workspace_nz = -1
@@ -35,6 +47,16 @@ module y_line_solvers
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_reduced_rows_recv(:, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_reduced_matrix_lu(:, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_reduced_rhs(:, :)
+#ifdef HAVE_CUDA
+  type(cusparseHandle), save :: ys_gpsv_handle
+  logical, save :: ys_gpsv_handle_created = .false.
+  integer(C_INT), save :: ys_gpsv_n = -1, ys_gpsv_batch = -1
+  integer(8), save :: ys_gpsv_buffer_size = 0_8
+  complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_gpsv_ds(:), ys_gpsv_dl(:), ys_gpsv_d(:), ys_gpsv_du(:), ys_gpsv_dw(:), ys_gpsv_x(:)
+  complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_gpsv_lower_rhs0(:), ys_gpsv_upper_rhsn(:)
+  real(C_DOUBLE), allocatable, save :: ys_gpsv_lower_eq(:, :), ys_gpsv_upper_eq(:, :)
+  character(c_char), allocatable, save :: ys_gpsv_buffer(:)
+#endif
 
 contains
 
@@ -83,6 +105,13 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     ys_workspace_nlines = nlines
     ys_workspace_active_n = active_n
     ys_workspace_npy = npy_grid
+#ifdef HAVE_CUDA
+    if (npy_grid == 1) then
+      call ys_prepare_gpsv_workspace(active_n, nlines)
+    else if (npy_grid == 2) then
+      call ys_prepare_gpsv_workspace(active_n, 3*nlines)
+    end if
+#endif
 
     ys_local_rhs = (0.0d0, 0.0d0)
     ys_local_operator = 0.0d0
@@ -116,6 +145,9 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     deallocate (ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row)
 deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values)
     deallocate (ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs)
+#ifdef HAVE_CUDA
+    call ys_release_gpsv_workspace()
+#endif
 
     ys_workspace_ny = -1
     ys_workspace_nz = -1
@@ -124,6 +156,90 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     ys_workspace_active_n = 0
     ys_workspace_npy = -1
   end subroutine ys_release_ghost_field_workspace
+
+#ifdef HAVE_CUDA
+  subroutine ys_check_cusparse(status, where)
+    integer(C_INT), intent(in) :: status
+    character(*), intent(in) :: where
+
+    if (status /= CUSPARSE_STATUS_SUCCESS) then
+      print *, "cuSPARSE error in ", trim(where), ": status=", status
+      error stop
+    end if
+  end subroutine ys_check_cusparse
+
+  subroutine ys_release_gpsv_workspace()
+    implicit none
+    integer(C_INT) :: status
+
+    if (allocated(ys_gpsv_ds)) then
+      !$omp target exit data map(delete: ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, &
+      !$omp& ys_gpsv_lower_rhs0, ys_gpsv_upper_rhsn, ys_gpsv_lower_eq, ys_gpsv_upper_eq)
+      deallocate (ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x)
+      deallocate (ys_gpsv_lower_rhs0, ys_gpsv_upper_rhsn, ys_gpsv_lower_eq, ys_gpsv_upper_eq)
+    end if
+    if (allocated(ys_gpsv_buffer)) then
+      !$omp target exit data map(delete: ys_gpsv_buffer)
+      deallocate (ys_gpsv_buffer)
+    end if
+    if (ys_gpsv_handle_created) then
+      status = cusparseDestroy(ys_gpsv_handle)
+      call ys_check_cusparse(status, "cusparseDestroy")
+      ys_gpsv_handle_created = .false.
+    end if
+    ys_gpsv_n = -1
+    ys_gpsv_batch = -1
+    ys_gpsv_buffer_size = 0_8
+  end subroutine ys_release_gpsv_workspace
+
+  subroutine ys_prepare_gpsv_workspace(n, batch_count)
+    implicit none
+    integer(C_INT), intent(in) :: n, batch_count
+    integer(C_INT) :: status
+    integer(8) :: buffer_size
+
+    if (ys_gpsv_n == n .and. ys_gpsv_batch == batch_count .and. allocated(ys_gpsv_ds)) return
+
+    call ys_release_gpsv_workspace()
+
+    status = cusparseCreate(ys_gpsv_handle)
+    call ys_check_cusparse(status, "cusparseCreate")
+    ys_gpsv_handle_created = .true.
+
+    allocate (ys_gpsv_ds(n*batch_count), ys_gpsv_dl(n*batch_count), ys_gpsv_d(n*batch_count), &
+              ys_gpsv_du(n*batch_count), ys_gpsv_dw(n*batch_count), ys_gpsv_x(n*batch_count))
+    allocate (ys_gpsv_lower_rhs0(batch_count), ys_gpsv_upper_rhsn(batch_count), &
+              ys_gpsv_lower_eq(-1:2, batch_count), ys_gpsv_upper_eq(-2:1, batch_count))
+    !$omp target enter data map(alloc: ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, &
+    !$omp& ys_gpsv_lower_rhs0, ys_gpsv_upper_rhsn, ys_gpsv_lower_eq, ys_gpsv_upper_eq)
+    !$omp target data use_device_addr(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x)
+    status = cusparseZgpsvInterleavedBatch_bufferSize(ys_gpsv_handle, 0_C_INT, n, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, &
+                                                      ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, batch_count, buffer_size)
+    !$omp end target data
+    call ys_check_cusparse(status, "cusparseZgpsvInterleavedBatch_bufferSize")
+    ys_gpsv_buffer_size = buffer_size
+    allocate (ys_gpsv_buffer(max(1, int(buffer_size))))
+    !$omp target enter data map(alloc: ys_gpsv_buffer)
+
+    ys_gpsv_n = n
+    ys_gpsv_batch = batch_count
+  end subroutine ys_prepare_gpsv_workspace
+
+  subroutine ys_solve_packed_gpsv(n, batch_count, label)
+    implicit none
+    integer(C_INT), intent(in) :: n, batch_count
+    character(*), intent(in) :: label
+    integer(C_INT) :: status
+
+    call roctxPush(label)
+    !$omp target data use_device_addr(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, ys_gpsv_buffer)
+    status = cusparseZgpsvInterleavedBatch(ys_gpsv_handle, 0_C_INT, n, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, &
+                                           ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, batch_count, ys_gpsv_buffer)
+    !$omp end target data
+    call ys_check_cusparse(status, "cusparseZgpsvInterleavedBatch "//trim(label))
+    call roctxPop(label)
+  end subroutine ys_solve_packed_gpsv
+#endif
 
   subroutine ys_lu5decomp(a)
     real(C_DOUBLE), intent(inout) :: a(0:, -2:)
@@ -261,11 +377,14 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     implicit none
     integer(C_INT), intent(in) :: ny, nz
     complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
-    complex(C_DOUBLE_COMPLEX) :: lower_rhs0, upper_rhsn
-    real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-2:2), upper_eqn(-2:2)
-    integer(C_INT) :: ix, iz, iline, nlines, nlines_z, row_start, row_end, active_n, row, local_idx, col, coupled_row
-    integer(C_INT) :: dst_row_base, lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3
+    integer(C_INT) :: nlines, nlines_z, row_start, row_end, active_n
+    integer(C_INT) :: dst_row_base
     logical :: has_lower_boundary, has_upper_boundary, has_padded_dst
+
+    if (npy_grid == 1) then
+      call ys_solve_ghost_field_single_rank(dst, ny, nz)
+      return
+    end if
 
     row_start = ny0
     row_end = nyN
@@ -287,103 +406,262 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     nlines_z = 2*nz + 1
     nlines = ys_workspace_nlines
 
-    !$omp target teams distribute parallel do default(none) &
+#ifdef HAVE_CUDA
+    if (npy_grid == 2) then
+      call roctxPush("ys_endpoint_schur_cusparse")
+      call ys_solve_reduced_endpoint_schur_cusparse(dst, ny, nz, has_lower_boundary, has_upper_boundary, &
+                                                    has_padded_dst, row_start, row_end, active_n, nlines, nlines_z, dst_row_base)
+      call roctxPop("ys_endpoint_schur_cusparse")
+      return
+    end if
+#endif
+    error stop "ys_solve_ghost_field_reduced: npy > 2 must use y-slab linsolve"
+  end subroutine ys_solve_ghost_field_reduced
+
+#ifdef HAVE_CUDA
+
+  subroutine ys_solve_reduced_endpoint_schur_cusparse(dst, ny, nz, has_lower_boundary, has_upper_boundary, &
+                                                      has_padded_dst, row_start, row_end, active_n, nlines, nlines_z, dst_row_base)
+    implicit none
+    integer(C_INT), intent(in) :: ny, nz, row_start, row_end, active_n, nlines, nlines_z, dst_row_base
+    logical, intent(in) :: has_lower_boundary, has_upper_boundary, has_padded_dst
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
+    complex(C_DOUBLE_COMPLEX) :: rhs_values(3), g0, g1, s00, s01, s10, s11, t00, t01, t10, t11, det
+    complex(C_DOUBLE_COMPLEX) :: c0, c1, y00, y01, y10, y11, vleft1, vleft2, vright1, vright2
+    complex(C_DOUBLE_COMPLEX) :: lower_rhs0, upper_rhsn, rhs_value
+    real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-2:2), upper_eqn(-2:2), fac, coeff
+    integer(C_INT) :: nI, batch3, status
+    integer(C_INT) :: iline, local_i, local_idx, row, coupled_row, col, p, isys, j, offset
+    integer(C_INT) :: ix, iz, lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3
+
+    nI = active_n - 2
+    batch3 = 3*nlines
+
+    call roctxPush("ys_endpoint_cusparse_pack3")
+    !$omp target teams distribute parallel do collapse(2) default(none) &
     !$omp shared(ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
-    !$omp& ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ys_interior_lu, ys_interior_response_columns, &
-    !$omp& ys_reduced_rows_send, row_start, row_end, active_n, has_lower_boundary, has_upper_boundary, nlines) &
-    !$omp private(iline, row, local_idx, col, coupled_row, lower_rhs0, upper_rhsn, row_coeffs, lower_eq0, upper_eqn)
-    do iline = 1, nlines
-      ys_interior_lu(:, :, iline) = 0.0d0
-      ys_interior_response_columns(:, :, iline) = (0.0d0, 0.0d0)
-
-      lower_rhs0 = (0.0d0, 0.0d0)
-      lower_eq0 = 0.0d0
-      if (has_lower_boundary) then
-lower_rhs0 = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
-        lower_eq0 = ys_lower_boundary_row(:, iline) - ys_lower_ghost_row(:, iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
-        lower_eq0(-2) = 0.0d0
-      end if
-      upper_rhsn = (0.0d0, 0.0d0)
-      upper_eqn = 0.0d0
-      if (has_upper_boundary) then
-  upper_rhsn = ys_upper_boundary_rhs(iline) - ys_upper_ghost_rhs(iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
-        upper_eqn = ys_upper_boundary_row(:, iline) - ys_upper_ghost_row(:, iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
-        upper_eqn(2) = 0.0d0
-      end if
-
-      do row = row_start, row_end
-        local_idx = row - row_start
-        ys_interior_response_columns(local_idx, 1, iline) = ys_local_rhs(row, iline)
-      end do
-
-      if (has_lower_boundary) then
-        ys_interior_response_columns(0, 1, iline) = ys_interior_response_columns(0, 1, iline) - &
-                                     ys_lower_ghost_rhs(iline)*ys_local_operator(row_start, -2, iline)/ys_lower_ghost_row(-2, iline)
-        row_coeffs = ys_local_operator(row_start, -2:2, iline) - ys_lower_ghost_row(:, iline)*ys_local_operator(row_start, -2, iline)/ys_lower_ghost_row(-2, iline)
-        row_coeffs(-2) = 0.0d0
-     ys_interior_response_columns(0, 1, iline) = ys_interior_response_columns(0, 1, iline) - lower_rhs0*row_coeffs(-1)/lower_eq0(-1)
-        row_coeffs = row_coeffs - lower_eq0*row_coeffs(-1)/lower_eq0(-1)
-        row_coeffs(-1) = 0.0d0
-        ys_interior_lu(0, 0:2, iline) = row_coeffs(0:2)
-
-        ys_interior_response_columns(1, 1, iline) = ys_interior_response_columns(1, 1, iline) - lower_rhs0*ys_local_operator(row_start + 1, -2, iline)/lower_eq0(-1)
-        row_coeffs = ys_local_operator(row_start + 1, -2:2, iline)
-        row_coeffs(-2:1) = row_coeffs(-2:1) - lower_eq0(-1:2)*ys_local_operator(row_start + 1, -2, iline)/lower_eq0(-1)
-        row_coeffs(-2) = 0.0d0
-        ys_interior_lu(1, -1:2, iline) = row_coeffs(-1:2)
-      end if
-
-      if (has_upper_boundary) then
-        ys_interior_response_columns(active_n - 1, 1, iline) = ys_interior_response_columns(active_n - 1, 1, iline) - &
-                                         ys_upper_ghost_rhs(iline)*ys_local_operator(row_end, 2, iline)/ys_upper_ghost_row(2, iline)
-        row_coeffs = ys_local_operator(row_end, -2:2, iline) - ys_upper_ghost_row(:, iline)*ys_local_operator(row_end, 2, iline)/ys_upper_ghost_row(2, iline)
-        row_coeffs(2) = 0.0d0
-        ys_interior_response_columns(active_n - 1, 1, iline) = ys_interior_response_columns(active_n - 1, 1, iline) - upper_rhsn*row_coeffs(1)/upper_eqn(1)
-        row_coeffs = row_coeffs - upper_eqn*row_coeffs(1)/upper_eqn(1)
-        row_coeffs(1) = 0.0d0
-        ys_interior_lu(active_n - 1, -2:0, iline) = row_coeffs(-2:0)
-
-        ys_interior_response_columns(active_n - 2, 1, iline) = ys_interior_response_columns(active_n - 2, 1, iline) - &
-                                                               upper_rhsn*ys_local_operator(row_end - 1, 2, iline)/upper_eqn(1)
-        row_coeffs = ys_local_operator(row_end - 1, -2:2, iline)
-        row_coeffs(-1:2) = row_coeffs(-1:2) - upper_eqn(-2:1)*ys_local_operator(row_end - 1, 2, iline)/upper_eqn(1)
-        row_coeffs(2) = 0.0d0
-        ys_interior_lu(active_n - 2, -2:1, iline) = row_coeffs(-2:1)
-      end if
-
-      do row = row_start, row_end
-        local_idx = row - row_start
-        if ((has_lower_boundary .and. row <= row_start + 1) .or. (has_upper_boundary .and. row >= row_end - 1)) cycle
+    !$omp& ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, &
+    !$omp& ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, row_start, row_end, active_n, nI, nlines, batch3, has_lower_boundary, has_upper_boundary, ipy) &
+    !$omp private(iline, local_i, local_idx, row, coupled_row, col, p, isys, j, offset, rhs_values, row_coeffs, lower_rhs0, upper_rhsn, lower_eq0, upper_eqn, fac, coeff)
+    do local_i = 0, nI - 1
+      do iline = 1, nlines
+        if (ipy == 0) then
+          local_idx = local_i
+        else
+          local_idx = local_i + 2
+        end if
+        row = row_start + local_idx
+        rhs_values(1) = ys_local_rhs(row, iline)
+        rhs_values(2) = (0.0d0, 0.0d0)
+        rhs_values(3) = (0.0d0, 0.0d0)
         row_coeffs = ys_local_operator(row, -2:2, iline)
+
+        if (has_lower_boundary .and. local_idx == 0) then
+          lower_rhs0 = ys_lower_boundary_rhs(iline) - &
+                       ys_lower_ghost_rhs(iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
+          lower_eq0 = ys_lower_boundary_row(:, iline) - &
+                      ys_lower_ghost_row(:, iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
+          lower_eq0(-2) = 0.0d0
+          fac = row_coeffs(-2)/ys_lower_ghost_row(-2, iline)
+          rhs_values(1) = rhs_values(1) - ys_lower_ghost_rhs(iline)*fac
+          row_coeffs = row_coeffs - ys_lower_ghost_row(:, iline)*fac
+          row_coeffs(-2) = 0.0d0
+          fac = row_coeffs(-1)/lower_eq0(-1)
+          rhs_values(1) = rhs_values(1) - lower_rhs0*fac
+          row_coeffs = row_coeffs - lower_eq0*fac
+          row_coeffs(-1) = 0.0d0
+        else if (has_lower_boundary .and. local_idx == 1) then
+          lower_rhs0 = ys_lower_boundary_rhs(iline) - &
+                       ys_lower_ghost_rhs(iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
+          lower_eq0 = ys_lower_boundary_row(:, iline) - &
+                      ys_lower_ghost_row(:, iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
+          lower_eq0(-2) = 0.0d0
+          fac = row_coeffs(-2)/lower_eq0(-1)
+          rhs_values(1) = rhs_values(1) - lower_rhs0*fac
+          row_coeffs(-2:1) = row_coeffs(-2:1) - lower_eq0(-1:2)*fac
+          row_coeffs(-2) = 0.0d0
+        end if
+
+        if (has_upper_boundary .and. local_idx == active_n - 2) then
+          upper_rhsn = ys_upper_boundary_rhs(iline) - &
+                       ys_upper_ghost_rhs(iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
+          upper_eqn = ys_upper_boundary_row(:, iline) - &
+                      ys_upper_ghost_row(:, iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
+          upper_eqn(2) = 0.0d0
+          fac = row_coeffs(2)/upper_eqn(1)
+          rhs_values(1) = rhs_values(1) - upper_rhsn*fac
+          row_coeffs(-1:2) = row_coeffs(-1:2) - upper_eqn(-2:1)*fac
+          row_coeffs(2) = 0.0d0
+        else if (has_upper_boundary .and. local_idx == active_n - 1) then
+          upper_rhsn = ys_upper_boundary_rhs(iline) - &
+                       ys_upper_ghost_rhs(iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
+          upper_eqn = ys_upper_boundary_row(:, iline) - &
+                      ys_upper_ghost_row(:, iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
+          upper_eqn(2) = 0.0d0
+          fac = row_coeffs(2)/ys_upper_ghost_row(2, iline)
+          rhs_values(1) = rhs_values(1) - ys_upper_ghost_rhs(iline)*fac
+          row_coeffs = row_coeffs - ys_upper_ghost_row(:, iline)*fac
+          row_coeffs(2) = 0.0d0
+          fac = row_coeffs(1)/upper_eqn(1)
+          rhs_values(1) = rhs_values(1) - upper_rhsn*fac
+          row_coeffs = row_coeffs - upper_eqn*fac
+          row_coeffs(1) = 0.0d0
+        end if
+
+        ys_gpsv_ds(local_i*batch3 + iline) = (0.0d0, 0.0d0)
+        ys_gpsv_dl(local_i*batch3 + iline) = (0.0d0, 0.0d0)
+        ys_gpsv_d(local_i*batch3 + iline) = (0.0d0, 0.0d0)
+        ys_gpsv_du(local_i*batch3 + iline) = (0.0d0, 0.0d0)
+        ys_gpsv_dw(local_i*batch3 + iline) = (0.0d0, 0.0d0)
+
         do col = -2, 2
-          coupled_row = row + col
-          if (coupled_row < row_start) then
- if (coupled_row == row_start - 2) ys_interior_response_columns(local_idx, 2, iline) = -cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
- if (coupled_row == row_start - 1) ys_interior_response_columns(local_idx, 3, iline) = -cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
-          else if (coupled_row > row_end) then
-   if (coupled_row == row_end + 1) ys_interior_response_columns(local_idx, 4, iline) = -cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
-   if (coupled_row == row_end + 2) ys_interior_response_columns(local_idx, 5, iline) = -cmplx(row_coeffs(col), 0.0d0, kind=C_DOUBLE)
+          coeff = row_coeffs(col)
+          if (coeff == 0.0d0) cycle
+          coupled_row = local_idx + col
+          if (ipy == 0) then
+            if (coupled_row >= 0 .and. coupled_row <= nI - 1) then
+              j = coupled_row
+              offset = j - local_i
+            else if (coupled_row == nI) then
+              rhs_values(2) = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+              cycle
+            else if (coupled_row == nI + 1) then
+              rhs_values(3) = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+              cycle
+            else
+              cycle
+            end if
           else
-            ys_interior_lu(local_idx, col, iline) = row_coeffs(col)
+            if (coupled_row >= 2 .and. coupled_row <= active_n - 1) then
+              j = coupled_row - 2
+              offset = j - local_i
+            else if (coupled_row == 0) then
+              rhs_values(2) = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+              cycle
+            else if (coupled_row == 1) then
+              rhs_values(3) = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+              cycle
+            else
+              cycle
+            end if
+          end if
+          p = local_i*batch3 + iline
+          select case (offset)
+          case (-2)
+            ys_gpsv_ds(p) = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+          case (-1)
+            ys_gpsv_dl(p) = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+          case (0)
+            ys_gpsv_d(p) = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+          case (1)
+            ys_gpsv_du(p) = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+          case (2)
+            ys_gpsv_dw(p) = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+          end select
+        end do
+
+        do isys = 1, 3
+          p = local_i*batch3 + (isys - 1)*nlines + iline
+          ys_gpsv_x(p) = rhs_values(isys)
+          if (isys > 1) then
+            ys_gpsv_ds(p) = ys_gpsv_ds(local_i*batch3 + iline)
+            ys_gpsv_dl(p) = ys_gpsv_dl(local_i*batch3 + iline)
+            ys_gpsv_d(p) = ys_gpsv_d(local_i*batch3 + iline)
+            ys_gpsv_du(p) = ys_gpsv_du(local_i*batch3 + iline)
+            ys_gpsv_dw(p) = ys_gpsv_dw(local_i*batch3 + iline)
           end if
         end do
       end do
-
-      call ys_factor_penta(ys_interior_lu(:, :, iline))
-      call ys_solve_factored_penta_multi(ys_interior_response_columns(:, :, iline), ys_interior_lu(:, :, iline))
-
-      ys_reduced_rows_send(1:4, iline) = [ys_interior_response_columns(0, 1, iline), ys_interior_response_columns(1, 1, iline), &
-                         ys_interior_response_columns(active_n - 2, 1, iline), ys_interior_response_columns(active_n - 1, 1, iline)]
-      ys_reduced_rows_send(5:12, iline) = [ys_interior_response_columns(0, 2, iline), ys_interior_response_columns(1, 2, iline), &
-                       ys_interior_response_columns(active_n - 2, 2, iline), ys_interior_response_columns(active_n - 1, 2, iline), &
-                                           ys_interior_response_columns(0, 3, iline), ys_interior_response_columns(1, 3, iline), &
-                         ys_interior_response_columns(active_n - 2, 3, iline), ys_interior_response_columns(active_n - 1, 3, iline)]
-      ys_reduced_rows_send(13:20, iline) = [ys_interior_response_columns(0, 4, iline), ys_interior_response_columns(1, 4, iline), &
-                       ys_interior_response_columns(active_n - 2, 4, iline), ys_interior_response_columns(active_n - 1, 4, iline), &
-                                            ys_interior_response_columns(0, 5, iline), ys_interior_response_columns(1, 5, iline), &
-                         ys_interior_response_columns(active_n - 2, 5, iline), ys_interior_response_columns(active_n - 1, 5, iline)]
     end do
     !$omp end target teams distribute parallel do
+    call roctxPop("ys_endpoint_cusparse_pack3")
+
+    call roctxPush("ys_endpoint_cusparse_gpsv3")
+    !$omp target data use_device_addr(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, ys_gpsv_buffer)
+    status = cusparseZgpsvInterleavedBatch(ys_gpsv_handle, 0_C_INT, nI, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, &
+                                           ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, batch3, ys_gpsv_buffer)
+    !$omp end target data
+    call ys_check_cusparse(status, "cusparseZgpsvInterleavedBatch endpoint Schur")
+    call roctxPop("ys_endpoint_cusparse_gpsv3")
+
+    call roctxPush("ys_endpoint_cusparse_pack_schur")
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(ys_local_rhs, ys_local_operator, ys_gpsv_x, ys_reduced_rows_send, nI, nlines, batch3, active_n, row_start, ipy) &
+    !$omp private(iline, p, row, g0, g1, s00, s01, s10, s11, t00, t01, t10, t11, det, c0, c1, y00, y01, y10, y11, row_coeffs)
+    do iline = 1, nlines
+      ys_reduced_rows_send(:, iline) = (0.0d0, 0.0d0)
+      if (ipy == 0) then
+        row = row_start + nI
+        row_coeffs = ys_local_operator(row, -2:2, iline)
+        c0 = ys_gpsv_x((nI - 2)*batch3 + iline)
+        c1 = ys_gpsv_x((nI - 1)*batch3 + iline)
+        y00 = ys_gpsv_x((nI - 2)*batch3 + nlines + iline)
+        y10 = ys_gpsv_x((nI - 1)*batch3 + nlines + iline)
+        y01 = ys_gpsv_x((nI - 2)*batch3 + 2*nlines + iline)
+        y11 = ys_gpsv_x((nI - 1)*batch3 + 2*nlines + iline)
+        g0 = ys_local_rhs(row, iline) - row_coeffs(-2)*c0 - row_coeffs(-1)*c1
+        s00 = cmplx(row_coeffs(0), 0.0d0, kind=C_DOUBLE) - row_coeffs(-2)*y00 - row_coeffs(-1)*y10
+        s01 = cmplx(row_coeffs(1), 0.0d0, kind=C_DOUBLE) - row_coeffs(-2)*y01 - row_coeffs(-1)*y11
+        t00 = cmplx(row_coeffs(2), 0.0d0, kind=C_DOUBLE)
+        t01 = (0.0d0, 0.0d0)
+
+        row = row_start + nI + 1
+        row_coeffs = ys_local_operator(row, -2:2, iline)
+        c1 = ys_gpsv_x((nI - 1)*batch3 + iline)
+        y10 = ys_gpsv_x((nI - 1)*batch3 + nlines + iline)
+        y11 = ys_gpsv_x((nI - 1)*batch3 + 2*nlines + iline)
+        g1 = ys_local_rhs(row, iline) - row_coeffs(-2)*c1
+        s10 = cmplx(row_coeffs(-1), 0.0d0, kind=C_DOUBLE) - row_coeffs(-2)*y10
+        s11 = cmplx(row_coeffs(0), 0.0d0, kind=C_DOUBLE) - row_coeffs(-2)*y11
+        t10 = cmplx(row_coeffs(1), 0.0d0, kind=C_DOUBLE)
+        t11 = cmplx(row_coeffs(2), 0.0d0, kind=C_DOUBLE)
+
+        det = s00*s11 - s01*s10
+        ys_reduced_rows_send(3, iline) = (s11*g0 - s01*g1)/det
+        ys_reduced_rows_send(4, iline) = (-s10*g0 + s00*g1)/det
+        ys_reduced_rows_send(15, iline) = -((s11*t00 - s01*t10)/det)
+        ys_reduced_rows_send(16, iline) = -((-s10*t00 + s00*t10)/det)
+        ys_reduced_rows_send(19, iline) = -((s11*t01 - s01*t11)/det)
+        ys_reduced_rows_send(20, iline) = -((-s10*t01 + s00*t11)/det)
+      else
+        row = row_start
+        row_coeffs = ys_local_operator(row, -2:2, iline)
+        c0 = ys_gpsv_x(iline)
+        y00 = ys_gpsv_x(nlines + iline)
+        y01 = ys_gpsv_x(2*nlines + iline)
+        g0 = ys_local_rhs(row, iline) - row_coeffs(2)*c0
+        s00 = cmplx(row_coeffs(0), 0.0d0, kind=C_DOUBLE) - row_coeffs(2)*y00
+        s01 = cmplx(row_coeffs(1), 0.0d0, kind=C_DOUBLE) - row_coeffs(2)*y01
+        t00 = cmplx(row_coeffs(-2), 0.0d0, kind=C_DOUBLE)
+        t01 = cmplx(row_coeffs(-1), 0.0d0, kind=C_DOUBLE)
+
+        row = row_start + 1
+        row_coeffs = ys_local_operator(row, -2:2, iline)
+        c0 = ys_gpsv_x(iline)
+        c1 = ys_gpsv_x(batch3 + iline)
+        y00 = ys_gpsv_x(nlines + iline)
+        y10 = ys_gpsv_x(batch3 + nlines + iline)
+        y01 = ys_gpsv_x(2*nlines + iline)
+        y11 = ys_gpsv_x(batch3 + 2*nlines + iline)
+        g1 = ys_local_rhs(row, iline) - row_coeffs(1)*c0 - row_coeffs(2)*c1
+        s10 = cmplx(row_coeffs(-1), 0.0d0, kind=C_DOUBLE) - row_coeffs(1)*y00 - row_coeffs(2)*y10
+        s11 = cmplx(row_coeffs(0), 0.0d0, kind=C_DOUBLE) - row_coeffs(1)*y01 - row_coeffs(2)*y11
+        t10 = (0.0d0, 0.0d0)
+        t11 = cmplx(row_coeffs(-2), 0.0d0, kind=C_DOUBLE)
+
+        det = s00*s11 - s01*s10
+        ys_reduced_rows_send(1, iline) = (s11*g0 - s01*g1)/det
+        ys_reduced_rows_send(2, iline) = (-s10*g0 + s00*g1)/det
+        ys_reduced_rows_send(5, iline) = -((s11*t00 - s01*t10)/det)
+        ys_reduced_rows_send(6, iline) = -((-s10*t00 + s00*t10)/det)
+        ys_reduced_rows_send(9, iline) = -((s11*t01 - s01*t11)/det)
+        ys_reduced_rows_send(10, iline) = -((-s10*t01 + s00*t11)/det)
+      end if
+    end do
+    !$omp end target teams distribute parallel do
+    call roctxPop("ys_endpoint_cusparse_pack_schur")
+
+    call ys_solve_reduced_interfaces()
 
     lower_inner0 = dst_row_base
     lower_inner2 = dst_row_base + 2
@@ -391,61 +669,1123 @@ lower_rhs0 = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_lower_b
     upper_inner2 = upper_inner0 + 2
     upper_inner3 = upper_inner0 + 3
 
-    call ys_solve_reduced_interfaces()
+    call roctxPush("ys_endpoint_cusparse_reconstruct")
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(dst, ys_gpsv_x, ys_reduced_rhs, ys_left_interface_values, ys_right_interface_values, ys_lower_ghost_rhs, ys_upper_ghost_rhs, &
+    !$omp& ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_lower_ghost_row, ys_upper_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, &
+    !$omp& nlines, nlines_z, nx0, nz, active_n, dst_row_base, has_lower_boundary, has_upper_boundary, lower_inner0, lower_inner2, &
+    !$omp& upper_inner0, upper_inner2, upper_inner3, has_padded_dst, nI, batch3, ipy) &
+    !$omp private(iline, local_i, local_idx, p, ix, iz, vleft1, vleft2, vright1, vright2, lower_rhs0, upper_rhsn, lower_eq0, upper_eqn)
+    do iline = 1, nlines
+      ix = (iline - 1)/nlines_z + nx0
+      iz = mod(iline - 1, nlines_z) - nz
+      if (ipy == 0) then
+        vright1 = ys_reduced_rhs(3, iline)
+        vright2 = ys_reduced_rhs(4, iline)
+        do local_i = 0, nI - 1
+          p = local_i*batch3 + iline
+          local_idx = local_i
+          dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) = ys_gpsv_x(p) - &
+                                                                     ys_gpsv_x(local_i*batch3 + nlines + iline)*vright1 - &
+                                                                     ys_gpsv_x(local_i*batch3 + 2*nlines + iline)*vright2
+        end do
+        dst(nI + dst_row_base, iz + nz + 1, ix - nx0 + 1) = vright1
+        dst(nI + 1 + dst_row_base, iz + nz + 1, ix - nx0 + 1) = vright2
+      else
+        vleft1 = ys_reduced_rhs(4*ipy + 1, iline)
+        vleft2 = ys_reduced_rhs(4*ipy + 2, iline)
+        dst(dst_row_base, iz + nz + 1, ix - nx0 + 1) = vleft1
+        dst(dst_row_base + 1, iz + nz + 1, ix - nx0 + 1) = vleft2
+        do local_i = 0, nI - 1
+          p = local_i*batch3 + iline
+          local_idx = local_i + 2
+          dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) = ys_gpsv_x(p) - &
+                                                                     ys_gpsv_x(local_i*batch3 + nlines + iline)*vleft1 - &
+                                                                     ys_gpsv_x(local_i*batch3 + 2*nlines + iline)*vleft2
+        end do
+      end if
+      if (has_padded_dst) then
+        if (has_lower_boundary) then
+          lower_rhs0 = ys_lower_boundary_rhs(iline) - &
+                       ys_lower_ghost_rhs(iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
+          lower_eq0 = ys_lower_boundary_row(:, iline) - &
+                      ys_lower_ghost_row(:, iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
+          lower_eq0(-2) = 0.0d0
+          dst(2, iz + nz + 1, ix - nx0 + 1) = (lower_rhs0 - &
+                                               lower_eq0(0)*dst(lower_inner0, iz + nz + 1, ix - nx0 + 1) - &
+                                               lower_eq0(1)*dst(lower_inner0 + 1, iz + nz + 1, ix - nx0 + 1) - &
+                                               lower_eq0(2)*dst(lower_inner2, iz + nz + 1, ix - nx0 + 1))/lower_eq0(-1)
+          dst(1, iz + nz + 1, ix - nx0 + 1) = (ys_lower_ghost_rhs(iline) - &
+                                               ys_lower_ghost_row(-1, iline)*dst(2, iz + nz + 1, ix - nx0 + 1) - &
+                                               ys_lower_ghost_row(0, iline)*dst(3, iz + nz + 1, ix - nx0 + 1) - &
+                                               ys_lower_ghost_row(1, iline)*dst(4, iz + nz + 1, ix - nx0 + 1) - &
+                                       ys_lower_ghost_row(2, iline)*dst(5, iz + nz + 1, ix - nx0 + 1))/ys_lower_ghost_row(-2, iline)
+        else
+          dst(1, iz + nz + 1, ix - nx0 + 1) = ys_left_interface_values(1, iline)
+          dst(2, iz + nz + 1, ix - nx0 + 1) = ys_left_interface_values(2, iline)
+        end if
+        if (has_upper_boundary) then
+          upper_rhsn = ys_upper_boundary_rhs(iline) - &
+                       ys_upper_ghost_rhs(iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
+          upper_eqn = ys_upper_boundary_row(:, iline) - &
+                      ys_upper_ghost_row(:, iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
+          upper_eqn(2) = 0.0d0
+          dst(active_n + 3, iz + nz + 1, ix - nx0 + 1) = (upper_rhsn - &
+                                                          upper_eqn(-2)*dst(upper_inner0, iz + nz + 1, ix - nx0 + 1) - &
+                                                          upper_eqn(-1)*dst(upper_inner0 + 1, iz + nz + 1, ix - nx0 + 1) - &
+                                                          upper_eqn(0)*dst(upper_inner2, iz + nz + 1, ix - nx0 + 1))/upper_eqn(1)
+          dst(active_n + 4, iz + nz + 1, ix - nx0 + 1) = (ys_upper_ghost_rhs(iline) - &
+                                                      ys_upper_ghost_row(-2, iline)*dst(upper_inner0, iz + nz + 1, ix - nx0 + 1) - &
+                                                  ys_upper_ghost_row(-1, iline)*dst(upper_inner0 + 1, iz + nz + 1, ix - nx0 + 1) - &
+                                                       ys_upper_ghost_row(0, iline)*dst(upper_inner2, iz + nz + 1, ix - nx0 + 1) - &
+                             ys_upper_ghost_row(1, iline)*dst(upper_inner3, iz + nz + 1, ix - nx0 + 1))/ys_upper_ghost_row(2, iline)
+        else
+          dst(active_n + 3, iz + nz + 1, ix - nx0 + 1) = ys_right_interface_values(1, iline)
+          dst(active_n + 4, iz + nz + 1, ix - nx0 + 1) = ys_right_interface_values(2, iline)
+        end if
+      end if
+    end do
+    !$omp end target teams distribute parallel do
+    call roctxPop("ys_endpoint_cusparse_reconstruct")
+  end subroutine ys_solve_reduced_endpoint_schur_cusparse
+
+  subroutine ys_solve_ghost_field_reduced_const_operator(dst, ny, nz)
+    implicit none
+    integer(C_INT), intent(in) :: ny, nz
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
+    complex(C_DOUBLE_COMPLEX) :: lower_rhs0, upper_rhsn, rhs_value
+    complex(C_DOUBLE_COMPLEX) :: c0, c1, y00, y01, y10, y11, g0, g1
+    complex(C_DOUBLE_COMPLEX) :: s00, s01, s10, s11, t00, t01, t10, t11, det
+    complex(C_DOUBLE_COMPLEX) :: vleft1, vleft2, vright1, vright2
+    real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-2:2), upper_eqn(-2:2), fac, coeff
+    integer(C_INT) :: row_start, row_end, active_n, nI, nlines, nlines_z, batch_const
+    integer(C_INT) :: dst_row_base, lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3
+    integer(C_INT) :: status, sys, iline, local_i, local_idx, row, col, coupled_row, p, j, offset
+    integer(C_INT) :: ix, iz
+    logical :: has_lower_boundary, has_upper_boundary, has_padded_dst, is_actual
+
+    if (npy_grid /= 2) then
+      call ys_solve_ghost_field_reduced(dst, ny, nz)
+      return
+    end if
+
+    row_start = ny0
+    row_end = nyN
+    active_n = row_end - row_start + 1
+    nI = active_n - 2
+    nlines = ys_workspace_nlines
+    nlines_z = 2*nz + 1
+    batch_const = nlines + 2
+    has_lower_boundary = (row_start == 1)
+    has_upper_boundary = (row_end == ny - 1)
+    has_padded_dst = (size(dst, 1) == active_n + 4)
+    dst_row_base = 1
+    if (has_padded_dst) dst_row_base = 3
+
+    if (.not. allocated(ys_local_rhs)) error stop "ys_prepare_ghost_field_workspace must be called before const y solve"
+    if (ys_gpsv_batch < batch_const) error stop "const y solve requires larger cuSPARSE workspace"
+
+    call roctxPush("ys_const_endpoint_pack1_plus_response")
     !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(dst, ys_interior_response_columns, ys_left_interface_values, ys_right_interface_values, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, &
-    !$omp& ys_upper_ghost_rhs, ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, nx0, nxN, nz, nlines_z, dst_row_base, &
-    !$omp& has_padded_dst, has_lower_boundary, has_upper_boundary, active_n, &
-    !$omp& lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3) &
-    !$omp private(ix, iz, iline, row, lower_rhs0, upper_rhsn, lower_eq0, upper_eqn)
-    do ix = nx0, nxN
-      do iz = -nz, nz
-        iline = (ix - nx0)*nlines_z + (iz + nz + 1)
+    !$omp shared(ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
+    !$omp& ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, &
+    !$omp& ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, row_start, active_n, nI, nlines, batch_const, has_lower_boundary, has_upper_boundary, ipy) &
+    !$omp private(sys, iline, local_i, local_idx, row, col, coupled_row, p, j, offset, is_actual, rhs_value, row_coeffs, lower_rhs0, &
+    !$omp& upper_rhsn, lower_eq0, upper_eqn, fac, coeff)
+    do local_i = 0, nI - 1
+      do sys = 1, batch_const
+        is_actual = (sys <= nlines)
+        if (is_actual) then
+          iline = sys
+        else
+          iline = 1
+        end if
+        if (ipy == 0) then
+          local_idx = local_i
+        else
+          local_idx = local_i + 2
+        end if
+        row = row_start + local_idx
+        rhs_value = (0.0d0, 0.0d0)
+        if (is_actual) rhs_value = ys_local_rhs(row, iline)
+        row_coeffs = ys_local_operator(row, -2:2, iline)
 
-        ys_interior_response_columns(:, 1, iline) = ys_interior_response_columns(:, 1, iline) + &
-                                                    ys_interior_response_columns(:, 2, iline)*ys_left_interface_values(1, iline) + &
-                                                    ys_interior_response_columns(:, 3, iline)*ys_left_interface_values(2, iline) + &
-                                                   ys_interior_response_columns(:, 4, iline)*ys_right_interface_values(1, iline) + &
-                                                    ys_interior_response_columns(:, 5, iline)*ys_right_interface_values(2, iline)
+        if (has_lower_boundary .and. local_idx == 0) then
+          lower_rhs0 = ys_lower_boundary_rhs(iline) - &
+                       ys_lower_ghost_rhs(iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
+          lower_eq0 = ys_lower_boundary_row(:, iline) - &
+                      ys_lower_ghost_row(:, iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
+          lower_eq0(-2) = 0.0d0
+          fac = row_coeffs(-2)/ys_lower_ghost_row(-2, iline)
+          if (is_actual) rhs_value = rhs_value - ys_lower_ghost_rhs(iline)*fac
+          row_coeffs = row_coeffs - ys_lower_ghost_row(:, iline)*fac
+          row_coeffs(-2) = 0.0d0
+          fac = row_coeffs(-1)/lower_eq0(-1)
+          if (is_actual) rhs_value = rhs_value - lower_rhs0*fac
+          row_coeffs = row_coeffs - lower_eq0*fac
+          row_coeffs(-1) = 0.0d0
+        else if (has_lower_boundary .and. local_idx == 1) then
+          lower_rhs0 = ys_lower_boundary_rhs(iline) - &
+                       ys_lower_ghost_rhs(iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
+          lower_eq0 = ys_lower_boundary_row(:, iline) - &
+                      ys_lower_ghost_row(:, iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
+          lower_eq0(-2) = 0.0d0
+          fac = row_coeffs(-2)/lower_eq0(-1)
+          if (is_actual) rhs_value = rhs_value - lower_rhs0*fac
+          row_coeffs(-2:1) = row_coeffs(-2:1) - lower_eq0(-1:2)*fac
+          row_coeffs(-2) = 0.0d0
+        end if
 
-        do row = 0, active_n - 1
-          dst(row + dst_row_base, iz + nz + 1, ix - nx0 + 1) = ys_interior_response_columns(row, 1, iline)
+        if (has_upper_boundary .and. local_idx == active_n - 2) then
+          upper_rhsn = ys_upper_boundary_rhs(iline) - &
+                       ys_upper_ghost_rhs(iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
+          upper_eqn = ys_upper_boundary_row(:, iline) - &
+                      ys_upper_ghost_row(:, iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
+          upper_eqn(2) = 0.0d0
+          fac = row_coeffs(2)/upper_eqn(1)
+          if (is_actual) rhs_value = rhs_value - upper_rhsn*fac
+          row_coeffs(-1:2) = row_coeffs(-1:2) - upper_eqn(-2:1)*fac
+          row_coeffs(2) = 0.0d0
+        else if (has_upper_boundary .and. local_idx == active_n - 1) then
+          upper_rhsn = ys_upper_boundary_rhs(iline) - &
+                       ys_upper_ghost_rhs(iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
+          upper_eqn = ys_upper_boundary_row(:, iline) - &
+                      ys_upper_ghost_row(:, iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
+          upper_eqn(2) = 0.0d0
+          fac = row_coeffs(2)/ys_upper_ghost_row(2, iline)
+          if (is_actual) rhs_value = rhs_value - ys_upper_ghost_rhs(iline)*fac
+          row_coeffs = row_coeffs - ys_upper_ghost_row(:, iline)*fac
+          row_coeffs(2) = 0.0d0
+          fac = row_coeffs(1)/upper_eqn(1)
+          if (is_actual) rhs_value = rhs_value - upper_rhsn*fac
+          row_coeffs = row_coeffs - upper_eqn*fac
+          row_coeffs(1) = 0.0d0
+        end if
+
+        ys_gpsv_ds(local_i*batch_const + sys) = (0.0d0, 0.0d0)
+        ys_gpsv_dl(local_i*batch_const + sys) = (0.0d0, 0.0d0)
+        ys_gpsv_d(local_i*batch_const + sys) = (0.0d0, 0.0d0)
+        ys_gpsv_du(local_i*batch_const + sys) = (0.0d0, 0.0d0)
+        ys_gpsv_dw(local_i*batch_const + sys) = (0.0d0, 0.0d0)
+
+        do col = -2, 2
+          coeff = row_coeffs(col)
+          if (coeff == 0.0d0) cycle
+          coupled_row = local_idx + col
+          if (ipy == 0) then
+            if (coupled_row >= 0 .and. coupled_row <= nI - 1) then
+              j = coupled_row
+              offset = j - local_i
+            else if (coupled_row == nI) then
+              if (sys == nlines + 1) rhs_value = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+              cycle
+            else if (coupled_row == nI + 1) then
+              if (sys == nlines + 2) rhs_value = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+              cycle
+            else
+              cycle
+            end if
+          else
+            if (coupled_row >= 2 .and. coupled_row <= active_n - 1) then
+              j = coupled_row - 2
+              offset = j - local_i
+            else if (coupled_row == 0) then
+              if (sys == nlines + 1) rhs_value = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+              cycle
+            else if (coupled_row == 1) then
+              if (sys == nlines + 2) rhs_value = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+              cycle
+            else
+              cycle
+            end if
+          end if
+
+          p = local_i*batch_const + sys
+          select case (offset)
+          case (-2)
+            ys_gpsv_ds(p) = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+          case (-1)
+            ys_gpsv_dl(p) = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+          case (0)
+            ys_gpsv_d(p) = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+          case (1)
+            ys_gpsv_du(p) = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+          case (2)
+            ys_gpsv_dw(p) = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+          end select
         end do
 
-        if (has_padded_dst) then
-          if (has_lower_boundary) then
-lower_rhs0 = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
-            lower_eq0 = ys_lower_boundary_row(:, iline) - ys_lower_ghost_row(:, iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
-            lower_eq0(-2) = 0.0d0
-
-            dst(2, iz + nz + 1, ix - nx0 + 1) = (lower_rhs0 - sum(lower_eq0(0:2)*dst(lower_inner0:lower_inner2, iz + nz + 1, ix - nx0 + 1)))/lower_eq0(-1)
-            dst(1, iz + nz + 1, ix - nx0 + 1) = (ys_lower_ghost_rhs(iline) - &
-                             sum(ys_lower_ghost_row(-1:2, iline)*dst(2:5, iz + nz + 1, ix - nx0 + 1)))/ys_lower_ghost_row(-2, iline)
-          else
-            dst(1, iz + nz + 1, ix - nx0 + 1) = ys_left_interface_values(1, iline)
-            dst(2, iz + nz + 1, ix - nx0 + 1) = ys_left_interface_values(2, iline)
-          end if
-
-          if (has_upper_boundary) then
-  upper_rhsn = ys_upper_boundary_rhs(iline) - ys_upper_ghost_rhs(iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
-            upper_eqn = ys_upper_boundary_row(:, iline) - ys_upper_ghost_row(:, iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
-            upper_eqn(2) = 0.0d0
-
-            dst(active_n + 3, iz + nz + 1, ix - nx0 + 1) = (upper_rhsn - &
-                                        sum(upper_eqn(-2:0)*dst(upper_inner0:upper_inner2, iz + nz + 1, ix - nx0 + 1)))/upper_eqn(1)
-            dst(active_n + 4, iz + nz + 1, ix - nx0 + 1) = (ys_upper_ghost_rhs(iline) - &
-        sum(ys_upper_ghost_row(-2:1, iline)*dst(upper_inner0:upper_inner3, iz + nz + 1, ix - nx0 + 1)))/ys_upper_ghost_row(2, iline)
-          else
-            dst(active_n + 3, iz + nz + 1, ix - nx0 + 1) = ys_right_interface_values(1, iline)
-            dst(active_n + 4, iz + nz + 1, ix - nx0 + 1) = ys_right_interface_values(2, iline)
-          end if
-        end if
+        p = local_i*batch_const + sys
+        ys_gpsv_x(p) = rhs_value
       end do
     end do
     !$omp end target teams distribute parallel do
-    !$omp target update from(dst)
+    call roctxPop("ys_const_endpoint_pack1_plus_response")
 
-  end subroutine ys_solve_ghost_field_reduced
+    call roctxPush("ys_const_endpoint_gpsv1_plus_response")
+    !$omp target data use_device_addr(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, ys_gpsv_buffer)
+    status = cusparseZgpsvInterleavedBatch(ys_gpsv_handle, 0_C_INT, nI, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, &
+                                           ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, batch_const, ys_gpsv_buffer)
+    !$omp end target data
+    call ys_check_cusparse(status, "cusparseZgpsvInterleavedBatch const endpoint Schur")
+    call roctxPop("ys_const_endpoint_gpsv1_plus_response")
+
+    call roctxPush("ys_const_endpoint_pack_schur")
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(ys_local_rhs, ys_local_operator, ys_gpsv_x, ys_reduced_rows_send, nI, nlines, batch_const, active_n, row_start, ipy) &
+    !$omp private(iline, row, c0, c1, y00, y01, y10, y11, g0, g1, s00, s01, s10, s11, t00, t01, t10, t11, det, row_coeffs)
+    do iline = 1, nlines
+      ys_reduced_rows_send(:, iline) = (0.0d0, 0.0d0)
+      if (ipy == 0) then
+        row = row_start + nI
+        row_coeffs = ys_local_operator(row, -2:2, iline)
+        c0 = ys_gpsv_x((nI - 2)*batch_const + iline)
+        c1 = ys_gpsv_x((nI - 1)*batch_const + iline)
+        y00 = ys_gpsv_x((nI - 2)*batch_const + nlines + 1)
+        y10 = ys_gpsv_x((nI - 1)*batch_const + nlines + 1)
+        y01 = ys_gpsv_x((nI - 2)*batch_const + nlines + 2)
+        y11 = ys_gpsv_x((nI - 1)*batch_const + nlines + 2)
+        g0 = ys_local_rhs(row, iline) - row_coeffs(-2)*c0 - row_coeffs(-1)*c1
+        s00 = cmplx(row_coeffs(0), 0.0d0, kind=C_DOUBLE) - row_coeffs(-2)*y00 - row_coeffs(-1)*y10
+        s01 = cmplx(row_coeffs(1), 0.0d0, kind=C_DOUBLE) - row_coeffs(-2)*y01 - row_coeffs(-1)*y11
+        t00 = cmplx(row_coeffs(2), 0.0d0, kind=C_DOUBLE)
+        t01 = (0.0d0, 0.0d0)
+
+        row = row_start + nI + 1
+        row_coeffs = ys_local_operator(row, -2:2, iline)
+        c1 = ys_gpsv_x((nI - 1)*batch_const + iline)
+        y10 = ys_gpsv_x((nI - 1)*batch_const + nlines + 1)
+        y11 = ys_gpsv_x((nI - 1)*batch_const + nlines + 2)
+        g1 = ys_local_rhs(row, iline) - row_coeffs(-2)*c1
+        s10 = cmplx(row_coeffs(-1), 0.0d0, kind=C_DOUBLE) - row_coeffs(-2)*y10
+        s11 = cmplx(row_coeffs(0), 0.0d0, kind=C_DOUBLE) - row_coeffs(-2)*y11
+        t10 = cmplx(row_coeffs(1), 0.0d0, kind=C_DOUBLE)
+        t11 = cmplx(row_coeffs(2), 0.0d0, kind=C_DOUBLE)
+
+        det = s00*s11 - s01*s10
+        ys_reduced_rows_send(3, iline) = (s11*g0 - s01*g1)/det
+        ys_reduced_rows_send(4, iline) = (-s10*g0 + s00*g1)/det
+        ys_reduced_rows_send(15, iline) = -((s11*t00 - s01*t10)/det)
+        ys_reduced_rows_send(16, iline) = -((-s10*t00 + s00*t10)/det)
+        ys_reduced_rows_send(19, iline) = -((s11*t01 - s01*t11)/det)
+        ys_reduced_rows_send(20, iline) = -((-s10*t01 + s00*t11)/det)
+      else
+        row = row_start
+        row_coeffs = ys_local_operator(row, -2:2, iline)
+        c0 = ys_gpsv_x(iline)
+        y00 = ys_gpsv_x(nlines + 1)
+        y01 = ys_gpsv_x(nlines + 2)
+        g0 = ys_local_rhs(row, iline) - row_coeffs(2)*c0
+        s00 = cmplx(row_coeffs(0), 0.0d0, kind=C_DOUBLE) - row_coeffs(2)*y00
+        s01 = cmplx(row_coeffs(1), 0.0d0, kind=C_DOUBLE) - row_coeffs(2)*y01
+        t00 = cmplx(row_coeffs(-2), 0.0d0, kind=C_DOUBLE)
+        t01 = cmplx(row_coeffs(-1), 0.0d0, kind=C_DOUBLE)
+
+        row = row_start + 1
+        row_coeffs = ys_local_operator(row, -2:2, iline)
+        c0 = ys_gpsv_x(iline)
+        c1 = ys_gpsv_x(batch_const + iline)
+        y00 = ys_gpsv_x(nlines + 1)
+        y10 = ys_gpsv_x(batch_const + nlines + 1)
+        y01 = ys_gpsv_x(nlines + 2)
+        y11 = ys_gpsv_x(batch_const + nlines + 2)
+        g1 = ys_local_rhs(row, iline) - row_coeffs(1)*c0 - row_coeffs(2)*c1
+        s10 = cmplx(row_coeffs(-1), 0.0d0, kind=C_DOUBLE) - row_coeffs(1)*y00 - row_coeffs(2)*y10
+        s11 = cmplx(row_coeffs(0), 0.0d0, kind=C_DOUBLE) - row_coeffs(1)*y01 - row_coeffs(2)*y11
+        t10 = (0.0d0, 0.0d0)
+        t11 = cmplx(row_coeffs(-2), 0.0d0, kind=C_DOUBLE)
+
+        det = s00*s11 - s01*s10
+        ys_reduced_rows_send(1, iline) = (s11*g0 - s01*g1)/det
+        ys_reduced_rows_send(2, iline) = (-s10*g0 + s00*g1)/det
+        ys_reduced_rows_send(5, iline) = -((s11*t00 - s01*t10)/det)
+        ys_reduced_rows_send(6, iline) = -((-s10*t00 + s00*t10)/det)
+        ys_reduced_rows_send(9, iline) = -((s11*t01 - s01*t11)/det)
+        ys_reduced_rows_send(10, iline) = -((-s10*t01 + s00*t11)/det)
+      end if
+    end do
+    !$omp end target teams distribute parallel do
+    call roctxPop("ys_const_endpoint_pack_schur")
+
+    call ys_solve_reduced_interfaces()
+
+    lower_inner0 = dst_row_base
+    lower_inner2 = dst_row_base + 2
+    upper_inner0 = active_n + dst_row_base - 3
+    upper_inner2 = upper_inner0 + 2
+    upper_inner3 = upper_inner0 + 3
+
+    call roctxPush("ys_const_endpoint_reconstruct")
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(dst, ys_gpsv_x, ys_reduced_rhs, ys_left_interface_values, ys_right_interface_values, ys_lower_ghost_rhs, ys_upper_ghost_rhs, &
+    !$omp& ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_lower_ghost_row, ys_upper_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, &
+    !$omp& nlines, nlines_z, nx0, nz, active_n, dst_row_base, has_lower_boundary, has_upper_boundary, lower_inner0, lower_inner2, &
+    !$omp& upper_inner0, upper_inner2, upper_inner3, has_padded_dst, nI, batch_const, ipy) &
+    !$omp private(iline, local_i, local_idx, p, ix, iz, vleft1, vleft2, vright1, vright2, lower_rhs0, upper_rhsn, lower_eq0, upper_eqn)
+    do iline = 1, nlines
+      ix = (iline - 1)/nlines_z + nx0
+      iz = mod(iline - 1, nlines_z) - nz
+      if (ipy == 0) then
+        vright1 = ys_reduced_rhs(3, iline)
+        vright2 = ys_reduced_rhs(4, iline)
+        do local_i = 0, nI - 1
+          p = local_i*batch_const + iline
+          local_idx = local_i
+          dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) = ys_gpsv_x(p) - &
+                                                                     ys_gpsv_x(local_i*batch_const + nlines + 1)*vright1 - &
+                                                                     ys_gpsv_x(local_i*batch_const + nlines + 2)*vright2
+        end do
+        dst(nI + dst_row_base, iz + nz + 1, ix - nx0 + 1) = vright1
+        dst(nI + 1 + dst_row_base, iz + nz + 1, ix - nx0 + 1) = vright2
+      else
+        vleft1 = ys_reduced_rhs(4*ipy + 1, iline)
+        vleft2 = ys_reduced_rhs(4*ipy + 2, iline)
+        dst(dst_row_base, iz + nz + 1, ix - nx0 + 1) = vleft1
+        dst(dst_row_base + 1, iz + nz + 1, ix - nx0 + 1) = vleft2
+        do local_i = 0, nI - 1
+          p = local_i*batch_const + iline
+          local_idx = local_i + 2
+          dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) = ys_gpsv_x(p) - &
+                                                                     ys_gpsv_x(local_i*batch_const + nlines + 1)*vleft1 - &
+                                                                     ys_gpsv_x(local_i*batch_const + nlines + 2)*vleft2
+        end do
+      end if
+      if (has_padded_dst) then
+        if (has_lower_boundary) then
+          lower_rhs0 = ys_lower_boundary_rhs(iline) - &
+                       ys_lower_ghost_rhs(iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
+          lower_eq0 = ys_lower_boundary_row(:, iline) - &
+                      ys_lower_ghost_row(:, iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
+          lower_eq0(-2) = 0.0d0
+          dst(2, iz + nz + 1, ix - nx0 + 1) = (lower_rhs0 - &
+                                               lower_eq0(0)*dst(lower_inner0, iz + nz + 1, ix - nx0 + 1) - &
+                                               lower_eq0(1)*dst(lower_inner0 + 1, iz + nz + 1, ix - nx0 + 1) - &
+                                               lower_eq0(2)*dst(lower_inner2, iz + nz + 1, ix - nx0 + 1))/lower_eq0(-1)
+          dst(1, iz + nz + 1, ix - nx0 + 1) = (ys_lower_ghost_rhs(iline) - &
+                                               ys_lower_ghost_row(-1, iline)*dst(2, iz + nz + 1, ix - nx0 + 1) - &
+                                               ys_lower_ghost_row(0, iline)*dst(3, iz + nz + 1, ix - nx0 + 1) - &
+                                               ys_lower_ghost_row(1, iline)*dst(4, iz + nz + 1, ix - nx0 + 1) - &
+                                       ys_lower_ghost_row(2, iline)*dst(5, iz + nz + 1, ix - nx0 + 1))/ys_lower_ghost_row(-2, iline)
+        else
+          dst(1, iz + nz + 1, ix - nx0 + 1) = ys_left_interface_values(1, iline)
+          dst(2, iz + nz + 1, ix - nx0 + 1) = ys_left_interface_values(2, iline)
+        end if
+        if (has_upper_boundary) then
+          upper_rhsn = ys_upper_boundary_rhs(iline) - &
+                       ys_upper_ghost_rhs(iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
+          upper_eqn = ys_upper_boundary_row(:, iline) - &
+                      ys_upper_ghost_row(:, iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
+          upper_eqn(2) = 0.0d0
+          dst(active_n + 3, iz + nz + 1, ix - nx0 + 1) = (upper_rhsn - &
+                                                          upper_eqn(-2)*dst(upper_inner0, iz + nz + 1, ix - nx0 + 1) - &
+                                                          upper_eqn(-1)*dst(upper_inner0 + 1, iz + nz + 1, ix - nx0 + 1) - &
+                                                          upper_eqn(0)*dst(upper_inner2, iz + nz + 1, ix - nx0 + 1))/upper_eqn(1)
+          dst(active_n + 4, iz + nz + 1, ix - nx0 + 1) = (ys_upper_ghost_rhs(iline) - &
+                                                      ys_upper_ghost_row(-2, iline)*dst(upper_inner0, iz + nz + 1, ix - nx0 + 1) - &
+                                                  ys_upper_ghost_row(-1, iline)*dst(upper_inner0 + 1, iz + nz + 1, ix - nx0 + 1) - &
+                                                       ys_upper_ghost_row(0, iline)*dst(upper_inner2, iz + nz + 1, ix - nx0 + 1) - &
+                             ys_upper_ghost_row(1, iline)*dst(upper_inner3, iz + nz + 1, ix - nx0 + 1))/ys_upper_ghost_row(2, iline)
+        else
+          dst(active_n + 3, iz + nz + 1, ix - nx0 + 1) = ys_right_interface_values(1, iline)
+          dst(active_n + 4, iz + nz + 1, ix - nx0 + 1) = ys_right_interface_values(2, iline)
+        end if
+      end if
+    end do
+    !$omp end target teams distribute parallel do
+    call roctxPop("ys_const_endpoint_reconstruct")
+  end subroutine ys_solve_ghost_field_reduced_const_operator
+
+  subroutine ys_solve_ghost_field_reduced_symmetric_operator(dst, ny, nz)
+    implicit none
+    integer(C_INT), intent(in) :: ny, nz
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
+    complex(C_DOUBLE_COMPLEX) :: lower_rhs0, upper_rhsn, rhs_value
+    complex(C_DOUBLE_COMPLEX) :: c0, c1, y00, y01, y10, y11, g0, g1
+    complex(C_DOUBLE_COMPLEX) :: s00, s01, s10, s11, t00, t01, t10, t11, det
+    complex(C_DOUBLE_COMPLEX) :: vleft1, vleft2, vright1, vright2
+    real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-2:2), upper_eqn(-2:2), fac, coeff
+    integer(C_INT) :: row_start, row_end, active_n, nI, nlines, nlines_z, nresp, batch_sym
+    integer(C_INT) :: dst_row_base, lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3
+    integer(C_INT) :: status, sys, iline, ref_iline, resp, resp_index, local_i, local_idx, row, col, coupled_row, p, j, offset
+    integer(C_INT) :: ix, iz, abs_iz, ix_local
+    logical :: has_lower_boundary, has_upper_boundary, has_padded_dst, is_actual
+
+    if (npy_grid /= 2) then
+      call ys_solve_ghost_field_reduced(dst, ny, nz)
+      return
+    end if
+
+    row_start = ny0
+    row_end = nyN
+    active_n = row_end - row_start + 1
+    nI = active_n - 2
+    nlines = ys_workspace_nlines
+    nlines_z = 2*nz + 1
+    nresp = (nxN - nx0 + 1)*(nz + 1)
+    batch_sym = nlines + 2*nresp
+    has_lower_boundary = (row_start == 1)
+    has_upper_boundary = (row_end == ny - 1)
+    has_padded_dst = (size(dst, 1) == active_n + 4)
+    dst_row_base = 1
+    if (has_padded_dst) dst_row_base = 3
+
+    if (.not. allocated(ys_local_rhs)) error stop "ys_prepare_ghost_field_workspace must be called before symmetric y solve"
+    if (ys_gpsv_batch < batch_sym) error stop "symmetric y solve requires larger cuSPARSE workspace"
+
+    call roctxPush("ys_sym_endpoint_pack1_plus_response")
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
+    !$omp& ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, &
+    !$omp& ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, row_start, active_n, nI, nlines, nlines_z, nresp, batch_sym, nz, nx0, &
+    !$omp& has_lower_boundary, has_upper_boundary, ipy) &
+    !$omp private(sys, iline, ref_iline, resp, local_i, local_idx, row, col, coupled_row, p, j, offset, is_actual, ix_local, abs_iz, &
+    !$omp& rhs_value, row_coeffs, lower_rhs0, upper_rhsn, lower_eq0, upper_eqn, fac, coeff)
+    do local_i = 0, nI - 1
+      do sys = 1, batch_sym
+        is_actual = (sys <= nlines)
+        if (is_actual) then
+          iline = sys
+          ref_iline = iline
+        else
+          resp = sys - nlines
+          if (resp > nresp) resp = resp - nresp
+          ix_local = (resp - 1)/(nz + 1)
+          abs_iz = mod(resp - 1, nz + 1)
+          ref_iline = ix_local*nlines_z + (abs_iz + nz + 1)
+          iline = ref_iline
+        end if
+        if (ipy == 0) then
+          local_idx = local_i
+        else
+          local_idx = local_i + 2
+        end if
+        row = row_start + local_idx
+        rhs_value = (0.0d0, 0.0d0)
+        if (is_actual) rhs_value = ys_local_rhs(row, iline)
+        row_coeffs = ys_local_operator(row, -2:2, ref_iline)
+
+        if (has_lower_boundary .and. local_idx == 0) then
+          lower_rhs0 = ys_lower_boundary_rhs(ref_iline) - &
+                       ys_lower_ghost_rhs(ref_iline)*ys_lower_boundary_row(-2, ref_iline)/ys_lower_ghost_row(-2, ref_iline)
+          lower_eq0 = ys_lower_boundary_row(:, ref_iline) - &
+                      ys_lower_ghost_row(:, ref_iline)*ys_lower_boundary_row(-2, ref_iline)/ys_lower_ghost_row(-2, ref_iline)
+          lower_eq0(-2) = 0.0d0
+          fac = row_coeffs(-2)/ys_lower_ghost_row(-2, ref_iline)
+          if (is_actual) rhs_value = rhs_value - ys_lower_ghost_rhs(ref_iline)*fac
+          row_coeffs = row_coeffs - ys_lower_ghost_row(:, ref_iline)*fac
+          row_coeffs(-2) = 0.0d0
+          fac = row_coeffs(-1)/lower_eq0(-1)
+          if (is_actual) rhs_value = rhs_value - lower_rhs0*fac
+          row_coeffs = row_coeffs - lower_eq0*fac
+          row_coeffs(-1) = 0.0d0
+        else if (has_lower_boundary .and. local_idx == 1) then
+          lower_rhs0 = ys_lower_boundary_rhs(ref_iline) - &
+                       ys_lower_ghost_rhs(ref_iline)*ys_lower_boundary_row(-2, ref_iline)/ys_lower_ghost_row(-2, ref_iline)
+          lower_eq0 = ys_lower_boundary_row(:, ref_iline) - &
+                      ys_lower_ghost_row(:, ref_iline)*ys_lower_boundary_row(-2, ref_iline)/ys_lower_ghost_row(-2, ref_iline)
+          lower_eq0(-2) = 0.0d0
+          fac = row_coeffs(-2)/lower_eq0(-1)
+          if (is_actual) rhs_value = rhs_value - lower_rhs0*fac
+          row_coeffs(-2:1) = row_coeffs(-2:1) - lower_eq0(-1:2)*fac
+          row_coeffs(-2) = 0.0d0
+        end if
+
+        if (has_upper_boundary .and. local_idx == active_n - 2) then
+          upper_rhsn = ys_upper_boundary_rhs(ref_iline) - &
+                       ys_upper_ghost_rhs(ref_iline)*ys_upper_boundary_row(2, ref_iline)/ys_upper_ghost_row(2, ref_iline)
+          upper_eqn = ys_upper_boundary_row(:, ref_iline) - &
+                      ys_upper_ghost_row(:, ref_iline)*ys_upper_boundary_row(2, ref_iline)/ys_upper_ghost_row(2, ref_iline)
+          upper_eqn(2) = 0.0d0
+          fac = row_coeffs(2)/upper_eqn(1)
+          if (is_actual) rhs_value = rhs_value - upper_rhsn*fac
+          row_coeffs(-1:2) = row_coeffs(-1:2) - upper_eqn(-2:1)*fac
+          row_coeffs(2) = 0.0d0
+        else if (has_upper_boundary .and. local_idx == active_n - 1) then
+          upper_rhsn = ys_upper_boundary_rhs(ref_iline) - &
+                       ys_upper_ghost_rhs(ref_iline)*ys_upper_boundary_row(2, ref_iline)/ys_upper_ghost_row(2, ref_iline)
+          upper_eqn = ys_upper_boundary_row(:, ref_iline) - &
+                      ys_upper_ghost_row(:, ref_iline)*ys_upper_boundary_row(2, ref_iline)/ys_upper_ghost_row(2, ref_iline)
+          upper_eqn(2) = 0.0d0
+          fac = row_coeffs(2)/ys_upper_ghost_row(2, ref_iline)
+          if (is_actual) rhs_value = rhs_value - ys_upper_ghost_rhs(ref_iline)*fac
+          row_coeffs = row_coeffs - ys_upper_ghost_row(:, ref_iline)*fac
+          row_coeffs(2) = 0.0d0
+          fac = row_coeffs(1)/upper_eqn(1)
+          if (is_actual) rhs_value = rhs_value - upper_rhsn*fac
+          row_coeffs = row_coeffs - upper_eqn*fac
+          row_coeffs(1) = 0.0d0
+        end if
+
+        p = local_i*batch_sym + sys
+        ys_gpsv_ds(p) = (0.0d0, 0.0d0)
+        ys_gpsv_dl(p) = (0.0d0, 0.0d0)
+        ys_gpsv_d(p) = (0.0d0, 0.0d0)
+        ys_gpsv_du(p) = (0.0d0, 0.0d0)
+        ys_gpsv_dw(p) = (0.0d0, 0.0d0)
+
+        do col = -2, 2
+          coeff = row_coeffs(col)
+          if (coeff == 0.0d0) cycle
+          coupled_row = local_idx + col
+          if (ipy == 0) then
+            if (coupled_row >= 0 .and. coupled_row <= nI - 1) then
+              j = coupled_row
+              offset = j - local_i
+            else if (coupled_row == nI) then
+              if (sys > nlines .and. sys <= nlines + nresp) rhs_value = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+              cycle
+            else if (coupled_row == nI + 1) then
+              if (sys > nlines + nresp) rhs_value = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+              cycle
+            else
+              cycle
+            end if
+          else
+            if (coupled_row >= 2 .and. coupled_row <= active_n - 1) then
+              j = coupled_row - 2
+              offset = j - local_i
+            else if (coupled_row == 0) then
+              if (sys > nlines .and. sys <= nlines + nresp) rhs_value = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+              cycle
+            else if (coupled_row == 1) then
+              if (sys > nlines + nresp) rhs_value = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+              cycle
+            else
+              cycle
+            end if
+          end if
+
+          select case (offset)
+          case (-2)
+            ys_gpsv_ds(p) = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+          case (-1)
+            ys_gpsv_dl(p) = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+          case (0)
+            ys_gpsv_d(p) = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+          case (1)
+            ys_gpsv_du(p) = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+          case (2)
+            ys_gpsv_dw(p) = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+          end select
+        end do
+        ys_gpsv_x(p) = rhs_value
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+    call roctxPop("ys_sym_endpoint_pack1_plus_response")
+
+    call roctxPush("ys_sym_endpoint_gpsv1_plus_response")
+    !$omp target data use_device_addr(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, ys_gpsv_buffer)
+    status = cusparseZgpsvInterleavedBatch(ys_gpsv_handle, 0_C_INT, nI, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, &
+                                           ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, batch_sym, ys_gpsv_buffer)
+    !$omp end target data
+    call ys_check_cusparse(status, "cusparseZgpsvInterleavedBatch symmetric endpoint Schur")
+    call roctxPop("ys_sym_endpoint_gpsv1_plus_response")
+
+    call roctxPush("ys_sym_endpoint_pack_schur")
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(ys_local_rhs, ys_local_operator, ys_gpsv_x, ys_reduced_rows_send, nI, nlines, nlines_z, nresp, batch_sym, nz, nx0, row_start, ipy) &
+    !$omp private(iline, row, ix, iz, abs_iz, resp_index, c0, c1, y00, y01, y10, y11, g0, g1, s00, s01, s10, s11, &
+    !$omp& t00, t01, t10, t11, det, row_coeffs)
+    do iline = 1, nlines
+      ix = (iline - 1)/nlines_z + nx0
+      iz = mod(iline - 1, nlines_z) - nz
+      abs_iz = abs(iz)
+      resp_index = (ix - nx0)*(nz + 1) + abs_iz + 1
+      ys_reduced_rows_send(:, iline) = (0.0d0, 0.0d0)
+      if (ipy == 0) then
+        row = row_start + nI
+        row_coeffs = ys_local_operator(row, -2:2, iline)
+        c0 = ys_gpsv_x((nI - 2)*batch_sym + iline)
+        c1 = ys_gpsv_x((nI - 1)*batch_sym + iline)
+        y00 = ys_gpsv_x((nI - 2)*batch_sym + nlines + resp_index)
+        y10 = ys_gpsv_x((nI - 1)*batch_sym + nlines + resp_index)
+        y01 = ys_gpsv_x((nI - 2)*batch_sym + nlines + nresp + resp_index)
+        y11 = ys_gpsv_x((nI - 1)*batch_sym + nlines + nresp + resp_index)
+        g0 = ys_local_rhs(row, iline) - row_coeffs(-2)*c0 - row_coeffs(-1)*c1
+        s00 = cmplx(row_coeffs(0), 0.0d0, kind=C_DOUBLE) - row_coeffs(-2)*y00 - row_coeffs(-1)*y10
+        s01 = cmplx(row_coeffs(1), 0.0d0, kind=C_DOUBLE) - row_coeffs(-2)*y01 - row_coeffs(-1)*y11
+        t00 = cmplx(row_coeffs(2), 0.0d0, kind=C_DOUBLE)
+        t01 = (0.0d0, 0.0d0)
+
+        row = row_start + nI + 1
+        row_coeffs = ys_local_operator(row, -2:2, iline)
+        c1 = ys_gpsv_x((nI - 1)*batch_sym + iline)
+        y10 = ys_gpsv_x((nI - 1)*batch_sym + nlines + resp_index)
+        y11 = ys_gpsv_x((nI - 1)*batch_sym + nlines + nresp + resp_index)
+        g1 = ys_local_rhs(row, iline) - row_coeffs(-2)*c1
+        s10 = cmplx(row_coeffs(-1), 0.0d0, kind=C_DOUBLE) - row_coeffs(-2)*y10
+        s11 = cmplx(row_coeffs(0), 0.0d0, kind=C_DOUBLE) - row_coeffs(-2)*y11
+        t10 = cmplx(row_coeffs(1), 0.0d0, kind=C_DOUBLE)
+        t11 = cmplx(row_coeffs(2), 0.0d0, kind=C_DOUBLE)
+
+        det = s00*s11 - s01*s10
+        ys_reduced_rows_send(3, iline) = (s11*g0 - s01*g1)/det
+        ys_reduced_rows_send(4, iline) = (-s10*g0 + s00*g1)/det
+        ys_reduced_rows_send(15, iline) = -((s11*t00 - s01*t10)/det)
+        ys_reduced_rows_send(16, iline) = -((-s10*t00 + s00*t10)/det)
+        ys_reduced_rows_send(19, iline) = -((s11*t01 - s01*t11)/det)
+        ys_reduced_rows_send(20, iline) = -((-s10*t01 + s00*t11)/det)
+      else
+        row = row_start
+        row_coeffs = ys_local_operator(row, -2:2, iline)
+        c0 = ys_gpsv_x(iline)
+        y00 = ys_gpsv_x(nlines + resp_index)
+        y01 = ys_gpsv_x(nlines + nresp + resp_index)
+        g0 = ys_local_rhs(row, iline) - row_coeffs(2)*c0
+        s00 = cmplx(row_coeffs(0), 0.0d0, kind=C_DOUBLE) - row_coeffs(2)*y00
+        s01 = cmplx(row_coeffs(1), 0.0d0, kind=C_DOUBLE) - row_coeffs(2)*y01
+        t00 = cmplx(row_coeffs(-2), 0.0d0, kind=C_DOUBLE)
+        t01 = cmplx(row_coeffs(-1), 0.0d0, kind=C_DOUBLE)
+
+        row = row_start + 1
+        row_coeffs = ys_local_operator(row, -2:2, iline)
+        c0 = ys_gpsv_x(iline)
+        c1 = ys_gpsv_x(batch_sym + iline)
+        y00 = ys_gpsv_x(nlines + resp_index)
+        y10 = ys_gpsv_x(batch_sym + nlines + resp_index)
+        y01 = ys_gpsv_x(nlines + nresp + resp_index)
+        y11 = ys_gpsv_x(batch_sym + nlines + nresp + resp_index)
+        g1 = ys_local_rhs(row, iline) - row_coeffs(1)*c0 - row_coeffs(2)*c1
+        s10 = cmplx(row_coeffs(-1), 0.0d0, kind=C_DOUBLE) - row_coeffs(1)*y00 - row_coeffs(2)*y10
+        s11 = cmplx(row_coeffs(0), 0.0d0, kind=C_DOUBLE) - row_coeffs(1)*y01 - row_coeffs(2)*y11
+        t10 = (0.0d0, 0.0d0)
+        t11 = cmplx(row_coeffs(-2), 0.0d0, kind=C_DOUBLE)
+
+        det = s00*s11 - s01*s10
+        ys_reduced_rows_send(1, iline) = (s11*g0 - s01*g1)/det
+        ys_reduced_rows_send(2, iline) = (-s10*g0 + s00*g1)/det
+        ys_reduced_rows_send(5, iline) = -((s11*t00 - s01*t10)/det)
+        ys_reduced_rows_send(6, iline) = -((-s10*t00 + s00*t10)/det)
+        ys_reduced_rows_send(9, iline) = -((s11*t01 - s01*t11)/det)
+        ys_reduced_rows_send(10, iline) = -((-s10*t01 + s00*t11)/det)
+      end if
+    end do
+    !$omp end target teams distribute parallel do
+    call roctxPop("ys_sym_endpoint_pack_schur")
+
+    call ys_solve_reduced_interfaces()
+
+    lower_inner0 = dst_row_base
+    lower_inner2 = dst_row_base + 2
+    upper_inner0 = active_n + dst_row_base - 3
+    upper_inner2 = upper_inner0 + 2
+    upper_inner3 = upper_inner0 + 3
+
+    call roctxPush("ys_sym_endpoint_reconstruct")
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(dst, ys_gpsv_x, ys_reduced_rhs, ys_left_interface_values, ys_right_interface_values, ys_lower_ghost_rhs, ys_upper_ghost_rhs, &
+    !$omp& ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_lower_ghost_row, ys_upper_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, &
+    !$omp& nlines, nlines_z, nresp, nx0, nz, active_n, dst_row_base, has_lower_boundary, has_upper_boundary, lower_inner0, lower_inner2, &
+    !$omp& upper_inner0, upper_inner2, upper_inner3, has_padded_dst, nI, batch_sym, ipy) &
+    !$omp private(iline, local_i, local_idx, p, ix, iz, abs_iz, resp_index, vleft1, vleft2, vright1, vright2, lower_rhs0, upper_rhsn, lower_eq0, upper_eqn)
+    do iline = 1, nlines
+      ix = (iline - 1)/nlines_z + nx0
+      iz = mod(iline - 1, nlines_z) - nz
+      abs_iz = abs(iz)
+      resp_index = (ix - nx0)*(nz + 1) + abs_iz + 1
+      if (ipy == 0) then
+        vright1 = ys_reduced_rhs(3, iline)
+        vright2 = ys_reduced_rhs(4, iline)
+        do local_i = 0, nI - 1
+          p = local_i*batch_sym + iline
+          local_idx = local_i
+          dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) = ys_gpsv_x(p) - &
+                                                                     ys_gpsv_x(local_i*batch_sym + nlines + resp_index)*vright1 - &
+                                                                  ys_gpsv_x(local_i*batch_sym + nlines + nresp + resp_index)*vright2
+        end do
+        dst(nI + dst_row_base, iz + nz + 1, ix - nx0 + 1) = vright1
+        dst(nI + 1 + dst_row_base, iz + nz + 1, ix - nx0 + 1) = vright2
+      else
+        vleft1 = ys_reduced_rhs(4*ipy + 1, iline)
+        vleft2 = ys_reduced_rhs(4*ipy + 2, iline)
+        dst(dst_row_base, iz + nz + 1, ix - nx0 + 1) = vleft1
+        dst(dst_row_base + 1, iz + nz + 1, ix - nx0 + 1) = vleft2
+        do local_i = 0, nI - 1
+          p = local_i*batch_sym + iline
+          local_idx = local_i + 2
+          dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) = ys_gpsv_x(p) - &
+                                                                     ys_gpsv_x(local_i*batch_sym + nlines + resp_index)*vleft1 - &
+                                                                   ys_gpsv_x(local_i*batch_sym + nlines + nresp + resp_index)*vleft2
+        end do
+      end if
+      if (has_padded_dst) then
+        if (has_lower_boundary) then
+          lower_rhs0 = ys_lower_boundary_rhs(iline) - &
+                       ys_lower_ghost_rhs(iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
+          lower_eq0 = ys_lower_boundary_row(:, iline) - &
+                      ys_lower_ghost_row(:, iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
+          lower_eq0(-2) = 0.0d0
+          dst(2, iz + nz + 1, ix - nx0 + 1) = (lower_rhs0 - &
+                                               lower_eq0(0)*dst(lower_inner0, iz + nz + 1, ix - nx0 + 1) - &
+                                               lower_eq0(1)*dst(lower_inner0 + 1, iz + nz + 1, ix - nx0 + 1) - &
+                                               lower_eq0(2)*dst(lower_inner2, iz + nz + 1, ix - nx0 + 1))/lower_eq0(-1)
+          dst(1, iz + nz + 1, ix - nx0 + 1) = (ys_lower_ghost_rhs(iline) - &
+                                               ys_lower_ghost_row(-1, iline)*dst(2, iz + nz + 1, ix - nx0 + 1) - &
+                                               ys_lower_ghost_row(0, iline)*dst(3, iz + nz + 1, ix - nx0 + 1) - &
+                                               ys_lower_ghost_row(1, iline)*dst(4, iz + nz + 1, ix - nx0 + 1) - &
+                                       ys_lower_ghost_row(2, iline)*dst(5, iz + nz + 1, ix - nx0 + 1))/ys_lower_ghost_row(-2, iline)
+        else
+          dst(1, iz + nz + 1, ix - nx0 + 1) = ys_left_interface_values(1, iline)
+          dst(2, iz + nz + 1, ix - nx0 + 1) = ys_left_interface_values(2, iline)
+        end if
+        if (has_upper_boundary) then
+          upper_rhsn = ys_upper_boundary_rhs(iline) - &
+                       ys_upper_ghost_rhs(iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
+          upper_eqn = ys_upper_boundary_row(:, iline) - &
+                      ys_upper_ghost_row(:, iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
+          upper_eqn(2) = 0.0d0
+          dst(active_n + 3, iz + nz + 1, ix - nx0 + 1) = (upper_rhsn - &
+                                                          upper_eqn(-2)*dst(upper_inner0, iz + nz + 1, ix - nx0 + 1) - &
+                                                          upper_eqn(-1)*dst(upper_inner0 + 1, iz + nz + 1, ix - nx0 + 1) - &
+                                                          upper_eqn(0)*dst(upper_inner2, iz + nz + 1, ix - nx0 + 1))/upper_eqn(1)
+          dst(active_n + 4, iz + nz + 1, ix - nx0 + 1) = (ys_upper_ghost_rhs(iline) - &
+                                                      ys_upper_ghost_row(-2, iline)*dst(upper_inner0, iz + nz + 1, ix - nx0 + 1) - &
+                                                  ys_upper_ghost_row(-1, iline)*dst(upper_inner0 + 1, iz + nz + 1, ix - nx0 + 1) - &
+                                                       ys_upper_ghost_row(0, iline)*dst(upper_inner2, iz + nz + 1, ix - nx0 + 1) - &
+                             ys_upper_ghost_row(1, iline)*dst(upper_inner3, iz + nz + 1, ix - nx0 + 1))/ys_upper_ghost_row(2, iline)
+        else
+          dst(active_n + 3, iz + nz + 1, ix - nx0 + 1) = ys_right_interface_values(1, iline)
+          dst(active_n + 4, iz + nz + 1, ix - nx0 + 1) = ys_right_interface_values(2, iline)
+        end if
+      end if
+    end do
+    !$omp end target teams distribute parallel do
+    call roctxPop("ys_sym_endpoint_reconstruct")
+  end subroutine ys_solve_ghost_field_reduced_symmetric_operator
+
+#endif
+
+  subroutine ys_solve_ghost_field_single_rank(dst, ny, nz)
+    implicit none
+    integer(C_INT), intent(in) :: ny, nz
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
+    complex(C_DOUBLE_COMPLEX) :: lower_rhs0, upper_rhsn, rhs_value
+    real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-2:2), upper_eqn(-2:2)
+    integer(C_INT) :: ix, iz, iline, nlines, nlines_z, row_start, row_end, active_n, row, local_idx
+    integer(C_INT) :: dst_row_base, lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3
+    logical :: has_padded_dst
+
+#ifdef HAVE_CUDA
+    call ys_solve_ghost_field_single_rank_cusparse(dst, ny, nz)
+    return
+#endif
+
+    row_start = ny0
+    row_end = nyN
+    active_n = row_end - row_start + 1
+    has_padded_dst = (size(dst, 1) == active_n + 4)
+    dst_row_base = 1
+    if (has_padded_dst) dst_row_base = 3
+    nlines_z = 2*nz + 1
+    nlines = ys_workspace_nlines
+
+    lower_inner0 = dst_row_base
+    lower_inner2 = dst_row_base + 2
+    upper_inner0 = active_n + dst_row_base - 3
+    upper_inner2 = upper_inner0 + 2
+    upper_inner3 = upper_inner0 + 3
+
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(dst, ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
+    !$omp& ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ys_interior_lu, ys_interior_response_columns, &
+    !$omp& row_start, row_end, active_n, nlines, nx0, nxN, nz, nlines_z, dst_row_base, lower_inner0, lower_inner2, upper_inner0, upper_inner2, &
+    !$omp& upper_inner3, has_padded_dst) &
+    !$omp private(ix, iz, iline, row, local_idx, lower_rhs0, upper_rhsn, row_coeffs, lower_eq0, upper_eqn)
+    do iline = 1, nlines
+      ys_interior_lu(:, :, iline) = 0.0d0
+
+lower_rhs0 = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
+      lower_eq0 = ys_lower_boundary_row(:, iline) - ys_lower_ghost_row(:, iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
+      lower_eq0(-2) = 0.0d0
+
+  upper_rhsn = ys_upper_boundary_rhs(iline) - ys_upper_ghost_rhs(iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
+      upper_eqn = ys_upper_boundary_row(:, iline) - ys_upper_ghost_row(:, iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
+      upper_eqn(2) = 0.0d0
+
+      do row = row_start, row_end
+        local_idx = row - row_start
+        ys_interior_response_columns(local_idx, 1, iline) = ys_local_rhs(row, iline)
+      end do
+
+      ys_interior_response_columns(0, 1, iline) = ys_interior_response_columns(0, 1, iline) - &
+                                     ys_lower_ghost_rhs(iline)*ys_local_operator(row_start, -2, iline)/ys_lower_ghost_row(-2, iline)
+      row_coeffs = ys_local_operator(row_start, -2:2, iline) - ys_lower_ghost_row(:, iline)*ys_local_operator(row_start, -2, iline)/ys_lower_ghost_row(-2, iline)
+      row_coeffs(-2) = 0.0d0
+     ys_interior_response_columns(0, 1, iline) = ys_interior_response_columns(0, 1, iline) - lower_rhs0*row_coeffs(-1)/lower_eq0(-1)
+      row_coeffs = row_coeffs - lower_eq0*row_coeffs(-1)/lower_eq0(-1)
+      row_coeffs(-1) = 0.0d0
+      ys_interior_lu(0, 0:2, iline) = row_coeffs(0:2)
+
+      ys_interior_response_columns(1, 1, iline) = ys_interior_response_columns(1, 1, iline) - lower_rhs0*ys_local_operator(row_start + 1, -2, iline)/lower_eq0(-1)
+      row_coeffs = ys_local_operator(row_start + 1, -2:2, iline)
+      row_coeffs(-2:1) = row_coeffs(-2:1) - lower_eq0(-1:2)*ys_local_operator(row_start + 1, -2, iline)/lower_eq0(-1)
+      row_coeffs(-2) = 0.0d0
+      ys_interior_lu(1, -1:2, iline) = row_coeffs(-1:2)
+
+      ys_interior_response_columns(active_n - 1, 1, iline) = ys_interior_response_columns(active_n - 1, 1, iline) - &
+                                         ys_upper_ghost_rhs(iline)*ys_local_operator(row_end, 2, iline)/ys_upper_ghost_row(2, iline)
+      row_coeffs = ys_local_operator(row_end, -2:2, iline) - ys_upper_ghost_row(:, iline)*ys_local_operator(row_end, 2, iline)/ys_upper_ghost_row(2, iline)
+      row_coeffs(2) = 0.0d0
+      ys_interior_response_columns(active_n - 1, 1, iline) = ys_interior_response_columns(active_n - 1, 1, iline) - upper_rhsn*row_coeffs(1)/upper_eqn(1)
+      row_coeffs = row_coeffs - upper_eqn*row_coeffs(1)/upper_eqn(1)
+      row_coeffs(1) = 0.0d0
+      ys_interior_lu(active_n - 1, -2:0, iline) = row_coeffs(-2:0)
+
+      ys_interior_response_columns(active_n - 2, 1, iline) = ys_interior_response_columns(active_n - 2, 1, iline) - &
+                                                             upper_rhsn*ys_local_operator(row_end - 1, 2, iline)/upper_eqn(1)
+      row_coeffs = ys_local_operator(row_end - 1, -2:2, iline)
+      row_coeffs(-1:2) = row_coeffs(-1:2) - upper_eqn(-2:1)*ys_local_operator(row_end - 1, 2, iline)/upper_eqn(1)
+      row_coeffs(2) = 0.0d0
+      ys_interior_lu(active_n - 2, -2:1, iline) = row_coeffs(-2:1)
+
+      do row = row_start + 2, row_end - 2
+        local_idx = row - row_start
+        ys_interior_lu(local_idx, -2:2, iline) = ys_local_operator(row, -2:2, iline)
+      end do
+
+      call ys_factor_penta(ys_interior_lu(:, :, iline))
+      call ys_solve_factored_penta_one(ys_interior_response_columns(:, 1, iline), ys_interior_lu(:, :, iline))
+
+      ix = (iline - 1)/nlines_z + nx0
+      iz = mod(iline - 1, nlines_z) - nz
+      do row = 0, active_n - 1
+        dst(row + dst_row_base, iz + nz + 1, ix - nx0 + 1) = ys_interior_response_columns(row, 1, iline)
+      end do
+
+      if (has_padded_dst) then
+        dst(2, iz + nz + 1, ix - nx0 + 1) = (lower_rhs0 - sum(lower_eq0(0:2)*dst(lower_inner0:lower_inner2, iz + nz + 1, ix - nx0 + 1)))/lower_eq0(-1)
+        dst(1, iz + nz + 1, ix - nx0 + 1) = (ys_lower_ghost_rhs(iline) - &
+                             sum(ys_lower_ghost_row(-1:2, iline)*dst(2:5, iz + nz + 1, ix - nx0 + 1)))/ys_lower_ghost_row(-2, iline)
+
+        dst(active_n + 3, iz + nz + 1, ix - nx0 + 1) = (upper_rhsn - &
+                                        sum(upper_eqn(-2:0)*dst(upper_inner0:upper_inner2, iz + nz + 1, ix - nx0 + 1)))/upper_eqn(1)
+        dst(active_n + 4, iz + nz + 1, ix - nx0 + 1) = (ys_upper_ghost_rhs(iline) - &
+        sum(ys_upper_ghost_row(-2:1, iline)*dst(upper_inner0:upper_inner3, iz + nz + 1, ix - nx0 + 1)))/ys_upper_ghost_row(2, iline)
+      end if
+    end do
+    !$omp end target teams distribute parallel do
+  end subroutine ys_solve_ghost_field_single_rank
+
+#ifdef HAVE_CUDA
+  subroutine ys_solve_ghost_field_single_rank_cusparse(dst, ny, nz)
+    implicit none
+    integer(C_INT), intent(in) :: ny, nz
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
+    complex(C_DOUBLE_COMPLEX) :: lower_rhs0, upper_rhsn, rhs_value
+    real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-2:2), upper_eqn(-2:2)
+    integer(C_INT) :: ix, iz, iline, p, nlines, nlines_z, row_start, row_end, active_n, row, local_idx
+    integer(C_INT) :: dst_row_base, lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3
+    integer(C_INT) :: status
+    logical :: has_padded_dst
+
+    row_start = ny0
+    row_end = nyN
+    active_n = row_end - row_start + 1
+    has_padded_dst = (size(dst, 1) == active_n + 4)
+    dst_row_base = 1
+    if (has_padded_dst) dst_row_base = 3
+    nlines_z = 2*nz + 1
+    nlines = ys_workspace_nlines
+
+    lower_inner0 = dst_row_base
+    lower_inner2 = dst_row_base + 2
+    upper_inner0 = active_n + dst_row_base - 3
+    upper_inner2 = upper_inner0 + 2
+    upper_inner3 = upper_inner0 + 3
+
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
+    !$omp& ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, &
+    !$omp& ys_gpsv_dw, ys_gpsv_x, ys_gpsv_lower_rhs0, ys_gpsv_upper_rhsn, ys_gpsv_lower_eq, ys_gpsv_upper_eq, row_start, row_end, active_n, nlines) &
+    !$omp private(iline, p, row, local_idx, lower_rhs0, upper_rhsn, rhs_value, row_coeffs, lower_eq0, upper_eqn)
+    do iline = 1, nlines
+lower_rhs0 = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
+      lower_eq0 = ys_lower_boundary_row(:, iline) - ys_lower_ghost_row(:, iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
+      lower_eq0(-2) = 0.0d0
+
+  upper_rhsn = ys_upper_boundary_rhs(iline) - ys_upper_ghost_rhs(iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
+      upper_eqn = ys_upper_boundary_row(:, iline) - ys_upper_ghost_row(:, iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
+      upper_eqn(2) = 0.0d0
+      ys_gpsv_lower_rhs0(iline) = lower_rhs0
+      ys_gpsv_upper_rhsn(iline) = upper_rhsn
+      ys_gpsv_lower_eq(-1, iline) = lower_eq0(-1)
+      ys_gpsv_lower_eq(0, iline) = lower_eq0(0)
+      ys_gpsv_lower_eq(1, iline) = lower_eq0(1)
+      ys_gpsv_lower_eq(2, iline) = lower_eq0(2)
+      ys_gpsv_upper_eq(-2, iline) = upper_eqn(-2)
+      ys_gpsv_upper_eq(-1, iline) = upper_eqn(-1)
+      ys_gpsv_upper_eq(0, iline) = upper_eqn(0)
+      ys_gpsv_upper_eq(1, iline) = upper_eqn(1)
+
+      p = iline
+      rhs_value = ys_local_rhs(row_start, iline) - ys_lower_ghost_rhs(iline)*ys_local_operator(row_start, -2, iline)/ys_lower_ghost_row(-2, iline)
+      row_coeffs = ys_local_operator(row_start, -2:2, iline) - ys_lower_ghost_row(:, iline)*ys_local_operator(row_start, -2, iline)/ys_lower_ghost_row(-2, iline)
+      row_coeffs(-2) = 0.0d0
+      rhs_value = rhs_value - lower_rhs0*row_coeffs(-1)/lower_eq0(-1)
+      row_coeffs = row_coeffs - lower_eq0*row_coeffs(-1)/lower_eq0(-1)
+      row_coeffs(-1) = 0.0d0
+      ys_gpsv_x(p) = rhs_value
+      ys_gpsv_ds(p) = (0.0d0, 0.0d0)
+      ys_gpsv_dl(p) = (0.0d0, 0.0d0)
+      ys_gpsv_d(p) = cmplx(row_coeffs(0), 0.0d0, kind=C_DOUBLE)
+      ys_gpsv_du(p) = cmplx(row_coeffs(1), 0.0d0, kind=C_DOUBLE)
+      ys_gpsv_dw(p) = cmplx(row_coeffs(2), 0.0d0, kind=C_DOUBLE)
+
+      p = nlines + iline
+      ys_gpsv_x(p) = ys_local_rhs(row_start + 1, iline) - lower_rhs0*ys_local_operator(row_start + 1, -2, iline)/lower_eq0(-1)
+      row_coeffs = ys_local_operator(row_start + 1, -2:2, iline)
+      row_coeffs(-2:1) = row_coeffs(-2:1) - lower_eq0(-1:2)*ys_local_operator(row_start + 1, -2, iline)/lower_eq0(-1)
+      row_coeffs(-2) = 0.0d0
+      ys_gpsv_ds(p) = (0.0d0, 0.0d0)
+      ys_gpsv_dl(p) = cmplx(row_coeffs(-1), 0.0d0, kind=C_DOUBLE)
+      ys_gpsv_d(p) = cmplx(row_coeffs(0), 0.0d0, kind=C_DOUBLE)
+      ys_gpsv_du(p) = cmplx(row_coeffs(1), 0.0d0, kind=C_DOUBLE)
+      ys_gpsv_dw(p) = cmplx(row_coeffs(2), 0.0d0, kind=C_DOUBLE)
+
+      do row = row_start + 2, row_end - 2
+        local_idx = row - row_start
+        p = local_idx*nlines + iline
+        ys_gpsv_x(p) = ys_local_rhs(row, iline)
+        ys_gpsv_ds(p) = cmplx(ys_local_operator(row, -2, iline), 0.0d0, kind=C_DOUBLE)
+        ys_gpsv_dl(p) = cmplx(ys_local_operator(row, -1, iline), 0.0d0, kind=C_DOUBLE)
+        ys_gpsv_d(p) = cmplx(ys_local_operator(row, 0, iline), 0.0d0, kind=C_DOUBLE)
+        ys_gpsv_du(p) = cmplx(ys_local_operator(row, 1, iline), 0.0d0, kind=C_DOUBLE)
+        ys_gpsv_dw(p) = cmplx(ys_local_operator(row, 2, iline), 0.0d0, kind=C_DOUBLE)
+      end do
+
+      p = (active_n - 2)*nlines + iline
+      ys_gpsv_x(p) = ys_local_rhs(row_end - 1, iline) - upper_rhsn*ys_local_operator(row_end - 1, 2, iline)/upper_eqn(1)
+      row_coeffs = ys_local_operator(row_end - 1, -2:2, iline)
+      row_coeffs(-1:2) = row_coeffs(-1:2) - upper_eqn(-2:1)*ys_local_operator(row_end - 1, 2, iline)/upper_eqn(1)
+      row_coeffs(2) = 0.0d0
+      ys_gpsv_ds(p) = cmplx(row_coeffs(-2), 0.0d0, kind=C_DOUBLE)
+      ys_gpsv_dl(p) = cmplx(row_coeffs(-1), 0.0d0, kind=C_DOUBLE)
+      ys_gpsv_d(p) = cmplx(row_coeffs(0), 0.0d0, kind=C_DOUBLE)
+      ys_gpsv_du(p) = cmplx(row_coeffs(1), 0.0d0, kind=C_DOUBLE)
+      ys_gpsv_dw(p) = (0.0d0, 0.0d0)
+
+      p = (active_n - 1)*nlines + iline
+      rhs_value = ys_local_rhs(row_end, iline) - ys_upper_ghost_rhs(iline)*ys_local_operator(row_end, 2, iline)/ys_upper_ghost_row(2, iline)
+      row_coeffs = ys_local_operator(row_end, -2:2, iline) - ys_upper_ghost_row(:, iline)*ys_local_operator(row_end, 2, iline)/ys_upper_ghost_row(2, iline)
+      row_coeffs(2) = 0.0d0
+      rhs_value = rhs_value - upper_rhsn*row_coeffs(1)/upper_eqn(1)
+      row_coeffs = row_coeffs - upper_eqn*row_coeffs(1)/upper_eqn(1)
+      row_coeffs(1) = 0.0d0
+      ys_gpsv_x(p) = rhs_value
+      ys_gpsv_ds(p) = cmplx(row_coeffs(-2), 0.0d0, kind=C_DOUBLE)
+      ys_gpsv_dl(p) = cmplx(row_coeffs(-1), 0.0d0, kind=C_DOUBLE)
+      ys_gpsv_d(p) = cmplx(row_coeffs(0), 0.0d0, kind=C_DOUBLE)
+      ys_gpsv_du(p) = (0.0d0, 0.0d0)
+      ys_gpsv_dw(p) = (0.0d0, 0.0d0)
+    end do
+    !$omp end target teams distribute parallel do
+
+    call ys_solve_ghost_field_single_rank_cusparse_packed(dst, ny, nz)
+  end subroutine ys_solve_ghost_field_single_rank_cusparse
+
+  subroutine ys_solve_ghost_field_single_rank_cusparse_packed(dst, ny, nz, direct_boundary_values)
+    implicit none
+    integer(C_INT), intent(in) :: ny, nz
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
+    logical, optional, intent(in) :: direct_boundary_values
+    integer(C_INT) :: ix, iz, iline, p, nlines, nlines_z, row_start, row_end, active_n, row
+    integer(C_INT) :: dst_row_base, lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3
+    integer(C_INT) :: status
+    logical :: has_padded_dst, use_direct_boundary_values
+
+    row_start = ny0
+    row_end = nyN
+    active_n = row_end - row_start + 1
+    has_padded_dst = (size(dst, 1) == active_n + 4)
+    dst_row_base = 1
+    if (has_padded_dst) dst_row_base = 3
+    nlines_z = 2*nz + 1
+    nlines = ys_workspace_nlines
+    use_direct_boundary_values = .false.
+    if (present(direct_boundary_values)) use_direct_boundary_values = direct_boundary_values
+
+    lower_inner0 = dst_row_base
+    lower_inner2 = dst_row_base + 2
+    upper_inner0 = active_n + dst_row_base - 3
+    upper_inner2 = upper_inner0 + 2
+    upper_inner3 = upper_inner0 + 3
+
+    call roctxPush("ys_single_rank_cusparse_gpsv")
+    !$omp target data use_device_addr(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, ys_gpsv_buffer)
+    status = cusparseZgpsvInterleavedBatch(ys_gpsv_handle, 0_C_INT, active_n, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, &
+                                           ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, nlines, ys_gpsv_buffer)
+    !$omp end target data
+    call ys_check_cusparse(status, "cusparseZgpsvInterleavedBatch")
+    call roctxPop("ys_single_rank_cusparse_gpsv")
+
+    call roctxPush("ys_single_rank_cusparse_unpack")
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(dst, ys_gpsv_x, nlines, nlines_z, nx0, nz, active_n, dst_row_base) &
+    !$omp private(iline, p, ix, iz, row)
+    do iline = 1, nlines
+      do row = 0, active_n - 1
+        ix = (iline - 1)/nlines_z + nx0
+        iz = mod(iline - 1, nlines_z) - nz
+        p = row*nlines + iline
+        dst(row + dst_row_base, iz + nz + 1, ix - nx0 + 1) = ys_gpsv_x(p)
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+    call roctxPop("ys_single_rank_cusparse_unpack")
+
+    if (has_padded_dst .and. use_direct_boundary_values) then
+      call roctxPush("ys_single_rank_direct_boundaries")
+      !$omp target teams distribute parallel do default(none) &
+      !$omp shared(dst, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, nlines, nlines_z, nx0, nz, active_n) &
+      !$omp private(iline, ix, iz)
+      do iline = 1, nlines
+        ix = (iline - 1)/nlines_z + nx0
+        iz = mod(iline - 1, nlines_z) - nz
+
+        dst(1, iz + nz + 1, ix - nx0 + 1) = ys_lower_ghost_rhs(iline)
+        dst(2, iz + nz + 1, ix - nx0 + 1) = ys_lower_boundary_rhs(iline)
+        dst(active_n + 3, iz + nz + 1, ix - nx0 + 1) = ys_upper_boundary_rhs(iline)
+        dst(active_n + 4, iz + nz + 1, ix - nx0 + 1) = ys_upper_ghost_rhs(iline)
+      end do
+      !$omp end target teams distribute parallel do
+      call roctxPop("ys_single_rank_direct_boundaries")
+    else if (has_padded_dst) then
+      call roctxPush("ys_single_rank_reconstruct_boundaries")
+      !$omp target teams distribute parallel do default(none) &
+      !$omp shared(dst, ys_lower_ghost_rhs, ys_upper_ghost_rhs, ys_lower_ghost_row, ys_upper_ghost_row, ys_gpsv_lower_rhs0, &
+      !$omp& ys_gpsv_upper_rhsn, ys_gpsv_lower_eq, ys_gpsv_upper_eq, nlines, nlines_z, nx0, nz, active_n, lower_inner0, &
+      !$omp& lower_inner2, upper_inner0, upper_inner2, upper_inner3) &
+      !$omp private(iline, ix, iz)
+      do iline = 1, nlines
+        ix = (iline - 1)/nlines_z + nx0
+        iz = mod(iline - 1, nlines_z) - nz
+
+        dst(2, iz + nz + 1, ix - nx0 + 1) = (ys_gpsv_lower_rhs0(iline) - &
+                                             ys_gpsv_lower_eq(0, iline)*dst(lower_inner0, iz + nz + 1, ix - nx0 + 1) - &
+                                             ys_gpsv_lower_eq(1, iline)*dst(lower_inner0 + 1, iz + nz + 1, ix - nx0 + 1) - &
+                                ys_gpsv_lower_eq(2, iline)*dst(lower_inner2, iz + nz + 1, ix - nx0 + 1))/ys_gpsv_lower_eq(-1, iline)
+        dst(1, iz + nz + 1, ix - nx0 + 1) = (ys_lower_ghost_rhs(iline) - &
+                                             ys_lower_ghost_row(-1, iline)*dst(2, iz + nz + 1, ix - nx0 + 1) - &
+                                             ys_lower_ghost_row(0, iline)*dst(3, iz + nz + 1, ix - nx0 + 1) - &
+                                             ys_lower_ghost_row(1, iline)*dst(4, iz + nz + 1, ix - nx0 + 1) - &
+                                       ys_lower_ghost_row(2, iline)*dst(5, iz + nz + 1, ix - nx0 + 1))/ys_lower_ghost_row(-2, iline)
+
+        dst(active_n + 3, iz + nz + 1, ix - nx0 + 1) = (ys_gpsv_upper_rhsn(iline) - &
+                                                        ys_gpsv_upper_eq(-2, iline)*dst(upper_inner0, iz + nz + 1, ix - nx0 + 1) - &
+                                                    ys_gpsv_upper_eq(-1, iline)*dst(upper_inner0 + 1, iz + nz + 1, ix - nx0 + 1) - &
+                                 ys_gpsv_upper_eq(0, iline)*dst(upper_inner2, iz + nz + 1, ix - nx0 + 1))/ys_gpsv_upper_eq(1, iline)
+        dst(active_n + 4, iz + nz + 1, ix - nx0 + 1) = (ys_upper_ghost_rhs(iline) - &
+                                                      ys_upper_ghost_row(-2, iline)*dst(upper_inner0, iz + nz + 1, ix - nx0 + 1) - &
+                                                  ys_upper_ghost_row(-1, iline)*dst(upper_inner0 + 1, iz + nz + 1, ix - nx0 + 1) - &
+                                                       ys_upper_ghost_row(0, iline)*dst(upper_inner2, iz + nz + 1, ix - nx0 + 1) - &
+                             ys_upper_ghost_row(1, iline)*dst(upper_inner3, iz + nz + 1, ix - nx0 + 1))/ys_upper_ghost_row(2, iline)
+      end do
+      !$omp end target teams distribute parallel do
+      call roctxPop("ys_single_rank_reconstruct_boundaries")
+    end if
+  end subroutine ys_solve_ghost_field_single_rank_cusparse_packed
+#endif
 
   subroutine ys_solve_reduced_interfaces()
     integer(C_INT), parameter :: bw = 5
@@ -456,6 +1796,7 @@ lower_rhs0 = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_lower_b
     niface = 4*npy_grid
 
 #ifdef HAVE_MPI
+    call roctxPush("MPI_Allgather reduced_y_interfaces")
 #ifndef HAVE_HIP
     !$omp target data use_device_ptr(ys_reduced_rows_send, ys_reduced_rows_recv)
 #endif
@@ -463,6 +1804,7 @@ lower_rhs0 = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_lower_b
 #ifndef HAVE_HIP
     !$omp end target data
 #endif
+    call roctxPop("MPI_Allgather reduced_y_interfaces")
 #else
     !$omp target teams distribute parallel do collapse(2) default(none) &
     !$omp shared(ys_reduced_rows_send, ys_reduced_rows_recv, nlines) private(iline, i)
@@ -474,6 +1816,7 @@ lower_rhs0 = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_lower_b
     !$omp end target teams distribute parallel do
 #endif
 
+    call roctxPush("ys_reduced_interfaces_solve")
     !$omp target teams distribute parallel do default(none) &
     !$omp shared(ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs, ys_left_interface_values, ys_right_interface_values, nlines, niface, npy_grid, ipy) &
     !$omp private(iline, iblock, row0, packed_remote, i, j, t, solve_piv, solve_factor)
@@ -524,6 +1867,7 @@ lower_rhs0 = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_lower_b
       end if
     end do
     !$omp end target teams distribute parallel do
+    call roctxPop("ys_reduced_interfaces_solve")
   end subroutine ys_solve_reduced_interfaces
 
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
@@ -627,4 +1971,26 @@ lower_rhs0 = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_lower_b
       rhs(i, 1:nrhs) = rhs(i, 1:nrhs)*a(i, 0)
     end do
   end subroutine ys_solve_factored_penta_multi
+
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+  !$omp declare target(ys_solve_factored_penta_one)
+#endif
+  subroutine ys_solve_factored_penta_one(rhs, a)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs(0:)
+    real(C_DOUBLE), intent(in) :: a(0:, -2:)
+    integer(C_INT) :: n, i
+
+    n = size(a, 1)
+
+    do i = 0, n - 1
+      if (i >= 2) rhs(i) = rhs(i) - a(i, -2)*rhs(i - 2)
+      if (i >= 1) rhs(i) = rhs(i) - a(i, -1)*rhs(i - 1)
+    end do
+
+    do i = n - 1, 0, -1
+      if (i + 1 < n) rhs(i) = rhs(i) - a(i, 1)*rhs(i + 1)
+      if (i + 2 < n) rhs(i) = rhs(i) - a(i, 2)*rhs(i + 2)
+      rhs(i) = rhs(i)*a(i, 0)
+    end do
+  end subroutine ys_solve_factored_penta_one
 end module y_line_solvers
