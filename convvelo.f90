@@ -10,6 +10,7 @@ module convvelo
   use pressure_output, only: compute_poisson, compute_dpdy
   use mpi_transpose, only: ny0, nyN, nx0, nxN, nxB, nzB, nx, has_average, ierr, sendbuf, recvbuf, &
                            pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, nzd
+  use roctx, only: roctxPush, roctxPop
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
   use ffts, only: IFT, RFT, HFT, FFT, VVdx, VVdz
 #else
@@ -290,7 +291,9 @@ contains
     end if
 
 #ifdef HAVE_MPI
+    call roctxPush("MPI_Allreduce convvelo_component_means")
     call MPI_Allreduce(MPI_IN_PLACE, snapshot, size(snapshot), MPI_DOUBLE_COMPLEX, MPI_SUM, MPI_COMM_WORLD, ierr)
+    call roctxPop("MPI_Allreduce convvelo_component_means")
 #endif
 
     if (n_mean_samples == 0_C_INT64_T) convvelo_average_start_time = time
@@ -508,9 +511,11 @@ contains
 
     call IFT(VVdz(:, :, :, 1), ny)
     call pack_zTOx(VVdz(:, :, :, 1), sendbuf(:, 1), ny)
-    call alltoall(sendbuf(:, 1), recvbuf(:, 1), request)
+    call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "zTOx convvelo_spectral_to_real")
 #ifdef HAVE_MPI
+    call roctxPush("MPI_Wait zTOx convvelo_spectral_to_real")
     call MPI_Wait(request, status, ierr)
+    call roctxPop("MPI_Wait zTOx convvelo_spectral_to_real")
 #endif
     call unpack_zTOx(recvbuf(:, 1), VVdx(:, :, :, 1), ny)
     !$omp target teams distribute parallel do collapse(3) &
@@ -537,9 +542,11 @@ contains
 
     call HFT(rx, VVdx(:, :, :, 1), ny)
     call pack_xTOz(VVdx(:, :, :, 1), sendbuf(:, 1), ny)
-    call alltoall(sendbuf(:, 1), recvbuf(:, 1), request)
+    call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "xTOz convvelo_real_to_spectral")
 #ifdef HAVE_MPI
+    call roctxPush("MPI_Wait xTOz convvelo_real_to_spectral")
     call MPI_Wait(request, status, ierr)
+    call roctxPop("MPI_Wait xTOz convvelo_real_to_spectral")
 #endif
     call unpack_xTOz(recvbuf(:, 1), VVdz(:, :, :, 1), ny)
     call FFT(VVdz(:, :, :, 1), ny)
@@ -826,6 +833,7 @@ contains
       call MPI_File_write_at(fh, 16_MPI_OFFSET_KIND, header_sample_count, 1, MPI_INTEGER8, status)
     end if
 
+    call roctxPush("MPI_File_write_all convvelo_profiles")
     disp = convvelo_file_header_bytes
     call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, profile_file_type, 'native', MPI_INFO_NULL)
     call MPI_File_write_all(fh, component_means(:, 1), 1, profile_mem_type, status)
@@ -840,13 +848,16 @@ contains
       call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, profile_file_type, 'native', MPI_INFO_NULL)
       call MPI_File_write_all(fh, component_means(:, 3 + iPhi), 1, profile_mem_type, status)
     end do
+    call roctxPop("MPI_File_write_all convvelo_profiles")
 
+    call roctxPush("MPI_File_write_all convvelo_fields")
     do field_index = 1, n_convvelo_fields
       disp = convvelo_file_header_bytes + int(n_convvelo_profile_slots, MPI_OFFSET_KIND)*profile_bytes + &
              int(field_index - 1, MPI_OFFSET_KIND)*field_bytes
       call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, file_type, 'native', MPI_INFO_NULL)
       call MPI_File_write_all(fh, convvelo_stats(:, :, :, field_index), 1, mem_type, status)
     end do
+    call roctxPop("MPI_File_write_all convvelo_fields")
 
     call MPI_File_close(fh)
     call MPI_Type_free(file_type, ierror)

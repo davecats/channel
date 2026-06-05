@@ -24,6 +24,7 @@ MODULE dnsdata
   USE config
   USE rbmat
   USE mpi_transpose
+  USE roctx, only: roctxPush, roctxPop
   USE ffts
 
   IMPLICIT NONE
@@ -823,12 +824,14 @@ CONTAINS
         CALL assemble_vvdz(m, to)
         CALL IFT(VVdz(:, :, :, to), ny)
         CALL pack_zTOx(VVdz(:, :, :, to), sendbuf(:, to), ny)
-        CALL alltoall(sendbuf(:, to), recvbuf(:, to), requests(m))
+        CALL alltoall(sendbuf(:, to), recvbuf(:, to), requests(m), "zTOx transform_to_physical")
       end if
 
       ! Step 2: wait, unpack, FFT (depending on overlap)
       if (MERGE(m > 1, .true., overlapping)) then
+        call roctxPush("MPI_Wait zTOx transform_to_physical")
         CALL MPI_WAIT(requests(mm1), status, ierr)
+        call roctxPop("MPI_Wait zTOx transform_to_physical")
         CALL unpack_zTOx(recvbuf(:, from), VVdx(:, :, :, from), ny)
         CALL zero_vvdx_hft(from)
         CALL RFT(VVdx(:, :, :, from), rVVdx(:, :, :, mm1), ny)
@@ -857,12 +860,14 @@ CONTAINS
         call build_products(m, to)
         call HFT(products(:, :, :, to), VVdx(:, :, :, to), ny)
         call pack_xTOz(VVdx(:, :, :, to), sendbuf(:, to), ny)
-        call alltoall(sendbuf(:, to), recvbuf(:, to), requests(m))
+        call alltoall(sendbuf(:, to), recvbuf(:, to), requests(m), "xTOz transform_back_and_build_rhs")
       end if
 
       ! Step 2: Wait, unpack, FFT, and build RHS
       if (MERGE(m > 1, .true., overlapping)) then
+        call roctxPush("MPI_Wait xTOz transform_back_and_build_rhs")
         call MPI_WAIT(requests(mm1), status, ierr)
+        call roctxPop("MPI_Wait xTOz transform_back_and_build_rhs")
         call unpack_xTOz(recvbuf(:, from), VVdz(:, :, :, from), ny)
         call FFT(VVdz(:, :, :, from), ny)
         call buildrhs(ODE, mm1, from)
@@ -1254,7 +1259,9 @@ CONTAINS
     CALL MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, writeview_type, 'native', MPI_INFO_NULL)
 
     ! finally write field
+    call roctxPush("MPI_File_write_all restart")
     CALL MPI_File_write_all(fh, R, 1, owned2write_type, status)
+    call roctxPop("MPI_File_write_all restart")
 
     ! close file
     call MPI_File_close(fh)
@@ -1273,7 +1280,9 @@ CONTAINS
     !$omp target update from(V(ny-3:ny+1, 0, 0, 2))
     !$omp target update from(V(ny-3:ny+1, 0, 0, 3))
 #ifdef HAVE_MPI
+    call roctxPush("MPI_Allreduce outstats_cfl")
     CALL MPI_Allreduce(cfl, runtime_global, 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD); cfl = 0; 
+    call roctxPop("MPI_Allreduce outstats_cfl")
 #else
     runtime_global = cfl
 #endif

@@ -14,6 +14,7 @@ MODULE pressure_output
 #endif
   USE mpi_transpose, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, ierr, &
                            sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall
+  USE roctx, ONLY: roctxPush, roctxPop
 #ifdef HAVE_MPI
   USE mpi_f08
 #endif
@@ -387,9 +388,11 @@ CONTAINS
 
     call IFT(VVdz(:, :, :, 1), ny)
     call pack_zTOx(VVdz(:, :, :, 1), sendbuf(:, 1), ny)
-    call alltoall(sendbuf(:, 1), recvbuf(:, 1), request)
+    call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "zTOx pressure_spectral_to_real")
 #ifdef HAVE_MPI
+    call roctxPush("MPI_Wait zTOx pressure_spectral_to_real")
     call MPI_Wait(request, status, ierr)
+    call roctxPop("MPI_Wait zTOx pressure_spectral_to_real")
 #endif
     call unpack_zTOx(recvbuf(:, 1), VVdx(:, :, :, 1), ny)
     !$omp target teams distribute parallel do collapse(3) default(none) &
@@ -416,9 +419,11 @@ CONTAINS
 
     call HFT(rx, VVdx(:, :, :, 1), ny)
     call pack_xTOz(VVdx(:, :, :, 1), sendbuf(:, 1), ny)
-    call alltoall(sendbuf(:, 1), recvbuf(:, 1), request)
+    call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "xTOz pressure_real_to_spectral")
 #ifdef HAVE_MPI
+    call roctxPush("MPI_Wait xTOz pressure_real_to_spectral")
     call MPI_Wait(request, status, ierr)
+    call roctxPop("MPI_Wait xTOz pressure_real_to_spectral")
 #endif
     call unpack_xTOz(recvbuf(:, 1), VVdz(:, :, :, 1), ny)
     call FFT(VVdz(:, :, :, 1), ny)
@@ -588,10 +593,10 @@ CONTAINS
         call LeftLU5div(p(:, iz, ix), pmat, p(:, iz, ix))
 
         ! Compute boundary value by applying BCs
-        p(0, iz, ix) = (p(0,iz,ix)-sum(eq0(0:2)*p(1:3, iz, ix)))/eq0(-1)
-        p(-1, iz, ix) = (p(-1,iz,ix) -sum(eqm1(-1:2)*p(0:3, iz, ix)))/eqm1(-2)
-        p(ny, iz, ix) = (p(ny,iz,ix)-sum(eqn(-2:0)*p(ny - 3:ny - 1, iz, ix)))/eqn(1)
-        p(ny + 1, iz, ix) = (p(ny+1,iz,ix)-sum(eqnp1(-2:1)*p(ny - 3:ny, iz, ix)))/eqnp1(2)
+        p(0, iz, ix) = (p(0, iz, ix) - sum(eq0(0:2)*p(1:3, iz, ix)))/eq0(-1)
+        p(-1, iz, ix) = (p(-1, iz, ix) - sum(eqm1(-1:2)*p(0:3, iz, ix)))/eqm1(-2)
+        p(ny, iz, ix) = (p(ny, iz, ix) - sum(eqn(-2:0)*p(ny - 3:ny - 1, iz, ix)))/eqn(1)
+        p(ny + 1, iz, ix) = (p(ny + 1, iz, ix) - sum(eqnp1(-2:1)*p(ny - 3:ny, iz, ix)))/eqnp1(2)
 
       end do
     end do
@@ -701,10 +706,10 @@ CONTAINS
         call LeftLU5div(dpdy(:, iz, ix), pmat, dpdy(:, iz, ix))
 
         ! Compute boundary value by applying BCs
-        dpdy(0, iz, ix) = (dpdy(0,iz,ix) -sum(eq0(0:2)*dpdy(1:3, iz, ix)))/eq0(-1)
-        dpdy(-1, iz, ix) = (dpdy(-1,iz,ix) -sum(eqm1(-1:2)*dpdy(0:3, iz, ix)))/eqm1(-2)
-        dpdy(ny, iz, ix) = (dpdy(ny,iz,ix) -sum(eqn(-2:0)*dpdy(ny - 3:ny - 1, iz, ix)))/eqn(1)
-        dpdy(ny + 1, iz, ix) = (dpdy(ny+1,iz,ix) -sum(eqnp1(-2:1)*dpdy(ny - 3:ny, iz, ix)))/eqnp1(2)
+        dpdy(0, iz, ix) = (dpdy(0, iz, ix) - sum(eq0(0:2)*dpdy(1:3, iz, ix)))/eq0(-1)
+        dpdy(-1, iz, ix) = (dpdy(-1, iz, ix) - sum(eqm1(-1:2)*dpdy(0:3, iz, ix)))/eqm1(-2)
+        dpdy(ny, iz, ix) = (dpdy(ny, iz, ix) - sum(eqn(-2:0)*dpdy(ny - 3:ny - 1, iz, ix)))/eqn(1)
+        dpdy(ny + 1, iz, ix) = (dpdy(ny + 1, iz, ix) - sum(eqnp1(-2:1)*dpdy(ny - 3:ny, iz, ix)))/eqnp1(2)
 
       end do
     end do

@@ -13,9 +13,9 @@
 
 #include "header.h"
 
-#ifdef HAVE_HIP
 module roctx
 
+  use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
   implicit none
 
   private
@@ -23,6 +23,20 @@ module roctx
 
   public :: roctxpush, roctxpop
 
+#if defined(HAVE_CUDA)
+  interface
+    integer(c_int) function nvtxrangepush(message) bind(c, name="nvtxRangePushA")
+      use iso_c_binding, only: c_char, c_int
+      implicit none
+      character(c_char) :: message(*)
+    end function nvtxrangepush
+
+    integer(c_int) function nvtxrangepop() bind(c, name="nvtxRangePop")
+      use iso_c_binding, only: c_int
+      implicit none
+    end function nvtxrangepop
+  end interface
+#elif defined(HAVE_HIP)
   interface
     subroutine roctxrangepush(message) bind(c, name="roctxRangePushA")
       use iso_c_binding, only: c_char
@@ -33,30 +47,47 @@ module roctx
     subroutine roctxrangepop() bind(c, name="roctxRangePop")
       implicit none
     end subroutine roctxrangepop
-
   end interface
+#endif
 
 contains
 
   subroutine roctxPush(name)
     character(len=*), intent(in) :: name
+    character(kind=c_char, len=len_trim(name) + 1) :: cname
+#if defined(HAVE_CUDA)
+    integer(c_int) :: ignored
+#endif
+
+    cname = trim(name)//c_null_char
     n = n + 1
-    call roctxRangePush(name)
+#if defined(HAVE_CUDA)
+    ignored = nvtxRangePush(cname)
+#elif defined(HAVE_HIP)
+    call roctxRangePush(cname)
+#endif
   end subroutine roctxPush
 
   subroutine roctxPop(name)
     character(len=*), intent(in) :: name
+#if defined(HAVE_CUDA)
+    integer(c_int) :: ignored
+#endif
+
     n = n - 1
     ! Print the marker name if there are more pop calls than push calls
     if (n < 0) then
       print *, "invalid pop for: ", name
       return
     end if
+#if defined(HAVE_CUDA)
+    ignored = nvtxRangePop()
+#elif defined(HAVE_HIP)
     call roctxRangePop()
+#endif
   end subroutine roctxPop
 
 end module
-#endif
 
 MODULE mpi_transpose
 
@@ -65,10 +96,10 @@ MODULE mpi_transpose
 #ifdef HAVE_MPI
   USE mpi_f08
 #endif
-#if defined(HAVE_HIP)
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
   use omp_lib
-  use roctx
 #endif
+  use roctx
 
   IMPLICIT NONE
 
@@ -180,11 +211,17 @@ CONTAINS
     end do
   END SUBROUTINE unpack_xTOz
 
-  SUBROUTINE alltoall(send, recv, request)
+  SUBROUTINE alltoall(send, recv, request, label)
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), intent(out) :: recv(:)
     complex(C_DOUBLE_COMPLEX), intent(in)  :: send(:)
     type(MPI_Request), intent(inout) :: request
+    character(len=*), intent(in), optional :: label
+    character(len=96) :: range_name
+
+    range_name = "MPI_Ialltoall fft_transpose"
+    if (present(label)) range_name = "MPI_Ialltoall "//trim(label)
+    call roctxPush(range_name)
 #ifndef HAVE_HIP
     !$omp target data use_device_ptr(send, recv)
 #endif
@@ -193,6 +230,7 @@ CONTAINS
 #ifndef HAVE_HIP
     !$omp end target data
 #endif
+    call roctxPop(range_name)
 
   END SUBROUTINE alltoall
 
