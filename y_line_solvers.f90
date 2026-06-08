@@ -1074,7 +1074,7 @@ lower_rhs0 = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_lower_b
     !$omp end target teams distribute parallel do
     call roctxPop("ys_single_rank_pack")
 
-    call ys_solve_ghost_field_single_rank_cusparse_packed(dst, ny, nz, fill_boundaries=.false.)
+    call ys_solve_ghost_field_single_rank_cusparse_packed(dst, ny, nz)
 #else
     !$omp target teams distribute parallel do default(none) &
     !$omp shared(dst, ys_local_rhs, ys_local_operator, ys_interior_lu, ys_interior_response_columns, row_start, row_end, active_n, nlines, nx0, nz, &
@@ -1103,17 +1103,16 @@ lower_rhs0 = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_lower_b
     call roctxPop("ys_single_rank_pack")
 
 #endif
-    call ys_fill_single_rank_boundaries(dst, ny, nz)
+    call ys_reconstruct_single_rank_boundaries(dst, ny, nz)
   end subroutine ys_solve_ghost_field_single_rank
 
-  subroutine ys_fill_single_rank_boundaries(dst, ny, nz, direct_boundary_values)
+  subroutine ys_reconstruct_single_rank_boundaries(dst, ny, nz)
     implicit none
     integer(C_INT), intent(in) :: ny, nz
     complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
-    logical, optional, intent(in) :: direct_boundary_values
     integer(C_INT) :: ix, iz, iline, nlines, nlines_z, active_n
     integer(C_INT) :: dst_row_base, lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3
-    logical :: has_padded_dst, use_direct_boundary_values
+    logical :: has_padded_dst
 
     active_n = nyN - ny0 + 1
     has_padded_dst = (size(dst, 1) == active_n + 4)
@@ -1122,78 +1121,55 @@ lower_rhs0 = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_lower_b
     dst_row_base = 3
     nlines_z = 2*nz + 1
     nlines = ys_workspace_nlines
-    use_direct_boundary_values = .false.
-    if (present(direct_boundary_values)) use_direct_boundary_values = direct_boundary_values
-
     lower_inner0 = dst_row_base
     lower_inner2 = dst_row_base + 2
     upper_inner0 = active_n + dst_row_base - 3
     upper_inner2 = upper_inner0 + 2
     upper_inner3 = upper_inner0 + 3
 
-    if (use_direct_boundary_values) then
-      call roctxPush("ys_single_rank_direct_boundaries")
-      !$omp target teams distribute parallel do default(none) &
-      !$omp shared(dst, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, nlines, nlines_z, nx0, nz, active_n) &
-      !$omp private(iline, ix, iz)
-      do iline = 1, nlines
-        ix = (iline - 1)/nlines_z + nx0
-        iz = mod(iline - 1, nlines_z) - nz
+    call roctxPush("ys_single_rank_reconstruct_boundaries")
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(dst, ys_lower_ghost_rhs, ys_upper_ghost_rhs, ys_lower_ghost_row, ys_upper_ghost_row, ys_boundary_lower_rhs0, &
+    !$omp& ys_boundary_upper_rhsn, ys_boundary_lower_eq, ys_boundary_upper_eq, nlines, nlines_z, nx0, nz, active_n, lower_inner0, &
+    !$omp& lower_inner2, upper_inner0, upper_inner2, upper_inner3) &
+    !$omp private(iline, ix, iz)
+    do iline = 1, nlines
+      ix = (iline - 1)/nlines_z + nx0
+      iz = mod(iline - 1, nlines_z) - nz
 
-        dst(1, iz + nz + 1, ix - nx0 + 1) = ys_lower_ghost_rhs(iline)
-        dst(2, iz + nz + 1, ix - nx0 + 1) = ys_lower_boundary_rhs(iline)
-        dst(active_n + 3, iz + nz + 1, ix - nx0 + 1) = ys_upper_boundary_rhs(iline)
-        dst(active_n + 4, iz + nz + 1, ix - nx0 + 1) = ys_upper_ghost_rhs(iline)
-      end do
-      !$omp end target teams distribute parallel do
-      call roctxPop("ys_single_rank_direct_boundaries")
-    else
-      call roctxPush("ys_single_rank_reconstruct_boundaries")
-      !$omp target teams distribute parallel do default(none) &
-      !$omp shared(dst, ys_lower_ghost_rhs, ys_upper_ghost_rhs, ys_lower_ghost_row, ys_upper_ghost_row, ys_boundary_lower_rhs0, &
-      !$omp& ys_boundary_upper_rhsn, ys_boundary_lower_eq, ys_boundary_upper_eq, nlines, nlines_z, nx0, nz, active_n, lower_inner0, &
-      !$omp& lower_inner2, upper_inner0, upper_inner2, upper_inner3) &
-      !$omp private(iline, ix, iz)
-      do iline = 1, nlines
-        ix = (iline - 1)/nlines_z + nx0
-        iz = mod(iline - 1, nlines_z) - nz
-
-        dst(2, iz + nz + 1, ix - nx0 + 1) = (ys_boundary_lower_rhs0(iline) - &
-                                             ys_boundary_lower_eq(0, iline)*dst(lower_inner0, iz + nz + 1, ix - nx0 + 1) - &
-                                             ys_boundary_lower_eq(1, iline)*dst(lower_inner0 + 1, iz + nz + 1, ix - nx0 + 1) - &
+      dst(2, iz + nz + 1, ix - nx0 + 1) = (ys_boundary_lower_rhs0(iline) - &
+                                           ys_boundary_lower_eq(0, iline)*dst(lower_inner0, iz + nz + 1, ix - nx0 + 1) - &
+                                           ys_boundary_lower_eq(1, iline)*dst(lower_inner0 + 1, iz + nz + 1, ix - nx0 + 1) - &
                         ys_boundary_lower_eq(2, iline)*dst(lower_inner2, iz + nz + 1, ix - nx0 + 1))/ys_boundary_lower_eq(-1, iline)
-        dst(1, iz + nz + 1, ix - nx0 + 1) = (ys_lower_ghost_rhs(iline) - &
-                                             ys_lower_ghost_row(-1, iline)*dst(2, iz + nz + 1, ix - nx0 + 1) - &
-                                             ys_lower_ghost_row(0, iline)*dst(3, iz + nz + 1, ix - nx0 + 1) - &
-                                             ys_lower_ghost_row(1, iline)*dst(4, iz + nz + 1, ix - nx0 + 1) - &
+      dst(1, iz + nz + 1, ix - nx0 + 1) = (ys_lower_ghost_rhs(iline) - &
+                                           ys_lower_ghost_row(-1, iline)*dst(2, iz + nz + 1, ix - nx0 + 1) - &
+                                           ys_lower_ghost_row(0, iline)*dst(3, iz + nz + 1, ix - nx0 + 1) - &
+                                           ys_lower_ghost_row(1, iline)*dst(4, iz + nz + 1, ix - nx0 + 1) - &
                                        ys_lower_ghost_row(2, iline)*dst(5, iz + nz + 1, ix - nx0 + 1))/ys_lower_ghost_row(-2, iline)
 
-        dst(active_n + 3, iz + nz + 1, ix - nx0 + 1) = (ys_boundary_upper_rhsn(iline) - &
+      dst(active_n + 3, iz + nz + 1, ix - nx0 + 1) = (ys_boundary_upper_rhsn(iline) - &
                                                     ys_boundary_upper_eq(-2, iline)*dst(upper_inner0, iz + nz + 1, ix - nx0 + 1) - &
                                                 ys_boundary_upper_eq(-1, iline)*dst(upper_inner0 + 1, iz + nz + 1, ix - nx0 + 1) - &
                          ys_boundary_upper_eq(0, iline)*dst(upper_inner2, iz + nz + 1, ix - nx0 + 1))/ys_boundary_upper_eq(1, iline)
-        dst(active_n + 4, iz + nz + 1, ix - nx0 + 1) = (ys_upper_ghost_rhs(iline) - &
+      dst(active_n + 4, iz + nz + 1, ix - nx0 + 1) = (ys_upper_ghost_rhs(iline) - &
                                                       ys_upper_ghost_row(-2, iline)*dst(upper_inner0, iz + nz + 1, ix - nx0 + 1) - &
                                                   ys_upper_ghost_row(-1, iline)*dst(upper_inner0 + 1, iz + nz + 1, ix - nx0 + 1) - &
-                                                       ys_upper_ghost_row(0, iline)*dst(upper_inner2, iz + nz + 1, ix - nx0 + 1) - &
+                                                      ys_upper_ghost_row(0, iline)*dst(upper_inner2, iz + nz + 1, ix - nx0 + 1) - &
                              ys_upper_ghost_row(1, iline)*dst(upper_inner3, iz + nz + 1, ix - nx0 + 1))/ys_upper_ghost_row(2, iline)
-      end do
-      !$omp end target teams distribute parallel do
-      call roctxPop("ys_single_rank_reconstruct_boundaries")
-    end if
-  end subroutine ys_fill_single_rank_boundaries
+    end do
+    !$omp end target teams distribute parallel do
+    call roctxPop("ys_single_rank_reconstruct_boundaries")
+  end subroutine ys_reconstruct_single_rank_boundaries
 
 #ifdef HAVE_CUDA
-  subroutine ys_solve_ghost_field_single_rank_cusparse_packed(dst, ny, nz, direct_boundary_values, fill_boundaries)
+  subroutine ys_solve_ghost_field_single_rank_cusparse_packed(dst, ny, nz)
     implicit none
     integer(C_INT), intent(in) :: ny, nz
     complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
-    logical, optional, intent(in) :: direct_boundary_values
-    logical, optional, intent(in) :: fill_boundaries
     integer(C_INT) :: ix, iz, iline, p, nlines, nlines_z, row_start, row_end, active_n, row
     integer(C_INT) :: dst_row_base
     integer(C_INT) :: status
-    logical :: has_padded_dst, use_direct_boundary_values, do_fill_boundaries
+    logical :: has_padded_dst
 
     row_start = ny0
     row_end = nyN
@@ -1203,11 +1179,6 @@ lower_rhs0 = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_lower_b
     if (has_padded_dst) dst_row_base = 3
     nlines_z = 2*nz + 1
     nlines = ys_workspace_nlines
-    use_direct_boundary_values = .false.
-    if (present(direct_boundary_values)) use_direct_boundary_values = direct_boundary_values
-    do_fill_boundaries = .true.
-    if (present(fill_boundaries)) do_fill_boundaries = fill_boundaries
-
     call roctxPush("ys_single_rank_cusparse_gpsv")
     !$omp target data use_device_addr(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, ys_gpsv_buffer)
     status = cusparseZgpsvInterleavedBatch(ys_gpsv_handle, 0_C_INT, active_n, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, &
@@ -1231,7 +1202,6 @@ lower_rhs0 = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_lower_b
     !$omp end target teams distribute parallel do
     call roctxPop("ys_single_rank_cusparse_unpack")
 
-    if (do_fill_boundaries) call ys_fill_single_rank_boundaries(dst, ny, nz, use_direct_boundary_values)
   end subroutine ys_solve_ghost_field_single_rank_cusparse_packed
 #endif
 

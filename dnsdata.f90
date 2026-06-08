@@ -490,19 +490,13 @@ CONTAINS
                               ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
                               ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row
 #ifdef HAVE_CUDA
-    use y_line_solvers, only: ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, &
-                              ys_solve_ghost_field_single_rank_cusparse_packed, ys_solve_ghost_field_reduced_const_operator
+    use y_line_solvers, only: ys_solve_ghost_field_reduced_const_operator
 #endif
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), intent(in) :: src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     logical, optional, intent(in) :: update_device
     integer(C_INT) :: ix, iz, iy, iline, nlines_z, ix_first, ix_last, iz_first, iz_last, row_start, row_end
-#ifdef HAVE_CUDA
-    integer(C_INT) :: active_n, local_idx, p, nlines
-    real(C_DOUBLE) :: c_m2, c_m1, c_0, c_p1, c_p2
-    complex(C_DOUBLE_COMPLEX) :: rhs_value
-#endif
 
     nlines_z = 2*nz + 1
     ix_first = nx0
@@ -514,72 +508,6 @@ CONTAINS
 #ifdef HAVE_CUDA
     if (use_yslab_linsolve) then
       call apply_complex_derivative_transposed_y(src, dst)
-      return
-    end if
-    if (npy_grid == 1) then
-      active_n = row_end - row_start + 1
-      nlines = (ix_last - ix_first + 1)*nlines_z
-      !$omp target teams distribute parallel do collapse(2) default(none) &
-      !$omp shared(src, d140, d14m1, d14n, d14np1, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, &
-      !$omp& ys_upper_ghost_rhs, ny, nz, nlines_z, ix_first, ix_last, iz_first, iz_last) &
-      !$omp private(ix, iz, iline)
-      do ix = ix_first, ix_last
-        do iz = iz_first, iz_last
-          iline = (ix - ix_first)*nlines_z + (iz - iz_first + 1)
-          ys_lower_boundary_rhs(iline) = sum(d140(-2:2)*src(-1:3, iz, ix))
-          ys_lower_ghost_rhs(iline) = sum(d14m1(-2:2)*src(-1:3, iz, ix))
-          ys_upper_boundary_rhs(iline) = sum(d14n(-2:2)*src(ny - 3:ny + 1, iz, ix))
-          ys_upper_ghost_rhs(iline) = sum(d14np1(-2:2)*src(ny - 3:ny + 1, iz, ix))
-        end do
-      end do
-      !$omp end target teams distribute parallel do
-
-      !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(src, der, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, ys_lower_ghost_rhs, &
-      !$omp& ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, nlines_z, nlines, ix_first, ix_last, iz_first, &
-      !$omp& iz_last, row_start, active_n) &
-      !$omp private(ix, iz, local_idx, iy, iline, p, c_m2, c_m1, c_0, c_p1, c_p2, rhs_value)
-      do ix = ix_first, ix_last
-        do iz = iz_first, iz_last
-          do local_idx = 0, active_n - 1
-            iy = row_start + local_idx
-            iline = (ix - ix_first)*nlines_z + (iz - iz_first + 1)
-            rhs_value = sum(der(iy, 1, -2:2)*src(iy - 2:iy + 2, iz, ix))
-            c_m2 = der(iy, 0, -2)
-            c_m1 = der(iy, 0, -1)
-            c_0 = der(iy, 0, 0)
-            c_p1 = der(iy, 0, 1)
-            c_p2 = der(iy, 0, 2)
-
-            if (local_idx == 0) then
-              rhs_value = rhs_value - c_m2*ys_lower_ghost_rhs(iline) - c_m1*ys_lower_boundary_rhs(iline)
-              c_m2 = 0.0d0
-              c_m1 = 0.0d0
-            else if (local_idx == 1) then
-              rhs_value = rhs_value - c_m2*ys_lower_boundary_rhs(iline)
-              c_m2 = 0.0d0
-            else if (local_idx == active_n - 2) then
-              rhs_value = rhs_value - c_p2*ys_upper_boundary_rhs(iline)
-              c_p2 = 0.0d0
-            else if (local_idx == active_n - 1) then
-              rhs_value = rhs_value - c_p1*ys_upper_boundary_rhs(iline) - c_p2*ys_upper_ghost_rhs(iline)
-              c_p1 = 0.0d0
-              c_p2 = 0.0d0
-            end if
-
-            p = local_idx*nlines + iline
-            ys_gpsv_x(p) = rhs_value
-            ys_gpsv_ds(p) = cmplx(c_m2, 0.0d0, kind=C_DOUBLE)
-            ys_gpsv_dl(p) = cmplx(c_m1, 0.0d0, kind=C_DOUBLE)
-            ys_gpsv_d(p) = cmplx(c_0, 0.0d0, kind=C_DOUBLE)
-            ys_gpsv_du(p) = cmplx(c_p1, 0.0d0, kind=C_DOUBLE)
-            ys_gpsv_dw(p) = cmplx(c_p2, 0.0d0, kind=C_DOUBLE)
-          end do
-        end do
-      end do
-      !$omp end target teams distribute parallel do
-
-      call ys_solve_ghost_field_single_rank_cusparse_packed(dst, ny, nz, direct_boundary_values=.true.)
       return
     end if
 #endif
