@@ -627,6 +627,23 @@ CONTAINS
 #endif
   END SUBROUTINE apply_complex_derivative_current_layout
 
+  !$omp declare target(compact_boundary_rhs_value)
+  subroutine compact_boundary_rhs_value(bc0_values, bcn_values, nz_value, nx0_value, iz, ix, rhs_index, value)
+    implicit none
+    integer(C_INT), intent(in) :: nz_value, nx0_value, iz, ix, rhs_index
+    complex(C_DOUBLE_COMPLEX), intent(in) :: bc0_values(-nz_value:, nx0_value:, :)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: bcn_values(-nz_value:, nx0_value:, :)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: value
+
+    if (rhs_index == 0_C_INT) then
+      value = (0.0d0, 0.0d0)
+    else if (rhs_index > 0_C_INT) then
+      value = bc0_values(iz, ix, rhs_index)
+    else
+      value = bcn_values(iz, ix, -rhs_index)
+    end if
+  end subroutine compact_boundary_rhs_value
+
   SUBROUTINE solve_compact_component_current_layout(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
                                                    lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
                                                     lambda_coeff, diffusion_coeff)
@@ -676,7 +693,7 @@ CONTAINS
     !$omp target teams distribute parallel do collapse(2) default(none) &
     !$omp shared(V, der, k2, ni, lambda_coeff, diffusion_coeff, component_index, ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, &
     !$omp& ys_upper_boundary_rhs, ys_upper_ghost_rhs, ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, lower_bc, &
-    !$omp& lower_ghost_bc, upper_bc, upper_ghost_bc, bc0, bcn, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, nlines_z, ny, &
+    !$omp& lower_ghost_bc, upper_bc, upper_ghost_bc, bc0, bcn, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, nlines_z, ny, nz, &
     !$omp& ix_first, ix_last, iz_first, iz_last, row_start, row_end) private(ix, iz, iy, iline)
     do ix = ix_first, ix_last
       do iz = iz_first, iz_last
@@ -699,37 +716,10 @@ CONTAINS
           end if
         end do
 
-        if (lower_ghost_rhs_index == 0_C_INT) then
-          ys_lower_ghost_rhs(iline) = (0.0d0, 0.0d0)
-        else if (lower_ghost_rhs_index > 0_C_INT) then
-          ys_lower_ghost_rhs(iline) = bc0(iz, ix, lower_ghost_rhs_index)
-        else
-          ys_lower_ghost_rhs(iline) = bcn(iz, ix, -lower_ghost_rhs_index)
-        end if
-
-        if (lower_rhs_index == 0_C_INT) then
-          ys_lower_boundary_rhs(iline) = (0.0d0, 0.0d0)
-        else if (lower_rhs_index > 0_C_INT) then
-          ys_lower_boundary_rhs(iline) = bc0(iz, ix, lower_rhs_index)
-        else
-          ys_lower_boundary_rhs(iline) = bcn(iz, ix, -lower_rhs_index)
-        end if
-
-        if (upper_rhs_index == 0_C_INT) then
-          ys_upper_boundary_rhs(iline) = (0.0d0, 0.0d0)
-        else if (upper_rhs_index > 0_C_INT) then
-          ys_upper_boundary_rhs(iline) = bc0(iz, ix, upper_rhs_index)
-        else
-          ys_upper_boundary_rhs(iline) = bcn(iz, ix, -upper_rhs_index)
-        end if
-
-        if (upper_ghost_rhs_index == 0_C_INT) then
-          ys_upper_ghost_rhs(iline) = (0.0d0, 0.0d0)
-        else if (upper_ghost_rhs_index > 0_C_INT) then
-          ys_upper_ghost_rhs(iline) = bc0(iz, ix, upper_ghost_rhs_index)
-        else
-          ys_upper_ghost_rhs(iline) = bcn(iz, ix, -upper_ghost_rhs_index)
-        end if
+        call compact_boundary_rhs_value(bc0, bcn, nz, ix_first, iz, ix, lower_ghost_rhs_index, ys_lower_ghost_rhs(iline))
+        call compact_boundary_rhs_value(bc0, bcn, nz, ix_first, iz, ix, lower_rhs_index, ys_lower_boundary_rhs(iline))
+        call compact_boundary_rhs_value(bc0, bcn, nz, ix_first, iz, ix, upper_rhs_index, ys_upper_boundary_rhs(iline))
+        call compact_boundary_rhs_value(bc0, bcn, nz, ix_first, iz, ix, upper_ghost_rhs_index, ys_upper_ghost_rhs(iline))
       end do
     end do
     !$omp end target teams distribute parallel do
@@ -815,34 +805,10 @@ CONTAINS
         ix = (iline - 1)/nlines_z + ix_base
         iz = mod(iline - 1, nlines_z) - nz
 
-        if (lower_ghost_rhs_index == 0_C_INT) then
-          lower_ghost_value = (0.0d0, 0.0d0)
-        else if (lower_ghost_rhs_index > 0_C_INT) then
-          lower_ghost_value = bc0(iz, ix, lower_ghost_rhs_index)
-        else
-          lower_ghost_value = bcn(iz, ix, -lower_ghost_rhs_index)
-        end if
-        if (lower_rhs_index == 0_C_INT) then
-          lower_boundary_value = (0.0d0, 0.0d0)
-        else if (lower_rhs_index > 0_C_INT) then
-          lower_boundary_value = bc0(iz, ix, lower_rhs_index)
-        else
-          lower_boundary_value = bcn(iz, ix, -lower_rhs_index)
-        end if
-        if (upper_rhs_index == 0_C_INT) then
-          upper_boundary_value = (0.0d0, 0.0d0)
-        else if (upper_rhs_index > 0_C_INT) then
-          upper_boundary_value = bc0(iz, ix, upper_rhs_index)
-        else
-          upper_boundary_value = bcn(iz, ix, -upper_rhs_index)
-        end if
-        if (upper_ghost_rhs_index == 0_C_INT) then
-          upper_ghost_value = (0.0d0, 0.0d0)
-        else if (upper_ghost_rhs_index > 0_C_INT) then
-          upper_ghost_value = bc0(iz, ix, upper_ghost_rhs_index)
-        else
-          upper_ghost_value = bcn(iz, ix, -upper_ghost_rhs_index)
-        end if
+        call compact_boundary_rhs_value(bc0, bcn, nz, ix_base, iz, ix, lower_ghost_rhs_index, lower_ghost_value)
+        call compact_boundary_rhs_value(bc0, bcn, nz, ix_base, iz, ix, lower_rhs_index, lower_boundary_value)
+        call compact_boundary_rhs_value(bc0, bcn, nz, ix_base, iz, ix, upper_rhs_index, upper_boundary_value)
+        call compact_boundary_rhs_value(bc0, bcn, nz, ix_base, iz, ix, upper_ghost_rhs_index, upper_ghost_value)
 
         lower_rhs0 = lower_boundary_value - lower_ghost_value*lower_bc(-2)/lower_ghost_bc(-2)
         lower_eq0 = lower_bc - lower_ghost_bc*lower_bc(-2)/lower_ghost_bc(-2)
@@ -945,34 +911,10 @@ CONTAINS
         slab(iy + 2, ilocal) = ys_gpsv_x(p)
       end do
 
-      if (lower_ghost_rhs_index == 0_C_INT) then
-        lower_ghost_value = (0.0d0, 0.0d0)
-      else if (lower_ghost_rhs_index > 0_C_INT) then
-        lower_ghost_value = bc0(iz, ix, lower_ghost_rhs_index)
-      else
-        lower_ghost_value = bcn(iz, ix, -lower_ghost_rhs_index)
-      end if
-      if (lower_rhs_index == 0_C_INT) then
-        lower_boundary_value = (0.0d0, 0.0d0)
-      else if (lower_rhs_index > 0_C_INT) then
-        lower_boundary_value = bc0(iz, ix, lower_rhs_index)
-      else
-        lower_boundary_value = bcn(iz, ix, -lower_rhs_index)
-      end if
-      if (upper_rhs_index == 0_C_INT) then
-        upper_boundary_value = (0.0d0, 0.0d0)
-      else if (upper_rhs_index > 0_C_INT) then
-        upper_boundary_value = bc0(iz, ix, upper_rhs_index)
-      else
-        upper_boundary_value = bcn(iz, ix, -upper_rhs_index)
-      end if
-      if (upper_ghost_rhs_index == 0_C_INT) then
-        upper_ghost_value = (0.0d0, 0.0d0)
-      else if (upper_ghost_rhs_index > 0_C_INT) then
-        upper_ghost_value = bc0(iz, ix, upper_ghost_rhs_index)
-      else
-        upper_ghost_value = bcn(iz, ix, -upper_ghost_rhs_index)
-      end if
+      call compact_boundary_rhs_value(bc0, bcn, nz, ix_base, iz, ix, lower_ghost_rhs_index, lower_ghost_value)
+      call compact_boundary_rhs_value(bc0, bcn, nz, ix_base, iz, ix, lower_rhs_index, lower_boundary_value)
+      call compact_boundary_rhs_value(bc0, bcn, nz, ix_base, iz, ix, upper_rhs_index, upper_boundary_value)
+      call compact_boundary_rhs_value(bc0, bcn, nz, ix_base, iz, ix, upper_ghost_rhs_index, upper_ghost_value)
 
       lower_rhs0 = lower_boundary_value - lower_ghost_value*lower_bc(-2)/lower_ghost_bc(-2)
       lower_eq0 = lower_bc - lower_ghost_bc*lower_bc(-2)/lower_ghost_bc(-2)
