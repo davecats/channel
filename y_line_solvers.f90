@@ -414,8 +414,9 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
 #ifdef HAVE_CUDA
     if (npy_grid == 2) then
       call roctxPush("ys_endpoint_schur_cusparse")
-      call ys_solve_reduced_endpoint_schur_cusparse(dst, ny, nz, has_lower_boundary, has_upper_boundary, &
-                                                    has_padded_dst, row_start, row_end, active_n, nlines, nlines_z, dst_row_base)
+      call ys_solve_endpoint_schur_cusparse(dst, ny, nz, has_lower_boundary, has_upper_boundary, has_padded_dst, &
+                                            row_start, row_end, active_n, nlines, nlines_z, dst_row_base, &
+                                            YS_ENDPOINT_RESPONSE_FULL)
       call roctxPop("ys_endpoint_schur_cusparse")
       return
     end if
@@ -456,18 +457,6 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
   end subroutine ys_padded_inner_indices
 
 #ifdef HAVE_CUDA
-
-  subroutine ys_solve_reduced_endpoint_schur_cusparse(dst, ny, nz, has_lower_boundary, has_upper_boundary, &
-                                                      has_padded_dst, row_start, row_end, active_n, nlines, nlines_z, dst_row_base)
-    implicit none
-    integer(C_INT), intent(in) :: ny, nz, row_start, row_end, active_n, nlines, nlines_z, dst_row_base
-    logical, intent(in) :: has_lower_boundary, has_upper_boundary, has_padded_dst
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
-
-    call ys_solve_endpoint_schur_cusparse(dst, ny, nz, has_lower_boundary, has_upper_boundary, has_padded_dst, &
-                                          row_start, row_end, active_n, nlines, nlines_z, dst_row_base, &
-                                          YS_ENDPOINT_RESPONSE_FULL)
-  end subroutine ys_solve_reduced_endpoint_schur_cusparse
 
   subroutine ys_solve_ghost_field_reduced_const_operator(dst, ny, nz)
     implicit none

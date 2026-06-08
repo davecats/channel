@@ -59,6 +59,291 @@ CONTAINS
     start = part*base + min(part, rem) + 1
   END SUBROUTINE split_block
 
+  !$omp declare target(yslab_line_range)
+  subroutine yslab_line_range(rank, nlines, first_line, line_count)
+    implicit none
+    integer(C_INT), intent(in) :: rank, nlines
+    integer(C_INT), intent(out) :: first_line, line_count
+    integer(C_INT) :: base, rem
+
+    base = nlines/npy_grid
+    rem = mod(nlines, npy_grid)
+    line_count = base
+    if (rank < rem) line_count = line_count + 1
+    first_line = rank*base + min(rank, rem) + 1
+  end subroutine yslab_line_range
+
+  !$omp declare target(yslab_active_range)
+  subroutine yslab_active_range(rank, ny, first_y, last_y)
+    implicit none
+    integer(C_INT), intent(in) :: rank, ny
+    integer(C_INT), intent(out) :: first_y, last_y
+
+    first_y = 1 + rank*(ny - 1)/npy_grid
+    last_y = (rank + 1)*(ny - 1)/npy_grid
+  end subroutine yslab_active_range
+
+  !$omp declare target(yslab_unique_range)
+  subroutine yslab_unique_range(rank, ny, include_physical_ghosts, first_y, last_y)
+    implicit none
+    integer(C_INT), intent(in) :: rank, ny
+    logical, intent(in) :: include_physical_ghosts
+    integer(C_INT), intent(out) :: first_y, last_y
+
+    call yslab_active_range(rank, ny, first_y, last_y)
+    if (include_physical_ghosts) then
+      if (rank == 0) first_y = -1
+      if (rank == npy_grid - 1) last_y = ny + 1
+    end if
+  end subroutine yslab_unique_range
+
+  !$omp declare target(yslab_padded_range)
+  subroutine yslab_padded_range(rank, ny, first_y, last_y)
+    implicit none
+    integer(C_INT), intent(in) :: rank, ny
+    integer(C_INT), intent(out) :: first_y, last_y
+
+    call yslab_active_range(rank, ny, first_y, last_y)
+    first_y = first_y - 2
+    last_y = last_y + 2
+  end subroutine yslab_padded_range
+
+#ifdef HAVE_MPI
+  subroutine yslab_transpose_to_full(field, slab, ny, nz, nlines, nlines_z, include_physical_ghosts)
+    implicit none
+    integer(C_INT), intent(in) :: ny, nz, nlines, nlines_z
+    complex(C_DOUBLE_COMPLEX), intent(in) :: field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: slab(:, :)
+    logical, intent(in) :: include_physical_ghosts
+    complex(C_DOUBLE_COMPLEX), allocatable :: send(:), recv(:)
+    integer, allocatable :: send_counts(:), recv_counts(:), send_displs(:), recv_displs(:)
+    integer(C_INT) :: dest, src, first_line, line_count, my_first_line, my_line_count
+    integer(C_INT) :: y_first, y_last, rows, total_send, total_recv
+    integer(C_INT) :: ilocal, iline, ix, iz, iy, p
+
+    call roctxPush("yslab_to_full setup_counts")
+    allocate (send_counts(npy_grid), recv_counts(npy_grid), send_displs(npy_grid), recv_displs(npy_grid))
+    call yslab_line_range(ipy, nlines, my_first_line, my_line_count)
+
+    total_send = 0
+    total_recv = 0
+    do dest = 0, npy_grid - 1
+      call yslab_line_range(dest, nlines, first_line, line_count)
+      call yslab_unique_range(ipy, ny, include_physical_ghosts, y_first, y_last)
+      rows = y_last - y_first + 1
+      send_counts(dest + 1) = line_count*rows
+      send_displs(dest + 1) = total_send
+      total_send = total_send + send_counts(dest + 1)
+
+      call yslab_unique_range(dest, ny, include_physical_ghosts, y_first, y_last)
+      rows = y_last - y_first + 1
+      recv_counts(dest + 1) = my_line_count*rows
+      recv_displs(dest + 1) = total_recv
+      total_recv = total_recv + recv_counts(dest + 1)
+    end do
+    call roctxPop("yslab_to_full setup_counts")
+
+    call roctxPush("yslab_to_full allocate_buffers")
+    allocate (send(max(1, total_send)), recv(max(1, total_recv)))
+    !$omp target enter data map(alloc: send, recv) map(to: send_displs, recv_displs)
+    call roctxPop("yslab_to_full allocate_buffers")
+
+    call yslab_unique_range(ipy, ny, include_physical_ghosts, y_first, y_last)
+    rows = y_last - y_first + 1
+    call roctxPush("yslab_to_full pack")
+    !$omp target teams distribute parallel do collapse(3) default(none) &
+    !$omp shared(field, send, send_displs, nlines_z, rows, y_first, y_last, nlines, nz, nx0, npy_grid) &
+    !$omp shared(include_physical_ghosts) &
+    !$omp private(dest, ilocal, iy, first_line, line_count, iline, ix, iz, p)
+    do dest = 0, npy_grid - 1
+      do ilocal = 1, nlines
+        do iy = y_first, y_last
+          call yslab_line_range(dest, nlines, first_line, line_count)
+          if (ilocal > line_count) cycle
+          iline = first_line + ilocal - 1
+          ix = (iline - 1)/nlines_z + nx0
+          iz = mod(iline - 1, nlines_z) - nz
+          p = send_displs(dest + 1) + (ilocal - 1)*rows + (iy - y_first + 1)
+          send(p) = field(iy, iz, ix)
+        end do
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+    call roctxPop("yslab_to_full pack")
+
+    call roctxPush("MPI_Alltoallv yslab_to_full")
+#ifndef HAVE_HIP
+    !$omp target data use_device_ptr(send, recv)
+#endif
+    call MPI_Alltoallv(send, send_counts, send_displs, MPI_DOUBLE_COMPLEX, &
+                       recv, recv_counts, recv_displs, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
+#ifndef HAVE_HIP
+    !$omp end target data
+#endif
+    call roctxPop("MPI_Alltoallv yslab_to_full")
+
+    call roctxPush("yslab_to_full unpack")
+    !$omp target teams distribute parallel do collapse(3) default(none) &
+    !$omp shared(slab, recv, recv_displs, my_line_count, include_physical_ghosts, ny, npy_grid) &
+    !$omp private(src, ilocal, iy, y_first, y_last, rows, p)
+    do src = 0, npy_grid - 1
+      do ilocal = 1, my_line_count
+        do iy = -1, ny + 1
+          call yslab_unique_range(src, ny, include_physical_ghosts, y_first, y_last)
+          if (iy < y_first .or. iy > y_last) cycle
+          rows = y_last - y_first + 1
+          p = recv_displs(src + 1) + (ilocal - 1)*rows + (iy - y_first + 1)
+          slab(iy + 2, ilocal) = recv(p)
+        end do
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+    call roctxPop("yslab_to_full unpack")
+
+    call roctxPush("yslab_to_full cleanup")
+    !$omp target exit data map(delete: send, recv, send_displs, recv_displs)
+    deallocate (send, recv, send_counts, recv_counts, send_displs, recv_displs)
+    call roctxPop("yslab_to_full cleanup")
+  end subroutine yslab_transpose_to_full
+
+  subroutine yslab_transpose_from_full(slab, field, ny, nz, nlines, nlines_z)
+    implicit none
+    integer(C_INT), intent(in) :: ny, nz, nlines, nlines_z
+    complex(C_DOUBLE_COMPLEX), intent(in) :: slab(:, :)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    complex(C_DOUBLE_COMPLEX), allocatable :: send(:), recv(:)
+    integer, allocatable :: send_counts(:), recv_counts(:), send_displs(:), recv_displs(:)
+    integer(C_INT) :: dest, src, first_line, line_count, my_first_line, my_line_count
+    integer(C_INT) :: y_first, y_last, rows, total_send, total_recv
+    integer(C_INT) :: ilocal, iline, ix, iz, iy, p
+
+    call roctxPush("yslab_from_full setup_counts")
+    allocate (send_counts(npy_grid), recv_counts(npy_grid), send_displs(npy_grid), recv_displs(npy_grid))
+    call yslab_line_range(ipy, nlines, my_first_line, my_line_count)
+
+    total_send = 0
+    total_recv = 0
+    do dest = 0, npy_grid - 1
+      call yslab_padded_range(dest, ny, y_first, y_last)
+      rows = y_last - y_first + 1
+      send_counts(dest + 1) = my_line_count*rows
+      send_displs(dest + 1) = total_send
+      total_send = total_send + send_counts(dest + 1)
+
+      call yslab_line_range(dest, nlines, first_line, line_count)
+      call yslab_padded_range(ipy, ny, y_first, y_last)
+      rows = y_last - y_first + 1
+      recv_counts(dest + 1) = line_count*rows
+      recv_displs(dest + 1) = total_recv
+      total_recv = total_recv + recv_counts(dest + 1)
+    end do
+    call roctxPop("yslab_from_full setup_counts")
+
+    call roctxPush("yslab_from_full allocate_buffers")
+    allocate (send(max(1, total_send)), recv(max(1, total_recv)))
+    !$omp target enter data map(alloc: send, recv) map(to: send_displs, recv_displs)
+    call roctxPop("yslab_from_full allocate_buffers")
+
+    call roctxPush("yslab_from_full pack")
+    !$omp target teams distribute parallel do collapse(3) default(none) &
+    !$omp shared(slab, send, send_displs, my_line_count, ny, npy_grid) &
+    !$omp private(dest, ilocal, iy, y_first, y_last, rows, p)
+    do dest = 0, npy_grid - 1
+      do ilocal = 1, my_line_count
+        do iy = -1, ny + 1
+          call yslab_padded_range(dest, ny, y_first, y_last)
+          if (iy < y_first .or. iy > y_last) cycle
+          rows = y_last - y_first + 1
+          p = send_displs(dest + 1) + (ilocal - 1)*rows + (iy - y_first + 1)
+          send(p) = slab(iy + 2, ilocal)
+        end do
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+    call roctxPop("yslab_from_full pack")
+
+    call roctxPush("MPI_Alltoallv yslab_from_full")
+#ifndef HAVE_HIP
+    !$omp target data use_device_ptr(send, recv)
+#endif
+    call MPI_Alltoallv(send, send_counts, send_displs, MPI_DOUBLE_COMPLEX, &
+                       recv, recv_counts, recv_displs, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
+#ifndef HAVE_HIP
+    !$omp end target data
+#endif
+    call roctxPop("MPI_Alltoallv yslab_from_full")
+
+    call yslab_padded_range(ipy, ny, y_first, y_last)
+    rows = y_last - y_first + 1
+    call roctxPush("yslab_from_full unpack")
+    !$omp target teams distribute parallel do collapse(3) default(none) &
+    !$omp shared(field, recv, recv_displs, nlines_z, rows, y_first, y_last, nz, nx0, nlines, npy_grid) &
+    !$omp private(src, ilocal, iy, first_line, line_count, iline, ix, iz, p)
+    do src = 0, npy_grid - 1
+      do ilocal = 1, nlines
+        do iy = y_first, y_last
+          call yslab_line_range(src, nlines, first_line, line_count)
+          if (ilocal > line_count) cycle
+          iline = first_line + ilocal - 1
+          ix = (iline - 1)/nlines_z + nx0
+          iz = mod(iline - 1, nlines_z) - nz
+          p = recv_displs(src + 1) + (ilocal - 1)*rows + (iy - y_first + 1)
+          field(iy, iz, ix) = recv(p)
+        end do
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+    call roctxPop("yslab_from_full unpack")
+
+    call roctxPush("yslab_from_full cleanup")
+    !$omp target exit data map(delete: send, recv, send_displs, recv_displs)
+    deallocate (send, recv, send_counts, recv_counts, send_displs, recv_displs)
+    call roctxPop("yslab_from_full cleanup")
+  end subroutine yslab_transpose_from_full
+#endif
+
+  subroutine yslab_copy_to_full(field, slab, ny, nz, first_line, line_count, nlines_z)
+    implicit none
+    integer(C_INT), intent(in) :: ny, nz, first_line, line_count, nlines_z
+    complex(C_DOUBLE_COMPLEX), intent(in) :: field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: slab(:, :)
+    integer(C_INT) :: ilocal, iline, ix, iz, iy
+
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(field, slab, first_line, line_count, nlines_z, nz, nx0, ny) &
+    !$omp private(ilocal, iline, ix, iz, iy)
+    do ilocal = 1, line_count
+      do iy = -1, ny + 1
+        iline = first_line + ilocal - 1
+        ix = (iline - 1)/nlines_z + nx0
+        iz = mod(iline - 1, nlines_z) - nz
+        slab(iy + 2, ilocal) = field(iy, iz, ix)
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+  end subroutine yslab_copy_to_full
+
+  subroutine yslab_copy_from_full(slab, field, ny, nz, first_line, line_count, nlines_z)
+    implicit none
+    integer(C_INT), intent(in) :: ny, nz, first_line, line_count, nlines_z
+    complex(C_DOUBLE_COMPLEX), intent(in) :: slab(:, :)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    integer(C_INT) :: ilocal, iline, ix, iz, iy
+
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(slab, field, first_line, line_count, nlines_z, nz, nx0, ny) &
+    !$omp private(ilocal, iline, ix, iz, iy)
+    do ilocal = 1, line_count
+      do iy = -1, ny + 1
+        iline = first_line + ilocal - 1
+        ix = (iline - 1)/nlines_z + nx0
+        iz = mod(iline - 1, nlines_z) - nz
+        field(iy, iz, ix) = slab(iy + 2, ilocal)
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+  end subroutine yslab_copy_from_full
+
   SUBROUTINE repack_zTOx_local(Vz, Vx, ny)
     use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
     implicit none
