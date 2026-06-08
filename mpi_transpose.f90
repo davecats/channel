@@ -35,6 +35,9 @@ MODULE mpi_transpose
 #else
   complex(C_DOUBLE_COMPLEX), allocatable :: sendbuf(:, :), recvbuf(:, :)
 #endif
+  complex(C_DOUBLE_COMPLEX), allocatable, save :: yslab_workspace(:, :)
+  integer(C_INT), save :: yslab_scratch_rows = -1
+  integer(C_INT), save :: yslab_scratch_lines = -1
   integer(C_INT), save :: nproc, iproc, ierr, nzd, nx
   integer(C_INT), save :: npy_grid = 1, npxz = 1, ipy = 0, ipxz = 0
   integer(C_INT), save :: nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN, sendcount
@@ -72,6 +75,37 @@ CONTAINS
     if (rank < rem) line_count = line_count + 1
     first_line = rank*base + min(rank, rem) + 1
   end subroutine yslab_line_range
+
+  subroutine prepare_yslab_scratch(nrows, nlines)
+    implicit none
+    integer(C_INT), intent(in) :: nrows, nlines
+
+    if (nlines <= 0) return
+    if (allocated(yslab_workspace)) then
+      if (yslab_scratch_rows /= nrows .or. yslab_scratch_lines /= nlines) then
+        !$omp target exit data map(delete: yslab_workspace)
+        deallocate (yslab_workspace)
+        yslab_scratch_rows = -1
+        yslab_scratch_lines = -1
+      end if
+    end if
+    if (.not. allocated(yslab_workspace)) then
+      allocate (yslab_workspace(nrows, nlines))
+      !$omp target enter data map(alloc: yslab_workspace)
+      yslab_scratch_rows = nrows
+      yslab_scratch_lines = nlines
+    end if
+  end subroutine prepare_yslab_scratch
+
+  subroutine release_yslab_scratch()
+    implicit none
+
+    if (.not. allocated(yslab_workspace)) return
+    !$omp target exit data map(delete: yslab_workspace)
+    deallocate (yslab_workspace)
+    yslab_scratch_rows = -1
+    yslab_scratch_lines = -1
+  end subroutine release_yslab_scratch
 
   !$omp declare target(yslab_active_range)
   subroutine yslab_active_range(rank, ny, first_y, last_y)

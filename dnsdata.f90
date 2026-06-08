@@ -44,9 +44,6 @@ MODULE dnsdata
   logical :: time_from_restart
   logical :: disable_restart_write = .false.
   logical :: use_yslab_linsolve = .false.
-  complex(C_DOUBLE_COMPLEX), allocatable, save :: slab(:, :)
-  integer(C_INT), save :: yslab_scratch_rows = -1
-  integer(C_INT), save :: yslab_scratch_lines = -1
   !Grid
   integer(C_INT), private :: iy
   real(C_DOUBLE), allocatable :: y(:), dy(:)
@@ -566,23 +563,6 @@ CONTAINS
     end if
   end subroutine compact_boundary_rhs_value
 
-  !$omp declare target(compact_boundary_rhs_values)
-  subroutine compact_boundary_rhs_values(bc0_values, bcn_values, nz_value, nx0_value, iz, ix, lower_rhs_index, lower_ghost_rhs_index, &
-                                         upper_rhs_index, upper_ghost_rhs_index, lower_ghost_value, lower_boundary_value, &
-                                         upper_boundary_value, upper_ghost_value)
-    implicit none
-    integer(C_INT), intent(in) :: nz_value, nx0_value, iz, ix
-    integer(C_INT), intent(in) :: lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index
-    complex(C_DOUBLE_COMPLEX), intent(in) :: bc0_values(-nz_value:, nx0_value:, :)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: bcn_values(-nz_value:, nx0_value:, :)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: lower_ghost_value, lower_boundary_value, upper_boundary_value, upper_ghost_value
-
-    call compact_boundary_rhs_value(bc0_values, bcn_values, nz_value, nx0_value, iz, ix, lower_ghost_rhs_index, lower_ghost_value)
-    call compact_boundary_rhs_value(bc0_values, bcn_values, nz_value, nx0_value, iz, ix, lower_rhs_index, lower_boundary_value)
-    call compact_boundary_rhs_value(bc0_values, bcn_values, nz_value, nx0_value, iz, ix, upper_rhs_index, upper_boundary_value)
-    call compact_boundary_rhs_value(bc0_values, bcn_values, nz_value, nx0_value, iz, ix, upper_ghost_rhs_index, upper_ghost_value)
-  end subroutine compact_boundary_rhs_values
-
   !$omp declare target(compact_component_operator_coeffs)
 subroutine compact_component_operator_coeffs(component_index, lambda_coeff, diffusion_coeff, ni_value, kk, der0, der2, der4, coeffs)
     implicit none
@@ -598,69 +578,10 @@ subroutine compact_component_operator_coeffs(component_index, lambda_coeff, diff
     end if
   end subroutine compact_component_operator_coeffs
 
-  !$omp declare target(compact_physical_boundary_equations)
-  subroutine compact_physical_boundary_equations(lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, lower_boundary_value, &
-                                                lower_ghost_value, upper_boundary_value, upper_ghost_value, lower_rhs0, lower_eq0, &
-                                                 upper_rhsn, upper_eqn)
-    implicit none
-    real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: lower_boundary_value, lower_ghost_value, upper_boundary_value, upper_ghost_value
-    complex(C_DOUBLE_COMPLEX), intent(out) :: lower_rhs0, upper_rhsn
-    real(C_DOUBLE), intent(out) :: lower_eq0(-2:2), upper_eqn(-2:2)
-
-    lower_rhs0 = lower_boundary_value - lower_ghost_value*lower_bc(-2)/lower_ghost_bc(-2)
-    lower_eq0 = lower_bc - lower_ghost_bc*lower_bc(-2)/lower_ghost_bc(-2)
-    lower_eq0(-2) = 0.0d0
-    upper_rhsn = upper_boundary_value - upper_ghost_value*upper_bc(2)/upper_ghost_bc(2)
-    upper_eqn = upper_bc - upper_ghost_bc*upper_bc(2)/upper_ghost_bc(2)
-    upper_eqn(2) = 0.0d0
-  end subroutine compact_physical_boundary_equations
-
-  !$omp declare target(compact_eliminate_physical_boundary_row)
-  subroutine compact_eliminate_physical_boundary_row(iy, ny_value, rhs_value, row_coeffs, lower_ghost_value, lower_rhs0, &
-                                                lower_ghost_bc, lower_eq0, upper_ghost_value, upper_rhsn, upper_ghost_bc, upper_eqn)
-    implicit none
-    integer(C_INT), intent(in) :: iy, ny_value
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs_value
-    real(C_DOUBLE), intent(inout) :: row_coeffs(-2:2)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: lower_ghost_value, lower_rhs0, upper_ghost_value, upper_rhsn
-    real(C_DOUBLE), intent(in) :: lower_ghost_bc(-2:2), lower_eq0(-2:2), upper_ghost_bc(-2:2), upper_eqn(-2:2)
-    real(C_DOUBLE) :: fac
-
-    if (iy == 1) then
-      fac = row_coeffs(-2)/lower_ghost_bc(-2)
-      rhs_value = rhs_value - lower_ghost_value*fac
-      row_coeffs = row_coeffs - lower_ghost_bc*fac
-      row_coeffs(-2) = 0.0d0
-      fac = row_coeffs(-1)/lower_eq0(-1)
-      rhs_value = rhs_value - lower_rhs0*fac
-      row_coeffs = row_coeffs - lower_eq0*fac
-      row_coeffs(-1) = 0.0d0
-    else if (iy == 2) then
-      fac = row_coeffs(-2)/lower_eq0(-1)
-      rhs_value = rhs_value - lower_rhs0*fac
-      row_coeffs(-2:1) = row_coeffs(-2:1) - lower_eq0(-1:2)*fac
-      row_coeffs(-2) = 0.0d0
-    else if (iy == ny_value - 2) then
-      fac = row_coeffs(2)/upper_eqn(1)
-      rhs_value = rhs_value - upper_rhsn*fac
-      row_coeffs(-1:2) = row_coeffs(-1:2) - upper_eqn(-2:1)*fac
-      row_coeffs(2) = 0.0d0
-    else if (iy == ny_value - 1) then
-      fac = row_coeffs(2)/upper_ghost_bc(2)
-      rhs_value = rhs_value - upper_ghost_value*fac
-      row_coeffs = row_coeffs - upper_ghost_bc*fac
-      row_coeffs(2) = 0.0d0
-      fac = row_coeffs(1)/upper_eqn(1)
-      rhs_value = rhs_value - upper_rhsn*fac
-      row_coeffs = row_coeffs - upper_eqn*fac
-      row_coeffs(1) = 0.0d0
-    end if
-  end subroutine compact_eliminate_physical_boundary_row
-
   SUBROUTINE solve_compact_component_current_layout(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
                                                    lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
                                                     lambda_coeff, diffusion_coeff)
+    use y_line_solvers, only: ys_solve_ghost_field_reduced_symmetric_operator
     IMPLICIT NONE
     integer(C_INT), intent(in) :: component_index, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index
     real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
@@ -675,7 +596,7 @@ subroutine compact_component_operator_coeffs(component_index, lambda_coeff, diff
     call assemble_compact_component_system(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
                                            lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
                                            lambda_coeff, diffusion_coeff)
-    call solve_current_layout_schur(V(:, :, :, component_index))
+    call ys_solve_ghost_field_reduced_symmetric_operator(V(:, :, :, component_index), ny, nz)
   END SUBROUTINE solve_compact_component_current_layout
 
   subroutine assemble_compact_component_system(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
@@ -719,56 +640,19 @@ subroutine compact_component_operator_coeffs(component_index, lambda_coeff, diff
           ys_local_operator(iy, -2:2, iline) = row_coeffs
         end do
 
-        call compact_boundary_rhs_values(bc0, bcn, nz, ix_first, iz, ix, lower_rhs_index, lower_ghost_rhs_index, &
-                                         upper_rhs_index, upper_ghost_rhs_index, ys_lower_ghost_rhs(iline), &
-                                         ys_lower_boundary_rhs(iline), ys_upper_boundary_rhs(iline), ys_upper_ghost_rhs(iline))
+        call compact_boundary_rhs_value(bc0, bcn, nz, ix_first, iz, ix, lower_ghost_rhs_index, ys_lower_ghost_rhs(iline))
+        call compact_boundary_rhs_value(bc0, bcn, nz, ix_first, iz, ix, lower_rhs_index, ys_lower_boundary_rhs(iline))
+        call compact_boundary_rhs_value(bc0, bcn, nz, ix_first, iz, ix, upper_rhs_index, ys_upper_boundary_rhs(iline))
+        call compact_boundary_rhs_value(bc0, bcn, nz, ix_first, iz, ix, upper_ghost_rhs_index, ys_upper_ghost_rhs(iline))
       end do
     end do
     !$omp end target teams distribute parallel do
   end subroutine assemble_compact_component_system
 
-  subroutine solve_current_layout_schur(dst)
-    use y_line_solvers, only: ys_solve_ghost_field_reduced_symmetric_operator
-    implicit none
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-
-    call ys_solve_ghost_field_reduced_symmetric_operator(dst, ny, nz)
-  end subroutine solve_current_layout_schur
-
-  subroutine prepare_yslab_scratch(nrows, nlines)
-    implicit none
-    integer(C_INT), intent(in) :: nrows, nlines
-
-    if (nlines <= 0) return
-    if (allocated(slab)) then
-      if (yslab_scratch_rows /= nrows .or. yslab_scratch_lines /= nlines) then
-        !$omp target exit data map(delete: slab)
-        deallocate (slab)
-        yslab_scratch_rows = -1
-        yslab_scratch_lines = -1
-      end if
-    end if
-    if (.not. allocated(slab)) then
-      allocate (slab(nrows, nlines))
-      !$omp target enter data map(alloc: slab)
-      yslab_scratch_rows = nrows
-      yslab_scratch_lines = nlines
-    end if
-  end subroutine prepare_yslab_scratch
-
-  subroutine release_yslab_scratch()
-    implicit none
-
-    if (.not. allocated(slab)) return
-    !$omp target exit data map(delete: slab)
-    deallocate (slab)
-    yslab_scratch_rows = -1
-    yslab_scratch_lines = -1
-  end subroutine release_yslab_scratch
-
   subroutine solve_compact_component_full_y(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
                                             lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
                                             lambda_coeff, diffusion_coeff)
+    use y_line_solvers, only: ys_solve_full_y_lines_packed
     implicit none
     integer(C_INT), intent(in) :: component_index, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index
     real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
@@ -782,180 +666,17 @@ subroutine compact_component_operator_coeffs(component_index, lambda_coeff, diff
     call prepare_yslab_scratch(ny + 3, line_count)
 
     call roctxPush("yslab compact transpose_to_full")
-    call yslab_transpose_to_full(V(:, :, :, component_index), slab, ny, nz, nlines, nlines_z, .false.)
+    call yslab_transpose_to_full(V(:, :, :, component_index), yslab_workspace, ny, nz, nlines, nlines_z, .false.)
     call roctxPop("yslab compact transpose_to_full")
 
-    call solve_full_y_lines_packed(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
-                                   lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
-                                   lambda_coeff, diffusion_coeff, first_line, line_count, "compact full-y gpsv")
+ call ys_solve_full_y_lines_packed(yslab_workspace, der, k2, bc0, bcn, ny, nz, nx0, ni, component_index, lower_bc, lower_ghost_bc, &
+                                      upper_bc, upper_ghost_bc, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, &
+                                upper_ghost_rhs_index, lambda_coeff, diffusion_coeff, first_line, line_count, "compact full-y gpsv")
 
     call roctxPush("yslab compact transpose_from_full")
-    call yslab_transpose_from_full(slab, V(:, :, :, component_index), ny, nz, nlines, nlines_z)
+    call yslab_transpose_from_full(yslab_workspace, V(:, :, :, component_index), ny, nz, nlines, nlines_z)
     call roctxPop("yslab compact transpose_from_full")
   end subroutine solve_compact_component_full_y
-
-  subroutine solve_full_y_lines_packed(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
-                                       lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
-                                       lambda_coeff, diffusion_coeff, first_line, line_count, solve_label)
-    use y_line_solvers, only: ys_prepare_gpsv_workspace, ys_solve_packed_pentadiagonal, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, &
-                              ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x
-    implicit none
-    integer(C_INT), intent(in) :: component_index, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index
-    real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
-    real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
-    integer(C_INT), intent(in) :: first_line, line_count
-    character(len=*), intent(in) :: solve_label
-    complex(C_DOUBLE_COMPLEX) :: rhs_value, lower_ghost_value, lower_boundary_value, upper_boundary_value, upper_ghost_value
-    complex(C_DOUBLE_COMPLEX) :: lower_rhs0, upper_rhsn
-    real(C_DOUBLE) :: lower_eq0(-2:2), upper_eqn(-2:2)
-    real(C_DOUBLE) :: kk, fac, c_m2, c_m1, c_0, c_p1, c_p2
-    integer(C_INT) :: nlines_z, ix_base, ilocal, iline, ix, iz, iy, p
-
-    if (line_count <= 0) return
-
-    nlines_z = 2*nz + 1
-    ix_base = nx0
-    call ys_prepare_gpsv_workspace(ny - 1, line_count)
-
-    call roctxPush("compact full-y pack")
-    !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(slab, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, der, k2, ni, &
-    !$omp& bc0, bcn, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, lambda_coeff, diffusion_coeff, component_index, &
-    !$omp& lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, first_line, line_count, nlines_z, nz, ix_base, ny) &
-    !$omp private(ilocal, iy, iline, ix, iz, p, kk, fac, c_m2, c_m1, c_0, c_p1, c_p2, rhs_value, lower_ghost_value, &
-    !$omp& lower_boundary_value, upper_boundary_value, upper_ghost_value, lower_rhs0, upper_rhsn, lower_eq0, upper_eqn)
-    do ilocal = 1, line_count
-      do iy = 1, ny - 1
-        iline = first_line + ilocal - 1
-        ix = (iline - 1)/nlines_z + ix_base
-        iz = mod(iline - 1, nlines_z) - nz
-
-        call compact_boundary_rhs_value(bc0, bcn, nz, ix_base, iz, ix, lower_ghost_rhs_index, lower_ghost_value)
-        call compact_boundary_rhs_value(bc0, bcn, nz, ix_base, iz, ix, lower_rhs_index, lower_boundary_value)
-        call compact_boundary_rhs_value(bc0, bcn, nz, ix_base, iz, ix, upper_rhs_index, upper_boundary_value)
-        call compact_boundary_rhs_value(bc0, bcn, nz, ix_base, iz, ix, upper_ghost_rhs_index, upper_ghost_value)
-
-        lower_rhs0 = lower_boundary_value - lower_ghost_value*lower_bc(-2)/lower_ghost_bc(-2)
-        lower_eq0 = lower_bc - lower_ghost_bc*lower_bc(-2)/lower_ghost_bc(-2)
-        lower_eq0(-2) = 0.0d0
-        upper_rhsn = upper_boundary_value - upper_ghost_value*upper_bc(2)/upper_ghost_bc(2)
-        upper_eqn = upper_bc - upper_ghost_bc*upper_bc(2)/upper_ghost_bc(2)
-        upper_eqn(2) = 0.0d0
-
-        kk = k2(iz, ix)
-        rhs_value = slab(iy + 2, ilocal)
-        if (component_index == 2_C_INT) then
-          c_m2 = lambda_coeff*(der(iy, 2, -2) - kk*der(iy, 0, -2)) - &
-                 ni*(der(iy, 3, -2) - 2.0d0*kk*der(iy, 2, -2) + kk*kk*der(iy, 0, -2))
-          c_m1 = lambda_coeff*(der(iy, 2, -1) - kk*der(iy, 0, -1)) - &
-                 ni*(der(iy, 3, -1) - 2.0d0*kk*der(iy, 2, -1) + kk*kk*der(iy, 0, -1))
-          c_0 = lambda_coeff*(der(iy, 2, 0) - kk*der(iy, 0, 0)) - &
-                ni*(der(iy, 3, 0) - 2.0d0*kk*der(iy, 2, 0) + kk*kk*der(iy, 0, 0))
-          c_p1 = lambda_coeff*(der(iy, 2, 1) - kk*der(iy, 0, 1)) - &
-                 ni*(der(iy, 3, 1) - 2.0d0*kk*der(iy, 2, 1) + kk*kk*der(iy, 0, 1))
-          c_p2 = lambda_coeff*(der(iy, 2, 2) - kk*der(iy, 0, 2)) - &
-                 ni*(der(iy, 3, 2) - 2.0d0*kk*der(iy, 2, 2) + kk*kk*der(iy, 0, 2))
-        else
-          c_m2 = lambda_coeff*der(iy, 0, -2) - diffusion_coeff*ni*(der(iy, 2, -2) - kk*der(iy, 0, -2))
-          c_m1 = lambda_coeff*der(iy, 0, -1) - diffusion_coeff*ni*(der(iy, 2, -1) - kk*der(iy, 0, -1))
-          c_0 = lambda_coeff*der(iy, 0, 0) - diffusion_coeff*ni*(der(iy, 2, 0) - kk*der(iy, 0, 0))
-          c_p1 = lambda_coeff*der(iy, 0, 1) - diffusion_coeff*ni*(der(iy, 2, 1) - kk*der(iy, 0, 1))
-          c_p2 = lambda_coeff*der(iy, 0, 2) - diffusion_coeff*ni*(der(iy, 2, 2) - kk*der(iy, 0, 2))
-        end if
-
-        if (iy == 1) then
-          fac = c_m2/lower_ghost_bc(-2)
-          rhs_value = rhs_value - lower_ghost_value*fac
-          c_m1 = c_m1 - lower_ghost_bc(-1)*fac
-          c_0 = c_0 - lower_ghost_bc(0)*fac
-          c_p1 = c_p1 - lower_ghost_bc(1)*fac
-          c_p2 = c_p2 - lower_ghost_bc(2)*fac
-          c_m2 = 0.0d0
-          fac = c_m1/lower_eq0(-1)
-          rhs_value = rhs_value - lower_rhs0*fac
-          c_0 = c_0 - lower_eq0(0)*fac
-          c_p1 = c_p1 - lower_eq0(1)*fac
-          c_p2 = c_p2 - lower_eq0(2)*fac
-          c_m1 = 0.0d0
-        else if (iy == 2) then
-          fac = c_m2/lower_eq0(-1)
-          rhs_value = rhs_value - lower_rhs0*fac
-          c_m1 = c_m1 - lower_eq0(0)*fac
-          c_0 = c_0 - lower_eq0(1)*fac
-          c_p1 = c_p1 - lower_eq0(2)*fac
-          c_m2 = 0.0d0
-        else if (iy == ny - 2) then
-          fac = c_p2/upper_eqn(1)
-          rhs_value = rhs_value - upper_rhsn*fac
-          c_m1 = c_m1 - upper_eqn(-2)*fac
-          c_0 = c_0 - upper_eqn(-1)*fac
-          c_p1 = c_p1 - upper_eqn(0)*fac
-          c_p2 = 0.0d0
-        else if (iy == ny - 1) then
-          fac = c_p2/upper_ghost_bc(2)
-          rhs_value = rhs_value - upper_ghost_value*fac
-          c_m2 = c_m2 - upper_ghost_bc(-2)*fac
-          c_m1 = c_m1 - upper_ghost_bc(-1)*fac
-          c_0 = c_0 - upper_ghost_bc(0)*fac
-          c_p1 = c_p1 - upper_ghost_bc(1)*fac
-          c_p2 = 0.0d0
-          fac = c_p1/upper_eqn(1)
-          rhs_value = rhs_value - upper_rhsn*fac
-          c_m2 = c_m2 - upper_eqn(-2)*fac
-          c_m1 = c_m1 - upper_eqn(-1)*fac
-          c_0 = c_0 - upper_eqn(0)*fac
-          c_p1 = 0.0d0
-        end if
-
-        p = (iy - 1)*line_count + ilocal
-        ys_gpsv_x(p) = rhs_value
-        ys_gpsv_ds(p) = cmplx(c_m2, 0.0d0, kind=C_DOUBLE)
-        ys_gpsv_dl(p) = cmplx(c_m1, 0.0d0, kind=C_DOUBLE)
-        ys_gpsv_d(p) = cmplx(c_0, 0.0d0, kind=C_DOUBLE)
-        ys_gpsv_du(p) = cmplx(c_p1, 0.0d0, kind=C_DOUBLE)
-        ys_gpsv_dw(p) = cmplx(c_p2, 0.0d0, kind=C_DOUBLE)
-      end do
-    end do
-    !$omp end target teams distribute parallel do
-    call roctxPop("compact full-y pack")
-
-    call ys_solve_packed_pentadiagonal(ny - 1, line_count, solve_label)
-
-    call roctxPush("compact full-y unpack")
-    !$omp target teams distribute parallel do default(none) &
-    !$omp shared(slab, ys_gpsv_x, der, k2, ni, bc0, bcn, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
-    !$omp& lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, first_line, line_count, nlines_z, nz, ix_base, ny) &
-    !$omp private(ilocal, iy, iline, ix, iz, p, lower_ghost_value, lower_boundary_value, upper_boundary_value, upper_ghost_value, &
-    !$omp& lower_rhs0, upper_rhsn, lower_eq0, upper_eqn)
-    do ilocal = 1, line_count
-      iline = first_line + ilocal - 1
-      ix = (iline - 1)/nlines_z + ix_base
-      iz = mod(iline - 1, nlines_z) - nz
-      do iy = 1, ny - 1
-        p = (iy - 1)*line_count + ilocal
-        slab(iy + 2, ilocal) = ys_gpsv_x(p)
-      end do
-
-      call compact_boundary_rhs_values(bc0, bcn, nz, ix_base, iz, ix, lower_rhs_index, lower_ghost_rhs_index, &
-                                       upper_rhs_index, upper_ghost_rhs_index, lower_ghost_value, lower_boundary_value, &
-                                       upper_boundary_value, upper_ghost_value)
-      call compact_physical_boundary_equations(lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, lower_boundary_value, &
-                                               lower_ghost_value, upper_boundary_value, upper_ghost_value, lower_rhs0, lower_eq0, &
-                                               upper_rhsn, upper_eqn)
-
-      slab(2, ilocal) = (lower_rhs0 - lower_eq0(0)*slab(3, ilocal) - lower_eq0(1)*slab(4, ilocal) - &
-                         lower_eq0(2)*slab(5, ilocal))/lower_eq0(-1)
-      slab(1, ilocal) = (lower_ghost_value - lower_ghost_bc(-1)*slab(2, ilocal) - lower_ghost_bc(0)*slab(3, ilocal) - &
-                         lower_ghost_bc(1)*slab(4, ilocal) - lower_ghost_bc(2)*slab(5, ilocal))/lower_ghost_bc(-2)
-      slab(ny + 2, ilocal) = (upper_rhsn - upper_eqn(-2)*slab(ny - 1, ilocal) - upper_eqn(-1)*slab(ny, ilocal) - &
-                              upper_eqn(0)*slab(ny + 1, ilocal))/upper_eqn(1)
-      slab(ny + 3, ilocal) = (upper_ghost_value - upper_ghost_bc(-2)*slab(ny - 1, ilocal) - &
-                              upper_ghost_bc(-1)*slab(ny, ilocal) - upper_ghost_bc(0)*slab(ny + 1, ilocal) - &
-                              upper_ghost_bc(1)*slab(ny + 2, ilocal))/upper_ghost_bc(2)
-    end do
-    !$omp end target teams distribute parallel do
-    call roctxPop("compact full-y unpack")
-  end subroutine solve_full_y_lines_packed
 
   subroutine apply_complex_derivative_transposed_y(src, dst)
     implicit none
@@ -971,13 +692,13 @@ subroutine compact_component_operator_coeffs(component_index, lambda_coeff, diff
     call prepare_yslab_scratch(ny + 3, my_line_count)
 
     call roctxPush("yslab derivative transpose_to_full")
-    call yslab_transpose_to_full(src, slab, ny, nz, nlines, nlines_z, .true.)
+    call yslab_transpose_to_full(src, yslab_workspace, ny, nz, nlines, nlines_z, .true.)
     call roctxPop("yslab derivative transpose_to_full")
 
     call solve_full_y_derivative_packed(my_line_count, "yslab derivative gpsv")
 
     call roctxPush("yslab derivative transpose_from_full")
-    call yslab_transpose_from_full(slab, dst, ny, nz, nlines, nlines_z)
+    call yslab_transpose_from_full(yslab_workspace, dst, ny, nz, nlines, nlines_z)
     call roctxPop("yslab derivative transpose_from_full")
 
   end subroutine apply_complex_derivative_transposed_y
@@ -998,17 +719,17 @@ subroutine compact_component_operator_coeffs(component_index, lambda_coeff, diff
 
     call roctxPush("full-y derivative pack")
     !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(slab, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, der, d140, d14m1, d14n, d14np1, &
+    !$omp shared(yslab_workspace, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, der, d140, d14m1, d14n, d14np1, &
     !$omp& line_count, ny) &
     !$omp private(ilocal, iy, p, rhs_value, c_m2, c_m1, c_0, c_p1, c_p2, lower_boundary_value, lower_ghost_value, upper_boundary_value, upper_ghost_value)
     do ilocal = 1, line_count
       do iy = 1, ny - 1
-        lower_boundary_value = sum(d140(-2:2)*slab(1:5, ilocal))
-        lower_ghost_value = sum(d14m1(-2:2)*slab(1:5, ilocal))
-        upper_boundary_value = sum(d14n(-2:2)*slab(ny - 1:ny + 3, ilocal))
-        upper_ghost_value = sum(d14np1(-2:2)*slab(ny - 1:ny + 3, ilocal))
+        lower_boundary_value = sum(d140(-2:2)*yslab_workspace(1:5, ilocal))
+        lower_ghost_value = sum(d14m1(-2:2)*yslab_workspace(1:5, ilocal))
+        upper_boundary_value = sum(d14n(-2:2)*yslab_workspace(ny - 1:ny + 3, ilocal))
+        upper_ghost_value = sum(d14np1(-2:2)*yslab_workspace(ny - 1:ny + 3, ilocal))
 
-        rhs_value = sum(der(iy, 1, -2:2)*slab(iy:iy + 4, ilocal))
+        rhs_value = sum(der(iy, 1, -2:2)*yslab_workspace(iy:iy + 4, ilocal))
         c_m2 = der(iy, 0, -2)
         c_m1 = der(iy, 0, -1)
         c_0 = der(iy, 0, 0)
@@ -1047,21 +768,21 @@ subroutine compact_component_operator_coeffs(component_index, lambda_coeff, diff
 
     call roctxPush("full-y derivative unpack")
     !$omp target teams distribute parallel do default(none) &
-    !$omp shared(slab, ys_gpsv_x, d140, d14m1, d14n, d14np1, line_count, ny) &
+    !$omp shared(yslab_workspace, ys_gpsv_x, d140, d14m1, d14n, d14np1, line_count, ny) &
     !$omp private(ilocal, iy, p, lower_boundary_value, lower_ghost_value, upper_boundary_value, upper_ghost_value)
     do ilocal = 1, line_count
-      lower_boundary_value = sum(d140(-2:2)*slab(1:5, ilocal))
-      lower_ghost_value = sum(d14m1(-2:2)*slab(1:5, ilocal))
-      upper_boundary_value = sum(d14n(-2:2)*slab(ny - 1:ny + 3, ilocal))
-      upper_ghost_value = sum(d14np1(-2:2)*slab(ny - 1:ny + 3, ilocal))
+      lower_boundary_value = sum(d140(-2:2)*yslab_workspace(1:5, ilocal))
+      lower_ghost_value = sum(d14m1(-2:2)*yslab_workspace(1:5, ilocal))
+      upper_boundary_value = sum(d14n(-2:2)*yslab_workspace(ny - 1:ny + 3, ilocal))
+      upper_ghost_value = sum(d14np1(-2:2)*yslab_workspace(ny - 1:ny + 3, ilocal))
       do iy = 1, ny - 1
         p = (iy - 1)*line_count + ilocal
-        slab(iy + 2, ilocal) = ys_gpsv_x(p)
+        yslab_workspace(iy + 2, ilocal) = ys_gpsv_x(p)
       end do
-      slab(1, ilocal) = lower_ghost_value
-      slab(2, ilocal) = lower_boundary_value
-      slab(ny + 2, ilocal) = upper_boundary_value
-      slab(ny + 3, ilocal) = upper_ghost_value
+      yslab_workspace(1, ilocal) = lower_ghost_value
+      yslab_workspace(2, ilocal) = lower_boundary_value
+      yslab_workspace(ny + 2, ilocal) = upper_boundary_value
+      yslab_workspace(ny + 3, ilocal) = upper_ghost_value
     end do
     !$omp end target teams distribute parallel do
     call roctxPop("full-y derivative unpack")
