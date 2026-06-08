@@ -116,6 +116,7 @@ run_case() {
 } > "${OUT_ROOT}/run_config.txt"
 
 run_case head "${CURRENT_EXE}" 1 1 np1_npy1_local
+run_case head "${CURRENT_EXE}" 1 1 np1_npy1_yslab CHANNEL_USE_YSLAB_LINSOLVE=1
 run_case head "${CURRENT_EXE}" 2 1 np2_npy1_xz
 run_case head "${CURRENT_EXE}" 2 2 np2_npy2_schur
 run_case head "${CURRENT_EXE}" 2 2 np2_npy2_yslab CHANNEL_USE_YSLAB_LINSOLVE=1

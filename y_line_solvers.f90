@@ -418,6 +418,38 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     error stop "ys_solve_ghost_field_reduced: npy > 2 must use y-slab linsolve"
   end subroutine ys_solve_ghost_field_reduced
 
+  subroutine ys_endpoint_context(dst, ny, nz, row_start, row_end, active_n, nlines, nlines_z, dst_row_base, &
+                                 has_lower_boundary, has_upper_boundary, has_padded_dst)
+    implicit none
+    integer(C_INT), intent(in) :: ny, nz
+    complex(C_DOUBLE_COMPLEX), intent(in) :: dst(:, :, :)
+    integer(C_INT), intent(out) :: row_start, row_end, active_n, nlines, nlines_z, dst_row_base
+    logical, intent(out) :: has_lower_boundary, has_upper_boundary, has_padded_dst
+
+    row_start = ny0
+    row_end = nyN
+    active_n = row_end - row_start + 1
+    nlines = ys_workspace_nlines
+    nlines_z = 2*nz + 1
+    has_lower_boundary = (row_start == 1)
+    has_upper_boundary = (row_end == ny - 1)
+    has_padded_dst = (size(dst, 1) == active_n + 4)
+    dst_row_base = 1
+    if (has_padded_dst) dst_row_base = 3
+  end subroutine ys_endpoint_context
+
+  subroutine ys_padded_inner_indices(active_n, dst_row_base, lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3)
+    implicit none
+    integer(C_INT), intent(in) :: active_n, dst_row_base
+    integer(C_INT), intent(out) :: lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3
+
+    lower_inner0 = dst_row_base
+    lower_inner2 = dst_row_base + 2
+    upper_inner0 = active_n + dst_row_base - 3
+    upper_inner2 = upper_inner0 + 2
+    upper_inner3 = upper_inner0 + 3
+  end subroutine ys_padded_inner_indices
+
 #ifdef HAVE_CUDA
 
   subroutine ys_solve_reduced_endpoint_schur_cusparse(dst, ny, nz, has_lower_boundary, has_upper_boundary, &
@@ -663,11 +695,7 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
 
     call ys_solve_reduced_interfaces()
 
-    lower_inner0 = dst_row_base
-    lower_inner2 = dst_row_base + 2
-    upper_inner0 = active_n + dst_row_base - 3
-    upper_inner2 = upper_inner0 + 2
-    upper_inner3 = upper_inner0 + 3
+    call ys_padded_inner_indices(active_n, dst_row_base, lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3)
 
     call roctxPush("ys_endpoint_cusparse_reconstruct")
     !$omp target teams distribute parallel do default(none) &
@@ -769,18 +797,10 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
       return
     end if
 
-    row_start = ny0
-    row_end = nyN
-    active_n = row_end - row_start + 1
+    call ys_endpoint_context(dst, ny, nz, row_start, row_end, active_n, nlines, nlines_z, dst_row_base, &
+                             has_lower_boundary, has_upper_boundary, has_padded_dst)
     nI = active_n - 2
-    nlines = ys_workspace_nlines
-    nlines_z = 2*nz + 1
     batch_const = nlines + 2
-    has_lower_boundary = (row_start == 1)
-    has_upper_boundary = (row_end == ny - 1)
-    has_padded_dst = (size(dst, 1) == active_n + 4)
-    dst_row_base = 1
-    if (has_padded_dst) dst_row_base = 3
 
     if (.not. allocated(ys_local_rhs)) error stop "ys_prepare_ghost_field_workspace must be called before const y solve"
     if (ys_gpsv_batch < batch_const) error stop "const y solve requires larger cuSPARSE workspace"
@@ -1009,11 +1029,7 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
 
     call ys_solve_reduced_interfaces()
 
-    lower_inner0 = dst_row_base
-    lower_inner2 = dst_row_base + 2
-    upper_inner0 = active_n + dst_row_base - 3
-    upper_inner2 = upper_inner0 + 2
-    upper_inner3 = upper_inner0 + 3
+    call ys_padded_inner_indices(active_n, dst_row_base, lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3)
 
     call roctxPush("ys_const_endpoint_reconstruct")
     !$omp target teams distribute parallel do default(none) &
@@ -1115,19 +1131,11 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
       return
     end if
 
-    row_start = ny0
-    row_end = nyN
-    active_n = row_end - row_start + 1
+    call ys_endpoint_context(dst, ny, nz, row_start, row_end, active_n, nlines, nlines_z, dst_row_base, &
+                             has_lower_boundary, has_upper_boundary, has_padded_dst)
     nI = active_n - 2
-    nlines = ys_workspace_nlines
-    nlines_z = 2*nz + 1
     nresp = (nxN - nx0 + 1)*(nz + 1)
     batch_sym = nlines + 2*nresp
-    has_lower_boundary = (row_start == 1)
-    has_upper_boundary = (row_end == ny - 1)
-    has_padded_dst = (size(dst, 1) == active_n + 4)
-    dst_row_base = 1
-    if (has_padded_dst) dst_row_base = 3
 
     if (.not. allocated(ys_local_rhs)) error stop "ys_prepare_ghost_field_workspace must be called before symmetric y solve"
     if (ys_gpsv_batch < batch_sym) error stop "symmetric y solve requires larger cuSPARSE workspace"
@@ -1366,11 +1374,7 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
 
     call ys_solve_reduced_interfaces()
 
-    lower_inner0 = dst_row_base
-    lower_inner2 = dst_row_base + 2
-    upper_inner0 = active_n + dst_row_base - 3
-    upper_inner2 = upper_inner0 + 2
-    upper_inner3 = upper_inner0 + 3
+    call ys_padded_inner_indices(active_n, dst_row_base, lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3)
 
     call roctxPush("ys_sym_endpoint_reconstruct")
     !$omp target teams distribute parallel do default(none) &
@@ -1948,29 +1952,6 @@ lower_rhs0 = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_lower_b
       end if
     end do
   end subroutine ys_factor_penta
-
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
-  !$omp declare target(ys_solve_factored_penta_multi)
-#endif
-  subroutine ys_solve_factored_penta_multi(rhs, a)
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs(0:, :)
-    real(C_DOUBLE), intent(in) :: a(0:, -2:)
-    integer(C_INT) :: n, nrhs, i
-
-    n = size(a, 1)
-    nrhs = size(rhs, 2)
-
-    do i = 0, n - 1
-      if (i >= 2) rhs(i, 1:nrhs) = rhs(i, 1:nrhs) - a(i, -2)*rhs(i - 2, 1:nrhs)
-      if (i >= 1) rhs(i, 1:nrhs) = rhs(i, 1:nrhs) - a(i, -1)*rhs(i - 1, 1:nrhs)
-    end do
-
-    do i = n - 1, 0, -1
-      if (i + 1 < n) rhs(i, 1:nrhs) = rhs(i, 1:nrhs) - a(i, 1)*rhs(i + 1, 1:nrhs)
-      if (i + 2 < n) rhs(i, 1:nrhs) = rhs(i, 1:nrhs) - a(i, 2)*rhs(i + 2, 1:nrhs)
-      rhs(i, 1:nrhs) = rhs(i, 1:nrhs)*a(i, 0)
-    end do
-  end subroutine ys_solve_factored_penta_multi
 
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
   !$omp declare target(ys_solve_factored_penta_one)

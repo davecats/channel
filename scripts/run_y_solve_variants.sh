@@ -109,9 +109,6 @@ run_case() {
 
 for npy in ${NPY_LIST}; do
   for mode in ${MODE_LIST}; do
-    if [[ "${npy}" == "1" && "${mode}" != "default" ]]; then
-      continue
-    fi
     run_case "${npy}" "${mode}"
   done
 done

@@ -258,7 +258,7 @@ CONTAINS
     allocate (fr(3 + 2*nPhi)); fr = 0.0
     call ys_prepare_ghost_field_workspace(ny, nz, nxB)
 #ifdef HAVE_CUDA
-    if (solveNS .and. npy_grid > 1 .and. (use_yslab_linsolve .or. npy_grid > 2)) then
+    if (solveNS .and. (use_yslab_linsolve .or. npy_grid > 2)) then
       call yslab_line_range(ipy, (nxN - nx0 + 1)*(2*nz + 1), yslab_first_line, yslab_line_count)
       call prepare_yslab_scratch(ny + 3, yslab_line_count)
     end if
@@ -512,7 +512,7 @@ CONTAINS
     row_start = ny0
     row_end = nyN
 #ifdef HAVE_CUDA
-    if ((use_yslab_linsolve .or. npy_grid > 2) .and. npy_grid > 1) then
+    if (use_yslab_linsolve .or. npy_grid > 2) then
       call apply_complex_derivative_with_y_slab(src, dst)
       return
     end if
@@ -658,7 +658,7 @@ CONTAINS
     row_start = ny0
     row_end = nyN
 #ifdef HAVE_CUDA
-    if ((use_yslab_linsolve .or. npy_grid > 2) .and. npy_grid > 1) then
+    if (use_yslab_linsolve .or. npy_grid > 2) then
       call solve_compact_component_with_y_slab(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
                                                lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
                                                lambda_coeff, diffusion_coeff)
@@ -680,26 +680,10 @@ CONTAINS
           upper_boundary_value = bcn(iz, ix, 2)
           upper_ghost_value = bcn(iz, ix, 4)
 
-          ys_lower_ghost_row(-2, iline) = lower_ghost_bc(-2)
-          ys_lower_ghost_row(-1, iline) = lower_ghost_bc(-1)
-          ys_lower_ghost_row(0, iline) = lower_ghost_bc(0)
-          ys_lower_ghost_row(1, iline) = lower_ghost_bc(1)
-          ys_lower_ghost_row(2, iline) = lower_ghost_bc(2)
-          ys_lower_boundary_row(-2, iline) = lower_bc(-2)
-          ys_lower_boundary_row(-1, iline) = lower_bc(-1)
-          ys_lower_boundary_row(0, iline) = lower_bc(0)
-          ys_lower_boundary_row(1, iline) = lower_bc(1)
-          ys_lower_boundary_row(2, iline) = lower_bc(2)
-          ys_upper_boundary_row(-2, iline) = upper_bc(-2)
-          ys_upper_boundary_row(-1, iline) = upper_bc(-1)
-          ys_upper_boundary_row(0, iline) = upper_bc(0)
-          ys_upper_boundary_row(1, iline) = upper_bc(1)
-          ys_upper_boundary_row(2, iline) = upper_bc(2)
-          ys_upper_ghost_row(-2, iline) = upper_ghost_bc(-2)
-          ys_upper_ghost_row(-1, iline) = upper_ghost_bc(-1)
-          ys_upper_ghost_row(0, iline) = upper_ghost_bc(0)
-          ys_upper_ghost_row(1, iline) = upper_ghost_bc(1)
-          ys_upper_ghost_row(2, iline) = upper_ghost_bc(2)
+          ys_lower_ghost_row(:, iline) = lower_ghost_bc
+          ys_lower_boundary_row(:, iline) = lower_bc
+          ys_upper_boundary_row(:, iline) = upper_bc
+          ys_upper_ghost_row(:, iline) = upper_ghost_bc
           ys_lower_ghost_rhs(iline) = lower_ghost_value
           ys_lower_boundary_rhs(iline) = lower_boundary_value
           ys_upper_boundary_rhs(iline) = upper_boundary_value
@@ -824,26 +808,10 @@ CONTAINS
           lower_boundary_value = bc0(iz, ix, 5)
           upper_boundary_value = bcn(iz, ix, 5)
 
-          ys_lower_ghost_row(-2, iline) = lower_ghost_bc(-2)
-          ys_lower_ghost_row(-1, iline) = lower_ghost_bc(-1)
-          ys_lower_ghost_row(0, iline) = lower_ghost_bc(0)
-          ys_lower_ghost_row(1, iline) = lower_ghost_bc(1)
-          ys_lower_ghost_row(2, iline) = lower_ghost_bc(2)
-          ys_lower_boundary_row(-2, iline) = lower_bc(-2)
-          ys_lower_boundary_row(-1, iline) = lower_bc(-1)
-          ys_lower_boundary_row(0, iline) = lower_bc(0)
-          ys_lower_boundary_row(1, iline) = lower_bc(1)
-          ys_lower_boundary_row(2, iline) = lower_bc(2)
-          ys_upper_boundary_row(-2, iline) = upper_bc(-2)
-          ys_upper_boundary_row(-1, iline) = upper_bc(-1)
-          ys_upper_boundary_row(0, iline) = upper_bc(0)
-          ys_upper_boundary_row(1, iline) = upper_bc(1)
-          ys_upper_boundary_row(2, iline) = upper_bc(2)
-          ys_upper_ghost_row(-2, iline) = upper_ghost_bc(-2)
-          ys_upper_ghost_row(-1, iline) = upper_ghost_bc(-1)
-          ys_upper_ghost_row(0, iline) = upper_ghost_bc(0)
-          ys_upper_ghost_row(1, iline) = upper_ghost_bc(1)
-          ys_upper_ghost_row(2, iline) = upper_ghost_bc(2)
+          ys_lower_ghost_row(:, iline) = lower_ghost_bc
+          ys_lower_boundary_row(:, iline) = lower_bc
+          ys_upper_boundary_row(:, iline) = upper_bc
+          ys_upper_ghost_row(:, iline) = upper_ghost_bc
           ys_lower_ghost_rhs(iline) = (0.0d0, 0.0d0)
           ys_lower_boundary_rhs(iline) = lower_boundary_value
           ys_upper_boundary_rhs(iline) = upper_boundary_value
@@ -1626,19 +1594,6 @@ CONTAINS
 
   end subroutine apply_complex_derivative_with_y_slab
 #endif
-
-  COMPLEX(C_DOUBLE_COMPLEX) FUNCTION select_bc_rhs(iz, ix, rhs_index)
-    IMPLICIT NONE
-    integer(C_INT), intent(in) :: iz, ix, rhs_index
-
-    if (rhs_index == 0_C_INT) then
-      select_bc_rhs = (0.0d0, 0.0d0)
-    else if (rhs_index > 0_C_INT) then
-      select_bc_rhs = bc0(iz, ix, rhs_index)
-    else
-      select_bc_rhs = bcn(iz, ix, -rhs_index)
-    end if
-  END FUNCTION select_bc_rhs
 
   SUBROUTINE scatter_full_y_line(full_line, local_line)
     IMPLICIT NONE
