@@ -669,9 +669,9 @@ subroutine compact_component_operator_coeffs(component_index, lambda_coeff, diff
     call yslab_transpose_to_full(V(:, :, :, component_index), yslab_workspace, ny, nz, nlines, nlines_z, .false.)
     call roctxPop("yslab compact transpose_to_full")
 
- call ys_solve_full_y_lines_packed(yslab_workspace, der, k2, bc0, bcn, ny, nz, nx0, ni, component_index, lower_bc, lower_ghost_bc, &
+    call ys_solve_full_y_lines_packed(yslab_workspace, der, k2, bc0, bcn, ny, nz, nx0, ni, component_index, lower_bc, lower_ghost_bc, &
                                       upper_bc, upper_ghost_bc, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, &
-                                upper_ghost_rhs_index, lambda_coeff, diffusion_coeff, first_line, line_count, "compact full-y gpsv")
+                                      upper_ghost_rhs_index, lambda_coeff, diffusion_coeff, first_line, line_count, "compact full-y gpsv")
 
     call roctxPush("yslab compact transpose_from_full")
     call yslab_transpose_from_full(yslab_workspace, V(:, :, :, component_index), ny, nz, nlines, nlines_z)

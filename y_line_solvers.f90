@@ -288,6 +288,52 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     upper_eqn(2) = 0.0d0
   end subroutine ys_compact_physical_boundary_equations
 
+  !$omp declare target(ys_eliminate_physical_boundary_row)
+  subroutine ys_eliminate_physical_boundary_row(local_idx, active_n, has_lower_boundary, has_upper_boundary, rhs_value, row_coeffs, &
+                                                lower_ghost_value, lower_rhs0, lower_ghost_row, lower_eq0, upper_ghost_value, &
+                                                upper_rhsn, upper_ghost_row, upper_eqn)
+    implicit none
+    integer(C_INT), intent(in) :: local_idx, active_n
+    logical, intent(in) :: has_lower_boundary, has_upper_boundary
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs_value
+    real(C_DOUBLE), intent(inout) :: row_coeffs(-2:2)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: lower_ghost_value, lower_rhs0, upper_ghost_value, upper_rhsn
+    real(C_DOUBLE), intent(in) :: lower_ghost_row(-2:2), lower_eq0(-2:2), upper_ghost_row(-2:2), upper_eqn(-2:2)
+    real(C_DOUBLE) :: fac
+
+    if (has_lower_boundary .and. local_idx == 0) then
+      fac = row_coeffs(-2)/lower_ghost_row(-2)
+      rhs_value = rhs_value - lower_ghost_value*fac
+      row_coeffs = row_coeffs - lower_ghost_row*fac
+      row_coeffs(-2) = 0.0d0
+      fac = row_coeffs(-1)/lower_eq0(-1)
+      rhs_value = rhs_value - lower_rhs0*fac
+      row_coeffs = row_coeffs - lower_eq0*fac
+      row_coeffs(-1) = 0.0d0
+    else if (has_lower_boundary .and. local_idx == 1) then
+      fac = row_coeffs(-2)/lower_eq0(-1)
+      rhs_value = rhs_value - lower_rhs0*fac
+      row_coeffs(-2:1) = row_coeffs(-2:1) - lower_eq0(-1:2)*fac
+      row_coeffs(-2) = 0.0d0
+    end if
+
+    if (has_upper_boundary .and. local_idx == active_n - 2) then
+      fac = row_coeffs(2)/upper_eqn(1)
+      rhs_value = rhs_value - upper_rhsn*fac
+      row_coeffs(-1:2) = row_coeffs(-1:2) - upper_eqn(-2:1)*fac
+      row_coeffs(2) = 0.0d0
+    else if (has_upper_boundary .and. local_idx == active_n - 1) then
+      fac = row_coeffs(2)/upper_ghost_row(2)
+      rhs_value = rhs_value - upper_ghost_value*fac
+      row_coeffs = row_coeffs - upper_ghost_row*fac
+      row_coeffs(2) = 0.0d0
+      fac = row_coeffs(1)/upper_eqn(1)
+      rhs_value = rhs_value - upper_rhsn*fac
+      row_coeffs = row_coeffs - upper_eqn*fac
+      row_coeffs(1) = 0.0d0
+    end if
+  end subroutine ys_eliminate_physical_boundary_row
+
 subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_values, bcn_values, ny_value, nz_value, nx0_value, &
                                           ni_value, component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
                                           lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
@@ -306,8 +352,8 @@ subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_
     character(len=*), intent(in) :: solve_label
     complex(C_DOUBLE_COMPLEX) :: rhs_value, lower_ghost_value, lower_boundary_value, upper_boundary_value, upper_ghost_value
     complex(C_DOUBLE_COMPLEX) :: lower_rhs0, upper_rhsn
-    real(C_DOUBLE) :: lower_eq0(-2:2), upper_eqn(-2:2)
-    real(C_DOUBLE) :: kk, fac, c_m2, c_m1, c_0, c_p1, c_p2
+    real(C_DOUBLE) :: lower_eq0(-2:2), upper_eqn(-2:2), row_coeffs(-2:2)
+    real(C_DOUBLE) :: kk, c_m2, c_m1, c_0, c_p1, c_p2
     integer(C_INT) :: nlines_z, ilocal, iline, ix, iz, iy, p
 
     if (line_count <= 0) return
@@ -320,8 +366,8 @@ subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_
     !$omp shared(slab_values, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, der_values, k2_values, ni_value, &
     !$omp& bc0_values, bcn_values, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, lambda_coeff, diffusion_coeff, component_index, &
     !$omp& lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, first_line, line_count, nlines_z, nz_value, nx0_value, ny_value) &
-    !$omp private(ilocal, iy, iline, ix, iz, p, kk, fac, c_m2, c_m1, c_0, c_p1, c_p2, rhs_value, lower_ghost_value, &
-    !$omp& lower_boundary_value, upper_boundary_value, upper_ghost_value, lower_rhs0, upper_rhsn, lower_eq0, upper_eqn)
+    !$omp private(ilocal, iy, iline, ix, iz, p, kk, c_m2, c_m1, c_0, c_p1, c_p2, rhs_value, lower_ghost_value, &
+    !$omp& lower_boundary_value, upper_boundary_value, upper_ghost_value, lower_rhs0, upper_rhsn, lower_eq0, upper_eqn, row_coeffs)
     do ilocal = 1, line_count
       do iy = 1, ny_value - 1
         iline = first_line + ilocal - 1
@@ -369,49 +415,15 @@ subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_
           c_p2 = lambda_coeff*der_values(iy, 0, 2) - diffusion_coeff*ni_value*(der_values(iy, 2, 2) - kk*der_values(iy, 0, 2))
         end if
 
-        if (iy == 1) then
-          fac = c_m2/lower_ghost_bc(-2)
-          rhs_value = rhs_value - lower_ghost_value*fac
-          c_m1 = c_m1 - lower_ghost_bc(-1)*fac
-          c_0 = c_0 - lower_ghost_bc(0)*fac
-          c_p1 = c_p1 - lower_ghost_bc(1)*fac
-          c_p2 = c_p2 - lower_ghost_bc(2)*fac
-          c_m2 = 0.0d0
-          fac = c_m1/lower_eq0(-1)
-          rhs_value = rhs_value - lower_rhs0*fac
-          c_0 = c_0 - lower_eq0(0)*fac
-          c_p1 = c_p1 - lower_eq0(1)*fac
-          c_p2 = c_p2 - lower_eq0(2)*fac
-          c_m1 = 0.0d0
-        else if (iy == 2) then
-          fac = c_m2/lower_eq0(-1)
-          rhs_value = rhs_value - lower_rhs0*fac
-          c_m1 = c_m1 - lower_eq0(0)*fac
-          c_0 = c_0 - lower_eq0(1)*fac
-          c_p1 = c_p1 - lower_eq0(2)*fac
-          c_m2 = 0.0d0
-        else if (iy == ny_value - 2) then
-          fac = c_p2/upper_eqn(1)
-          rhs_value = rhs_value - upper_rhsn*fac
-          c_m1 = c_m1 - upper_eqn(-2)*fac
-          c_0 = c_0 - upper_eqn(-1)*fac
-          c_p1 = c_p1 - upper_eqn(0)*fac
-          c_p2 = 0.0d0
-        else if (iy == ny_value - 1) then
-          fac = c_p2/upper_ghost_bc(2)
-          rhs_value = rhs_value - upper_ghost_value*fac
-          c_m2 = c_m2 - upper_ghost_bc(-2)*fac
-          c_m1 = c_m1 - upper_ghost_bc(-1)*fac
-          c_0 = c_0 - upper_ghost_bc(0)*fac
-          c_p1 = c_p1 - upper_ghost_bc(1)*fac
-          c_p2 = 0.0d0
-          fac = c_p1/upper_eqn(1)
-          rhs_value = rhs_value - upper_rhsn*fac
-          c_m2 = c_m2 - upper_eqn(-2)*fac
-          c_m1 = c_m1 - upper_eqn(-1)*fac
-          c_0 = c_0 - upper_eqn(0)*fac
-          c_p1 = 0.0d0
-        end if
+        row_coeffs = (/c_m2, c_m1, c_0, c_p1, c_p2/)
+        call ys_eliminate_physical_boundary_row(iy - 1, ny_value - 1, .true., .true., rhs_value, row_coeffs, lower_ghost_value, &
+                                                lower_rhs0, lower_ghost_bc, lower_eq0, upper_ghost_value, upper_rhsn, &
+                                                upper_ghost_bc, upper_eqn)
+        c_m2 = row_coeffs(-2)
+        c_m1 = row_coeffs(-1)
+        c_0 = row_coeffs(0)
+        c_p1 = row_coeffs(1)
+        c_p2 = row_coeffs(2)
 
         p = (iy - 1)*line_count + ilocal
         ys_gpsv_x(p) = rhs_value
@@ -724,11 +736,12 @@ subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_
     logical, intent(in) :: has_lower_boundary, has_upper_boundary, has_padded_dst
     complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
     complex(C_DOUBLE_COMPLEX) :: lower_rhs0, upper_rhsn, rhs_value
+    complex(C_DOUBLE_COMPLEX) :: elim_lower_ghost_value, elim_lower_rhs0, elim_upper_ghost_value, elim_upper_rhsn
     complex(C_DOUBLE_COMPLEX) :: c0, c1, y00, y01, y10, y11, g0, g1
     complex(C_DOUBLE_COMPLEX) :: s00, s01, s10, s11, t00, t01, t10, t11, det
     complex(C_DOUBLE_COMPLEX) :: vleft1, vleft2, vright1, vright2
     complex(C_DOUBLE_COMPLEX) :: s4(4, 4), rhs4(4, 5), pivot4, factor4
-    real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-2:2), upper_eqn(-2:2), fac, coeff
+    real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-2:2), upper_eqn(-2:2), coeff
     integer(C_INT) :: nI, nresp, batch_count, exposed_n, interior_base
     integer(C_INT) :: sys, iline, ref_iline, resp, resp_index
     integer(C_INT) :: local_i, local_idx, row, col, coupled_row, p, j, offset
@@ -769,7 +782,8 @@ subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_
     !$omp& ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, row_start, active_n, nI, nlines, nlines_z, nresp, batch_count, nz, nx0, &
     !$omp& has_lower_boundary, has_upper_boundary, response_mode, ipy, has_left_interface, has_right_interface, exposed_n, interior_base) &
     !$omp private(sys, iline, ref_iline, resp, local_i, local_idx, row, col, coupled_row, p, j, offset, is_actual, ix_local, abs_iz, &
-    !$omp& rhs_value, row_coeffs, lower_rhs0, upper_rhsn, lower_eq0, upper_eqn, fac, coeff, exposed_slot, response_slot)
+    !$omp& rhs_value, row_coeffs, lower_rhs0, upper_rhsn, lower_eq0, upper_eqn, coeff, exposed_slot, response_slot, &
+    !$omp& elim_lower_ghost_value, elim_lower_rhs0, elim_upper_ghost_value, elim_upper_rhsn)
     do local_i = 0, nI - 1
       do sys = 1, batch_count
         is_actual = (sys <= nlines)
@@ -796,57 +810,37 @@ subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_
         if (is_actual) rhs_value = ys_local_rhs(row, iline)
         row_coeffs = ys_local_operator(row, -2:2, ref_iline)
 
-        if (has_lower_boundary .and. local_idx == 0) then
+        lower_rhs0 = (0.0d0, 0.0d0)
+        lower_eq0 = 0.0d0
+        if (has_lower_boundary) then
           lower_rhs0 = ys_lower_boundary_rhs(ref_iline) - &
                        ys_lower_ghost_rhs(ref_iline)*ys_lower_boundary_row(-2, ref_iline)/ys_lower_ghost_row(-2, ref_iline)
           lower_eq0 = ys_lower_boundary_row(:, ref_iline) - &
                       ys_lower_ghost_row(:, ref_iline)*ys_lower_boundary_row(-2, ref_iline)/ys_lower_ghost_row(-2, ref_iline)
           lower_eq0(-2) = 0.0d0
-          fac = row_coeffs(-2)/ys_lower_ghost_row(-2, ref_iline)
-          if (is_actual) rhs_value = rhs_value - ys_lower_ghost_rhs(ref_iline)*fac
-          row_coeffs = row_coeffs - ys_lower_ghost_row(:, ref_iline)*fac
-          row_coeffs(-2) = 0.0d0
-          fac = row_coeffs(-1)/lower_eq0(-1)
-          if (is_actual) rhs_value = rhs_value - lower_rhs0*fac
-          row_coeffs = row_coeffs - lower_eq0*fac
-          row_coeffs(-1) = 0.0d0
-        else if (has_lower_boundary .and. local_idx == 1) then
-          lower_rhs0 = ys_lower_boundary_rhs(ref_iline) - &
-                       ys_lower_ghost_rhs(ref_iline)*ys_lower_boundary_row(-2, ref_iline)/ys_lower_ghost_row(-2, ref_iline)
-          lower_eq0 = ys_lower_boundary_row(:, ref_iline) - &
-                      ys_lower_ghost_row(:, ref_iline)*ys_lower_boundary_row(-2, ref_iline)/ys_lower_ghost_row(-2, ref_iline)
-          lower_eq0(-2) = 0.0d0
-          fac = row_coeffs(-2)/lower_eq0(-1)
-          if (is_actual) rhs_value = rhs_value - lower_rhs0*fac
-          row_coeffs(-2:1) = row_coeffs(-2:1) - lower_eq0(-1:2)*fac
-          row_coeffs(-2) = 0.0d0
         end if
-
-        if (has_upper_boundary .and. local_idx == active_n - 2) then
+        upper_rhsn = (0.0d0, 0.0d0)
+        upper_eqn = 0.0d0
+        if (has_upper_boundary) then
           upper_rhsn = ys_upper_boundary_rhs(ref_iline) - &
                        ys_upper_ghost_rhs(ref_iline)*ys_upper_boundary_row(2, ref_iline)/ys_upper_ghost_row(2, ref_iline)
           upper_eqn = ys_upper_boundary_row(:, ref_iline) - &
                       ys_upper_ghost_row(:, ref_iline)*ys_upper_boundary_row(2, ref_iline)/ys_upper_ghost_row(2, ref_iline)
           upper_eqn(2) = 0.0d0
-          fac = row_coeffs(2)/upper_eqn(1)
-          if (is_actual) rhs_value = rhs_value - upper_rhsn*fac
-          row_coeffs(-1:2) = row_coeffs(-1:2) - upper_eqn(-2:1)*fac
-          row_coeffs(2) = 0.0d0
-        else if (has_upper_boundary .and. local_idx == active_n - 1) then
-          upper_rhsn = ys_upper_boundary_rhs(ref_iline) - &
-                       ys_upper_ghost_rhs(ref_iline)*ys_upper_boundary_row(2, ref_iline)/ys_upper_ghost_row(2, ref_iline)
-          upper_eqn = ys_upper_boundary_row(:, ref_iline) - &
-                      ys_upper_ghost_row(:, ref_iline)*ys_upper_boundary_row(2, ref_iline)/ys_upper_ghost_row(2, ref_iline)
-          upper_eqn(2) = 0.0d0
-          fac = row_coeffs(2)/ys_upper_ghost_row(2, ref_iline)
-          if (is_actual) rhs_value = rhs_value - ys_upper_ghost_rhs(ref_iline)*fac
-          row_coeffs = row_coeffs - ys_upper_ghost_row(:, ref_iline)*fac
-          row_coeffs(2) = 0.0d0
-          fac = row_coeffs(1)/upper_eqn(1)
-          if (is_actual) rhs_value = rhs_value - upper_rhsn*fac
-          row_coeffs = row_coeffs - upper_eqn*fac
-          row_coeffs(1) = 0.0d0
         end if
+        elim_lower_ghost_value = (0.0d0, 0.0d0)
+        elim_lower_rhs0 = (0.0d0, 0.0d0)
+        elim_upper_ghost_value = (0.0d0, 0.0d0)
+        elim_upper_rhsn = (0.0d0, 0.0d0)
+        if (is_actual) then
+          elim_lower_ghost_value = ys_lower_ghost_rhs(ref_iline)
+          elim_lower_rhs0 = lower_rhs0
+          elim_upper_ghost_value = ys_upper_ghost_rhs(ref_iline)
+          elim_upper_rhsn = upper_rhsn
+        end if
+        call ys_eliminate_physical_boundary_row(local_idx, active_n, has_lower_boundary, has_upper_boundary, rhs_value, row_coeffs, &
+                                                elim_lower_ghost_value, elim_lower_rhs0, ys_lower_ghost_row(:, ref_iline), lower_eq0, &
+                                                elim_upper_ghost_value, elim_upper_rhsn, ys_upper_ghost_row(:, ref_iline), upper_eqn)
 
         p = local_i*batch_count + sys
         ys_gpsv_ds(p) = (0.0d0, 0.0d0)
@@ -1190,7 +1184,7 @@ subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_
     integer(C_INT), intent(in) :: ny, nz
     complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
     complex(C_DOUBLE_COMPLEX) :: lower_rhs0, upper_rhsn, rhs_value
-    real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-2:2), upper_eqn(-2:2), fac
+    real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-2:2), upper_eqn(-2:2)
     integer(C_INT) :: ix, iz, iline, p, nlines, nlines_z, row_start, row_end, active_n, row, local_idx
     integer(C_INT) :: dst_row_base
     logical :: has_padded_dst
@@ -1209,12 +1203,14 @@ subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_
     !$omp shared(ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
     !$omp& ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, &
     !$omp& ys_boundary_lower_eq, ys_boundary_upper_eq, row_start, row_end, active_n, nlines) &
-    !$omp private(iline, lower_rhs0, upper_rhsn, rhs_value, row_coeffs, lower_eq0, upper_eqn, fac)
+    !$omp private(iline, lower_rhs0, upper_rhsn, rhs_value, row_coeffs, lower_eq0, upper_eqn, row, local_idx)
     do iline = 1, nlines
-lower_rhs0 = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
+      lower_rhs0 = ys_lower_boundary_rhs(iline) - &
+                   ys_lower_ghost_rhs(iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
       lower_eq0 = ys_lower_boundary_row(:, iline) - ys_lower_ghost_row(:, iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
       lower_eq0(-2) = 0.0d0
-  upper_rhsn = ys_upper_boundary_rhs(iline) - ys_upper_ghost_rhs(iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
+      upper_rhsn = ys_upper_boundary_rhs(iline) - &
+                   ys_upper_ghost_rhs(iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
       upper_eqn = ys_upper_boundary_row(:, iline) - ys_upper_ghost_row(:, iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
       upper_eqn(2) = 0.0d0
       ys_boundary_lower_rhs0(iline) = lower_rhs0
@@ -1222,39 +1218,17 @@ lower_rhs0 = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_lower_b
       ys_boundary_lower_eq(:, iline) = lower_eq0(-1:2)
       ys_boundary_upper_eq(:, iline) = upper_eqn(-2:1)
 
-      rhs_value = ys_local_rhs(row_start, iline) - ys_lower_ghost_rhs(iline)*ys_local_operator(row_start, -2, iline)/ys_lower_ghost_row(-2, iline)
-      row_coeffs = ys_local_operator(row_start, -2:2, iline) - ys_lower_ghost_row(:, iline)*ys_local_operator(row_start, -2, iline)/ys_lower_ghost_row(-2, iline)
-      row_coeffs(-2) = 0.0d0
-      fac = row_coeffs(-1)/lower_eq0(-1)
-      rhs_value = rhs_value - lower_rhs0*fac
-      row_coeffs = row_coeffs - lower_eq0*fac
-      row_coeffs(-1) = 0.0d0
-      ys_local_rhs(row_start, iline) = rhs_value
-      ys_local_operator(row_start, -2:2, iline) = row_coeffs
-
-      rhs_value = ys_local_rhs(row_start + 1, iline) - lower_rhs0*ys_local_operator(row_start + 1, -2, iline)/lower_eq0(-1)
-      row_coeffs = ys_local_operator(row_start + 1, -2:2, iline)
-      row_coeffs(-2:1) = row_coeffs(-2:1) - lower_eq0(-1:2)*ys_local_operator(row_start + 1, -2, iline)/lower_eq0(-1)
-      row_coeffs(-2) = 0.0d0
-      ys_local_rhs(row_start + 1, iline) = rhs_value
-      ys_local_operator(row_start + 1, -2:2, iline) = row_coeffs
-
-      rhs_value = ys_local_rhs(row_end - 1, iline) - upper_rhsn*ys_local_operator(row_end - 1, 2, iline)/upper_eqn(1)
-      row_coeffs = ys_local_operator(row_end - 1, -2:2, iline)
-      row_coeffs(-1:2) = row_coeffs(-1:2) - upper_eqn(-2:1)*ys_local_operator(row_end - 1, 2, iline)/upper_eqn(1)
-      row_coeffs(2) = 0.0d0
-      ys_local_rhs(row_end - 1, iline) = rhs_value
-      ys_local_operator(row_end - 1, -2:2, iline) = row_coeffs
-
-      rhs_value = ys_local_rhs(row_end, iline) - ys_upper_ghost_rhs(iline)*ys_local_operator(row_end, 2, iline)/ys_upper_ghost_row(2, iline)
-      row_coeffs = ys_local_operator(row_end, -2:2, iline) - ys_upper_ghost_row(:, iline)*ys_local_operator(row_end, 2, iline)/ys_upper_ghost_row(2, iline)
-      row_coeffs(2) = 0.0d0
-      fac = row_coeffs(1)/upper_eqn(1)
-      rhs_value = rhs_value - upper_rhsn*fac
-      row_coeffs = row_coeffs - upper_eqn*fac
-      row_coeffs(1) = 0.0d0
-      ys_local_rhs(row_end, iline) = rhs_value
-      ys_local_operator(row_end, -2:2, iline) = row_coeffs
+      do local_idx = 0, active_n - 1
+        if (local_idx > 1 .and. local_idx < active_n - 2) cycle
+        row = row_start + local_idx
+        rhs_value = ys_local_rhs(row, iline)
+        row_coeffs = ys_local_operator(row, -2:2, iline)
+        call ys_eliminate_physical_boundary_row(local_idx, active_n, .true., .true., rhs_value, row_coeffs, ys_lower_ghost_rhs(iline), &
+                                                lower_rhs0, ys_lower_ghost_row(:, iline), lower_eq0, ys_upper_ghost_rhs(iline), &
+                                                upper_rhsn, ys_upper_ghost_row(:, iline), upper_eqn)
+        ys_local_rhs(row, iline) = rhs_value
+        ys_local_operator(row, -2:2, iline) = row_coeffs
+      end do
     end do
     !$omp end target teams distribute parallel do
     call roctxPop("ys_single_rank_eliminate_boundaries")
