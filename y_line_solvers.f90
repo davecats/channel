@@ -623,40 +623,8 @@ subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_
     implicit none
     integer(C_INT), intent(in) :: ny, nz
     complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
-    integer(C_INT) :: nlines, nlines_z, row_start, row_end, active_n
-    integer(C_INT) :: dst_row_base
-    logical :: has_lower_boundary, has_upper_boundary, has_padded_dst
 
-    if (npy_grid == 1) then
-      call ys_solve_ghost_field_single_rank(dst, ny, nz)
-      return
-    end if
-
-    row_start = ny0
-    row_end = nyN
-    active_n = row_end - row_start + 1
-    has_lower_boundary = (row_start == 1)
-    has_upper_boundary = (row_end == ny - 1)
-    has_padded_dst = (size(dst, 1) == active_n + 4)
-    if (.not. has_padded_dst .and. size(dst, 1) /= active_n) then
-      error stop "ys_solve_ghost_field_reduced expected either local-only or ghost-padded dst"
-    end if
-    dst_row_base = 1
-    if (has_padded_dst) dst_row_base = 3
-    if (.not. allocated(ys_local_rhs)) error stop "ys_prepare_ghost_field_workspace must be called before ys_solve_ghost_field"
-    if (ys_workspace_ny /= ny .or. ys_workspace_nz /= nz .or. ys_workspace_nx /= size(dst, 3) .or. &
-        ys_workspace_active_n /= active_n) then
-      error stop "ys_solve_ghost_field workspace does not match requested local solve dimensions"
-    end if
-
-    nlines_z = 2*nz + 1
-    nlines = ys_workspace_nlines
-
-    call roctxPush("ys_endpoint_schur")
-    call ys_solve_endpoint_schur(dst, ny, nz, has_lower_boundary, has_upper_boundary, has_padded_dst, &
-                                 row_start, row_end, active_n, nlines, nlines_z, dst_row_base, &
-                                 YS_ENDPOINT_RESPONSE_FULL)
-    call roctxPop("ys_endpoint_schur")
+    call ys_solve_assembled_ghost_field(dst, ny, nz, YS_ENDPOINT_RESPONSE_FULL)
   end subroutine ys_solve_ghost_field_reduced
 
   subroutine ys_endpoint_context(dst, ny, nz, row_start, row_end, active_n, nlines, nlines_z, dst_row_base, &
@@ -691,42 +659,120 @@ subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_
     upper_inner3 = upper_inner0 + 3
   end subroutine ys_padded_inner_indices
 
-  subroutine ys_solve_ghost_field_reduced_const_operator(dst, ny, nz)
+  subroutine ys_solve_assembled_ghost_field(dst, ny, nz, response_mode)
     implicit none
-    integer(C_INT), intent(in) :: ny, nz
+    integer(C_INT), intent(in) :: ny, nz, response_mode
     complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
     integer(C_INT) :: row_start, row_end, active_n, nlines, nlines_z, dst_row_base
     logical :: has_lower_boundary, has_upper_boundary, has_padded_dst
 
+    call ys_endpoint_context(dst, ny, nz, row_start, row_end, active_n, nlines, nlines_z, dst_row_base, &
+                             has_lower_boundary, has_upper_boundary, has_padded_dst)
+    if (.not. has_padded_dst .and. size(dst, 1) /= active_n) then
+      error stop "ys_solve_assembled_ghost_field expected either local-only or ghost-padded dst"
+    end if
+    if (.not. allocated(ys_local_rhs)) error stop "ys_prepare_ghost_field_workspace must be called before assembled ghost solve"
+    if (ys_workspace_ny /= ny .or. ys_workspace_nz /= nz .or. ys_workspace_nx /= size(dst, 3) .or. &
+        ys_workspace_active_n /= active_n) then
+      error stop "ys_solve_assembled_ghost_field workspace does not match requested local solve dimensions"
+    end if
+
+    call ys_eliminate_assembled_boundaries(row_start, active_n, nlines, has_lower_boundary, has_upper_boundary)
+
     if (npy_grid == 1) then
-      call ys_solve_ghost_field_reduced(dst, ny, nz)
+      call ys_pack_assembled_direct(row_start, active_n, nlines)
+      call ys_solve_ghost_field_single_rank_packed(dst, ny, nz)
+      call ys_reconstruct_single_rank_boundaries(dst, ny, nz)
       return
     end if
 
-    call ys_endpoint_context(dst, ny, nz, row_start, row_end, active_n, nlines, nlines_z, dst_row_base, &
-                             has_lower_boundary, has_upper_boundary, has_padded_dst)
+    call roctxPush("ys_endpoint_schur")
     call ys_solve_endpoint_schur(dst, ny, nz, has_lower_boundary, has_upper_boundary, has_padded_dst, &
-                                 row_start, row_end, active_n, nlines, nlines_z, dst_row_base, &
-                                 YS_ENDPOINT_RESPONSE_CONST)
+                                 row_start, row_end, active_n, nlines, nlines_z, dst_row_base, response_mode)
+    call roctxPop("ys_endpoint_schur")
+  end subroutine ys_solve_assembled_ghost_field
+
+  subroutine ys_eliminate_assembled_boundaries(row_start, active_n, nlines, has_lower_boundary, has_upper_boundary)
+    implicit none
+    integer(C_INT), intent(in) :: row_start, active_n, nlines
+    logical, intent(in) :: has_lower_boundary, has_upper_boundary
+    complex(C_DOUBLE_COMPLEX) :: lower_rhs0, upper_rhsn, rhs_value
+    real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-2:2), upper_eqn(-2:2)
+    integer(C_INT) :: iline, row, local_idx
+
+    if (.not. has_lower_boundary .and. .not. has_upper_boundary) return
+
+    call roctxPush("ys_eliminate_assembled_boundaries")
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
+    !$omp& ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, &
+    !$omp& ys_boundary_lower_eq, ys_boundary_upper_eq, row_start, active_n, nlines, has_lower_boundary, has_upper_boundary) &
+    !$omp private(iline, lower_rhs0, upper_rhsn, rhs_value, row_coeffs, lower_eq0, upper_eqn, row, local_idx)
+    do iline = 1, nlines
+      lower_rhs0 = (0.0d0, 0.0d0)
+      lower_eq0 = 0.0d0
+      if (has_lower_boundary) then
+        lower_rhs0 = ys_lower_boundary_rhs(iline) - &
+                     ys_lower_ghost_rhs(iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
+        lower_eq0 = ys_lower_boundary_row(:, iline) - &
+                    ys_lower_ghost_row(:, iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
+        lower_eq0(-2) = 0.0d0
+        ys_boundary_lower_rhs0(iline) = lower_rhs0
+        ys_boundary_lower_eq(:, iline) = lower_eq0(-1:2)
+
+        do local_idx = 0, 1
+          row = row_start + local_idx
+          rhs_value = ys_local_rhs(row, iline)
+          row_coeffs = ys_local_operator(row, -2:2, iline)
+          call ys_eliminate_physical_boundary_row(local_idx, active_n, .true., .false., rhs_value, row_coeffs, ys_lower_ghost_rhs(iline), &
+                                                  lower_rhs0, ys_lower_ghost_row(:, iline), lower_eq0, (0.0d0, 0.0d0), &
+                                                  (0.0d0, 0.0d0), ys_upper_ghost_row(:, iline), upper_eqn)
+          ys_local_rhs(row, iline) = rhs_value
+          ys_local_operator(row, -2:2, iline) = row_coeffs
+        end do
+      end if
+
+      upper_rhsn = (0.0d0, 0.0d0)
+      upper_eqn = 0.0d0
+      if (has_upper_boundary) then
+        upper_rhsn = ys_upper_boundary_rhs(iline) - &
+                     ys_upper_ghost_rhs(iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
+        upper_eqn = ys_upper_boundary_row(:, iline) - &
+                    ys_upper_ghost_row(:, iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
+        upper_eqn(2) = 0.0d0
+        ys_boundary_upper_rhsn(iline) = upper_rhsn
+        ys_boundary_upper_eq(:, iline) = upper_eqn(-2:1)
+
+        do local_idx = active_n - 2, active_n - 1
+          row = row_start + local_idx
+          rhs_value = ys_local_rhs(row, iline)
+          row_coeffs = ys_local_operator(row, -2:2, iline)
+          call ys_eliminate_physical_boundary_row(local_idx, active_n, .false., .true., rhs_value, row_coeffs, (0.0d0, 0.0d0), &
+                                                  (0.0d0, 0.0d0), ys_lower_ghost_row(:, iline), lower_eq0, ys_upper_ghost_rhs(iline), &
+                                                  upper_rhsn, ys_upper_ghost_row(:, iline), upper_eqn)
+          ys_local_rhs(row, iline) = rhs_value
+          ys_local_operator(row, -2:2, iline) = row_coeffs
+        end do
+      end if
+    end do
+    !$omp end target teams distribute parallel do
+    call roctxPop("ys_eliminate_assembled_boundaries")
+  end subroutine ys_eliminate_assembled_boundaries
+
+  subroutine ys_solve_ghost_field_reduced_const_operator(dst, ny, nz)
+    implicit none
+    integer(C_INT), intent(in) :: ny, nz
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
+
+    call ys_solve_assembled_ghost_field(dst, ny, nz, YS_ENDPOINT_RESPONSE_CONST)
   end subroutine ys_solve_ghost_field_reduced_const_operator
 
   subroutine ys_solve_ghost_field_reduced_symmetric_operator(dst, ny, nz)
     implicit none
     integer(C_INT), intent(in) :: ny, nz
     complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
-    integer(C_INT) :: row_start, row_end, active_n, nlines, nlines_z, dst_row_base
-    logical :: has_lower_boundary, has_upper_boundary, has_padded_dst
 
-    if (npy_grid == 1) then
-      call ys_solve_ghost_field_reduced(dst, ny, nz)
-      return
-    end if
-
-    call ys_endpoint_context(dst, ny, nz, row_start, row_end, active_n, nlines, nlines_z, dst_row_base, &
-                             has_lower_boundary, has_upper_boundary, has_padded_dst)
-    call ys_solve_endpoint_schur(dst, ny, nz, has_lower_boundary, has_upper_boundary, has_padded_dst, &
-                                 row_start, row_end, active_n, nlines, nlines_z, dst_row_base, &
-                                 YS_ENDPOINT_RESPONSE_SYMMETRIC)
+    call ys_solve_assembled_ghost_field(dst, ny, nz, YS_ENDPOINT_RESPONSE_SYMMETRIC)
   end subroutine ys_solve_ghost_field_reduced_symmetric_operator
 
   subroutine ys_solve_endpoint_schur(dst, ny, nz, has_lower_boundary, has_upper_boundary, has_padded_dst, &
@@ -736,7 +782,6 @@ subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_
     logical, intent(in) :: has_lower_boundary, has_upper_boundary, has_padded_dst
     complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
     complex(C_DOUBLE_COMPLEX) :: lower_rhs0, upper_rhsn, rhs_value
-    complex(C_DOUBLE_COMPLEX) :: elim_lower_ghost_value, elim_lower_rhs0, elim_upper_ghost_value, elim_upper_rhsn
     complex(C_DOUBLE_COMPLEX) :: c0, c1, y00, y01, y10, y11, g0, g1
     complex(C_DOUBLE_COMPLEX) :: s00, s01, s10, s11, t00, t01, t10, t11, det
     complex(C_DOUBLE_COMPLEX) :: vleft1, vleft2, vright1, vright2
@@ -782,8 +827,7 @@ subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_
     !$omp& ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, row_start, active_n, nI, nlines, nlines_z, nresp, batch_count, nz, nx0, &
     !$omp& has_lower_boundary, has_upper_boundary, response_mode, ipy, has_left_interface, has_right_interface, exposed_n, interior_base) &
     !$omp private(sys, iline, ref_iline, resp, local_i, local_idx, row, col, coupled_row, p, j, offset, is_actual, ix_local, abs_iz, &
-    !$omp& rhs_value, row_coeffs, lower_rhs0, upper_rhsn, lower_eq0, upper_eqn, coeff, exposed_slot, response_slot, &
-    !$omp& elim_lower_ghost_value, elim_lower_rhs0, elim_upper_ghost_value, elim_upper_rhsn)
+    !$omp& rhs_value, row_coeffs, coeff, exposed_slot, response_slot)
     do local_i = 0, nI - 1
       do sys = 1, batch_count
         is_actual = (sys <= nlines)
@@ -809,38 +853,6 @@ subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_
         rhs_value = (0.0d0, 0.0d0)
         if (is_actual) rhs_value = ys_local_rhs(row, iline)
         row_coeffs = ys_local_operator(row, -2:2, ref_iline)
-
-        lower_rhs0 = (0.0d0, 0.0d0)
-        lower_eq0 = 0.0d0
-        if (has_lower_boundary) then
-          lower_rhs0 = ys_lower_boundary_rhs(ref_iline) - &
-                       ys_lower_ghost_rhs(ref_iline)*ys_lower_boundary_row(-2, ref_iline)/ys_lower_ghost_row(-2, ref_iline)
-          lower_eq0 = ys_lower_boundary_row(:, ref_iline) - &
-                      ys_lower_ghost_row(:, ref_iline)*ys_lower_boundary_row(-2, ref_iline)/ys_lower_ghost_row(-2, ref_iline)
-          lower_eq0(-2) = 0.0d0
-        end if
-        upper_rhsn = (0.0d0, 0.0d0)
-        upper_eqn = 0.0d0
-        if (has_upper_boundary) then
-          upper_rhsn = ys_upper_boundary_rhs(ref_iline) - &
-                       ys_upper_ghost_rhs(ref_iline)*ys_upper_boundary_row(2, ref_iline)/ys_upper_ghost_row(2, ref_iline)
-          upper_eqn = ys_upper_boundary_row(:, ref_iline) - &
-                      ys_upper_ghost_row(:, ref_iline)*ys_upper_boundary_row(2, ref_iline)/ys_upper_ghost_row(2, ref_iline)
-          upper_eqn(2) = 0.0d0
-        end if
-        elim_lower_ghost_value = (0.0d0, 0.0d0)
-        elim_lower_rhs0 = (0.0d0, 0.0d0)
-        elim_upper_ghost_value = (0.0d0, 0.0d0)
-        elim_upper_rhsn = (0.0d0, 0.0d0)
-        if (is_actual) then
-          elim_lower_ghost_value = ys_lower_ghost_rhs(ref_iline)
-          elim_lower_rhs0 = lower_rhs0
-          elim_upper_ghost_value = ys_upper_ghost_rhs(ref_iline)
-          elim_upper_rhsn = upper_rhsn
-        end if
-        call ys_eliminate_physical_boundary_row(local_idx, active_n, has_lower_boundary, has_upper_boundary, rhs_value, row_coeffs, &
-                                                elim_lower_ghost_value, elim_lower_rhs0, ys_lower_ghost_row(:, ref_iline), lower_eq0, &
-                                                elim_upper_ghost_value, elim_upper_rhsn, ys_upper_ghost_row(:, ref_iline), upper_eqn)
 
         p = local_i*batch_count + sys
         ys_gpsv_ds(p) = (0.0d0, 0.0d0)
@@ -1179,61 +1191,12 @@ subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_
     call roctxPop("ys_endpoint_reconstruct")
   end subroutine ys_solve_endpoint_schur
 
-  subroutine ys_solve_ghost_field_single_rank(dst, ny, nz)
+  subroutine ys_pack_assembled_direct(row_start, active_n, nlines)
     implicit none
-    integer(C_INT), intent(in) :: ny, nz
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
-    complex(C_DOUBLE_COMPLEX) :: lower_rhs0, upper_rhsn, rhs_value
-    real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-2:2), upper_eqn(-2:2)
-    integer(C_INT) :: ix, iz, iline, p, nlines, nlines_z, row_start, row_end, active_n, row, local_idx
-    integer(C_INT) :: dst_row_base
-    logical :: has_padded_dst
+    integer(C_INT), intent(in) :: row_start, active_n, nlines
+    integer(C_INT) :: iline, p, row, local_idx
 
-    row_start = ny0
-    row_end = nyN
-    active_n = row_end - row_start + 1
-    has_padded_dst = (size(dst, 1) == active_n + 4)
-    dst_row_base = 1
-    if (has_padded_dst) dst_row_base = 3
-    nlines_z = 2*nz + 1
-    nlines = ys_workspace_nlines
-
-    call roctxPush("ys_single_rank_eliminate_boundaries")
-    !$omp target teams distribute parallel do default(none) &
-    !$omp shared(ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
-    !$omp& ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, &
-    !$omp& ys_boundary_lower_eq, ys_boundary_upper_eq, row_start, row_end, active_n, nlines) &
-    !$omp private(iline, lower_rhs0, upper_rhsn, rhs_value, row_coeffs, lower_eq0, upper_eqn, row, local_idx)
-    do iline = 1, nlines
-      lower_rhs0 = ys_lower_boundary_rhs(iline) - &
-                   ys_lower_ghost_rhs(iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
-      lower_eq0 = ys_lower_boundary_row(:, iline) - ys_lower_ghost_row(:, iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
-      lower_eq0(-2) = 0.0d0
-      upper_rhsn = ys_upper_boundary_rhs(iline) - &
-                   ys_upper_ghost_rhs(iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
-      upper_eqn = ys_upper_boundary_row(:, iline) - ys_upper_ghost_row(:, iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
-      upper_eqn(2) = 0.0d0
-      ys_boundary_lower_rhs0(iline) = lower_rhs0
-      ys_boundary_upper_rhsn(iline) = upper_rhsn
-      ys_boundary_lower_eq(:, iline) = lower_eq0(-1:2)
-      ys_boundary_upper_eq(:, iline) = upper_eqn(-2:1)
-
-      do local_idx = 0, active_n - 1
-        if (local_idx > 1 .and. local_idx < active_n - 2) cycle
-        row = row_start + local_idx
-        rhs_value = ys_local_rhs(row, iline)
-        row_coeffs = ys_local_operator(row, -2:2, iline)
-        call ys_eliminate_physical_boundary_row(local_idx, active_n, .true., .true., rhs_value, row_coeffs, ys_lower_ghost_rhs(iline), &
-                                                lower_rhs0, ys_lower_ghost_row(:, iline), lower_eq0, ys_upper_ghost_rhs(iline), &
-                                                upper_rhsn, ys_upper_ghost_row(:, iline), upper_eqn)
-        ys_local_rhs(row, iline) = rhs_value
-        ys_local_operator(row, -2:2, iline) = row_coeffs
-      end do
-    end do
-    !$omp end target teams distribute parallel do
-    call roctxPop("ys_single_rank_eliminate_boundaries")
-
-    call roctxPush("ys_single_rank_pack")
+    call roctxPush("ys_direct_pack")
     !$omp target teams distribute parallel do collapse(2) default(none) &
     !$omp shared(ys_local_rhs, ys_local_operator, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, row_start, active_n, nlines) &
     !$omp private(iline, p, row, local_idx)
@@ -1250,11 +1213,8 @@ subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_
       end do
     end do
     !$omp end target teams distribute parallel do
-    call roctxPop("ys_single_rank_pack")
-
-    call ys_solve_ghost_field_single_rank_packed(dst, ny, nz)
-    call ys_reconstruct_single_rank_boundaries(dst, ny, nz)
-  end subroutine ys_solve_ghost_field_single_rank
+    call roctxPop("ys_direct_pack")
+  end subroutine ys_pack_assembled_direct
 
   subroutine ys_reconstruct_single_rank_boundaries(dst, ny, nz)
     implicit none
