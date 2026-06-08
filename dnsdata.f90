@@ -627,9 +627,9 @@ CONTAINS
 #endif
   END SUBROUTINE apply_complex_derivative_with_y_pencil
 
-  SUBROUTINE solve_compact_component_with_y_pencil(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
+  SUBROUTINE solve_compact_component_current_layout(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
                                                    lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
-                                                   lambda_coeff, diffusion_coeff)
+                                                    lambda_coeff, diffusion_coeff)
     use y_line_solvers, only: ys_solve_ghost_field_reduced, ys_local_rhs, ys_local_operator, &
                               ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
                               ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row
@@ -653,9 +653,9 @@ CONTAINS
     row_end = nyN
 #ifdef HAVE_CUDA
     if (use_yslab_linsolve .or. npy_grid > 2) then
-      call solve_compact_component_with_y_slab(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
-                                               lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
-                                               lambda_coeff, diffusion_coeff)
+      call solve_compact_component_transposed_y(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
+                                                lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
+                                                lambda_coeff, diffusion_coeff)
       return
     end if
     if (npy_grid == 1) then
@@ -743,7 +743,7 @@ CONTAINS
 #else
     call ys_solve_ghost_field_reduced(V(:, :, :, component_index), ny, nz)
 #endif
-  END SUBROUTINE solve_compact_component_with_y_pencil
+  END SUBROUTINE solve_compact_component_current_layout
 
 #ifdef HAVE_CUDA
   subroutine prepare_yslab_scratch(nrows, nlines)
@@ -1276,9 +1276,9 @@ CONTAINS
     call roctxPop("compact full-y unpack")
   end subroutine solve_compact_component_full_y_lines
 
-  subroutine solve_compact_component_with_y_slab(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
-                                                 lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
-                                                 lambda_coeff, diffusion_coeff)
+  subroutine solve_compact_component_transposed_y(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
+                                                  lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
+                                                  lambda_coeff, diffusion_coeff)
     implicit none
     integer(C_INT), intent(in) :: component_index, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index
     real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
@@ -1304,7 +1304,7 @@ CONTAINS
     call yslab_transpose_from_full(slab, V(:, :, :, component_index), nlines, nlines_z)
     call roctxPop("yslab compact transpose_from_full")
 
-  end subroutine solve_compact_component_with_y_slab
+  end subroutine solve_compact_component_transposed_y
 
   subroutine apply_complex_derivative_with_y_slab(src, dst)
     use y_line_solvers, only: ys_prepare_gpsv_workspace, ys_solve_packed_gpsv, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, &
@@ -1457,12 +1457,12 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX) :: zero_mode_u(-1:ny + 1), zero_mode_w(-1:ny + 1), zero_mode_ucor(-1:ny + 1)
 
     call roctxPush("linsolve solve_v")
-    call solve_compact_component_with_y_pencil(2_C_INT, v0bc, v0m1bc, vnbc, vnp1bc, &
-                                               2_C_INT, 4_C_INT, -2_C_INT, -4_C_INT, lambda, 1.0d0)
+    call solve_compact_component_current_layout(2_C_INT, v0bc, v0m1bc, vnbc, vnp1bc, &
+                                                2_C_INT, 4_C_INT, -2_C_INT, -4_C_INT, lambda, 1.0d0)
     call roctxPop("linsolve solve_v")
     call roctxPush("linsolve solve_eta")
-    call solve_compact_component_with_y_pencil(1_C_INT, eta0bc, eta0m1bc, etanbc, etanp1bc, &
-                                               5_C_INT, 0_C_INT, -5_C_INT, 0_C_INT, lambda, 1.0d0)
+    call solve_compact_component_current_layout(1_C_INT, eta0bc, eta0m1bc, etanbc, etanp1bc, &
+                                                5_C_INT, 0_C_INT, -5_C_INT, 0_C_INT, lambda, 1.0d0)
     call roctxPop("linsolve solve_eta")
     call roctxPush("linsolve d_v_dy")
     call apply_complex_derivative_with_y_pencil(V(:, :, :, 2), V(:, :, :, 3))
@@ -1521,8 +1521,8 @@ CONTAINS
     integer(C_INT) :: ix, iz, i, j
     complex(C_DOUBLE_COMPLEX) :: temp
     complex(C_DOUBLE_COMPLEX) :: zero_mode_scalar(-1:ny + 1), zero_mode_tcor(-1:ny + 1)
-    call solve_compact_component_with_y_pencil(3_C_INT + iPhi, phi0bc, phi0m1bc, phinbc, phinp1bc, 5_C_INT + iPhi, 0_C_INT, &
-                                               -(5_C_INT + iPhi), 0_C_INT, lambda, pra(iPhi))
+    call solve_compact_component_current_layout(3_C_INT + iPhi, phi0bc, phi0m1bc, phinbc, phinp1bc, 5_C_INT + iPhi, 0_C_INT, &
+                                                -(5_C_INT + iPhi), 0_C_INT, lambda, pra(iPhi))
 
     if (nx0 == 0) then
       !$omp target update from(V(:, 0, 0, 3 + iPhi))
