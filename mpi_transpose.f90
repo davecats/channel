@@ -121,6 +121,13 @@ CONTAINS
     integer(C_INT) :: y_first, y_last, rows, total_send, total_recv
     integer(C_INT) :: ilocal, iline, ix, iz, iy, p
 
+    if (npy_grid == 1) then
+      call roctxPush("yslab_to_full local_copy")
+      call yslab_copy_to_full(field, slab, ny, nz, 1_C_INT, nlines, nlines_z)
+      call roctxPop("yslab_to_full local_copy")
+      return
+    end if
+
     call roctxPush("yslab_to_full setup_counts")
     allocate (send_counts(npy_grid), recv_counts(npy_grid), send_displs(npy_grid), recv_displs(npy_grid))
     call yslab_line_range(ipy, nlines, my_first_line, my_line_count)
@@ -216,6 +223,13 @@ CONTAINS
     integer(C_INT) :: dest, src, first_line, line_count, my_first_line, my_line_count
     integer(C_INT) :: y_first, y_last, rows, total_send, total_recv
     integer(C_INT) :: ilocal, iline, ix, iz, iy, p
+
+    if (npy_grid == 1) then
+      call roctxPush("yslab_from_full local_copy")
+      call yslab_copy_from_full(slab, field, ny, nz, 1_C_INT, nlines, nlines_z)
+      call roctxPop("yslab_from_full local_copy")
+      return
+    end if
 
     call roctxPush("yslab_from_full setup_counts")
     allocate (send_counts(npy_grid), recv_counts(npy_grid), send_displs(npy_grid), recv_displs(npy_grid))

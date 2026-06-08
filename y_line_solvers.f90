@@ -14,11 +14,9 @@ module y_line_solvers
 
   implicit none
   private
-#ifdef HAVE_CUDA
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_FULL = 0_C_INT
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_CONST = 1_C_INT
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_SYMMETRIC = 2_C_INT
-#endif
 
   public :: ys_lu5decomp, ys_leftlu5div
   public :: ys_solve_compact_derivative, ys_solve_compact_system, ys_solve_ghost_system
@@ -26,13 +24,10 @@ module y_line_solvers
   public :: ys_local_rhs, ys_local_operator
   public :: ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs
   public :: ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row
-#ifdef HAVE_CUDA
   public :: ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x
-  public :: ys_prepare_gpsv_workspace, ys_solve_packed_gpsv
-  public :: ys_solve_ghost_field_single_rank_cusparse_packed
+  public :: ys_prepare_gpsv_workspace, ys_solve_packed_pentadiagonal
   public :: ys_solve_ghost_field_reduced_const_operator
   public :: ys_solve_ghost_field_reduced_symmetric_operator
-#endif
 
   integer(C_INT), save :: ys_workspace_ny = -1
   integer(C_INT), save :: ys_workspace_nz = -1
@@ -56,9 +51,13 @@ module y_line_solvers
 #ifdef HAVE_CUDA
   type(cusparseHandle), save :: ys_gpsv_handle
   logical, save :: ys_gpsv_handle_created = .false.
+#endif
   integer(C_INT), save :: ys_gpsv_n = -1, ys_gpsv_batch = -1
+#ifdef HAVE_CUDA
   integer(8), save :: ys_gpsv_buffer_size = 0_8
+#endif
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_gpsv_ds(:), ys_gpsv_dl(:), ys_gpsv_d(:), ys_gpsv_du(:), ys_gpsv_dw(:), ys_gpsv_x(:)
+#ifdef HAVE_CUDA
   character(c_char), allocatable, save :: ys_gpsv_buffer(:)
 #endif
 
@@ -113,13 +112,11 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     ys_workspace_nlines = nlines
     ys_workspace_active_n = active_n
     ys_workspace_npy = npy_grid
-#ifdef HAVE_CUDA
     if (npy_grid == 1) then
       call ys_prepare_gpsv_workspace(active_n, nlines)
     else if (npy_grid == 2) then
       call ys_prepare_gpsv_workspace(active_n, 3*nlines)
     end if
-#endif
 
     ys_local_rhs = (0.0d0, 0.0d0)
     ys_local_operator = 0.0d0
@@ -159,9 +156,7 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     deallocate (ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, ys_boundary_lower_eq, ys_boundary_upper_eq)
 deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values)
     deallocate (ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs)
-#ifdef HAVE_CUDA
     call ys_release_gpsv_workspace()
-#endif
 
     ys_workspace_ny = -1
     ys_workspace_nz = -1
@@ -181,15 +176,19 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
       error stop
     end if
   end subroutine ys_check_cusparse
+#endif
 
   subroutine ys_release_gpsv_workspace()
     implicit none
+#ifdef HAVE_CUDA
     integer(C_INT) :: status
+#endif
 
     if (allocated(ys_gpsv_ds)) then
       !$omp target exit data map(delete: ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x)
       deallocate (ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x)
     end if
+#ifdef HAVE_CUDA
     if (allocated(ys_gpsv_buffer)) then
       !$omp target exit data map(delete: ys_gpsv_buffer)
       deallocate (ys_gpsv_buffer)
@@ -199,28 +198,36 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
       call ys_check_cusparse(status, "cusparseDestroy")
       ys_gpsv_handle_created = .false.
     end if
+#endif
     ys_gpsv_n = -1
     ys_gpsv_batch = -1
+#ifdef HAVE_CUDA
     ys_gpsv_buffer_size = 0_8
+#endif
   end subroutine ys_release_gpsv_workspace
 
   subroutine ys_prepare_gpsv_workspace(n, batch_count)
     implicit none
     integer(C_INT), intent(in) :: n, batch_count
+#ifdef HAVE_CUDA
     integer(C_INT) :: status
     integer(8) :: buffer_size
+#endif
 
     if (ys_gpsv_n == n .and. ys_gpsv_batch == batch_count .and. allocated(ys_gpsv_ds)) return
 
     call ys_release_gpsv_workspace()
 
+#ifdef HAVE_CUDA
     status = cusparseCreate(ys_gpsv_handle)
     call ys_check_cusparse(status, "cusparseCreate")
     ys_gpsv_handle_created = .true.
+#endif
 
     allocate (ys_gpsv_ds(n*batch_count), ys_gpsv_dl(n*batch_count), ys_gpsv_d(n*batch_count), &
               ys_gpsv_du(n*batch_count), ys_gpsv_dw(n*batch_count), ys_gpsv_x(n*batch_count))
     !$omp target enter data map(alloc: ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x)
+#ifdef HAVE_CUDA
     !$omp target data use_device_addr(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x)
     status = cusparseZgpsvInterleavedBatch_bufferSize(ys_gpsv_handle, 0_C_INT, n, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, &
                                                       ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, batch_count, buffer_size)
@@ -229,26 +236,42 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     ys_gpsv_buffer_size = buffer_size
     allocate (ys_gpsv_buffer(max(1, int(buffer_size))))
     !$omp target enter data map(alloc: ys_gpsv_buffer)
+#endif
 
     ys_gpsv_n = n
     ys_gpsv_batch = batch_count
   end subroutine ys_prepare_gpsv_workspace
 
-  subroutine ys_solve_packed_gpsv(n, batch_count, label)
+  subroutine ys_solve_packed_pentadiagonal(n, batch_count, label)
     implicit none
     integer(C_INT), intent(in) :: n, batch_count
     character(*), intent(in) :: label
+#ifdef HAVE_CUDA
     integer(C_INT) :: status
+#else
+    integer(C_INT) :: iline
+#endif
 
     call roctxPush(label)
+#ifdef HAVE_CUDA
     !$omp target data use_device_addr(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, ys_gpsv_buffer)
     status = cusparseZgpsvInterleavedBatch(ys_gpsv_handle, 0_C_INT, n, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, &
                                            ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, batch_count, ys_gpsv_buffer)
     !$omp end target data
     call ys_check_cusparse(status, "cusparseZgpsvInterleavedBatch "//trim(label))
-    call roctxPop(label)
-  end subroutine ys_solve_packed_gpsv
+#else
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, n, batch_count) &
+    !$omp private(iline)
+    do iline = 1, batch_count
+      call ys_factor_penta_interleaved(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, batch_count, iline, n)
+      call ys_solve_factored_penta_interleaved(ys_gpsv_x, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, &
+                                               batch_count, iline, n)
+    end do
+    !$omp end target teams distribute parallel do
 #endif
+    call roctxPop(label)
+  end subroutine ys_solve_packed_pentadiagonal
 
   subroutine ys_lu5decomp(a)
     real(C_DOUBLE), intent(inout) :: a(0:, -2:)
@@ -415,15 +438,11 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     nlines_z = 2*nz + 1
     nlines = ys_workspace_nlines
 
-#ifdef HAVE_CUDA
-    call roctxPush("ys_endpoint_schur_cusparse")
-    call ys_solve_endpoint_schur_cusparse(dst, ny, nz, has_lower_boundary, has_upper_boundary, has_padded_dst, &
-                                          row_start, row_end, active_n, nlines, nlines_z, dst_row_base, &
-                                          YS_ENDPOINT_RESPONSE_FULL)
-    call roctxPop("ys_endpoint_schur_cusparse")
-    return
-#endif
-    error stop "ys_solve_ghost_field_reduced: distributed solve requires CUDA"
+    call roctxPush("ys_endpoint_schur")
+    call ys_solve_endpoint_schur(dst, ny, nz, has_lower_boundary, has_upper_boundary, has_padded_dst, &
+                                 row_start, row_end, active_n, nlines, nlines_z, dst_row_base, &
+                                 YS_ENDPOINT_RESPONSE_FULL)
+    call roctxPop("ys_endpoint_schur")
   end subroutine ys_solve_ghost_field_reduced
 
   subroutine ys_endpoint_context(dst, ny, nz, row_start, row_end, active_n, nlines, nlines_z, dst_row_base, &
@@ -458,8 +477,6 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     upper_inner3 = upper_inner0 + 3
   end subroutine ys_padded_inner_indices
 
-#ifdef HAVE_CUDA
-
   subroutine ys_solve_ghost_field_reduced_const_operator(dst, ny, nz)
     implicit none
     integer(C_INT), intent(in) :: ny, nz
@@ -474,9 +491,9 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
 
     call ys_endpoint_context(dst, ny, nz, row_start, row_end, active_n, nlines, nlines_z, dst_row_base, &
                              has_lower_boundary, has_upper_boundary, has_padded_dst)
-    call ys_solve_endpoint_schur_cusparse(dst, ny, nz, has_lower_boundary, has_upper_boundary, has_padded_dst, &
-                                          row_start, row_end, active_n, nlines, nlines_z, dst_row_base, &
-                                          YS_ENDPOINT_RESPONSE_CONST)
+    call ys_solve_endpoint_schur(dst, ny, nz, has_lower_boundary, has_upper_boundary, has_padded_dst, &
+                                 row_start, row_end, active_n, nlines, nlines_z, dst_row_base, &
+                                 YS_ENDPOINT_RESPONSE_CONST)
   end subroutine ys_solve_ghost_field_reduced_const_operator
 
   subroutine ys_solve_ghost_field_reduced_symmetric_operator(dst, ny, nz)
@@ -493,13 +510,13 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
 
     call ys_endpoint_context(dst, ny, nz, row_start, row_end, active_n, nlines, nlines_z, dst_row_base, &
                              has_lower_boundary, has_upper_boundary, has_padded_dst)
-    call ys_solve_endpoint_schur_cusparse(dst, ny, nz, has_lower_boundary, has_upper_boundary, has_padded_dst, &
-                                          row_start, row_end, active_n, nlines, nlines_z, dst_row_base, &
-                                          YS_ENDPOINT_RESPONSE_SYMMETRIC)
+    call ys_solve_endpoint_schur(dst, ny, nz, has_lower_boundary, has_upper_boundary, has_padded_dst, &
+                                 row_start, row_end, active_n, nlines, nlines_z, dst_row_base, &
+                                 YS_ENDPOINT_RESPONSE_SYMMETRIC)
   end subroutine ys_solve_ghost_field_reduced_symmetric_operator
 
-  subroutine ys_solve_endpoint_schur_cusparse(dst, ny, nz, has_lower_boundary, has_upper_boundary, has_padded_dst, &
-                                              row_start, row_end, active_n, nlines, nlines_z, dst_row_base, response_mode)
+  subroutine ys_solve_endpoint_schur(dst, ny, nz, has_lower_boundary, has_upper_boundary, has_padded_dst, &
+                                     row_start, row_end, active_n, nlines, nlines_z, dst_row_base, response_mode)
     implicit none
     integer(C_INT), intent(in) :: ny, nz, row_start, row_end, active_n, nlines, nlines_z, dst_row_base, response_mode
     logical, intent(in) :: has_lower_boundary, has_upper_boundary, has_padded_dst
@@ -511,7 +528,7 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     complex(C_DOUBLE_COMPLEX) :: s4(4, 4), rhs4(4, 5), pivot4, factor4
     real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-2:2), upper_eqn(-2:2), fac, coeff
     integer(C_INT) :: nI, nresp, batch_count, exposed_n, interior_base
-    integer(C_INT) :: status, sys, iline, ref_iline, resp, resp_index
+    integer(C_INT) :: sys, iline, ref_iline, resp, resp_index
     integer(C_INT) :: local_i, local_idx, row, col, coupled_row, p, j, offset
     integer(C_INT) :: exposed_slot, response_slot, rhs_col, iface, k, m
     integer(C_INT) :: ix, iz, abs_iz, ix_local
@@ -681,13 +698,7 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     !$omp end target teams distribute parallel do
     call roctxPop("ys_endpoint_pack_plus_response")
 
-    call roctxPush("ys_endpoint_gpsv_plus_response")
-    !$omp target data use_device_addr(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, ys_gpsv_buffer)
-    status = cusparseZgpsvInterleavedBatch(ys_gpsv_handle, 0_C_INT, nI, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, &
-                                           ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, batch_count, ys_gpsv_buffer)
-    !$omp end target data
-    call ys_check_cusparse(status, "cusparseZgpsvInterleavedBatch endpoint Schur")
-    call roctxPop("ys_endpoint_gpsv_plus_response")
+    call ys_solve_packed_pentadiagonal(nI, batch_count, "ys_endpoint_gpsv_plus_response")
 
     call roctxPush("ys_endpoint_pack_schur")
     !$omp target teams distribute parallel do default(none) &
@@ -970,9 +981,7 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     end do
     !$omp end target teams distribute parallel do
     call roctxPop("ys_endpoint_reconstruct")
-  end subroutine ys_solve_endpoint_schur_cusparse
-
-#endif
+  end subroutine ys_solve_endpoint_schur
 
   subroutine ys_solve_ghost_field_single_rank(dst, ny, nz)
     implicit none
@@ -1049,7 +1058,6 @@ lower_rhs0 = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_lower_b
     call roctxPop("ys_single_rank_eliminate_boundaries")
 
     call roctxPush("ys_single_rank_pack")
-#ifdef HAVE_CUDA
     !$omp target teams distribute parallel do collapse(2) default(none) &
     !$omp shared(ys_local_rhs, ys_local_operator, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, row_start, active_n, nlines) &
     !$omp private(iline, p, row, local_idx)
@@ -1068,35 +1076,7 @@ lower_rhs0 = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_lower_b
     !$omp end target teams distribute parallel do
     call roctxPop("ys_single_rank_pack")
 
-    call ys_solve_ghost_field_single_rank_cusparse_packed(dst, ny, nz)
-#else
-    !$omp target teams distribute parallel do default(none) &
-    !$omp shared(dst, ys_local_rhs, ys_local_operator, ys_interior_lu, ys_interior_response_columns, row_start, row_end, active_n, nlines, nx0, nz, &
-    !$omp& nlines_z, dst_row_base) &
-    !$omp private(ix, iz, iline, row, local_idx)
-    do iline = 1, nlines
-      ys_interior_lu(:, :, iline) = 0.0d0
-
-      do row = row_start, row_end
-        local_idx = row - row_start
-        ys_interior_response_columns(local_idx, 1, iline) = ys_local_rhs(row, iline)
-        ys_interior_lu(local_idx, -2:2, iline) = ys_local_operator(row, -2:2, iline)
-      end do
-
-      call ys_factor_penta(ys_interior_lu(:, :, iline))
-      call ys_solve_factored_penta_one(ys_interior_response_columns(:, 1, iline), ys_interior_lu(:, :, iline))
-
-      ix = (iline - 1)/nlines_z + nx0
-      iz = mod(iline - 1, nlines_z) - nz
-      do row = 0, active_n - 1
-        dst(row + dst_row_base, iz + nz + 1, ix - nx0 + 1) = ys_interior_response_columns(row, 1, iline)
-      end do
-
-    end do
-    !$omp end target teams distribute parallel do
-    call roctxPop("ys_single_rank_pack")
-
-#endif
+    call ys_solve_ghost_field_single_rank_packed(dst, ny, nz)
     call ys_reconstruct_single_rank_boundaries(dst, ny, nz)
   end subroutine ys_solve_ghost_field_single_rank
 
@@ -1155,14 +1135,12 @@ lower_rhs0 = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_lower_b
     call roctxPop("ys_single_rank_reconstruct_boundaries")
   end subroutine ys_reconstruct_single_rank_boundaries
 
-#ifdef HAVE_CUDA
-  subroutine ys_solve_ghost_field_single_rank_cusparse_packed(dst, ny, nz)
+  subroutine ys_solve_ghost_field_single_rank_packed(dst, ny, nz)
     implicit none
     integer(C_INT), intent(in) :: ny, nz
     complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
     integer(C_INT) :: ix, iz, iline, p, nlines, nlines_z, row_start, row_end, active_n, row
     integer(C_INT) :: dst_row_base
-    integer(C_INT) :: status
     logical :: has_padded_dst
 
     row_start = ny0
@@ -1173,15 +1151,9 @@ lower_rhs0 = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_lower_b
     if (has_padded_dst) dst_row_base = 3
     nlines_z = 2*nz + 1
     nlines = ys_workspace_nlines
-    call roctxPush("ys_single_rank_cusparse_gpsv")
-    !$omp target data use_device_addr(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, ys_gpsv_buffer)
-    status = cusparseZgpsvInterleavedBatch(ys_gpsv_handle, 0_C_INT, active_n, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, &
-                                           ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, nlines, ys_gpsv_buffer)
-    !$omp end target data
-    call ys_check_cusparse(status, "cusparseZgpsvInterleavedBatch")
-    call roctxPop("ys_single_rank_cusparse_gpsv")
+    call ys_solve_packed_pentadiagonal(active_n, nlines, "ys_single_rank_gpsv")
 
-    call roctxPush("ys_single_rank_cusparse_unpack")
+    call roctxPush("ys_single_rank_unpack")
     !$omp target teams distribute parallel do collapse(2) default(none) &
     !$omp shared(dst, ys_gpsv_x, nlines, nlines_z, nx0, nz, active_n, dst_row_base) &
     !$omp private(iline, p, ix, iz, row)
@@ -1194,10 +1166,9 @@ lower_rhs0 = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_lower_b
       end do
     end do
     !$omp end target teams distribute parallel do
-    call roctxPop("ys_single_rank_cusparse_unpack")
+    call roctxPop("ys_single_rank_unpack")
 
-  end subroutine ys_solve_ghost_field_single_rank_cusparse_packed
-#endif
+  end subroutine ys_solve_ghost_field_single_rank_packed
 
   subroutine ys_solve_reduced_interfaces()
     integer(C_INT), parameter :: bw = 5
@@ -1382,4 +1353,58 @@ lower_rhs0 = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_lower_b
       rhs(i) = rhs(i)*a(i, 0)
     end do
   end subroutine ys_solve_factored_penta_one
+
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+  !$omp declare target(ys_factor_penta_interleaved)
+#endif
+  subroutine ys_factor_penta_interleaved(ds, dl, d, du, dw, stride, first, n)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: ds(:), dl(:), d(:), du(:), dw(:)
+    integer(C_INT), intent(in) :: stride, first, n
+    integer(C_INT) :: i, p, p1, p2
+    complex(C_DOUBLE_COMPLEX) :: factor
+
+    do i = 0, n - 1
+      p = first + i*stride
+      d(p) = 1.0d0/d(p)
+
+      if (i + 1 < n) then
+        p1 = first + (i + 1)*stride
+        factor = dl(p1)*d(p)
+        dl(p1) = factor
+        d(p1) = d(p1) - factor*du(p)
+        if (i + 2 < n) du(p1) = du(p1) - factor*dw(p)
+      end if
+
+      if (i + 2 < n) then
+        p2 = first + (i + 2)*stride
+        factor = ds(p2)*d(p)
+        ds(p2) = factor
+        dl(p2) = dl(p2) - factor*du(p)
+        d(p2) = d(p2) - factor*dw(p)
+      end if
+    end do
+  end subroutine ys_factor_penta_interleaved
+
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+  !$omp declare target(ys_solve_factored_penta_interleaved)
+#endif
+  subroutine ys_solve_factored_penta_interleaved(rhs, ds, dl, d, du, dw, stride, first, n)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs(:)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: ds(:), dl(:), d(:), du(:), dw(:)
+    integer(C_INT), intent(in) :: stride, first, n
+    integer(C_INT) :: i, p
+
+    do i = 0, n - 1
+      p = first + i*stride
+      if (i >= 2) rhs(p) = rhs(p) - ds(p)*rhs(first + (i - 2)*stride)
+      if (i >= 1) rhs(p) = rhs(p) - dl(p)*rhs(first + (i - 1)*stride)
+    end do
+
+    do i = n - 1, 0, -1
+      p = first + i*stride
+      if (i + 1 < n) rhs(p) = rhs(p) - du(p)*rhs(first + (i + 1)*stride)
+      if (i + 2 < n) rhs(p) = rhs(p) - dw(p)*rhs(first + (i + 2)*stride)
+      rhs(p) = rhs(p)*d(p)
+    end do
+  end subroutine ys_solve_factored_penta_interleaved
 end module y_line_solvers

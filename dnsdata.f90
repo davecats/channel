@@ -44,11 +44,9 @@ MODULE dnsdata
   logical :: time_from_restart
   logical :: disable_restart_write = .false.
   logical :: use_yslab_linsolve = .false.
-#ifdef HAVE_CUDA
   complex(C_DOUBLE_COMPLEX), allocatable, save :: slab(:, :)
   integer(C_INT), save :: yslab_scratch_rows = -1
   integer(C_INT), save :: yslab_scratch_lines = -1
-#endif
   !Grid
   integer(C_INT), private :: iy
   real(C_DOUBLE), allocatable :: y(:), dy(:)
@@ -208,9 +206,7 @@ CONTAINS
     use y_line_solvers, only: ys_prepare_ghost_field_workspace
     IMPLICIT NONE
     INTEGER(C_INT) :: ix, iz
-#ifdef HAVE_CUDA
     integer(C_INT) :: yslab_first_line, yslab_line_count
-#endif
     logical, intent(IN) :: solveNS
     ALLOCATE (V(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3 + nPhi)); V = 0
     !$omp target enter data map(to: V)
@@ -257,12 +253,10 @@ CONTAINS
 
     allocate (fr(3 + 2*nPhi)); fr = 0.0
     call ys_prepare_ghost_field_workspace(ny, nz, nxB)
-#ifdef HAVE_CUDA
     if (solveNS .and. use_yslab_linsolve) then
       call yslab_line_range(ipy, (nxN - nx0 + 1)*(2*nz + 1), yslab_first_line, yslab_line_count)
       call prepare_yslab_scratch(ny + 3, yslab_line_count)
     end if
-#endif
   END SUBROUTINE init_memory
 
   SUBROUTINE get_solver_memory_estimate(solveNS, n_floats)
@@ -317,9 +311,7 @@ CONTAINS
       CLOSE (UNIT=195)
       IF (has_terminal) CLOSE (UNIT=121)
     END IF
-#ifdef HAVE_CUDA
     call release_yslab_scratch()
-#endif
     call ys_release_ghost_field_workspace()
   END SUBROUTINE free_memory
 
@@ -491,12 +483,10 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(out) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     logical, optional, intent(in) :: update_device
 
-#ifdef HAVE_CUDA
     if (use_yslab_linsolve) then
       call apply_complex_derivative_transposed_y(src, dst)
       return
     end if
-#endif
     call assemble_compact_derivative_system(src)
     call solve_current_layout_derivative(dst)
   END SUBROUTINE apply_complex_derivative_current_layout
@@ -552,22 +542,15 @@ CONTAINS
   end subroutine assemble_compact_derivative_system
 
   subroutine solve_current_layout_derivative(dst)
-    use y_line_solvers, only: ys_solve_ghost_field_reduced
-#ifdef HAVE_CUDA
-    use y_line_solvers, only: ys_solve_ghost_field_reduced_const_operator
-#endif
+    use y_line_solvers, only: ys_solve_ghost_field_reduced, ys_solve_ghost_field_reduced_const_operator
     implicit none
     complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
 
-#ifdef HAVE_CUDA
     if (npy_grid == 2) then
       call ys_solve_ghost_field_reduced_const_operator(dst, ny, nz)
     else
       call ys_solve_ghost_field_reduced(dst, ny, nz)
     end if
-#else
-    call ys_solve_ghost_field_reduced(dst, ny, nz)
-#endif
   end subroutine solve_current_layout_derivative
 
   !$omp declare target(compact_boundary_rhs_value)
@@ -687,20 +670,12 @@ subroutine compact_component_operator_coeffs(component_index, lambda_coeff, diff
     real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
     real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
 
-#ifdef HAVE_CUDA
-    if (use_yslab_linsolve) then
-      call solve_compact_component_transposed_y(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
-                                                lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
-                                                lambda_coeff, diffusion_coeff)
+    if (use_yslab_linsolve .or. npy_grid == 1) then
+      call solve_compact_component_full_y(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
+                                          lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
+                                          lambda_coeff, diffusion_coeff)
       return
     end if
-    if (npy_grid == 1) then
-      call solve_compact_component_local_full_y(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
-                                                lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
-                                                lambda_coeff, diffusion_coeff)
-      return
-    end if
-#endif
     call assemble_compact_component_system(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
                                            lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
                                            lambda_coeff, diffusion_coeff)
@@ -757,25 +732,17 @@ subroutine compact_component_operator_coeffs(component_index, lambda_coeff, diff
   end subroutine assemble_compact_component_system
 
   subroutine solve_current_layout_schur(dst)
-    use y_line_solvers, only: ys_solve_ghost_field_reduced
-#ifdef HAVE_CUDA
-    use y_line_solvers, only: ys_solve_ghost_field_reduced_symmetric_operator
-#endif
+    use y_line_solvers, only: ys_solve_ghost_field_reduced, ys_solve_ghost_field_reduced_symmetric_operator
     implicit none
     complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
 
-#ifdef HAVE_CUDA
     if (npy_grid == 2) then
       call ys_solve_ghost_field_reduced_symmetric_operator(dst, ny, nz)
     else
       call ys_solve_ghost_field_reduced(dst, ny, nz)
     end if
-#else
-    call ys_solve_ghost_field_reduced(dst, ny, nz)
-#endif
   end subroutine solve_current_layout_schur
 
-#ifdef HAVE_CUDA
   subroutine prepare_yslab_scratch(nrows, nlines)
     implicit none
     integer(C_INT), intent(in) :: nrows, nlines
@@ -806,39 +773,39 @@ subroutine compact_component_operator_coeffs(component_index, lambda_coeff, diff
     yslab_scratch_rows = -1
     yslab_scratch_lines = -1
   end subroutine release_yslab_scratch
-#endif
 
-#ifdef HAVE_CUDA
-  subroutine solve_compact_component_local_full_y(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
-                                                  lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
-                                                  lambda_coeff, diffusion_coeff)
+  subroutine solve_compact_component_full_y(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
+                                            lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
+                                            lambda_coeff, diffusion_coeff)
     implicit none
     integer(C_INT), intent(in) :: component_index, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index
     real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
     real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
-    integer(C_INT) :: nlines_z, nlines
+    integer(C_INT) :: nlines_z, nlines, first_line, line_count
 
     nlines_z = 2*nz + 1
     nlines = (nxN - nx0 + 1)*nlines_z
-    call prepare_yslab_scratch(ny + 3, nlines)
+    call yslab_line_range(ipy, nlines, first_line, line_count)
+    if (line_count <= 0) return
+    call prepare_yslab_scratch(ny + 3, line_count)
 
-    call roctxPush("compact full-y copy_to_slab")
-    call yslab_copy_to_full(V(:, :, :, component_index), slab, ny, nz, 1_C_INT, nlines, nlines_z)
-    call roctxPop("compact full-y copy_to_slab")
+    call roctxPush("yslab compact transpose_to_full")
+    call yslab_transpose_to_full(V(:, :, :, component_index), slab, ny, nz, nlines, nlines_z, .false.)
+    call roctxPop("yslab compact transpose_to_full")
 
     call solve_full_y_lines_packed(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
                                    lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
-                                   lambda_coeff, diffusion_coeff, 1_C_INT, nlines, "compact full-y gpsv")
+                                   lambda_coeff, diffusion_coeff, first_line, line_count, "compact full-y gpsv")
 
-    call roctxPush("compact full-y copy_from_slab")
-    call yslab_copy_from_full(slab, V(:, :, :, component_index), ny, nz, 1_C_INT, nlines, nlines_z)
-    call roctxPop("compact full-y copy_from_slab")
-  end subroutine solve_compact_component_local_full_y
+    call roctxPush("yslab compact transpose_from_full")
+    call yslab_transpose_from_full(slab, V(:, :, :, component_index), ny, nz, nlines, nlines_z)
+    call roctxPop("yslab compact transpose_from_full")
+  end subroutine solve_compact_component_full_y
 
   subroutine solve_full_y_lines_packed(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
                                        lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
                                        lambda_coeff, diffusion_coeff, first_line, line_count, solve_label)
-    use y_line_solvers, only: ys_prepare_gpsv_workspace, ys_solve_packed_gpsv, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, &
+    use y_line_solvers, only: ys_prepare_gpsv_workspace, ys_solve_packed_pentadiagonal, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, &
                               ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x
     implicit none
     integer(C_INT), intent(in) :: component_index, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index
@@ -960,7 +927,7 @@ subroutine compact_component_operator_coeffs(component_index, lambda_coeff, diff
     !$omp end target teams distribute parallel do
     call roctxPop("compact full-y pack")
 
-    call ys_solve_packed_gpsv(ny - 1, line_count, solve_label)
+    call ys_solve_packed_pentadiagonal(ny - 1, line_count, solve_label)
 
     call roctxPush("compact full-y unpack")
     !$omp target teams distribute parallel do default(none) &
@@ -998,36 +965,6 @@ subroutine compact_component_operator_coeffs(component_index, lambda_coeff, diff
     call roctxPop("compact full-y unpack")
   end subroutine solve_full_y_lines_packed
 
-  subroutine solve_compact_component_transposed_y(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
-                                                  lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
-                                                  lambda_coeff, diffusion_coeff)
-    implicit none
-    integer(C_INT), intent(in) :: component_index, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index
-    real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
-    real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
-    integer(C_INT) :: nlines_z, nlines, my_first_line, my_line_count
-
-    nlines_z = 2*nz + 1
-    nlines = (nxN - nx0 + 1)*nlines_z
-    call yslab_line_range(ipy, nlines, my_first_line, my_line_count)
-    if (my_line_count <= 0) return
-
-    call prepare_yslab_scratch(ny + 3, my_line_count)
-
-    call roctxPush("yslab compact transpose_to_full")
-    call yslab_transpose_to_full(V(:, :, :, component_index), slab, ny, nz, nlines, nlines_z, .false.)
-    call roctxPop("yslab compact transpose_to_full")
-
-    call solve_full_y_lines_packed(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
-                                   lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
-                                   lambda_coeff, diffusion_coeff, my_first_line, my_line_count, "yslab compact gpsv")
-
-    call roctxPush("yslab compact transpose_from_full")
-    call yslab_transpose_from_full(slab, V(:, :, :, component_index), ny, nz, nlines, nlines_z)
-    call roctxPop("yslab compact transpose_from_full")
-
-  end subroutine solve_compact_component_transposed_y
-
   subroutine apply_complex_derivative_transposed_y(src, dst)
     implicit none
     complex(C_DOUBLE_COMPLEX), intent(in) :: src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
@@ -1054,7 +991,7 @@ subroutine compact_component_operator_coeffs(component_index, lambda_coeff, diff
   end subroutine apply_complex_derivative_transposed_y
 
   subroutine solve_full_y_derivative_packed(line_count, solve_label)
-    use y_line_solvers, only: ys_prepare_gpsv_workspace, ys_solve_packed_gpsv, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, &
+    use y_line_solvers, only: ys_prepare_gpsv_workspace, ys_solve_packed_pentadiagonal, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, &
                               ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x
     implicit none
     integer(C_INT), intent(in) :: line_count
@@ -1114,7 +1051,7 @@ subroutine compact_component_operator_coeffs(component_index, lambda_coeff, diff
     !$omp end target teams distribute parallel do
     call roctxPop("full-y derivative pack")
 
-    call ys_solve_packed_gpsv(ny - 1, line_count, solve_label)
+    call ys_solve_packed_pentadiagonal(ny - 1, line_count, solve_label)
 
     call roctxPush("full-y derivative unpack")
     !$omp target teams distribute parallel do default(none) &
@@ -1137,8 +1074,6 @@ subroutine compact_component_operator_coeffs(component_index, lambda_coeff, diff
     !$omp end target teams distribute parallel do
     call roctxPop("full-y derivative unpack")
   end subroutine solve_full_y_derivative_packed
-#endif
-
   SUBROUTINE scatter_full_y_line(full_line, local_line)
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), intent(in) :: full_line(-1:ny + 1)
