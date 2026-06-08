@@ -412,16 +412,14 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     nlines = ys_workspace_nlines
 
 #ifdef HAVE_CUDA
-    if (npy_grid == 2) then
-      call roctxPush("ys_endpoint_schur_cusparse")
-      call ys_solve_endpoint_schur_cusparse(dst, ny, nz, has_lower_boundary, has_upper_boundary, has_padded_dst, &
-                                            row_start, row_end, active_n, nlines, nlines_z, dst_row_base, &
-                                            YS_ENDPOINT_RESPONSE_FULL)
-      call roctxPop("ys_endpoint_schur_cusparse")
-      return
-    end if
+    call roctxPush("ys_endpoint_schur_cusparse")
+    call ys_solve_endpoint_schur_cusparse(dst, ny, nz, has_lower_boundary, has_upper_boundary, has_padded_dst, &
+                                          row_start, row_end, active_n, nlines, nlines_z, dst_row_base, &
+                                          YS_ENDPOINT_RESPONSE_FULL)
+    call roctxPop("ys_endpoint_schur_cusparse")
+    return
 #endif
-    error stop "ys_solve_ghost_field_reduced: npy > 2 must use y-slab linsolve"
+    error stop "ys_solve_ghost_field_reduced: distributed solve requires CUDA"
   end subroutine ys_solve_ghost_field_reduced
 
   subroutine ys_endpoint_context(dst, ny, nz, row_start, row_end, active_n, nlines, nlines_z, dst_row_base, &
@@ -465,7 +463,7 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     integer(C_INT) :: row_start, row_end, active_n, nlines, nlines_z, dst_row_base
     logical :: has_lower_boundary, has_upper_boundary, has_padded_dst
 
-    if (npy_grid /= 2) then
+    if (npy_grid == 1) then
       call ys_solve_ghost_field_reduced(dst, ny, nz)
       return
     end if
@@ -484,7 +482,7 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     integer(C_INT) :: row_start, row_end, active_n, nlines, nlines_z, dst_row_base
     logical :: has_lower_boundary, has_upper_boundary, has_padded_dst
 
-    if (npy_grid /= 2) then
+    if (npy_grid == 1) then
       call ys_solve_ghost_field_reduced(dst, ny, nz)
       return
     end if
@@ -506,15 +504,26 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     complex(C_DOUBLE_COMPLEX) :: c0, c1, y00, y01, y10, y11, g0, g1
     complex(C_DOUBLE_COMPLEX) :: s00, s01, s10, s11, t00, t01, t10, t11, det
     complex(C_DOUBLE_COMPLEX) :: vleft1, vleft2, vright1, vright2
+    complex(C_DOUBLE_COMPLEX) :: s4(4, 4), rhs4(4, 5), pivot4, factor4
     real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-2:2), upper_eqn(-2:2), fac, coeff
-    integer(C_INT) :: nI, nresp, batch_count
+    integer(C_INT) :: nI, nresp, batch_count, exposed_n, interior_base
     integer(C_INT) :: status, sys, iline, ref_iline, resp, resp_index
     integer(C_INT) :: local_i, local_idx, row, col, coupled_row, p, j, offset
+    integer(C_INT) :: exposed_slot, response_slot, rhs_col, iface, k, m
     integer(C_INT) :: ix, iz, abs_iz, ix_local
     integer(C_INT) :: lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3
     logical :: is_actual
+    logical :: has_left_interface, has_right_interface
 
-    nI = active_n - 2
+    has_left_interface = (ipy > 0)
+    has_right_interface = (ipy < npy_grid - 1)
+    exposed_n = 0
+    if (has_left_interface) exposed_n = exposed_n + 2
+    if (has_right_interface) exposed_n = exposed_n + 2
+    interior_base = 0
+    if (has_left_interface) interior_base = 2
+    nI = active_n - exposed_n
+    if (nI <= 0) error stop "endpoint Schur solve needs at least one interior row"
     select case (response_mode)
     case (YS_ENDPOINT_RESPONSE_FULL)
       nresp = nlines
@@ -525,19 +534,19 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     case default
       error stop "unknown endpoint Schur response mode"
     end select
-    batch_count = nlines + 2*nresp
+    batch_count = nlines + exposed_n*nresp
 
     if (.not. allocated(ys_local_rhs)) error stop "ys_prepare_ghost_field_workspace must be called before endpoint Schur solve"
-    if (ys_gpsv_batch < batch_count) error stop "endpoint Schur solve requires larger cuSPARSE workspace"
+    call ys_prepare_gpsv_workspace(nI, batch_count)
 
     call roctxPush("ys_endpoint_pack_plus_response")
     !$omp target teams distribute parallel do collapse(2) default(none) &
     !$omp shared(ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
     !$omp& ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, &
     !$omp& ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, row_start, active_n, nI, nlines, nlines_z, nresp, batch_count, nz, nx0, &
-    !$omp& has_lower_boundary, has_upper_boundary, response_mode, ipy) &
+    !$omp& has_lower_boundary, has_upper_boundary, response_mode, ipy, has_left_interface, has_right_interface, exposed_n, interior_base) &
     !$omp private(sys, iline, ref_iline, resp, local_i, local_idx, row, col, coupled_row, p, j, offset, is_actual, ix_local, abs_iz, &
-    !$omp& rhs_value, row_coeffs, lower_rhs0, upper_rhsn, lower_eq0, upper_eqn, fac, coeff)
+    !$omp& rhs_value, row_coeffs, lower_rhs0, upper_rhsn, lower_eq0, upper_eqn, fac, coeff, exposed_slot, response_slot)
     do local_i = 0, nI - 1
       do sys = 1, batch_count
         is_actual = (sys <= nlines)
@@ -545,8 +554,7 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
           iline = sys
           ref_iline = iline
         else
-          resp = sys - nlines
-          if (resp > nresp) resp = resp - nresp
+          resp = mod(sys - nlines - 1, nresp) + 1
           select case (response_mode)
           case (YS_ENDPOINT_RESPONSE_FULL)
             ref_iline = resp
@@ -559,11 +567,7 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
           end select
           iline = ref_iline
         end if
-        if (ipy == 0) then
-          local_idx = local_i
-        else
-          local_idx = local_i + 2
-        end if
+        local_idx = interior_base + local_i
         row = row_start + local_idx
         rhs_value = (0.0d0, 0.0d0)
         if (is_actual) rhs_value = ys_local_rhs(row, iline)
@@ -632,32 +636,26 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
           coeff = row_coeffs(col)
           if (coeff == 0.0d0) cycle
           coupled_row = local_idx + col
-          if (ipy == 0) then
-            if (coupled_row >= 0 .and. coupled_row <= nI - 1) then
-              j = coupled_row
-              offset = j - local_i
-            else if (coupled_row == nI) then
-              if (sys > nlines .and. sys <= nlines + nresp) rhs_value = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
-              cycle
-            else if (coupled_row == nI + 1) then
-              if (sys > nlines + nresp) rhs_value = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
-              cycle
-            else
-              cycle
-            end if
+          if (coupled_row >= interior_base .and. coupled_row <= interior_base + nI - 1) then
+            j = coupled_row - interior_base
+            offset = j - local_i
           else
-            if (coupled_row >= 2 .and. coupled_row <= active_n - 1) then
-              j = coupled_row - 2
-              offset = j - local_i
-            else if (coupled_row == 0) then
-              if (sys > nlines .and. sys <= nlines + nresp) rhs_value = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
-              cycle
-            else if (coupled_row == 1) then
-              if (sys > nlines + nresp) rhs_value = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
-              cycle
-            else
-              cycle
+            exposed_slot = 0
+            if (has_left_interface) then
+              if (coupled_row == 0) exposed_slot = 1
+              if (coupled_row == 1) exposed_slot = 2
             end if
+            if (has_right_interface) then
+              if (coupled_row == active_n - 2) exposed_slot = exposed_n - 1
+              if (coupled_row == active_n - 1) exposed_slot = exposed_n
+            end if
+            if (exposed_slot > 0) then
+              if (sys > nlines) then
+                response_slot = (sys - nlines - 1)/nresp + 1
+                if (response_slot == exposed_slot) rhs_value = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+              end if
+            end if
+            cycle
           end if
 
           select case (offset)
@@ -690,9 +688,10 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     call roctxPush("ys_endpoint_pack_schur")
     !$omp target teams distribute parallel do default(none) &
     !$omp shared(ys_local_rhs, ys_local_operator, ys_gpsv_x, ys_reduced_rows_send, nI, nlines, nlines_z, nresp, batch_count, &
-    !$omp& nz, nx0, row_start, response_mode, ipy) &
+    !$omp& nz, nx0, row_start, active_n, response_mode, ipy, has_left_interface, has_right_interface, exposed_n, interior_base) &
     !$omp private(iline, row, ix, iz, abs_iz, resp_index, c0, c1, y00, y01, y10, y11, g0, g1, s00, s01, s10, s11, &
-    !$omp& t00, t01, t10, t11, det, row_coeffs)
+    !$omp& t00, t01, t10, t11, det, row_coeffs, s4, rhs4, pivot4, factor4, local_idx, col, coeff, coupled_row, j, &
+    !$omp& exposed_slot, iface, k, m, rhs_col)
     do iline = 1, nlines
       ix = (iline - 1)/nlines_z + nx0
       iz = mod(iline - 1, nlines_z) - nz
@@ -706,7 +705,7 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
         resp_index = (ix - nx0)*(nz + 1) + abs_iz + 1
       end select
       ys_reduced_rows_send(:, iline) = (0.0d0, 0.0d0)
-      if (ipy == 0) then
+      if (.not. has_left_interface) then
         row = row_start + nI
         row_coeffs = ys_local_operator(row, -2:2, iline)
         c0 = ys_gpsv_x((nI - 2)*batch_count + iline)
@@ -739,7 +738,7 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
         ys_reduced_rows_send(16, iline) = -((-s10*t00 + s00*t10)/det)
         ys_reduced_rows_send(19, iline) = -((s11*t01 - s01*t11)/det)
         ys_reduced_rows_send(20, iline) = -((-s10*t01 + s00*t11)/det)
-      else
+      else if (.not. has_right_interface) then
         row = row_start
         row_coeffs = ys_local_operator(row, -2:2, iline)
         c0 = ys_gpsv_x(iline)
@@ -772,6 +771,88 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
         ys_reduced_rows_send(6, iline) = -((-s10*t00 + s00*t10)/det)
         ys_reduced_rows_send(9, iline) = -((s11*t01 - s01*t11)/det)
         ys_reduced_rows_send(10, iline) = -((-s10*t01 + s00*t11)/det)
+      else
+        do k = 1, 4
+          do m = 1, 4
+            s4(k, m) = (0.0d0, 0.0d0)
+          end do
+          do rhs_col = 1, 5
+            rhs4(k, rhs_col) = (0.0d0, 0.0d0)
+          end do
+        end do
+        do iface = 1, 4
+          select case (iface)
+          case (1)
+            local_idx = 0
+          case (2)
+            local_idx = 1
+          case (3)
+            local_idx = active_n - 2
+          case default
+            local_idx = active_n - 1
+          end select
+          row = row_start + local_idx
+          row_coeffs = ys_local_operator(row, -2:2, iline)
+          rhs4(iface, 1) = ys_local_rhs(row, iline)
+          do col = -2, 2
+            coeff = row_coeffs(col)
+            if (coeff == 0.0d0) cycle
+            coupled_row = local_idx + col
+            if (coupled_row >= interior_base .and. coupled_row <= interior_base + nI - 1) then
+              j = coupled_row - interior_base
+              rhs4(iface, 1) = rhs4(iface, 1) - coeff*ys_gpsv_x(j*batch_count + iline)
+              do exposed_slot = 1, exposed_n
+                s4(iface, exposed_slot) = s4(iface, exposed_slot) - &
+                                          coeff*ys_gpsv_x(j*batch_count + nlines + (exposed_slot - 1)*nresp + resp_index)
+              end do
+            else if (coupled_row == -2) then
+              rhs4(iface, 2) = rhs4(iface, 2) + coeff
+            else if (coupled_row == -1) then
+              rhs4(iface, 3) = rhs4(iface, 3) + coeff
+            else if (coupled_row == active_n) then
+              rhs4(iface, 4) = rhs4(iface, 4) + coeff
+            else if (coupled_row == active_n + 1) then
+              rhs4(iface, 5) = rhs4(iface, 5) + coeff
+            else
+              exposed_slot = 0
+              if (coupled_row == 0) exposed_slot = 1
+              if (coupled_row == 1) exposed_slot = 2
+              if (coupled_row == active_n - 2) exposed_slot = 3
+              if (coupled_row == active_n - 1) exposed_slot = 4
+              if (exposed_slot > 0) s4(iface, exposed_slot) = s4(iface, exposed_slot) + coeff
+            end if
+          end do
+        end do
+
+        do k = 1, 4
+          pivot4 = s4(k, k)
+          do m = k + 1, 4
+            factor4 = s4(m, k)/pivot4
+            s4(m, k) = factor4
+            do j = k + 1, 4
+              s4(m, j) = s4(m, j) - factor4*s4(k, j)
+            end do
+            do rhs_col = 1, 5
+              rhs4(m, rhs_col) = rhs4(m, rhs_col) - factor4*rhs4(k, rhs_col)
+            end do
+          end do
+        end do
+        do rhs_col = 1, 5
+          do k = 4, 1, -1
+            do j = k + 1, 4
+              rhs4(k, rhs_col) = rhs4(k, rhs_col) - s4(k, j)*rhs4(j, rhs_col)
+            end do
+            rhs4(k, rhs_col) = rhs4(k, rhs_col)/s4(k, k)
+          end do
+        end do
+
+        do iface = 1, 4
+          ys_reduced_rows_send(iface, iline) = rhs4(iface, 1)
+          ys_reduced_rows_send(4 + iface, iline) = -rhs4(iface, 2)
+          ys_reduced_rows_send(8 + iface, iline) = -rhs4(iface, 3)
+          ys_reduced_rows_send(12 + iface, iline) = -rhs4(iface, 4)
+          ys_reduced_rows_send(16 + iface, iline) = -rhs4(iface, 5)
+        end do
       end if
     end do
     !$omp end target teams distribute parallel do
@@ -786,8 +867,8 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     !$omp shared(dst, ys_gpsv_x, ys_reduced_rhs, ys_left_interface_values, ys_right_interface_values, ys_lower_ghost_rhs, ys_upper_ghost_rhs, &
     !$omp& ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_lower_ghost_row, ys_upper_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, &
     !$omp& nlines, nlines_z, nresp, nx0, nz, active_n, dst_row_base, has_lower_boundary, has_upper_boundary, lower_inner0, lower_inner2, &
-    !$omp& upper_inner0, upper_inner2, upper_inner3, has_padded_dst, nI, batch_count, response_mode, ipy) &
-    !$omp private(iline, local_i, local_idx, p, ix, iz, abs_iz, resp_index, vleft1, vleft2, vright1, vright2, lower_rhs0, upper_rhsn, lower_eq0, upper_eqn)
+    !$omp& upper_inner0, upper_inner2, upper_inner3, has_padded_dst, nI, batch_count, response_mode, ipy, has_left_interface, has_right_interface, interior_base) &
+    !$omp private(iline, local_i, local_idx, p, ix, iz, abs_iz, resp_index, vleft1, vleft2, vright1, vright2, lower_rhs0, upper_rhsn, lower_eq0, upper_eqn, exposed_slot)
     do iline = 1, nlines
       ix = (iline - 1)/nlines_z + nx0
       iz = mod(iline - 1, nlines_z) - nz
@@ -800,31 +881,48 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
         abs_iz = abs(iz)
         resp_index = (ix - nx0)*(nz + 1) + abs_iz + 1
       end select
-      if (ipy == 0) then
-        vright1 = ys_reduced_rhs(3, iline)
-        vright2 = ys_reduced_rhs(4, iline)
-        do local_i = 0, nI - 1
-          p = local_i*batch_count + iline
-          local_idx = local_i
-          dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) = ys_gpsv_x(p) - &
-                                                                    ys_gpsv_x(local_i*batch_count + nlines + resp_index)*vright1 - &
-                                                                ys_gpsv_x(local_i*batch_count + nlines + nresp + resp_index)*vright2
-        end do
-        dst(nI + dst_row_base, iz + nz + 1, ix - nx0 + 1) = vright1
-        dst(nI + 1 + dst_row_base, iz + nz + 1, ix - nx0 + 1) = vright2
-      else
+      vleft1 = (0.0d0, 0.0d0)
+      vleft2 = (0.0d0, 0.0d0)
+      vright1 = (0.0d0, 0.0d0)
+      vright2 = (0.0d0, 0.0d0)
+      if (has_left_interface) then
         vleft1 = ys_reduced_rhs(4*ipy + 1, iline)
         vleft2 = ys_reduced_rhs(4*ipy + 2, iline)
         dst(dst_row_base, iz + nz + 1, ix - nx0 + 1) = vleft1
         dst(dst_row_base + 1, iz + nz + 1, ix - nx0 + 1) = vleft2
-        do local_i = 0, nI - 1
-          p = local_i*batch_count + iline
-          local_idx = local_i + 2
-          dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) = ys_gpsv_x(p) - &
-                                                                     ys_gpsv_x(local_i*batch_count + nlines + resp_index)*vleft1 - &
-                                                                 ys_gpsv_x(local_i*batch_count + nlines + nresp + resp_index)*vleft2
-        end do
       end if
+      if (has_right_interface) then
+        vright1 = ys_reduced_rhs(4*ipy + 3, iline)
+        vright2 = ys_reduced_rhs(4*ipy + 4, iline)
+        dst(active_n - 2 + dst_row_base, iz + nz + 1, ix - nx0 + 1) = vright1
+        dst(active_n - 1 + dst_row_base, iz + nz + 1, ix - nx0 + 1) = vright2
+      end if
+      do local_i = 0, nI - 1
+        p = local_i*batch_count + iline
+        local_idx = interior_base + local_i
+        dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) = ys_gpsv_x(p)
+        exposed_slot = 0
+        if (has_left_interface) then
+          exposed_slot = exposed_slot + 1
+          dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) = &
+            dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) - &
+            ys_gpsv_x(local_i*batch_count + nlines + (exposed_slot - 1)*nresp + resp_index)*vleft1
+          exposed_slot = exposed_slot + 1
+          dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) = &
+            dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) - &
+            ys_gpsv_x(local_i*batch_count + nlines + (exposed_slot - 1)*nresp + resp_index)*vleft2
+        end if
+        if (has_right_interface) then
+          exposed_slot = exposed_slot + 1
+          dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) = &
+            dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) - &
+            ys_gpsv_x(local_i*batch_count + nlines + (exposed_slot - 1)*nresp + resp_index)*vright1
+          exposed_slot = exposed_slot + 1
+          dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) = &
+            dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) - &
+            ys_gpsv_x(local_i*batch_count + nlines + (exposed_slot - 1)*nresp + resp_index)*vright2
+        end if
+      end do
       if (has_padded_dst) then
         if (has_lower_boundary) then
           lower_rhs0 = ys_lower_boundary_rhs(iline) - &

@@ -258,7 +258,7 @@ CONTAINS
     allocate (fr(3 + 2*nPhi)); fr = 0.0
     call ys_prepare_ghost_field_workspace(ny, nz, nxB)
 #ifdef HAVE_CUDA
-    if (solveNS .and. (use_yslab_linsolve .or. npy_grid > 2)) then
+    if (solveNS .and. use_yslab_linsolve) then
       call yslab_line_range(ipy, (nxN - nx0 + 1)*(2*nz + 1), yslab_first_line, yslab_line_count)
       call prepare_yslab_scratch(ny + 3, yslab_line_count)
     end if
@@ -512,7 +512,7 @@ CONTAINS
     row_start = ny0
     row_end = nyN
 #ifdef HAVE_CUDA
-    if (use_yslab_linsolve .or. npy_grid > 2) then
+    if (use_yslab_linsolve) then
       call apply_complex_derivative_transposed_y(src, dst)
       return
     end if
@@ -669,7 +669,7 @@ CONTAINS
     row_start = ny0
     row_end = nyN
 #ifdef HAVE_CUDA
-    if (use_yslab_linsolve .or. npy_grid > 2) then
+    if (use_yslab_linsolve) then
       call solve_compact_component_transposed_y(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
                                                 lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
                                                 lambda_coeff, diffusion_coeff)
