@@ -981,7 +981,7 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     complex(C_DOUBLE_COMPLEX) :: lower_rhs0, upper_rhsn, rhs_value
     real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-2:2), upper_eqn(-2:2), fac
     integer(C_INT) :: ix, iz, iline, p, nlines, nlines_z, row_start, row_end, active_n, row, local_idx
-    integer(C_INT) :: dst_row_base, lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3
+    integer(C_INT) :: dst_row_base
     logical :: has_padded_dst
 
     row_start = ny0
@@ -992,12 +992,6 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     if (has_padded_dst) dst_row_base = 3
     nlines_z = 2*nz + 1
     nlines = ys_workspace_nlines
-
-    lower_inner0 = dst_row_base
-    lower_inner2 = dst_row_base + 2
-    upper_inner0 = active_n + dst_row_base - 3
-    upper_inner2 = upper_inner0 + 2
-    upper_inner3 = upper_inner0 + 3
 
     call roctxPush("ys_single_rank_eliminate_boundaries")
     !$omp target teams distribute parallel do default(none) &
