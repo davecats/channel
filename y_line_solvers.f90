@@ -518,8 +518,8 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     complex(C_DOUBLE_COMPLEX) :: s00, s01, s10, s11, t00, t01, t10, t11, det
     complex(C_DOUBLE_COMPLEX) :: vleft1, vleft2, vright1, vright2
     real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-2:2), upper_eqn(-2:2), fac, coeff
-    integer(C_INT) :: row_count, nI, nresp, batch_count
-    integer(C_INT) :: dst_line_count, dst_nz, status, sys, iline, ref_iline, resp, resp_index
+    integer(C_INT) :: nI, nresp, batch_count
+    integer(C_INT) :: status, sys, iline, ref_iline, resp, resp_index
     integer(C_INT) :: local_i, local_idx, row, col, coupled_row, p, j, offset
     integer(C_INT) :: ix, iz, abs_iz, ix_local
     integer(C_INT) :: lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3
@@ -792,16 +792,12 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
 
     call ys_padded_inner_indices(active_n, dst_row_base, lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3)
 
-    row_count = size(dst, 1)
-    dst_nz = size(dst, 2)
-    dst_line_count = size(dst, 3)
-
     call roctxPush("ys_endpoint_reconstruct")
     !$omp target teams distribute parallel do default(none) &
     !$omp shared(dst, ys_gpsv_x, ys_reduced_rhs, ys_left_interface_values, ys_right_interface_values, ys_lower_ghost_rhs, ys_upper_ghost_rhs, &
     !$omp& ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_lower_ghost_row, ys_upper_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, &
     !$omp& nlines, nlines_z, nresp, nx0, nz, active_n, dst_row_base, has_lower_boundary, has_upper_boundary, lower_inner0, lower_inner2, &
-    !$omp& upper_inner0, upper_inner2, upper_inner3, has_padded_dst, nI, batch_count, response_mode, ipy, row_count, dst_nz, dst_line_count) &
+    !$omp& upper_inner0, upper_inner2, upper_inner3, has_padded_dst, nI, batch_count, response_mode, ipy) &
     !$omp private(iline, local_i, local_idx, p, ix, iz, abs_iz, resp_index, vleft1, vleft2, vright1, vright2, lower_rhs0, upper_rhsn, lower_eq0, upper_eqn)
     do iline = 1, nlines
       ix = (iline - 1)/nlines_z + nx0

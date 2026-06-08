@@ -93,7 +93,7 @@ MODULE dnsdata
   character(len=40) :: fname
   logical :: overlapping
 
-  public :: get_solver_memory_estimate, sync_velocity_to_device, apply_complex_derivative_with_y_pencil
+  public :: get_solver_memory_estimate, sync_velocity_to_device, apply_complex_derivative_current_layout
 
 CONTAINS
 
@@ -485,7 +485,7 @@ CONTAINS
     call ys_solve_compact_derivative(f0, f1, der, D0mat, d140, d14m1, d14n, d14np1, ny, ny0, nyN)
   END SUBROUTINE COMPLEXderiv
 
-  SUBROUTINE apply_complex_derivative_with_y_pencil(src, dst, update_device)
+  SUBROUTINE apply_complex_derivative_current_layout(src, dst, update_device)
     use y_line_solvers, only: ys_solve_ghost_field_reduced, ys_local_rhs, ys_local_operator, &
                               ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
                               ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row
@@ -513,7 +513,7 @@ CONTAINS
     row_end = nyN
 #ifdef HAVE_CUDA
     if (use_yslab_linsolve .or. npy_grid > 2) then
-      call apply_complex_derivative_with_y_slab(src, dst)
+      call apply_complex_derivative_transposed_y(src, dst)
       return
     end if
     if (npy_grid == 1) then
@@ -625,7 +625,7 @@ CONTAINS
 #else
     call ys_solve_ghost_field_reduced(dst, ny, nz)
 #endif
-  END SUBROUTINE apply_complex_derivative_with_y_pencil
+  END SUBROUTINE apply_complex_derivative_current_layout
 
   SUBROUTINE solve_compact_component_current_layout(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
                                                    lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
@@ -1306,7 +1306,7 @@ CONTAINS
 
   end subroutine solve_compact_component_transposed_y
 
-  subroutine apply_complex_derivative_with_y_slab(src, dst)
+  subroutine apply_complex_derivative_transposed_y(src, dst)
     use y_line_solvers, only: ys_prepare_gpsv_workspace, ys_solve_packed_gpsv, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, &
                               ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x
     implicit none
@@ -1404,7 +1404,7 @@ CONTAINS
     call yslab_transpose_from_full(slab, dst, nlines, nlines_z)
     call roctxPop("yslab derivative transpose_from_full")
 
-  end subroutine apply_complex_derivative_with_y_slab
+  end subroutine apply_complex_derivative_transposed_y
 #endif
 
   SUBROUTINE scatter_full_y_line(full_line, local_line)
@@ -1465,7 +1465,7 @@ CONTAINS
                                                 5_C_INT, 0_C_INT, -5_C_INT, 0_C_INT, lambda, 1.0d0)
     call roctxPop("linsolve solve_eta")
     call roctxPush("linsolve d_v_dy")
-    call apply_complex_derivative_with_y_pencil(V(:, :, :, 2), V(:, :, :, 3))
+    call apply_complex_derivative_current_layout(V(:, :, :, 2), V(:, :, :, 3))
     call roctxPop("linsolve d_v_dy")
 
     if (nx0 == 0) then

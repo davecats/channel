@@ -5,7 +5,7 @@ module convvelo
   use, intrinsic :: iso_c_binding
   use config, only: ini_config, has_section, get_string, get_real, lower
   use dnsdata, only: V, nPhi, nz, ny, der, nxd, izd, factor, iproc, D0mat, d240, d24m1, d24n, d24np1, &
-                     apply_complex_derivative_with_y_pencil, has_terminal, &
+                     apply_complex_derivative_current_layout, has_terminal, &
                      time, deltat
   use pressure_output, only: compute_poisson, compute_dpdy
   use mpi_transpose, only: ny0, nyN, nx0, nxN, nxB, nzB, nx, has_average, ierr, sendbuf, recvbuf, &
@@ -419,7 +419,7 @@ contains
     implicit none
     integer(C_INT), intent(in) :: component_index
 
-    call apply_complex_derivative_with_y_pencil(V(:, :, :, component_index), convvelo_work)
+    call apply_complex_derivative_current_layout(V(:, :, :, component_index), convvelo_work)
   end subroutine apply_dy_to_work
 
   subroutine apply_dyy_to_work(component_index)
@@ -687,7 +687,7 @@ contains
     complex(C_DOUBLE_COMPLEX), allocatable :: deriv(:, :, :)
 
     allocate (deriv(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
-    call apply_complex_derivative_with_y_pencil(convvelo_work, deriv, update_device=.false.)
+    call apply_complex_derivative_current_layout(convvelo_work, deriv, update_device=.false.)
     convvelo_work = deriv
     !$omp target update to(convvelo_work)
     deallocate (deriv)
