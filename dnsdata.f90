@@ -542,15 +542,11 @@ CONTAINS
   end subroutine assemble_compact_derivative_system
 
   subroutine solve_current_layout_derivative(dst)
-    use y_line_solvers, only: ys_solve_ghost_field_reduced, ys_solve_ghost_field_reduced_const_operator
+    use y_line_solvers, only: ys_solve_ghost_field_reduced_const_operator
     implicit none
     complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
 
-    if (npy_grid == 2) then
-      call ys_solve_ghost_field_reduced_const_operator(dst, ny, nz)
-    else
-      call ys_solve_ghost_field_reduced(dst, ny, nz)
-    end if
+    call ys_solve_ghost_field_reduced_const_operator(dst, ny, nz)
   end subroutine solve_current_layout_derivative
 
   !$omp declare target(compact_boundary_rhs_value)
@@ -732,15 +728,11 @@ subroutine compact_component_operator_coeffs(component_index, lambda_coeff, diff
   end subroutine assemble_compact_component_system
 
   subroutine solve_current_layout_schur(dst)
-    use y_line_solvers, only: ys_solve_ghost_field_reduced, ys_solve_ghost_field_reduced_symmetric_operator
+    use y_line_solvers, only: ys_solve_ghost_field_reduced_symmetric_operator
     implicit none
     complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
 
-    if (npy_grid == 2) then
-      call ys_solve_ghost_field_reduced_symmetric_operator(dst, ny, nz)
-    else
-      call ys_solve_ghost_field_reduced(dst, ny, nz)
-    end if
+    call ys_solve_ghost_field_reduced_symmetric_operator(dst, ny, nz)
   end subroutine solve_current_layout_schur
 
   subroutine prepare_yslab_scratch(nrows, nlines)

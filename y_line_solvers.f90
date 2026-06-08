@@ -112,11 +112,7 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     ys_workspace_nlines = nlines
     ys_workspace_active_n = active_n
     ys_workspace_npy = npy_grid
-    if (npy_grid == 1) then
-      call ys_prepare_gpsv_workspace(active_n, nlines)
-    else if (npy_grid == 2) then
-      call ys_prepare_gpsv_workspace(active_n, 3*nlines)
-    end if
+    if (npy_grid == 1) call ys_prepare_gpsv_workspace(active_n, nlines)
 
     ys_local_rhs = (0.0d0, 0.0d0)
     ys_local_operator = 0.0d0
