@@ -3,7 +3,7 @@
 program test_y_reduced_known_good_local_dst
   use, intrinsic :: iso_c_binding
   use mpi_transpose
-  use y_line_solvers, only: ys_prepare_ghost_field_workspace, ys_solve_ghost_field_reduced, &
+  use y_line_solvers, only: ys_prepare_ghost_field_workspace, ys_solve_ghost_field_reduced_const_operator, &
                             ys_local_rhs, ys_local_operator, &
                             ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
                             ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row
@@ -64,7 +64,7 @@ program test_y_reduced_known_good_local_dst
   !
   !   first dimension bounds are ny0:nyN
   !
-  ! Therefore inside ys_solve_ghost_field_reduced:
+  ! Therefore inside the reduced ghost solve:
   !
   !   dst_full_start = lbound(dst,1) + 2 = ny0 + 2
   !   dst_full_end   = ubound(dst,1) + 2 = nyN + 2
@@ -92,7 +92,7 @@ program test_y_reduced_known_good_local_dst
     end do
   end do
 
-  call ys_solve_ghost_field_reduced(reduced_local, ny_test, nz_test)
+  call ys_solve_ghost_field_reduced_const_operator(reduced_local, ny_test, nz_test)
 
   local_err = 0.0d0
 

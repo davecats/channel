@@ -17,6 +17,7 @@ add_library(channel_core
     rbmat.f90
     roctx.f90
     y_line_solvers.f90
+    compact_line_solvers.f90
     mpi_transpose.f90
     ffts.f90
     dnsdata.f90

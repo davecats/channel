@@ -321,7 +321,7 @@ CONTAINS
   !--------------------------------------------------------------!
   !--------------- Set-up the compact derivatives ---------------!
   SUBROUTINE setup_derivatives()
-    use y_line_solvers, only: ys_lu5decomp
+    use compact_line_solvers, only: compact_lu5decomp
     IMPLICIT NONE
     real(C_DOUBLE)    :: M(0:4, 0:4), t(0:4)
     integer(C_INT)    :: iy, i, j
@@ -354,7 +354,7 @@ CONTAINS
     d04n = 0; d04n(1) = 1; 
     D0mat = 0.0d0
     FORALL (iy=max(1_C_INT, ny0):min(ny - 1, nyN)) D0mat(iy, -2:2) = der(iy, 0, -2:2)
-    call ys_lu5decomp(D0mat)
+    call compact_lu5decomp(D0mat)
     !$omp target update to(d14np1, d14n, d14m1, d140)
     !$omp target enter data map(to: d240, d24m1, d04n, d14n, d24n, d24np1, D0mat, der)
   END SUBROUTINE setup_derivatives
@@ -462,19 +462,8 @@ CONTAINS
 #define D1(f,g) D_MASTER(f,g,1)
 #define D2(f,g) D_MASTER(f,g,2)
 #define D4(f,g) D_MASTER(f,g,3)
-  !--------------------------------------------------------------!
-  !---COMPLEX----- derivative in the y-direction ----------------!
-  SUBROUTINE COMPLEXderiv(f0, f1, der, D0mat)
-    use y_line_solvers, only: ys_solve_compact_derivative
-    complex(C_DOUBLE_COMPLEX), intent(in)  :: f0(-1:ny + 1)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: f1(-1:ny + 1)
-    real(C_DOUBLE), DIMENSION(:, :), intent(in) :: der(ny0:nyN, 0:3, -2:2)
-    real(C_DOUBLE), DIMENSION(:, :), intent(in) :: D0mat(ny0:nyN + 2, -2:2)
-
-    call ys_solve_compact_derivative(f0, f1, der, D0mat, d140, d14m1, d14n, d14np1, ny, ny0, nyN)
-  END SUBROUTINE COMPLEXderiv
-
   SUBROUTINE apply_complex_derivative_current_layout(src, dst, update_device)
+    use y_line_solvers, only: ys_solve_ghost_field_reduced_const_operator
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), intent(in) :: src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
@@ -484,11 +473,11 @@ CONTAINS
       call apply_complex_derivative_transposed_y(src, dst)
       return
     end if
-    call assemble_compact_derivative_system(src)
-    call solve_current_layout_derivative(dst)
+    call assemble_compact_derivative_current_layout(src)
+    call ys_solve_ghost_field_reduced_const_operator(dst, ny, nz)
   END SUBROUTINE apply_complex_derivative_current_layout
 
-  subroutine assemble_compact_derivative_system(src)
+  subroutine assemble_compact_derivative_current_layout(src)
     use y_line_solvers, only: ys_local_rhs, ys_local_operator, &
                               ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
                               ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row
@@ -505,9 +494,10 @@ CONTAINS
     row_end = nyN
 
     !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(src, der, d140, d14m1, d14n, d14np1, ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, &
-    !$omp& ys_upper_ghost_rhs, ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ny, nz, nlines_z, ix_first, ix_last, &
-    !$omp& iz_first, iz_last, row_start, row_end) private(ix, iz, iy, iline)
+    !$omp shared(src, der, ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, &
+    !$omp& ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, &
+    !$omp& d140, d14m1, d14n, d14np1, ny, nz, nlines_z, ix_first, ix_last, iz_first, iz_last, row_start, row_end) &
+    !$omp private(ix, iz, iy, iline)
     do ix = ix_first, ix_last
       do iz = iz_first, iz_last
         iline = (ix - ix_first)*nlines_z + (iz - iz_first + 1)
@@ -536,15 +526,59 @@ CONTAINS
       end do
     end do
     !$omp end target teams distribute parallel do
-  end subroutine assemble_compact_derivative_system
+  end subroutine assemble_compact_derivative_current_layout
 
-  subroutine solve_current_layout_derivative(dst)
-    use y_line_solvers, only: ys_solve_ghost_field_reduced_const_operator
-    implicit none
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+  subroutine assemble_compact_linsolve_current_layout(src, component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
+                                                      lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
+                                                      lambda_coeff, diffusion_coeff)
+    use y_line_solvers, only: ys_local_rhs, ys_local_operator, &
+                              ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
+                              ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row
+    IMPLICIT NONE
+    complex(C_DOUBLE_COMPLEX), intent(in) :: src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    integer(C_INT), intent(in) :: component_index, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index
+    real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
+    real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
+    real(C_DOUBLE) :: row_coeffs(-2:2)
+    integer(C_INT) :: ix, iz, iy, iline, nlines_z, ix_first, ix_last, iz_first, iz_last, row_start, row_end
 
-    call ys_solve_ghost_field_reduced_const_operator(dst, ny, nz)
-  end subroutine solve_current_layout_derivative
+    nlines_z = 2*nz + 1
+    ix_first = nx0
+    ix_last = nxN
+    iz_first = -nz
+    iz_last = nz
+    row_start = ny0
+    row_end = nyN
+
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(src, der, k2, ni, lambda_coeff, diffusion_coeff, component_index, ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, &
+    !$omp& ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, &
+    !$omp& lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, bc0, bcn, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
+    !$omp& nz, nlines_z, ix_first, ix_last, iz_first, iz_last, row_start, row_end) &
+    !$omp private(ix, iz, iy, iline, row_coeffs)
+    do ix = ix_first, ix_last
+      do iz = iz_first, iz_last
+        iline = (ix - ix_first)*nlines_z + (iz - iz_first + 1)
+
+        do iy = row_start, row_end
+          ys_local_rhs(iy, iline) = src(iy, iz, ix)
+          call compact_component_operator_coeffs(component_index, lambda_coeff, diffusion_coeff, ni, k2(iz, ix), der(iy, 0, -2:2), &
+                                                 der(iy, 2, -2:2), der(iy, 3, -2:2), row_coeffs)
+          ys_local_operator(iy, -2:2, iline) = row_coeffs
+        end do
+
+        ys_lower_ghost_row(:, iline) = lower_ghost_bc
+        ys_lower_boundary_row(:, iline) = lower_bc
+        ys_upper_boundary_row(:, iline) = upper_bc
+        ys_upper_ghost_row(:, iline) = upper_ghost_bc
+        call compact_boundary_rhs_value(bc0, bcn, nz, ix_first, iz, ix, lower_ghost_rhs_index, ys_lower_ghost_rhs(iline))
+        call compact_boundary_rhs_value(bc0, bcn, nz, ix_first, iz, ix, lower_rhs_index, ys_lower_boundary_rhs(iline))
+        call compact_boundary_rhs_value(bc0, bcn, nz, ix_first, iz, ix, upper_rhs_index, ys_upper_boundary_rhs(iline))
+        call compact_boundary_rhs_value(bc0, bcn, nz, ix_first, iz, ix, upper_ghost_rhs_index, ys_upper_ghost_rhs(iline))
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+  end subroutine assemble_compact_linsolve_current_layout
 
   !$omp declare target(compact_boundary_rhs_value)
   subroutine compact_boundary_rhs_value(bc0_values, bcn_values, nz_value, nx0_value, iz, ix, rhs_index, value)
@@ -564,7 +598,7 @@ CONTAINS
   end subroutine compact_boundary_rhs_value
 
   !$omp declare target(compact_component_operator_coeffs)
-subroutine compact_component_operator_coeffs(component_index, lambda_coeff, diffusion_coeff, ni_value, kk, der0, der2, der4, coeffs)
+  subroutine compact_component_operator_coeffs(component_index, lambda_coeff, diffusion_coeff, ni_value, kk, der0, der2, der4, coeffs)
     implicit none
     integer(C_INT), intent(in) :: component_index
     real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff, ni_value, kk
@@ -593,61 +627,11 @@ subroutine compact_component_operator_coeffs(component_index, lambda_coeff, diff
                                           lambda_coeff, diffusion_coeff)
       return
     end if
-    call assemble_compact_component_system(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
-                                           lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
-                                           lambda_coeff, diffusion_coeff)
+    call assemble_compact_linsolve_current_layout(V(:, :, :, component_index), component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
+                                                  lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
+                                                  lambda_coeff, diffusion_coeff)
     call ys_solve_ghost_field_reduced_symmetric_operator(V(:, :, :, component_index), ny, nz)
   END SUBROUTINE solve_compact_component_current_layout
-
-  subroutine assemble_compact_component_system(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
-                                               lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
-                                               lambda_coeff, diffusion_coeff)
-    use y_line_solvers, only: ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, &
-                            ys_upper_ghost_rhs, ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row
-    implicit none
-    integer(C_INT), intent(in) :: component_index, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index
-    real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
-    real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
-    real(C_DOUBLE) :: row_coeffs(-2:2)
-    integer(C_INT) :: ix, iz, iy, iline, nlines_z, ix_first, ix_last, iz_first, iz_last, row_start, row_end
-
-    nlines_z = 2*nz + 1
-    ix_first = nx0
-    ix_last = nxN
-    iz_first = -nz
-    iz_last = nz
-    row_start = ny0
-    row_end = nyN
-
-    !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(V, der, k2, ni, lambda_coeff, diffusion_coeff, component_index, ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, &
-    !$omp& ys_upper_boundary_rhs, ys_upper_ghost_rhs, ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, lower_bc, &
-    !$omp& lower_ghost_bc, upper_bc, upper_ghost_bc, bc0, bcn, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, nlines_z, ny, nz, &
-    !$omp& ix_first, ix_last, iz_first, iz_last, row_start, row_end) private(ix, iz, iy, iline, row_coeffs)
-    do ix = ix_first, ix_last
-      do iz = iz_first, iz_last
-        iline = (ix - ix_first)*nlines_z + (iz - iz_first + 1)
-
-        ys_lower_ghost_row(:, iline) = lower_ghost_bc
-        ys_lower_boundary_row(:, iline) = lower_bc
-        ys_upper_boundary_row(:, iline) = upper_bc
-        ys_upper_ghost_row(:, iline) = upper_ghost_bc
-
-        do iy = row_start, row_end
-          ys_local_rhs(iy, iline) = V(iy, iz, ix, component_index)
-          call compact_component_operator_coeffs(component_index, lambda_coeff, diffusion_coeff, ni, k2(iz, ix), der(iy, 0, -2:2), &
-                                                 der(iy, 2, -2:2), der(iy, 3, -2:2), row_coeffs)
-          ys_local_operator(iy, -2:2, iline) = row_coeffs
-        end do
-
-        call compact_boundary_rhs_value(bc0, bcn, nz, ix_first, iz, ix, lower_ghost_rhs_index, ys_lower_ghost_rhs(iline))
-        call compact_boundary_rhs_value(bc0, bcn, nz, ix_first, iz, ix, lower_rhs_index, ys_lower_boundary_rhs(iline))
-        call compact_boundary_rhs_value(bc0, bcn, nz, ix_first, iz, ix, upper_rhs_index, ys_upper_boundary_rhs(iline))
-        call compact_boundary_rhs_value(bc0, bcn, nz, ix_first, iz, ix, upper_ghost_rhs_index, ys_upper_ghost_rhs(iline))
-      end do
-    end do
-    !$omp end target teams distribute parallel do
-  end subroutine assemble_compact_component_system
 
   subroutine solve_compact_component_full_y(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
                                             lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
@@ -805,7 +789,7 @@ subroutine compact_component_operator_coeffs(component_index, lambda_coeff, diff
 
   SUBROUTINE solve_mean_correction_line(x, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, lambda_coeff, diffusion_coeff)
     !!! THIS OPERATES ON A FULL Y LINE (ASSEMBLED FROM ALL PROCESSES) !!!
-    use y_line_solvers, only: ys_solve_compact_system
+    use compact_line_solvers, only: solve_full_line_compact
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), intent(inout) :: x(-1:ny + 1)
     real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
@@ -821,8 +805,8 @@ subroutine compact_component_operator_coeffs(component_index, lambda_coeff, diff
       mat(iy, -2:2) = lambda_coeff*der(iy, 0, -2:2) - &
                       diffusion_coeff*ni*(der(iy, 2, -2:2) - k2(0, 0)*der(iy, 0, -2:2))
     end do
-    call ys_solve_compact_system(x, mat, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
-                                 (0.0d0, 0.0d0), (0.0d0, 0.0d0), (0.0d0, 0.0d0), (0.0d0, 0.0d0), ny, 1_C_INT, ny - 1)
+    call solve_full_line_compact(x, mat, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
+                                 (0.0d0, 0.0d0), (0.0d0, 0.0d0), (0.0d0, 0.0d0), (0.0d0, 0.0d0), ny)
   END SUBROUTINE solve_mean_correction_line
 
 ! Orr-Sommerfeld and Squire opearators

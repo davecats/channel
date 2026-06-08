@@ -3,24 +3,18 @@
 module y_line_solvers
 
   use, intrinsic :: iso_c_binding
-  use mpi_transpose, only: ny0, nyN, nx0, nxN, nxB, npy_grid, ierr, ipy, MPI_COMM_Y
+  use mpi_transpose, only: ny0, nyN, nx0, nxN, nxB, npy_grid, ipy, allgather_y_device_complex_rows
   use roctx, only: roctxPush, roctxPop
-#ifdef HAVE_MPI
-  use mpi_f08
-#endif
 #ifdef HAVE_CUDA
   use cusparse
 #endif
 
   implicit none
   private
-  integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_FULL = 0_C_INT
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_CONST = 1_C_INT
-  integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_SYMMETRIC = 2_C_INT
+  integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_EVEN_Z = 2_C_INT
 
-  public :: ys_lu5decomp, ys_leftlu5div
-  public :: ys_solve_compact_derivative, ys_solve_compact_system, ys_solve_ghost_system
-  public :: ys_prepare_ghost_field_workspace, ys_release_ghost_field_workspace, ys_solve_ghost_field_reduced
+  public :: ys_prepare_ghost_field_workspace, ys_release_ghost_field_workspace
   public :: ys_local_rhs, ys_local_operator
   public :: ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs
   public :: ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row
@@ -334,7 +328,7 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     end if
   end subroutine ys_eliminate_physical_boundary_row
 
-subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_values, bcn_values, ny_value, nz_value, nx0_value, &
+  subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_values, bcn_values, ny_value, nz_value, nx0_value, &
                                           ni_value, component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
                                           lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
                                           lambda_coeff, diffusion_coeff, first_line, line_count, solve_label)
@@ -487,153 +481,12 @@ subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_
     call roctxPop("compact full-y unpack")
   end subroutine ys_solve_full_y_lines_packed
 
-  subroutine ys_lu5decomp(a)
-    real(C_DOUBLE), intent(inout) :: a(0:, -2:)
-    integer(C_INT) :: hi1, hi2
-    real(C_DOUBLE) :: piv
-    integer :: i, k, j
-
-    hi1 = size(a, 1) - 1
-    hi2 = size(a, 2) - 3
-    a(hi1 - 2, 1:2) = 0
-    a(hi1 - 3, 2) = 0
-    do i = hi1 - hi2, 0, -1
-      do k = hi2, 1, -1
-        piv = a(i, k)
-        do j = -1, -2, -1
-          a(i, j + k) = a(i, j + k) - piv*a(i + k, j)
-        end do
-      end do
-      piv = 1.0d0/a(i, 0)
-      a(i, 0) = piv
-      a(i, -2:-1) = a(i, -2:-1)*piv
-    end do
-    a(0, -2:-1) = 0
-    a(1, -2) = 0
-  end subroutine ys_lu5decomp
-
-  subroutine ys_leftlu5div(x, a)
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(-2:)
-    real(C_DOUBLE), intent(in) :: a(0:, -2:)
-    integer(C_INT) :: hi1, hi2, i
-
-    hi1 = size(a, 1) - 1
-    hi2 = size(a, 2) - 3
-
-    do i = hi1 - hi2, 0, -1
-      x(i) = x(i) - (a(i, 1)*x(i + 1) + a(i, 2)*x(i + 2))
-      x(i) = x(i)*a(i, 0)
-    end do
-
-    do i = 0, hi1
-      x(i) = x(i) - (a(i, -2)*x(i - 2) + a(i, -1)*x(i - 1))
-    end do
-  end subroutine ys_leftlu5div
-
-  subroutine ys_solve_compact_derivative(f0, f1, der, d0mat, d140, d14m1, d14n, d14np1, ny, ny0, nyN)
-    integer(C_INT), intent(in) :: ny, ny0, nyN
-    complex(C_DOUBLE_COMPLEX), intent(in) :: f0(-1:ny + 1)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: f1(-1:ny + 1)
-    real(C_DOUBLE), intent(in) :: der(ny0:nyN, 0:3, -2:2)
-    real(C_DOUBLE), intent(in) :: d0mat(ny0:nyN + 2, -2:2)
-    real(C_DOUBLE), intent(in) :: d140(-2:2), d14m1(-2:2), d14n(-2:2), d14np1(-2:2)
-    integer(C_INT) :: iy
-
-    f1(0) = sum(d140(-2:2)*f0(-1:3))
-    f1(-1) = sum(d14m1(-2:2)*f0(-1:3))
-    f1(ny) = sum(d14n(-2:2)*f0(ny - 3:ny + 1))
-    f1(ny + 1) = sum(d14np1(-2:2)*f0(ny - 3:ny + 1))
-    do iy = ny0, nyN
-      f1(iy) = sum(der(iy, 1, -2:2)*f0(iy - 2:iy + 2))
-    end do
-    f1(1) = f1(1) - (der(1, 0, -1)*f1(0) + der(1, 0, -2)*f1(-1))
-    f1(2) = f1(2) - der(2, 0, -2)*f1(0)
-    f1(ny - 1) = f1(ny - 1) - (der(ny - 1, 0, 1)*f1(ny) + der(ny - 1, 0, 2)*f1(ny + 1))
-    f1(ny - 2) = f1(ny - 2) - der(ny - 2, 0, 2)*f1(ny)
-    call ys_leftlu5div(f1, d0mat)
-  end subroutine ys_solve_compact_derivative
-  subroutine ys_solve_compact_system(x, a, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
-                                     rhs_lower, rhs_lower_ghost, rhs_upper, rhs_upper_ghost, ny, ny0, nyN)
-    integer(C_INT), intent(in) :: ny, ny0, nyN
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(-1:ny + 1)
-    real(C_DOUBLE), intent(inout) :: a(ny0:nyN + 2, -2:2)
-    real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: rhs_lower, rhs_lower_ghost, rhs_upper, rhs_upper_ghost
-    real(C_DOUBLE) :: eqm1(-2:2), eq0(-2:2), eqn(-2:2), eqnp1(-2:2)
-
-    eqm1 = lower_ghost_bc
-    eq0 = lower_bc
-    eqn = upper_bc
-    eqnp1 = upper_ghost_bc
-    x(-1) = rhs_lower_ghost
-    x(0) = rhs_lower
-    x(ny) = rhs_upper
-    x(ny + 1) = rhs_upper_ghost
-    call ys_solve_ghost_system(x, a, eqm1, eq0, eqn, eqnp1, ny)
-  end subroutine ys_solve_compact_system
-
-  subroutine ys_solve_ghost_system(x, a, eqm1, eq0, eqn, eqnp1, ny)
-    integer(C_INT), intent(in) :: ny
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(-1:ny + 1)
-    real(C_DOUBLE), intent(inout) :: a(1:ny + 1, -2:2)
-    real(C_DOUBLE), intent(inout) :: eqm1(-2:2), eq0(-2:2), eqn(-2:2), eqnp1(-2:2)
-
-    x(0) = x(0) - x(-1)*eq0(-2)/eqm1(-2)
-    eq0(-2:2) = eq0(-2:2) - eqm1(-2:2)*eq0(-2)/eqm1(-2)
-    eq0(-2) = 0.0d0
-
-    x(1) = x(1) - x(-1)*a(1, -2)/eqm1(-2)
-    a(1, -2:2) = a(1, -2:2) - eqm1(-2:2)*a(1, -2)/eqm1(-2)
-    a(1, -2) = 0.0d0
-
-    x(1) = x(1) - x(0)*a(1, -1)/eq0(-1)
-    a(1, -2:2) = a(1, -2:2) - eq0(-2:2)*a(1, -1)/eq0(-1)
-    a(1, -1) = 0.0d0
-
-    x(2) = x(2) - x(0)*a(2, -2)/eq0(-1)
-    a(2, -2:1) = a(2, -2:1) - eq0(-1:2)*a(2, -2)/eq0(-1)
-    a(2, -2) = 0.0d0
-
-    x(ny) = x(ny) - x(ny + 1)*eqn(2)/eqnp1(2)
-    eqn(-2:2) = eqn(-2:2) - eqnp1(-2:2)*eqn(2)/eqnp1(2)
-    eqn(2) = 0.0d0
-
-    x(ny - 1) = x(ny - 1) - x(ny + 1)*a(ny - 1, 2)/eqnp1(2)
-    a(ny - 1, -2:2) = a(ny - 1, -2:2) - eqnp1(-2:2)*a(ny - 1, 2)/eqnp1(2)
-    a(ny - 1, 2) = 0.0d0
-
-    x(ny - 1) = x(ny - 1) - x(ny)*a(ny - 1, 1)/eqn(1)
-    a(ny - 1, -2:2) = a(ny - 1, -2:2) - eqn(-2:2)*a(ny - 1, 1)/eqn(1)
-    a(ny - 1, 1) = 0.0d0
-
-    x(ny - 2) = x(ny - 2) - x(ny)*a(ny - 2, 2)/eqn(1)
-    a(ny - 2, -1:2) = a(ny - 2, -1:2) - eqn(-2:1)*a(ny - 2, 2)/eqn(1)
-    a(ny - 2, 2) = 0.0d0
-
-    call ys_lu5decomp(a)
-    call ys_leftlu5div(x, a)
-
-    x(0) = (x(0) - sum(eq0(0:2)*x(1:3)))/eq0(-1)
-    x(-1) = (x(-1) - sum(eqm1(-1:2)*x(0:3)))/eqm1(-2)
-    x(ny) = (x(ny) - sum(eqn(-2:0)*x(ny - 3:ny - 1)))/eqn(1)
-    x(ny + 1) = (x(ny + 1) - sum(eqnp1(-2:1)*x(ny - 3:ny)))/eqnp1(2)
-  end subroutine ys_solve_ghost_system
-
-  subroutine ys_solve_ghost_field_reduced(dst, ny, nz)
+  subroutine ys_solve_assembled_ghost_field(dst, ny, nz, response_mode)
     implicit none
-    integer(C_INT), intent(in) :: ny, nz
+    integer(C_INT), intent(in) :: ny, nz, response_mode
     complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
-
-    call ys_solve_assembled_ghost_field(dst, ny, nz, YS_ENDPOINT_RESPONSE_FULL)
-  end subroutine ys_solve_ghost_field_reduced
-
-  subroutine ys_endpoint_context(dst, ny, nz, row_start, row_end, active_n, nlines, nlines_z, dst_row_base, &
-                                 has_lower_boundary, has_upper_boundary, has_padded_dst)
-    implicit none
-    integer(C_INT), intent(in) :: ny, nz
-    complex(C_DOUBLE_COMPLEX), intent(in) :: dst(:, :, :)
-    integer(C_INT), intent(out) :: row_start, row_end, active_n, nlines, nlines_z, dst_row_base
-    logical, intent(out) :: has_lower_boundary, has_upper_boundary, has_padded_dst
+    integer(C_INT) :: row_start, row_end, active_n, nlines, nlines_z, dst_row_base
+    logical :: has_lower_boundary, has_upper_boundary, has_padded_dst
 
     row_start = ny0
     row_end = nyN
@@ -645,29 +498,6 @@ subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_
     has_padded_dst = (size(dst, 1) == active_n + 4)
     dst_row_base = 1
     if (has_padded_dst) dst_row_base = 3
-  end subroutine ys_endpoint_context
-
-  subroutine ys_padded_inner_indices(active_n, dst_row_base, lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3)
-    implicit none
-    integer(C_INT), intent(in) :: active_n, dst_row_base
-    integer(C_INT), intent(out) :: lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3
-
-    lower_inner0 = dst_row_base
-    lower_inner2 = dst_row_base + 2
-    upper_inner0 = active_n + dst_row_base - 3
-    upper_inner2 = upper_inner0 + 2
-    upper_inner3 = upper_inner0 + 3
-  end subroutine ys_padded_inner_indices
-
-  subroutine ys_solve_assembled_ghost_field(dst, ny, nz, response_mode)
-    implicit none
-    integer(C_INT), intent(in) :: ny, nz, response_mode
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
-    integer(C_INT) :: row_start, row_end, active_n, nlines, nlines_z, dst_row_base
-    logical :: has_lower_boundary, has_upper_boundary, has_padded_dst
-
-    call ys_endpoint_context(dst, ny, nz, row_start, row_end, active_n, nlines, nlines_z, dst_row_base, &
-                             has_lower_boundary, has_upper_boundary, has_padded_dst)
     if (.not. has_padded_dst .and. size(dst, 1) /= active_n) then
       error stop "ys_solve_assembled_ghost_field expected either local-only or ghost-padded dst"
     end if
@@ -772,7 +602,7 @@ subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_
     integer(C_INT), intent(in) :: ny, nz
     complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
 
-    call ys_solve_assembled_ghost_field(dst, ny, nz, YS_ENDPOINT_RESPONSE_SYMMETRIC)
+    call ys_solve_assembled_ghost_field(dst, ny, nz, YS_ENDPOINT_RESPONSE_EVEN_Z)
   end subroutine ys_solve_ghost_field_reduced_symmetric_operator
 
   subroutine ys_solve_endpoint_schur(dst, ny, nz, has_lower_boundary, has_upper_boundary, has_padded_dst, &
@@ -806,11 +636,9 @@ subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_
     nI = active_n - exposed_n
     if (nI <= 0) error stop "endpoint Schur solve needs at least one interior row"
     select case (response_mode)
-    case (YS_ENDPOINT_RESPONSE_FULL)
-      nresp = nlines
     case (YS_ENDPOINT_RESPONSE_CONST)
       nresp = 1_C_INT
-    case (YS_ENDPOINT_RESPONSE_SYMMETRIC)
+    case (YS_ENDPOINT_RESPONSE_EVEN_Z)
       nresp = (nxN - nx0 + 1)*(nz + 1)
     case default
       error stop "unknown endpoint Schur response mode"
@@ -837,8 +665,6 @@ subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_
         else
           resp = mod(sys - nlines - 1, nresp) + 1
           select case (response_mode)
-          case (YS_ENDPOINT_RESPONSE_FULL)
-            ref_iline = resp
           case (YS_ENDPOINT_RESPONSE_CONST)
             ref_iline = 1_C_INT
           case default
@@ -919,8 +745,6 @@ subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_
       ix = (iline - 1)/nlines_z + nx0
       iz = mod(iline - 1, nlines_z) - nz
       select case (response_mode)
-      case (YS_ENDPOINT_RESPONSE_FULL)
-        resp_index = iline
       case (YS_ENDPOINT_RESPONSE_CONST)
         resp_index = 1_C_INT
       case default
@@ -1083,7 +907,11 @@ subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_
 
     call ys_solve_reduced_interfaces()
 
-    call ys_padded_inner_indices(active_n, dst_row_base, lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3)
+    lower_inner0 = dst_row_base
+    lower_inner2 = dst_row_base + 2
+    upper_inner0 = active_n + dst_row_base - 3
+    upper_inner2 = upper_inner0 + 2
+    upper_inner3 = upper_inner0 + 3
 
     call roctxPush("ys_endpoint_reconstruct")
     !$omp target teams distribute parallel do default(none) &
@@ -1096,8 +924,6 @@ subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_
       ix = (iline - 1)/nlines_z + nx0
       iz = mod(iline - 1, nlines_z) - nz
       select case (response_mode)
-      case (YS_ENDPOINT_RESPONSE_FULL)
-        resp_index = iline
       case (YS_ENDPOINT_RESPONSE_CONST)
         resp_index = 1_C_INT
       case default
@@ -1314,26 +1140,8 @@ subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_
     nlines = size(ys_reduced_rows_send, 2)
     niface = 4*npy_grid
 
-#ifdef HAVE_MPI
-    call roctxPush("MPI_Allgather reduced_y_interfaces")
-#ifndef HAVE_HIP
-    !$omp target data use_device_ptr(ys_reduced_rows_send, ys_reduced_rows_recv)
-#endif
-    call MPI_Allgather(ys_reduced_rows_send, 20*nlines, MPI_DOUBLE_COMPLEX, ys_reduced_rows_recv, 20*nlines, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
-#ifndef HAVE_HIP
-    !$omp end target data
-#endif
-    call roctxPop("MPI_Allgather reduced_y_interfaces")
-#else
-    !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(ys_reduced_rows_send, ys_reduced_rows_recv, nlines) private(iline, i)
-    do iline = 1, nlines
-      do i = 1, 20
-        ys_reduced_rows_recv(i, iline, 1) = ys_reduced_rows_send(i, iline)
-      end do
-    end do
-    !$omp end target teams distribute parallel do
-#endif
+    call allgather_y_device_complex_rows(ys_reduced_rows_send, ys_reduced_rows_recv, 20_C_INT, nlines, &
+                                         "MPI_Allgather reduced_y_interfaces")
 
     call roctxPush("ys_reduced_interfaces_solve")
     !$omp target teams distribute parallel do default(none) &
@@ -1435,60 +1243,6 @@ subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_
       rhs(i) = rhs(i)/a(i, bw + 1)
     end do
   end subroutine ys_solve_factored_banded_complex
-
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
-  !$omp declare target(ys_factor_penta)
-#endif
-  subroutine ys_factor_penta(a)
-    real(C_DOUBLE), intent(inout) :: a(0:, -2:)
-    integer(C_INT) :: n, i
-    real(C_DOUBLE) :: piv, factor
-
-    ! Generic pentadiagonal LU on the local reduced block. The wall/ghost rows
-    ! are already eliminated outside this factorization, so this is a pure
-    ! interior solve rather than the boundary-aware variant used elsewhere.
-    n = size(a, 1)
-    do i = 0, n - 1
-      piv = a(i, 0)
-      a(i, 0) = 1.0d0/piv
-
-      if (i + 1 < n) then
-        factor = a(i + 1, -1)*a(i, 0)
-        a(i + 1, -1) = factor
-        a(i + 1, 0) = a(i + 1, 0) - factor*a(i, 1)
-        if (i + 2 < n) a(i + 1, 1) = a(i + 1, 1) - factor*a(i, 2)
-      end if
-
-      if (i + 2 < n) then
-        factor = a(i + 2, -2)*a(i, 0)
-        a(i + 2, -2) = factor
-        a(i + 2, -1) = a(i + 2, -1) - factor*a(i, 1)
-        a(i + 2, 0) = a(i + 2, 0) - factor*a(i, 2)
-      end if
-    end do
-  end subroutine ys_factor_penta
-
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
-  !$omp declare target(ys_solve_factored_penta_one)
-#endif
-  subroutine ys_solve_factored_penta_one(rhs, a)
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs(0:)
-    real(C_DOUBLE), intent(in) :: a(0:, -2:)
-    integer(C_INT) :: n, i
-
-    n = size(a, 1)
-
-    do i = 0, n - 1
-      if (i >= 2) rhs(i) = rhs(i) - a(i, -2)*rhs(i - 2)
-      if (i >= 1) rhs(i) = rhs(i) - a(i, -1)*rhs(i - 1)
-    end do
-
-    do i = n - 1, 0, -1
-      if (i + 1 < n) rhs(i) = rhs(i) - a(i, 1)*rhs(i + 1)
-      if (i + 2 < n) rhs(i) = rhs(i) - a(i, 2)*rhs(i + 2)
-      rhs(i) = rhs(i)*a(i, 0)
-    end do
-  end subroutine ys_solve_factored_penta_one
 
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
   !$omp declare target(ys_factor_penta_interleaved)

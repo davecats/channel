@@ -3,7 +3,7 @@ program test_mean_correction
   use dnsdata
   use driver
   use mpi_transpose, only: ipy, npy_grid, MPI_COMM_Y, ierr
-  use y_line_solvers, only: ys_solve_compact_system
+  use compact_line_solvers, only: solve_full_line_compact
   implicit none
 
   character(len=256) :: config_file, restart_in
@@ -31,12 +31,12 @@ program test_mean_correction
   end do
   mat_test = mat_ref
 
-  call ys_solve_compact_system(x_ref, mat_ref, eta0bc, eta0m1bc, etanbc, etanp1bc, &
-                               (0.0d0, 0.0d0), (0.0d0, 0.0d0), (0.0d0, 0.0d0), (0.0d0, 0.0d0), ny, 1_C_INT, ny - 1)
+  call solve_full_line_compact(x_ref, mat_ref, eta0bc, eta0m1bc, etanbc, etanp1bc, &
+                               (0.0d0, 0.0d0), (0.0d0, 0.0d0), (0.0d0, 0.0d0), (0.0d0, 0.0d0), ny)
 
   if (npy_grid == 1 .or. ipy == 0) then
-    call ys_solve_compact_system(x_test, mat_test, eta0bc, eta0m1bc, etanbc, etanp1bc, &
-                                 (0.0d0, 0.0d0), (0.0d0, 0.0d0), (0.0d0, 0.0d0), (0.0d0, 0.0d0), ny, 1_C_INT, ny - 1)
+    call solve_full_line_compact(x_test, mat_test, eta0bc, eta0m1bc, etanbc, etanp1bc, &
+                                 (0.0d0, 0.0d0), (0.0d0, 0.0d0), (0.0d0, 0.0d0), (0.0d0, 0.0d0), ny)
   end if
 #ifdef HAVE_MPI
   if (npy_grid > 1) call MPI_Bcast(x_test, ny + 3, MPI_DOUBLE_COMPLEX, 0, MPI_COMM_Y, ierr)

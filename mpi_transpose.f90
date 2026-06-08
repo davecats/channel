@@ -586,6 +586,37 @@ CONTAINS
 #endif
   END SUBROUTINE gather_full_y_line
 
+  SUBROUTINE allgather_y_device_complex_rows(send_rows, recv_rows, nrows, ncols, marker)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: send_rows(:, :)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: recv_rows(:, :, :)
+    integer(C_INT), intent(in) :: nrows, ncols
+    character(len=*), intent(in) :: marker
+#ifndef HAVE_MPI
+    integer(C_INT) :: irow, icol
+#endif
+
+#ifdef HAVE_MPI
+    call roctxPush(marker)
+#ifndef HAVE_HIP
+    !$omp target data use_device_ptr(send_rows, recv_rows)
+#endif
+    call MPI_Allgather(send_rows, nrows*ncols, MPI_DOUBLE_COMPLEX, recv_rows, nrows*ncols, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
+#ifndef HAVE_HIP
+    !$omp end target data
+#endif
+    call roctxPop(marker)
+#else
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(send_rows, recv_rows, nrows, ncols) private(irow, icol)
+    do icol = 1, ncols
+      do irow = 1, nrows
+        recv_rows(irow, icol, 1) = send_rows(irow, icol)
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+#endif
+  END SUBROUTINE allgather_y_device_complex_rows
+
   !------- Divide the problem in pencils ---------!
   !-----------------------------------------------!
   SUBROUTINE init_MPI(nxpp, nz, ny, nxd, nzd, nPhi, overlapping, npy_requested)

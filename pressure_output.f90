@@ -16,7 +16,7 @@ MODULE pressure_output
                            sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, &
                            fft_transpose_is_local, repack_zTOx_local, repack_xTOz_local
   USE roctx, ONLY: roctxPush, roctxPop
-  USE y_line_solvers, ONLY: ys_solve_ghost_field_reduced, ys_local_rhs, ys_local_operator, &
+  USE y_line_solvers, ONLY: ys_solve_ghost_field_reduced_symmetric_operator, ys_local_rhs, ys_local_operator, &
                             ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
                             ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row
 #ifdef HAVE_MPI
@@ -549,7 +549,7 @@ CONTAINS
     end do
     !$omp end target teams distribute parallel do
 
-    call ys_solve_ghost_field_reduced(p, ny, nz)
+    call ys_solve_ghost_field_reduced_symmetric_operator(p, ny, nz)
   END SUBROUTINE solve_pressure_field
 
   SUBROUTINE solve_dpdy_field(src0, src1, dpdy)
@@ -597,7 +597,7 @@ CONTAINS
     end do
     !$omp end target teams distribute parallel do
 
-    call ys_solve_ghost_field_reduced(dpdy, ny, nz)
+    call ys_solve_ghost_field_reduced_symmetric_operator(dpdy, ny, nz)
   END SUBROUTINE solve_dpdy_field
 
 END MODULE pressure_output
