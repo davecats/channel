@@ -5,20 +5,24 @@ MODULE pressure_output
   USE, intrinsic :: iso_c_binding
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
   USE dnsdata, ONLY: V, der, k2, ialfa, ibeta, d140, d240, d24n, ni, alfa0, beta0, factor, &
-                     ny, nz, nxd, izd
+                     ny, nz, nxd, izd, eliminate_assembled_boundaries, &
+                     pack_assembled_pentadiagonal, unpack_assembled_pentadiagonal, &
+                     reconstruct_assembled_boundaries
   USE ffts, ONLY: FFT, IFT, RFT, HFT, VVdz, VVdx
 #else
   USE dnsdata, ONLY: V, der, k2, ialfa, ibeta, d140, d240, d24n, ni, alfa0, beta0, factor, &
-                     ny, nz, nxd, izd, VVdz, VVdx
+                     ny, nz, nxd, izd, VVdz, VVdx, eliminate_assembled_boundaries, &
+                     pack_assembled_pentadiagonal, unpack_assembled_pentadiagonal, &
+                     reconstruct_assembled_boundaries
   USE ffts, ONLY: FFT, IFT, RFT, HFT
 #endif
-  USE mpi_transpose, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, ierr, &
+  USE mpi_transpose, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, npy_grid, ierr, &
                            sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, &
                            fft_transpose_is_local, repack_zTOx_local, repack_xTOz_local
   USE roctx, ONLY: roctxPush, roctxPop
-  USE y_line_solvers, ONLY: ys_solve_ghost_field_reduced_symmetric_operator, ys_local_rhs, ys_local_operator, &
+  USE y_line_solvers, ONLY: ys_prepare_assembled_workspace, ys_solve_endpoint_schur, ys_solve_packed_pentadiagonal, ys_local_rhs, ys_local_operator, &
                             ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
-                            ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row
+                            ys_eqm1, ys_eq0, ys_eqn, ys_eqnp1
 #ifdef HAVE_MPI
   USE mpi_f08
 #endif
@@ -484,72 +488,7 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(in) :: src0(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(in) :: src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: p(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    integer(C_INT) :: ix, iz, iy, iline, nlines_z, ix_first, ix_last, iz_first, iz_last, row_start, row_end
-    nlines_z = 2*nz + 1
-    ix_first = nx0
-    ix_last = nxN
-    iz_first = -nz
-    iz_last = nz
-    row_start = ny0
-    row_end = nyN
-    !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(src0, src1, V, der, k2, ialfa, ibeta, ni, d140, d240, d24n, ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, &
-    !$omp& ys_upper_boundary_rhs, ys_upper_ghost_rhs, ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ny, nlines_z, &
-    !$omp& ix_first, ix_last, iz_first, iz_last, row_start, row_end) private(ix, iz, iy, iline)
-    do ix = ix_first, ix_last
-      do iz = iz_first, iz_last
-        iline = (ix - ix_first)*nlines_z + (iz - iz_first + 1)
-
-        do iy = row_start, row_end
-          ys_local_rhs(iy, iline) = sum(der(iy, 0, -2:2)*src0(iy - 2:iy + 2, iz, ix)) + &
-                                    sum(der(iy, 1, -2:2)*src1(iy - 2:iy + 2, iz, ix))
-        end do
-
-        if (ix == 0 .and. iz == 0) then
-          do iy = row_start, row_end
-            ys_local_operator(iy, -2:2, iline) = der(iy, 2, -2:2)
-          end do
-          if (row_start == 1) then
-            ys_lower_ghost_row(:, iline) = d140
-            ys_lower_ghost_rhs(iline) = ni*sum(d240(-2:2)*V(-1:3, iz, ix, 2))
-            ys_lower_boundary_row(:, iline) = d240
-            ys_lower_boundary_rhs(iline) = src0(0, iz, ix) + src1(0, iz, ix)
-          end if
-          if (row_end == ny - 1) then
-            ys_upper_boundary_row(:, iline) = 0.0d0
-            ys_upper_boundary_row(1, iline) = 1.0d0
-            ys_upper_boundary_rhs(iline) = (0.0d0, 0.0d0)
-            ys_upper_ghost_rhs(iline) = (0.0d0, 0.0d0)
-          end if
-          if (row_end == ny - 1) then
-            ys_upper_ghost_row(:, iline) = der(ny - 1, 3, :)
-          end if
-        else
-          do iy = row_start, row_end
-            ys_local_operator(iy, -2:2, iline) = der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)
-          end do
-          if (row_start == 1) then
-            ys_lower_ghost_row(:, iline) = der(1, 3, :)
-            ys_lower_boundary_row(:, iline) = 0.0d0
-            ys_lower_ghost_rhs(iline) = (0.0d0, 0.0d0)
-            ys_lower_boundary_rhs(iline) = -ni*(ialfa(ix)*sum(d240(-2:2)*V(-1:3, iz, ix, 1)) + &
-                                                ibeta(iz)*sum(d240(-2:2)*V(-1:3, iz, ix, 3)))/k2(iz, ix)
-            ys_lower_boundary_row(-1, iline) = 1.0d0
-          end if
-          if (row_end == ny - 1) then
-            ys_upper_boundary_row(:, iline) = 0.0d0
-            ys_upper_ghost_rhs(iline) = (0.0d0, 0.0d0)
-            ys_upper_boundary_rhs(iline) = -ni*(ialfa(ix)*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 1)) + &
-                                                ibeta(iz)*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 3)))/k2(iz, ix)
-            ys_upper_boundary_row(1, iline) = 1.0d0
-            ys_upper_ghost_row(:, iline) = der(ny - 1, 3, :)
-          end if
-        end if
-      end do
-    end do
-    !$omp end target teams distribute parallel do
-
-    call ys_solve_ghost_field_reduced_symmetric_operator(p, ny, nz)
+    call solve_pressure_like_field(src0, src1, p, .false.)
   END SUBROUTINE solve_pressure_field
 
   SUBROUTINE solve_dpdy_field(src0, src1, dpdy)
@@ -557,47 +496,111 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(in) :: src0(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(in) :: src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dpdy(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    integer(C_INT) :: ix, iz, iy, iline, nlines_z, ix_first, ix_last, iz_first, iz_last, row_start, row_end
+    call solve_pressure_like_field(src0, src1, dpdy, .true.)
+  END SUBROUTINE solve_dpdy_field
+
+  subroutine solve_pressure_like_field(src0, src1, dst, solve_dpdy)
+    implicit none
+    complex(C_DOUBLE_COMPLEX), intent(in) :: src0(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    logical, intent(in) :: solve_dpdy
+    integer(C_INT) :: ix, iz, iy, iline, nlines_z, row_start, row_end, line_count
+    logical :: has_lower_boundary, has_upper_boundary
+
     nlines_z = 2*nz + 1
-    ix_first = nx0
-    ix_last = nxN
-    iz_first = -nz
-    iz_last = nz
     row_start = ny0
     row_end = nyN
+    line_count = (nxN - nx0 + 1)*(2*nz + 1)
+    call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, line_count, .true.)
+
     !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(src0, src1, V, der, k2, ni, d240, d24n, ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, &
-    !$omp& ys_upper_ghost_rhs, ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ny, nlines_z, ix_first, ix_last, &
-    !$omp& iz_first, iz_last, row_start, row_end) private(ix, iz, iy, iline)
-    do ix = ix_first, ix_last
-      do iz = iz_first, iz_last
-        iline = (ix - ix_first)*nlines_z + (iz - iz_first + 1)
+    !$omp shared(src0, src1, V, der, k2, ialfa, ibeta, ni, d140, d240, d24n, ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, &
+    !$omp& ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, ys_eqm1, ys_eq0, ys_eqn, ys_eqnp1, &
+    !$omp& row_start, row_end, solve_dpdy, nlines_z, nx0, nxN, nz, ny) &
+    !$omp private(ix, iz, iy, iline)
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        iline = (ix - nx0)*nlines_z + iz + nz + 1
 
         do iy = row_start, row_end
-          ys_local_operator(iy, -2:2, iline) = der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)
-          ys_local_rhs(iy, iline) = sum(der(iy, 1, -2:2)*src0(iy - 2:iy + 2, iz, ix)) + &
-                                    sum(der(iy, 2, -2:2)*src1(iy - 2:iy + 2, iz, ix))
+          if (solve_dpdy) then
+            ys_local_operator(iy, -2:2, iline) = der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)
+            ys_local_rhs(iy, iline) = sum(der(iy, 1, -2:2)*src0(iy - 2:iy + 2, iz, ix)) + &
+                                      sum(der(iy, 2, -2:2)*src1(iy - 2:iy + 2, iz, ix))
+          else
+            ys_local_rhs(iy, iline) = sum(der(iy, 0, -2:2)*src0(iy - 2:iy + 2, iz, ix)) + &
+                                      sum(der(iy, 1, -2:2)*src1(iy - 2:iy + 2, iz, ix))
+            if (ix == 0 .and. iz == 0) then
+              ys_local_operator(iy, -2:2, iline) = der(iy, 2, -2:2)
+            else
+              ys_local_operator(iy, -2:2, iline) = der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)
+            end if
+          end if
         end do
 
-        if (row_start == 1) then
-          ys_lower_boundary_row(:, iline) = 0.0d0
-          ys_lower_ghost_rhs(iline) = (0.0d0, 0.0d0)
-          ys_lower_boundary_rhs(iline) = ni*sum(d240(-2:2)*V(-1:3, iz, ix, 2))
-          ys_lower_boundary_row(-1, iline) = 1.0d0
-          ys_lower_ghost_row(:, iline) = der(1, 3, :)
-        end if
-        if (row_end == ny - 1) then
-          ys_upper_boundary_row(:, iline) = 0.0d0
-          ys_upper_ghost_rhs(iline) = (0.0d0, 0.0d0)
-          ys_upper_boundary_rhs(iline) = ni*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 2))
-          ys_upper_boundary_row(1, iline) = 1.0d0
-          ys_upper_ghost_row(:, iline) = der(ny - 1, 3, :)
+        if (solve_dpdy) then
+          if (row_start == 1) then
+            ys_eq0(:, iline) = 0.0d0
+            ys_eq0(-1, iline) = 1.0d0
+            ys_eqm1(:, iline) = der(1, 3, :)
+            ys_lower_ghost_rhs(iline) = (0.0d0, 0.0d0)
+            ys_lower_boundary_rhs(iline) = ni*sum(d240(-2:2)*V(-1:3, iz, ix, 2))
+          end if
+          if (row_end == ny - 1) then
+            ys_eqn(:, iline) = 0.0d0
+            ys_eqn(1, iline) = 1.0d0
+            ys_eqnp1(:, iline) = der(ny - 1, 3, :)
+            ys_upper_ghost_rhs(iline) = (0.0d0, 0.0d0)
+            ys_upper_boundary_rhs(iline) = ni*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 2))
+          end if
+        else if (ix == 0 .and. iz == 0) then
+          if (row_start == 1) then
+            ys_eqm1(:, iline) = d140
+            ys_eq0(:, iline) = d240
+            ys_lower_ghost_rhs(iline) = ni*sum(d240(-2:2)*V(-1:3, iz, ix, 2))
+            ys_lower_boundary_rhs(iline) = src0(0, iz, ix) + src1(0, iz, ix)
+          end if
+          if (row_end == ny - 1) then
+            ys_eqn(:, iline) = 0.0d0
+            ys_eqn(1, iline) = 1.0d0
+            ys_eqnp1(:, iline) = der(ny - 1, 3, :)
+            ys_upper_boundary_rhs(iline) = (0.0d0, 0.0d0)
+            ys_upper_ghost_rhs(iline) = (0.0d0, 0.0d0)
+          end if
+        else
+          if (row_start == 1) then
+            ys_eqm1(:, iline) = der(1, 3, :)
+            ys_eq0(:, iline) = 0.0d0
+            ys_eq0(-1, iline) = 1.0d0
+            ys_lower_ghost_rhs(iline) = (0.0d0, 0.0d0)
+            ys_lower_boundary_rhs(iline) = -ni*(ialfa(ix)*sum(d240(-2:2)*V(-1:3, iz, ix, 1)) + &
+                                                ibeta(iz)*sum(d240(-2:2)*V(-1:3, iz, ix, 3)))/k2(iz, ix)
+          end if
+          if (row_end == ny - 1) then
+            ys_eqn(:, iline) = 0.0d0
+            ys_eqn(1, iline) = 1.0d0
+            ys_eqnp1(:, iline) = der(ny - 1, 3, :)
+            ys_upper_ghost_rhs(iline) = (0.0d0, 0.0d0)
+            ys_upper_boundary_rhs(iline) = -ni*(ialfa(ix)*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 1)) + &
+                                                ibeta(iz)*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 3)))/k2(iz, ix)
+          end if
         end if
       end do
     end do
     !$omp end target teams distribute parallel do
 
-    call ys_solve_ghost_field_reduced_symmetric_operator(dpdy, ny, nz)
-  END SUBROUTINE solve_dpdy_field
+    has_lower_boundary = (ny0 == 1)
+    has_upper_boundary = (nyN == ny - 1)
+    call eliminate_assembled_boundaries(ny0, nyN, line_count, has_lower_boundary, has_upper_boundary)
+    if (npy_grid == 1) then
+      call pack_assembled_pentadiagonal(ny0, nyN, line_count)
+      call ys_solve_packed_pentadiagonal(nyN - ny0 + 1, line_count, "pressure current-layout gpsv")
+      call unpack_assembled_pentadiagonal(dst(ny0 - 2, -nz, nx0), ny0, nyN, line_count)
+    else
+      call ys_solve_endpoint_schur(dst, .true.)
+    end if
+    call reconstruct_assembled_boundaries(dst(ny0 - 2, -nz, nx0), ny0, nyN, line_count, has_lower_boundary, has_upper_boundary)
+  end subroutine solve_pressure_like_field
 
 END MODULE pressure_output

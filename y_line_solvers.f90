@@ -14,16 +14,13 @@ module y_line_solvers
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_CONST = 1_C_INT
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_EVEN_Z = 2_C_INT
 
-  public :: ys_prepare_ghost_field_workspace, ys_release_ghost_field_workspace
-  public :: ys_prepare_local_assembled_workspace, ys_solve_local_assembled_packed
+  public :: ys_prepare_assembled_workspace, ys_release_workspace
   public :: ys_local_rhs, ys_local_operator
   public :: ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs
-  public :: ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row
+  public :: ys_eqm1, ys_eq0, ys_eqn, ys_eqnp1
   public :: ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, ys_boundary_lower_eq, ys_boundary_upper_eq
   public :: ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x
-  public :: ys_prepare_gpsv_workspace, ys_solve_packed_pentadiagonal
-  public :: ys_solve_ghost_field_reduced_const_operator
-  public :: ys_solve_ghost_field_reduced_symmetric_operator
+  public :: ys_solve_packed_pentadiagonal, ys_solve_endpoint_schur
 
   integer(C_INT), save :: ys_workspace_ny = -1
   integer(C_INT), save :: ys_workspace_nz = -1
@@ -34,7 +31,7 @@ module y_line_solvers
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_local_rhs(:, :)
   real(C_DOUBLE), allocatable, save :: ys_local_operator(:, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_lower_ghost_rhs(:), ys_lower_boundary_rhs(:), ys_upper_boundary_rhs(:), ys_upper_ghost_rhs(:)
-  real(C_DOUBLE), allocatable, save :: ys_lower_ghost_row(:, :), ys_lower_boundary_row(:, :), ys_upper_boundary_row(:, :), ys_upper_ghost_row(:, :)
+  real(C_DOUBLE), allocatable, save :: ys_eqm1(:, :), ys_eq0(:, :), ys_eqn(:, :), ys_eqnp1(:, :)
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_boundary_lower_rhs0(:), ys_boundary_upper_rhsn(:)
   real(C_DOUBLE), allocatable, save :: ys_boundary_lower_eq(:, :), ys_boundary_upper_eq(:, :)
   real(C_DOUBLE), allocatable, save :: ys_interior_lu(:, :, :)
@@ -59,120 +56,101 @@ module y_line_solvers
 
 contains
 
-  subroutine ys_prepare_ghost_field_workspace(ny, nz, nx_lines)
-    implicit none
-    integer(C_INT), intent(in) :: ny, nz, nx_lines
-    integer(C_INT) :: row_start, row_end, active_n, nlines
-
-    ! The reduced interface solve keeps two boundary-adjacent unknowns per side,
-    ! so each rank must own at least four physical/ghost rows.
-    if (npy_grid > 1 .and. nyN - ny0 + 1 < 4) error stop "ys_solve_ghost_field requires at least four y rows per rank"
-    row_start = ny0
-    row_end = nyN
-    active_n = row_end - row_start + 1
-    if (active_n < 4) error stop "ys_solve_ghost_field requires at least four active y rows"
-
-    nlines = nx_lines*(2*nz + 1)
-    if (allocated(ys_local_rhs)) then
-      if (ys_workspace_ny /= ny .or. ys_workspace_nz /= nz .or. ys_workspace_nx /= nx_lines .or. &
-          ys_workspace_active_n /= active_n .or. ys_workspace_npy /= npy_grid) then
-        !$omp target exit data map(delete: ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
-        !$omp& ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, &
-        !$omp& ys_boundary_lower_eq, ys_boundary_upper_eq, ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, ys_left_interface_values, &
-        !$omp& ys_right_interface_values, ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs)
-  deallocate (ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs)
-        deallocate (ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row)
-        deallocate (ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, ys_boundary_lower_eq, ys_boundary_upper_eq)
-deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values)
-        deallocate (ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs)
-      end if
-    end if
-
-    if (.not. allocated(ys_local_rhs)) then
-      allocate (ys_local_rhs(ny0:nyN, nlines), ys_local_operator(ny0:nyN, -2:2, nlines))
-     allocate (ys_lower_ghost_rhs(nlines), ys_lower_boundary_rhs(nlines), ys_upper_boundary_rhs(nlines), ys_upper_ghost_rhs(nlines))
-      allocate (ys_lower_ghost_row(-2:2, nlines), ys_lower_boundary_row(-2:2, nlines), ys_upper_boundary_row(-2:2, nlines), ys_upper_ghost_row(-2:2, nlines))
-      allocate (ys_boundary_lower_rhs0(nlines), ys_boundary_upper_rhsn(nlines), ys_boundary_lower_eq(-1:2, nlines), ys_boundary_upper_eq(-2:1, nlines))
-      allocate (ys_interior_lu(0:active_n - 1, -2:2, nlines), ys_interior_response_columns(0:active_n - 1, 5, nlines))
-      allocate (ys_reduced_rows_send(20, nlines), ys_left_interface_values(2, nlines), ys_right_interface_values(2, nlines))
-      allocate (ys_reduced_rows_recv(20, nlines, npy_grid), ys_reduced_matrix_lu(4*npy_grid, 11, nlines), ys_reduced_rhs(4*npy_grid, nlines))
-      !$omp target enter data map(alloc: ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
-      !$omp& ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, &
-      !$omp& ys_boundary_lower_eq, ys_boundary_upper_eq, ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, ys_left_interface_values, &
-      !$omp& ys_right_interface_values, ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs)
-    end if
-
-    ys_workspace_ny = ny
-    ys_workspace_nz = nz
-    ys_workspace_nx = nx_lines
-    ys_workspace_nlines = nlines
-    ys_workspace_active_n = active_n
-    ys_workspace_npy = npy_grid
-    if (npy_grid == 1) call ys_prepare_gpsv_workspace(active_n, nlines)
-
-  end subroutine ys_prepare_ghost_field_workspace
-
-  subroutine ys_prepare_local_assembled_workspace(ny, nz, row_start, row_end, nlines)
-    implicit none
-    integer(C_INT), intent(in) :: ny, nz, row_start, row_end, nlines
-    integer(C_INT) :: active_n
-
-    active_n = row_end - row_start + 1
-    if (active_n < 1) error stop "ys_prepare_local_assembled_workspace requires at least one row"
-
-    if (allocated(ys_local_rhs)) then
-      if (ys_workspace_ny /= ny .or. ys_workspace_nz /= nz .or. ys_workspace_nlines /= nlines .or. &
-          ys_workspace_active_n /= active_n .or. ys_workspace_npy /= -1_C_INT) then
-        !$omp target exit data map(delete: ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
-        !$omp& ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, &
-        !$omp& ys_boundary_lower_eq, ys_boundary_upper_eq, ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, ys_left_interface_values, &
-        !$omp& ys_right_interface_values, ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs)
-  deallocate (ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs)
-        deallocate (ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row)
-        deallocate (ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, ys_boundary_lower_eq, ys_boundary_upper_eq)
-deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values)
-        deallocate (ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs)
-      end if
-    end if
-
-    if (.not. allocated(ys_local_rhs)) then
-      allocate (ys_local_rhs(row_start:row_end, nlines), ys_local_operator(row_start:row_end, -2:2, nlines))
-     allocate (ys_lower_ghost_rhs(nlines), ys_lower_boundary_rhs(nlines), ys_upper_boundary_rhs(nlines), ys_upper_ghost_rhs(nlines))
-      allocate (ys_lower_ghost_row(-2:2, nlines), ys_lower_boundary_row(-2:2, nlines), ys_upper_boundary_row(-2:2, nlines), ys_upper_ghost_row(-2:2, nlines))
-      allocate (ys_boundary_lower_rhs0(nlines), ys_boundary_upper_rhsn(nlines), ys_boundary_lower_eq(-1:2, nlines), ys_boundary_upper_eq(-2:1, nlines))
-      allocate (ys_interior_lu(0:active_n - 1, -2:2, nlines), ys_interior_response_columns(0:active_n - 1, 5, nlines))
-      allocate (ys_reduced_rows_send(20, nlines), ys_left_interface_values(2, nlines), ys_right_interface_values(2, nlines))
-      allocate (ys_reduced_rows_recv(20, nlines, 1), ys_reduced_matrix_lu(4, 11, nlines), ys_reduced_rhs(4, nlines))
-      !$omp target enter data map(alloc: ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
-      !$omp& ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, &
-      !$omp& ys_boundary_lower_eq, ys_boundary_upper_eq, ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, ys_left_interface_values, &
-      !$omp& ys_right_interface_values, ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs)
-    end if
-
-    ys_workspace_ny = ny
-    ys_workspace_nz = nz
-    ys_workspace_nx = nlines
-    ys_workspace_nlines = nlines
-    ys_workspace_active_n = active_n
-    ys_workspace_npy = -1_C_INT
-    call ys_prepare_gpsv_workspace(active_n, nlines)
-
-  end subroutine ys_prepare_local_assembled_workspace
-
-  subroutine ys_release_ghost_field_workspace()
+  subroutine ys_release_core_workspace()
     implicit none
 
     if (.not. allocated(ys_local_rhs)) return
 
     !$omp target exit data map(delete: ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
-    !$omp& ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, &
-    !$omp& ys_boundary_lower_eq, ys_boundary_upper_eq, ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, ys_left_interface_values, &
-    !$omp& ys_right_interface_values, ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs)
+    !$omp& ys_eqm1, ys_eq0, ys_eqn, ys_eqnp1, ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, &
+    !$omp& ys_boundary_lower_eq, ys_boundary_upper_eq)
   deallocate (ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs)
-    deallocate (ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row)
+    deallocate (ys_eqm1, ys_eq0, ys_eqn, ys_eqnp1)
     deallocate (ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, ys_boundary_lower_eq, ys_boundary_upper_eq)
+  end subroutine ys_release_core_workspace
+
+  subroutine ys_release_reduced_workspace()
+    implicit none
+
+    if (.not. allocated(ys_interior_lu)) return
+
+    !$omp target exit data map(delete: ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, ys_left_interface_values, &
+    !$omp& ys_right_interface_values, ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs)
 deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values)
     deallocate (ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs)
+  end subroutine ys_release_reduced_workspace
+
+  subroutine ys_allocate_core_workspace(row_start, row_end, nlines)
+    implicit none
+    integer(C_INT), intent(in) :: row_start, row_end, nlines
+
+    allocate (ys_local_rhs(row_start:row_end, nlines), ys_local_operator(row_start:row_end, -2:2, nlines))
+    allocate (ys_lower_ghost_rhs(nlines), ys_lower_boundary_rhs(nlines), ys_upper_boundary_rhs(nlines), ys_upper_ghost_rhs(nlines))
+    allocate (ys_eqm1(-2:2, nlines), ys_eq0(-2:2, nlines), ys_eqn(-2:2, nlines), ys_eqnp1(-2:2, nlines))
+    allocate (ys_boundary_lower_rhs0(nlines), ys_boundary_upper_rhsn(nlines), ys_boundary_lower_eq(-1:2, nlines), ys_boundary_upper_eq(-2:1, nlines))
+    !$omp target enter data map(alloc: ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
+    !$omp& ys_eqm1, ys_eq0, ys_eqn, ys_eqnp1, ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, &
+    !$omp& ys_boundary_lower_eq, ys_boundary_upper_eq)
+  end subroutine ys_allocate_core_workspace
+
+  subroutine ys_allocate_reduced_workspace(active_n, nlines, npy_count)
+    implicit none
+    integer(C_INT), intent(in) :: active_n, nlines, npy_count
+
+    allocate (ys_interior_lu(0:active_n - 1, -2:2, nlines), ys_interior_response_columns(0:active_n - 1, 5, nlines))
+    allocate (ys_reduced_rows_send(20, nlines), ys_left_interface_values(2, nlines), ys_right_interface_values(2, nlines))
+    allocate (ys_reduced_rows_recv(20, nlines, npy_count), ys_reduced_matrix_lu(4*npy_count, 11, nlines), ys_reduced_rhs(4*npy_count, nlines))
+    !$omp target enter data map(alloc: ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, ys_left_interface_values, &
+    !$omp& ys_right_interface_values, ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs)
+  end subroutine ys_allocate_reduced_workspace
+
+  subroutine ys_prepare_assembled_workspace(ny, nz, row_start, row_end, nlines, use_reduced_backend)
+    implicit none
+    integer(C_INT), intent(in) :: ny, nz, row_start, row_end, nlines
+    logical, intent(in) :: use_reduced_backend
+    integer(C_INT) :: active_n
+
+    active_n = row_end - row_start + 1
+    if (active_n < 1) error stop "ys_prepare_assembled_workspace requires at least one row"
+    if (use_reduced_backend) then
+      if (npy_grid > 1 .and. active_n < 4) error stop "ys_solve_ghost_field requires at least four y rows per rank"
+      if (active_n < 4) error stop "ys_solve_ghost_field requires at least four active y rows"
+    end if
+
+    if (allocated(ys_local_rhs)) then
+      if (ys_workspace_ny /= ny .or. ys_workspace_nz /= nz .or. ys_workspace_nlines /= nlines .or. &
+          ys_workspace_active_n /= active_n .or. ys_workspace_npy /= merge(npy_grid, -1_C_INT, use_reduced_backend)) then
+        call ys_release_core_workspace()
+        call ys_release_reduced_workspace()
+      end if
+    end if
+
+    if (.not. allocated(ys_local_rhs)) then
+      call ys_allocate_core_workspace(row_start, row_end, nlines)
+    end if
+    if (use_reduced_backend) then
+      if (.not. allocated(ys_interior_lu)) call ys_allocate_reduced_workspace(active_n, nlines, npy_grid)
+    else if (allocated(ys_interior_lu)) then
+      call ys_release_reduced_workspace()
+    end if
+
+    ys_workspace_ny = ny
+    ys_workspace_nz = nz
+    ys_workspace_nx = nlines/(2*nz + 1)
+    ys_workspace_nlines = nlines
+    ys_workspace_active_n = active_n
+    ys_workspace_npy = merge(npy_grid, -1_C_INT, use_reduced_backend)
+    call ys_prepare_gpsv_workspace(active_n, nlines)
+
+  end subroutine ys_prepare_assembled_workspace
+
+  subroutine ys_release_workspace()
+    implicit none
+
+    if (.not. allocated(ys_local_rhs)) return
+
+    call ys_release_core_workspace()
+    call ys_release_reduced_workspace()
     call ys_release_gpsv_workspace()
 
     ys_workspace_ny = -1
@@ -181,7 +159,7 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     ys_workspace_nlines = 0
     ys_workspace_active_n = 0
     ys_workspace_npy = -1
-  end subroutine ys_release_ghost_field_workspace
+  end subroutine ys_release_workspace
 
 #ifdef HAVE_CUDA
   subroutine ys_check_cusparse(status, where)
@@ -290,61 +268,9 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     call roctxPop(label)
   end subroutine ys_solve_packed_pentadiagonal
 
-  subroutine ys_solve_assembled_ghost_field(dst, ny, nz, response_mode)
+  subroutine ys_solve_endpoint_schur(dst, symmetric_operator)
     implicit none
-    integer(C_INT), intent(in) :: ny, nz, response_mode
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
-    integer(C_INT) :: row_start, row_end, active_n, nlines, nlines_z, dst_row_base
-    logical :: has_padded_dst
-
-    row_start = ny0
-    row_end = nyN
-    active_n = row_end - row_start + 1
-    nlines = ys_workspace_nlines
-    nlines_z = 2*nz + 1
-    has_padded_dst = (size(dst, 1) == active_n + 4)
-    dst_row_base = 1
-    if (has_padded_dst) dst_row_base = 3
-    if (.not. has_padded_dst .and. size(dst, 1) /= active_n) then
-      error stop "ys_solve_assembled_ghost_field expected either local-only or ghost-padded dst"
-    end if
-    if (.not. allocated(ys_local_rhs)) error stop "ys_prepare_ghost_field_workspace must be called before assembled ghost solve"
-    if (ys_workspace_ny /= ny .or. ys_workspace_nz /= nz .or. ys_workspace_nx /= size(dst, 3) .or. &
-        ys_workspace_active_n /= active_n) then
-      error stop "ys_solve_assembled_ghost_field workspace does not match requested local solve dimensions"
-    end if
-
-    if (npy_grid == 1) then
-      call ys_pack_assembled_direct(row_start, active_n, nlines)
-      call ys_solve_ghost_field_single_rank_packed(dst, ny, nz)
-      return
-    end if
-
-    call roctxPush("ys_endpoint_schur")
-    call ys_solve_endpoint_schur(dst, ny, nz, has_padded_dst, row_start, row_end, active_n, nlines, nlines_z, dst_row_base, response_mode)
-    call roctxPop("ys_endpoint_schur")
-  end subroutine ys_solve_assembled_ghost_field
-
-  subroutine ys_solve_ghost_field_reduced_const_operator(dst, ny, nz)
-    implicit none
-    integer(C_INT), intent(in) :: ny, nz
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
-
-    call ys_solve_assembled_ghost_field(dst, ny, nz, YS_ENDPOINT_RESPONSE_CONST)
-  end subroutine ys_solve_ghost_field_reduced_const_operator
-
-  subroutine ys_solve_ghost_field_reduced_symmetric_operator(dst, ny, nz)
-    implicit none
-    integer(C_INT), intent(in) :: ny, nz
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
-
-    call ys_solve_assembled_ghost_field(dst, ny, nz, YS_ENDPOINT_RESPONSE_EVEN_Z)
-  end subroutine ys_solve_ghost_field_reduced_symmetric_operator
-
-  subroutine ys_solve_endpoint_schur(dst, ny, nz, has_padded_dst, row_start, row_end, active_n, nlines, nlines_z, dst_row_base, response_mode)
-    implicit none
-    integer(C_INT), intent(in) :: ny, nz, row_start, row_end, active_n, nlines, nlines_z, dst_row_base, response_mode
-    logical, intent(in) :: has_padded_dst
+    logical, intent(in) :: symmetric_operator
     complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
     complex(C_DOUBLE_COMPLEX) :: rhs_value
     complex(C_DOUBLE_COMPLEX) :: c0, c1, y00, y01, y10, y11, g0, g1
@@ -352,13 +278,24 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     complex(C_DOUBLE_COMPLEX) :: vleft1, vleft2, vright1, vright2
     complex(C_DOUBLE_COMPLEX) :: s4(4, 4), rhs4(4, 5), pivot4, factor4
     real(C_DOUBLE) :: row_coeffs(-2:2), coeff
+    integer(C_INT) :: row_start, row_end, active_n, nlines, nlines_z, nz, dst_row_base, response_mode
     integer(C_INT) :: nI, nresp, batch_count, exposed_n, interior_base
     integer(C_INT) :: sys, iline, ref_iline, resp, resp_index
     integer(C_INT) :: local_i, local_idx, row, col, coupled_row, p, j, offset
     integer(C_INT) :: exposed_slot, response_slot, rhs_col, iface, k, m
     integer(C_INT) :: ix, iz, abs_iz, ix_local
     logical :: is_actual
-    logical :: has_left_interface, has_right_interface
+    logical :: has_left_interface, has_right_interface, has_padded_dst
+
+    row_start = ny0
+    row_end = nyN
+    active_n = ys_workspace_active_n
+    nlines = ys_workspace_nlines
+    nlines_z = size(dst, 2)
+    nz = (nlines_z - 1)/2
+    has_padded_dst = (size(dst, 1) == active_n + 4)
+    dst_row_base = merge(3_C_INT, 1_C_INT, has_padded_dst)
+    response_mode = merge(YS_ENDPOINT_RESPONSE_EVEN_Z, YS_ENDPOINT_RESPONSE_CONST, symmetric_operator)
 
     has_left_interface = (ipy > 0)
     has_right_interface = (ipy < npy_grid - 1)
@@ -379,7 +316,6 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     end select
     batch_count = nlines + exposed_n*nresp
 
-    if (.not. allocated(ys_local_rhs)) error stop "ys_prepare_ghost_field_workspace must be called before endpoint Schur solve"
     call ys_prepare_gpsv_workspace(nI, batch_count)
 
     call roctxPush("ys_endpoint_pack_plus_response")
@@ -712,75 +648,6 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     !$omp end target teams distribute parallel do
     call roctxPop("ys_endpoint_reconstruct")
   end subroutine ys_solve_endpoint_schur
-
-  subroutine ys_pack_assembled_direct(row_start, active_n, nlines)
-    implicit none
-    integer(C_INT), intent(in) :: row_start, active_n, nlines
-    integer(C_INT) :: iline, p, row, local_idx
-
-    call roctxPush("ys_direct_pack")
-    !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(ys_local_rhs, ys_local_operator, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, row_start, active_n, nlines) &
-    !$omp private(iline, p, row, local_idx)
-    do iline = 1, nlines
-      do local_idx = 0, active_n - 1
-        row = row_start + local_idx
-        p = local_idx*nlines + iline
-        ys_gpsv_x(p) = ys_local_rhs(row, iline)
-        ys_gpsv_ds(p) = cmplx(ys_local_operator(row, -2, iline), 0.0d0, kind=C_DOUBLE)
-        ys_gpsv_dl(p) = cmplx(ys_local_operator(row, -1, iline), 0.0d0, kind=C_DOUBLE)
-        ys_gpsv_d(p) = cmplx(ys_local_operator(row, 0, iline), 0.0d0, kind=C_DOUBLE)
-        ys_gpsv_du(p) = cmplx(ys_local_operator(row, 1, iline), 0.0d0, kind=C_DOUBLE)
-        ys_gpsv_dw(p) = cmplx(ys_local_operator(row, 2, iline), 0.0d0, kind=C_DOUBLE)
-      end do
-    end do
-    !$omp end target teams distribute parallel do
-    call roctxPop("ys_direct_pack")
-  end subroutine ys_pack_assembled_direct
-
-  subroutine ys_solve_local_assembled_packed(row_start, active_n, nlines, label)
-    implicit none
-    integer(C_INT), intent(in) :: row_start, active_n, nlines
-    character(len=*), intent(in) :: label
-
-    call ys_pack_assembled_direct(row_start, active_n, nlines)
-    call ys_solve_packed_pentadiagonal(active_n, nlines, label)
-  end subroutine ys_solve_local_assembled_packed
-
-  subroutine ys_solve_ghost_field_single_rank_packed(dst, ny, nz)
-    implicit none
-    integer(C_INT), intent(in) :: ny, nz
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
-    integer(C_INT) :: ix, iz, iline, p, nlines, nlines_z, row_start, row_end, active_n, row
-    integer(C_INT) :: dst_row_base
-    logical :: has_padded_dst
-
-    row_start = ny0
-    row_end = nyN
-    active_n = row_end - row_start + 1
-    has_padded_dst = (size(dst, 1) == active_n + 4)
-    dst_row_base = 1
-    if (has_padded_dst) dst_row_base = 3
-    nlines_z = 2*nz + 1
-    nlines = ys_workspace_nlines
-    call ys_solve_packed_pentadiagonal(active_n, nlines, "ys_single_rank_gpsv")
-
-    call roctxPush("ys_single_rank_unpack")
-    !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(dst, ys_gpsv_x, nlines, nlines_z, nx0, nz, active_n, dst_row_base) &
-    !$omp private(iline, p, ix, iz, row)
-    do iline = 1, nlines
-      do row = 0, active_n - 1
-        ix = (iline - 1)/nlines_z + nx0
-        iz = mod(iline - 1, nlines_z) - nz
-        p = row*nlines + iline
-        dst(row + dst_row_base, iz + nz + 1, ix - nx0 + 1) = ys_gpsv_x(p)
-      end do
-    end do
-    !$omp end target teams distribute parallel do
-    call roctxPop("ys_single_rank_unpack")
-
-  end subroutine ys_solve_ghost_field_single_rank_packed
 
   subroutine ys_solve_reduced_interfaces()
     integer(C_INT), parameter :: bw = 5
