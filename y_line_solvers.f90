@@ -1,5 +1,4 @@
 #include "header.h"
-#include "y_boundary_macros.h"
 
 module y_line_solvers
 
@@ -16,9 +15,11 @@ module y_line_solvers
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_EVEN_Z = 2_C_INT
 
   public :: ys_prepare_ghost_field_workspace, ys_release_ghost_field_workspace
+  public :: ys_prepare_local_assembled_workspace, ys_solve_local_assembled_packed
   public :: ys_local_rhs, ys_local_operator
   public :: ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs
   public :: ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row
+  public :: ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, ys_boundary_lower_eq, ys_boundary_upper_eq
   public :: ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x
   public :: ys_prepare_gpsv_workspace, ys_solve_packed_pentadiagonal
   public :: ys_solve_ghost_field_reduced_const_operator
@@ -109,29 +110,54 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     ys_workspace_npy = npy_grid
     if (npy_grid == 1) call ys_prepare_gpsv_workspace(active_n, nlines)
 
-    ys_local_rhs = (0.0d0, 0.0d0)
-    ys_local_operator = 0.0d0
-    ys_lower_ghost_rhs = (0.0d0, 0.0d0)
-    ys_lower_boundary_rhs = (0.0d0, 0.0d0)
-    ys_upper_boundary_rhs = (0.0d0, 0.0d0)
-    ys_upper_ghost_rhs = (0.0d0, 0.0d0)
-    ys_lower_ghost_row = 0.0d0
-    ys_lower_boundary_row = 0.0d0
-    ys_upper_boundary_row = 0.0d0
-    ys_upper_ghost_row = 0.0d0
-    ys_boundary_lower_rhs0 = (0.0d0, 0.0d0)
-    ys_boundary_upper_rhsn = (0.0d0, 0.0d0)
-    ys_boundary_lower_eq = 0.0d0
-    ys_boundary_upper_eq = 0.0d0
-    ys_interior_lu = 0.0d0
-    ys_interior_response_columns = (0.0d0, 0.0d0)
-    ys_reduced_rows_send = (0.0d0, 0.0d0)
-    ys_left_interface_values = (0.0d0, 0.0d0)
-    ys_right_interface_values = (0.0d0, 0.0d0)
-    ys_reduced_rows_recv = (0.0d0, 0.0d0)
-    ys_reduced_matrix_lu = (0.0d0, 0.0d0)
-    ys_reduced_rhs = (0.0d0, 0.0d0)
   end subroutine ys_prepare_ghost_field_workspace
+
+  subroutine ys_prepare_local_assembled_workspace(ny, nz, row_start, row_end, nlines)
+    implicit none
+    integer(C_INT), intent(in) :: ny, nz, row_start, row_end, nlines
+    integer(C_INT) :: active_n
+
+    active_n = row_end - row_start + 1
+    if (active_n < 1) error stop "ys_prepare_local_assembled_workspace requires at least one row"
+
+    if (allocated(ys_local_rhs)) then
+      if (ys_workspace_ny /= ny .or. ys_workspace_nz /= nz .or. ys_workspace_nlines /= nlines .or. &
+          ys_workspace_active_n /= active_n .or. ys_workspace_npy /= -1_C_INT) then
+        !$omp target exit data map(delete: ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
+        !$omp& ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, &
+        !$omp& ys_boundary_lower_eq, ys_boundary_upper_eq, ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, ys_left_interface_values, &
+        !$omp& ys_right_interface_values, ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs)
+  deallocate (ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs)
+        deallocate (ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row)
+        deallocate (ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, ys_boundary_lower_eq, ys_boundary_upper_eq)
+deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values)
+        deallocate (ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs)
+      end if
+    end if
+
+    if (.not. allocated(ys_local_rhs)) then
+      allocate (ys_local_rhs(row_start:row_end, nlines), ys_local_operator(row_start:row_end, -2:2, nlines))
+     allocate (ys_lower_ghost_rhs(nlines), ys_lower_boundary_rhs(nlines), ys_upper_boundary_rhs(nlines), ys_upper_ghost_rhs(nlines))
+      allocate (ys_lower_ghost_row(-2:2, nlines), ys_lower_boundary_row(-2:2, nlines), ys_upper_boundary_row(-2:2, nlines), ys_upper_ghost_row(-2:2, nlines))
+      allocate (ys_boundary_lower_rhs0(nlines), ys_boundary_upper_rhsn(nlines), ys_boundary_lower_eq(-1:2, nlines), ys_boundary_upper_eq(-2:1, nlines))
+      allocate (ys_interior_lu(0:active_n - 1, -2:2, nlines), ys_interior_response_columns(0:active_n - 1, 5, nlines))
+      allocate (ys_reduced_rows_send(20, nlines), ys_left_interface_values(2, nlines), ys_right_interface_values(2, nlines))
+      allocate (ys_reduced_rows_recv(20, nlines, 1), ys_reduced_matrix_lu(4, 11, nlines), ys_reduced_rhs(4, nlines))
+      !$omp target enter data map(alloc: ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
+      !$omp& ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, &
+      !$omp& ys_boundary_lower_eq, ys_boundary_upper_eq, ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, ys_left_interface_values, &
+      !$omp& ys_right_interface_values, ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs)
+    end if
+
+    ys_workspace_ny = ny
+    ys_workspace_nz = nz
+    ys_workspace_nx = nlines
+    ys_workspace_nlines = nlines
+    ys_workspace_active_n = active_n
+    ys_workspace_npy = -1_C_INT
+    call ys_prepare_gpsv_workspace(active_n, nlines)
+
+  end subroutine ys_prepare_local_assembled_workspace
 
   subroutine ys_release_ghost_field_workspace()
     implicit none
@@ -269,15 +295,13 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     integer(C_INT), intent(in) :: ny, nz, response_mode
     complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
     integer(C_INT) :: row_start, row_end, active_n, nlines, nlines_z, dst_row_base
-    logical :: has_lower_boundary, has_upper_boundary, has_padded_dst
+    logical :: has_padded_dst
 
     row_start = ny0
     row_end = nyN
     active_n = row_end - row_start + 1
     nlines = ys_workspace_nlines
     nlines_z = 2*nz + 1
-    has_lower_boundary = (row_start == 1)
-    has_upper_boundary = (row_end == ny - 1)
     has_padded_dst = (size(dst, 1) == active_n + 4)
     dst_row_base = 1
     if (has_padded_dst) dst_row_base = 3
@@ -290,83 +314,16 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
       error stop "ys_solve_assembled_ghost_field workspace does not match requested local solve dimensions"
     end if
 
-    call ys_eliminate_assembled_boundaries(row_start, active_n, nlines, has_lower_boundary, has_upper_boundary)
-
     if (npy_grid == 1) then
       call ys_pack_assembled_direct(row_start, active_n, nlines)
       call ys_solve_ghost_field_single_rank_packed(dst, ny, nz)
- call ys_reconstruct_assembled_boundaries(dst, nz, has_lower_boundary, has_upper_boundary, active_n, nlines, nlines_z, dst_row_base)
       return
     end if
 
     call roctxPush("ys_endpoint_schur")
     call ys_solve_endpoint_schur(dst, ny, nz, has_padded_dst, row_start, row_end, active_n, nlines, nlines_z, dst_row_base, response_mode)
     call roctxPop("ys_endpoint_schur")
- call ys_reconstruct_assembled_boundaries(dst, nz, has_lower_boundary, has_upper_boundary, active_n, nlines, nlines_z, dst_row_base)
   end subroutine ys_solve_assembled_ghost_field
-
-  subroutine ys_eliminate_assembled_boundaries(row_start, active_n, nlines, has_lower_boundary, has_upper_boundary)
-    implicit none
-    integer(C_INT), intent(in) :: row_start, active_n, nlines
-    logical, intent(in) :: has_lower_boundary, has_upper_boundary
-    complex(C_DOUBLE_COMPLEX) :: lower_rhs0, upper_rhsn, rhs_value
-    complex(C_DOUBLE_COMPLEX) :: lower_ghost_value, lower_boundary_value, upper_ghost_value, upper_boundary_value
-    real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-1:2), upper_eqn(-2:1)
-    real(C_DOUBLE) :: lower_ghost_row(-2:2), lower_boundary_row(-2:2), upper_ghost_row(-2:2), upper_boundary_row(-2:2)
-    integer(C_INT) :: iline, row, local_idx
-    real(C_DOUBLE) :: fac
-
-    if (.not. has_lower_boundary .and. .not. has_upper_boundary) return
-
-    call roctxPush("ys_eliminate_assembled_boundaries")
-    !$omp target teams distribute parallel do default(none) &
-    !$omp shared(ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
-    !$omp& ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, &
-    !$omp& ys_boundary_lower_eq, ys_boundary_upper_eq, row_start, active_n, nlines, has_lower_boundary, has_upper_boundary) &
-    !$omp private(iline, lower_rhs0, upper_rhsn, rhs_value, lower_ghost_value, lower_boundary_value, upper_ghost_value, upper_boundary_value, &
-    !$omp& row_coeffs, lower_eq0, upper_eqn, lower_ghost_row, lower_boundary_row, upper_ghost_row, upper_boundary_row, row, local_idx, fac)
-    do iline = 1, nlines
-      if (has_lower_boundary) then
-        lower_ghost_row = ys_lower_ghost_row(:, iline)
-        lower_boundary_row = ys_lower_boundary_row(:, iline)
-        lower_ghost_value = ys_lower_ghost_rhs(iline)
-        lower_boundary_value = ys_lower_boundary_rhs(iline)
-      YS_MAKE_LOWER_BOUNDARY_EQ(lower_ghost_value, lower_boundary_value, lower_ghost_row, lower_boundary_row, lower_rhs0, lower_eq0)
-        ys_boundary_lower_rhs0(iline) = lower_rhs0
-        ys_boundary_lower_eq(:, iline) = lower_eq0
-
-        do local_idx = 0, 1
-          row = row_start + local_idx
-          rhs_value = ys_local_rhs(row, iline)
-          row_coeffs = ys_local_operator(row, -2:2, iline)
-   YS_ELIMINATE_LOWER_BOUNDARY_ROW(local_idx, rhs_value, row_coeffs, lower_ghost_value, lower_rhs0, lower_ghost_row, lower_eq0, fac)
-          ys_local_rhs(row, iline) = rhs_value
-          ys_local_operator(row, -2:2, iline) = row_coeffs
-        end do
-      end if
-
-      if (has_upper_boundary) then
-        upper_ghost_row = ys_upper_ghost_row(:, iline)
-        upper_boundary_row = ys_upper_boundary_row(:, iline)
-        upper_ghost_value = ys_upper_ghost_rhs(iline)
-        upper_boundary_value = ys_upper_boundary_rhs(iline)
-      YS_MAKE_UPPER_BOUNDARY_EQ(upper_ghost_value, upper_boundary_value, upper_ghost_row, upper_boundary_row, upper_rhsn, upper_eqn)
-        ys_boundary_upper_rhsn(iline) = upper_rhsn
-        ys_boundary_upper_eq(:, iline) = upper_eqn
-
-        do local_idx = active_n - 2, active_n - 1
-          row = row_start + local_idx
-          rhs_value = ys_local_rhs(row, iline)
-          row_coeffs = ys_local_operator(row, -2:2, iline)
-          YS_ELIMINATE_UPPER_BOUNDARY_ROW(local_idx, active_n, rhs_value, row_coeffs, upper_ghost_value, upper_rhsn, upper_ghost_row, upper_eqn, fac)
-          ys_local_rhs(row, iline) = rhs_value
-          ys_local_operator(row, -2:2, iline) = row_coeffs
-        end do
-      end if
-    end do
-    !$omp end target teams distribute parallel do
-    call roctxPop("ys_eliminate_assembled_boundaries")
-  end subroutine ys_eliminate_assembled_boundaries
 
   subroutine ys_solve_ghost_field_reduced_const_operator(dst, ny, nz)
     implicit none
@@ -781,57 +738,14 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     call roctxPop("ys_direct_pack")
   end subroutine ys_pack_assembled_direct
 
-  subroutine ys_reconstruct_assembled_boundaries(dst, nz, has_lower_boundary, has_upper_boundary, active_n, nlines, nlines_z, dst_row_base)
+  subroutine ys_solve_local_assembled_packed(row_start, active_n, nlines, label)
     implicit none
-    integer(C_INT), intent(in) :: nz, active_n, nlines, nlines_z, dst_row_base
-    logical, intent(in) :: has_lower_boundary, has_upper_boundary
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
-    integer(C_INT) :: ix, iz, iline
-    integer(C_INT) :: lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3
-    real(C_DOUBLE) :: lower_ghost_row(-2:2), upper_ghost_row(-2:2), lower_eq0(-1:2), upper_eqn(-2:1)
-    complex(C_DOUBLE_COMPLEX) :: lower_ghost_value, upper_ghost_value
-    complex(C_DOUBLE_COMPLEX) :: lower_ghost_dst, lower_boundary_dst, upper_boundary_dst, upper_ghost_dst
+    integer(C_INT), intent(in) :: row_start, active_n, nlines
+    character(len=*), intent(in) :: label
 
-    if (size(dst, 1) /= active_n + 4) return
-    if (.not. has_lower_boundary .and. .not. has_upper_boundary) return
-    lower_inner0 = dst_row_base
-    lower_inner2 = dst_row_base + 2
-    upper_inner0 = active_n + dst_row_base - 3
-    upper_inner2 = upper_inner0 + 2
-    upper_inner3 = upper_inner0 + 3
-
-    call roctxPush("ys_reconstruct_assembled_boundaries")
-    !$omp target teams distribute parallel do default(none) &
-    !$omp shared(dst, ys_lower_ghost_rhs, ys_upper_ghost_rhs, ys_lower_ghost_row, ys_upper_ghost_row, ys_boundary_lower_rhs0, &
-    !$omp& ys_boundary_upper_rhsn, ys_boundary_lower_eq, ys_boundary_upper_eq, nlines, nlines_z, nx0, nz, active_n, lower_inner0, &
-    !$omp& lower_inner2, upper_inner0, upper_inner2, upper_inner3, has_lower_boundary, has_upper_boundary) &
-    !$omp private(iline, ix, iz, lower_ghost_row, upper_ghost_row, lower_eq0, upper_eqn, lower_ghost_value, upper_ghost_value, &
-    !$omp& lower_ghost_dst, lower_boundary_dst, upper_boundary_dst, upper_ghost_dst)
-    do iline = 1, nlines
-      ix = (iline - 1)/nlines_z + nx0
-      iz = mod(iline - 1, nlines_z) - nz
-
-      if (has_lower_boundary) then
-        lower_ghost_row = ys_lower_ghost_row(:, iline)
-        lower_eq0 = ys_boundary_lower_eq(:, iline)
-        lower_ghost_value = ys_lower_ghost_rhs(iline)
-        YS_RECONSTRUCT_LOWER_BOUNDARY(lower_ghost_dst, lower_boundary_dst, dst(lower_inner0, iz + nz + 1, ix - nx0 + 1), dst(lower_inner0 + 1, iz + nz + 1, ix - nx0 + 1), dst(lower_inner2, iz + nz + 1, ix - nx0 + 1), lower_ghost_value, lower_ghost_row, ys_boundary_lower_rhs0(iline), lower_eq0)
-        dst(1, iz + nz + 1, ix - nx0 + 1) = lower_ghost_dst
-        dst(2, iz + nz + 1, ix - nx0 + 1) = lower_boundary_dst
-      end if
-
-      if (has_upper_boundary) then
-        upper_ghost_row = ys_upper_ghost_row(:, iline)
-        upper_eqn = ys_boundary_upper_eq(:, iline)
-        upper_ghost_value = ys_upper_ghost_rhs(iline)
-        YS_RECONSTRUCT_UPPER_BOUNDARY(upper_boundary_dst, upper_ghost_dst, dst(upper_inner0, iz + nz + 1, ix - nx0 + 1), dst(upper_inner0 + 1, iz + nz + 1, ix - nx0 + 1), dst(upper_inner2, iz + nz + 1, ix - nx0 + 1), upper_ghost_value, upper_ghost_row, ys_boundary_upper_rhsn(iline), upper_eqn)
-        dst(active_n + 3, iz + nz + 1, ix - nx0 + 1) = upper_boundary_dst
-        dst(active_n + 4, iz + nz + 1, ix - nx0 + 1) = upper_ghost_dst
-      end if
-    end do
-    !$omp end target teams distribute parallel do
-    call roctxPop("ys_reconstruct_assembled_boundaries")
-  end subroutine ys_reconstruct_assembled_boundaries
+    call ys_pack_assembled_direct(row_start, active_n, nlines)
+    call ys_solve_packed_pentadiagonal(active_n, nlines, label)
+  end subroutine ys_solve_local_assembled_packed
 
   subroutine ys_solve_ghost_field_single_rank_packed(dst, ny, nz)
     implicit none
