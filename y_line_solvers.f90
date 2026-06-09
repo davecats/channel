@@ -1,4 +1,5 @@
 #include "header.h"
+#include "y_boundary_macros.h"
 
 module y_line_solvers
 
@@ -22,7 +23,6 @@ module y_line_solvers
   public :: ys_prepare_gpsv_workspace, ys_solve_packed_pentadiagonal
   public :: ys_solve_ghost_field_reduced_const_operator
   public :: ys_solve_ghost_field_reduced_symmetric_operator
-  public :: ys_solve_full_y_lines_packed
 
   integer(C_INT), save :: ys_workspace_ny = -1
   integer(C_INT), save :: ys_workspace_nz = -1
@@ -264,223 +264,6 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     call roctxPop(label)
   end subroutine ys_solve_packed_pentadiagonal
 
-  !$omp declare target(ys_compact_physical_boundary_equations)
-  subroutine ys_compact_physical_boundary_equations(lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, lower_boundary_value, &
-                                                lower_ghost_value, upper_boundary_value, upper_ghost_value, lower_rhs0, lower_eq0, &
-                                                    upper_rhsn, upper_eqn)
-    implicit none
-    real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: lower_boundary_value, lower_ghost_value, upper_boundary_value, upper_ghost_value
-    complex(C_DOUBLE_COMPLEX), intent(out) :: lower_rhs0, upper_rhsn
-    real(C_DOUBLE), intent(out) :: lower_eq0(-2:2), upper_eqn(-2:2)
-
-    lower_rhs0 = lower_boundary_value - lower_ghost_value*lower_bc(-2)/lower_ghost_bc(-2)
-    lower_eq0 = lower_bc - lower_ghost_bc*lower_bc(-2)/lower_ghost_bc(-2)
-    lower_eq0(-2) = 0.0d0
-    upper_rhsn = upper_boundary_value - upper_ghost_value*upper_bc(2)/upper_ghost_bc(2)
-    upper_eqn = upper_bc - upper_ghost_bc*upper_bc(2)/upper_ghost_bc(2)
-    upper_eqn(2) = 0.0d0
-  end subroutine ys_compact_physical_boundary_equations
-
-  !$omp declare target(ys_eliminate_physical_boundary_row)
-  subroutine ys_eliminate_physical_boundary_row(local_idx, active_n, has_lower_boundary, has_upper_boundary, rhs_value, row_coeffs, &
-                                                lower_ghost_value, lower_rhs0, lower_ghost_row, lower_eq0, upper_ghost_value, &
-                                                upper_rhsn, upper_ghost_row, upper_eqn)
-    implicit none
-    integer(C_INT), intent(in) :: local_idx, active_n
-    logical, intent(in) :: has_lower_boundary, has_upper_boundary
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs_value
-    real(C_DOUBLE), intent(inout) :: row_coeffs(-2:2)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: lower_ghost_value, lower_rhs0, upper_ghost_value, upper_rhsn
-    real(C_DOUBLE), intent(in) :: lower_ghost_row(-2:2), lower_eq0(-2:2), upper_ghost_row(-2:2), upper_eqn(-2:2)
-    real(C_DOUBLE) :: fac
-
-    if (has_lower_boundary .and. local_idx == 0) then
-      fac = row_coeffs(-2)/lower_ghost_row(-2)
-      rhs_value = rhs_value - lower_ghost_value*fac
-      row_coeffs = row_coeffs - lower_ghost_row*fac
-      row_coeffs(-2) = 0.0d0
-      fac = row_coeffs(-1)/lower_eq0(-1)
-      rhs_value = rhs_value - lower_rhs0*fac
-      row_coeffs = row_coeffs - lower_eq0*fac
-      row_coeffs(-1) = 0.0d0
-    else if (has_lower_boundary .and. local_idx == 1) then
-      fac = row_coeffs(-2)/lower_eq0(-1)
-      rhs_value = rhs_value - lower_rhs0*fac
-      row_coeffs(-2:1) = row_coeffs(-2:1) - lower_eq0(-1:2)*fac
-      row_coeffs(-2) = 0.0d0
-    end if
-
-    if (has_upper_boundary .and. local_idx == active_n - 2) then
-      fac = row_coeffs(2)/upper_eqn(1)
-      rhs_value = rhs_value - upper_rhsn*fac
-      row_coeffs(-1:2) = row_coeffs(-1:2) - upper_eqn(-2:1)*fac
-      row_coeffs(2) = 0.0d0
-    else if (has_upper_boundary .and. local_idx == active_n - 1) then
-      fac = row_coeffs(2)/upper_ghost_row(2)
-      rhs_value = rhs_value - upper_ghost_value*fac
-      row_coeffs = row_coeffs - upper_ghost_row*fac
-      row_coeffs(2) = 0.0d0
-      fac = row_coeffs(1)/upper_eqn(1)
-      rhs_value = rhs_value - upper_rhsn*fac
-      row_coeffs = row_coeffs - upper_eqn*fac
-      row_coeffs(1) = 0.0d0
-    end if
-  end subroutine ys_eliminate_physical_boundary_row
-
-  subroutine ys_solve_full_y_lines_packed(slab_values, der_values, k2_values, bc0_values, bcn_values, ny_value, nz_value, nx0_value, &
-                                          ni_value, component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
-                                          lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
-                                          lambda_coeff, diffusion_coeff, first_line, line_count, solve_label)
-    implicit none
-    integer(C_INT), intent(in) :: ny_value, nz_value, nx0_value
-    integer(C_INT), intent(in) :: component_index, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index
-    integer(C_INT), intent(in) :: first_line, line_count
-    real(C_DOUBLE), intent(in) :: ni_value, lambda_coeff, diffusion_coeff
-    real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
-    real(C_DOUBLE), intent(in) :: der_values(1:ny_value - 1, 0:3, -2:2)
-    real(C_DOUBLE), intent(in) :: k2_values(-nz_value:, nx0_value:)
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: slab_values(:, :)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: bc0_values(-nz_value:, nx0_value:, :)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: bcn_values(-nz_value:, nx0_value:, :)
-    character(len=*), intent(in) :: solve_label
-    complex(C_DOUBLE_COMPLEX) :: rhs_value, lower_ghost_value, lower_boundary_value, upper_boundary_value, upper_ghost_value
-    complex(C_DOUBLE_COMPLEX) :: lower_rhs0, upper_rhsn
-    real(C_DOUBLE) :: lower_eq0(-2:2), upper_eqn(-2:2), row_coeffs(-2:2)
-    real(C_DOUBLE) :: kk, c_m2, c_m1, c_0, c_p1, c_p2
-    integer(C_INT) :: nlines_z, ilocal, iline, ix, iz, iy, p
-
-    if (line_count <= 0) return
-
-    nlines_z = 2*nz_value + 1
-    call ys_prepare_gpsv_workspace(ny_value - 1, line_count)
-
-    call roctxPush("compact full-y pack")
-    !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(slab_values, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, der_values, k2_values, ni_value, &
-    !$omp& bc0_values, bcn_values, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, lambda_coeff, diffusion_coeff, component_index, &
-    !$omp& lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, first_line, line_count, nlines_z, nz_value, nx0_value, ny_value) &
-    !$omp private(ilocal, iy, iline, ix, iz, p, kk, c_m2, c_m1, c_0, c_p1, c_p2, rhs_value, lower_ghost_value, &
-    !$omp& lower_boundary_value, upper_boundary_value, upper_ghost_value, lower_rhs0, upper_rhsn, lower_eq0, upper_eqn, row_coeffs)
-    do ilocal = 1, line_count
-      do iy = 1, ny_value - 1
-        iline = first_line + ilocal - 1
-        ix = (iline - 1)/nlines_z + nx0_value
-        iz = mod(iline - 1, nlines_z) - nz_value
-
-        lower_ghost_value = (0.0d0, 0.0d0)
-        if (lower_ghost_rhs_index > 0_C_INT) lower_ghost_value = bc0_values(iz, ix, lower_ghost_rhs_index)
-        if (lower_ghost_rhs_index < 0_C_INT) lower_ghost_value = bcn_values(iz, ix, -lower_ghost_rhs_index)
-        lower_boundary_value = (0.0d0, 0.0d0)
-        if (lower_rhs_index > 0_C_INT) lower_boundary_value = bc0_values(iz, ix, lower_rhs_index)
-        if (lower_rhs_index < 0_C_INT) lower_boundary_value = bcn_values(iz, ix, -lower_rhs_index)
-        upper_boundary_value = (0.0d0, 0.0d0)
-        if (upper_rhs_index > 0_C_INT) upper_boundary_value = bc0_values(iz, ix, upper_rhs_index)
-        if (upper_rhs_index < 0_C_INT) upper_boundary_value = bcn_values(iz, ix, -upper_rhs_index)
-        upper_ghost_value = (0.0d0, 0.0d0)
-        if (upper_ghost_rhs_index > 0_C_INT) upper_ghost_value = bc0_values(iz, ix, upper_ghost_rhs_index)
-        if (upper_ghost_rhs_index < 0_C_INT) upper_ghost_value = bcn_values(iz, ix, -upper_ghost_rhs_index)
-
-        lower_rhs0 = lower_boundary_value - lower_ghost_value*lower_bc(-2)/lower_ghost_bc(-2)
-        lower_eq0 = lower_bc - lower_ghost_bc*lower_bc(-2)/lower_ghost_bc(-2)
-        lower_eq0(-2) = 0.0d0
-        upper_rhsn = upper_boundary_value - upper_ghost_value*upper_bc(2)/upper_ghost_bc(2)
-        upper_eqn = upper_bc - upper_ghost_bc*upper_bc(2)/upper_ghost_bc(2)
-        upper_eqn(2) = 0.0d0
-
-        kk = k2_values(iz, ix)
-        rhs_value = slab_values(iy + 2, ilocal)
-        if (component_index == 2_C_INT) then
-          c_m2 = lambda_coeff*(der_values(iy, 2, -2) - kk*der_values(iy, 0, -2)) - &
-                 ni_value*(der_values(iy, 3, -2) - 2.0d0*kk*der_values(iy, 2, -2) + kk*kk*der_values(iy, 0, -2))
-          c_m1 = lambda_coeff*(der_values(iy, 2, -1) - kk*der_values(iy, 0, -1)) - &
-                 ni_value*(der_values(iy, 3, -1) - 2.0d0*kk*der_values(iy, 2, -1) + kk*kk*der_values(iy, 0, -1))
-          c_0 = lambda_coeff*(der_values(iy, 2, 0) - kk*der_values(iy, 0, 0)) - &
-                ni_value*(der_values(iy, 3, 0) - 2.0d0*kk*der_values(iy, 2, 0) + kk*kk*der_values(iy, 0, 0))
-          c_p1 = lambda_coeff*(der_values(iy, 2, 1) - kk*der_values(iy, 0, 1)) - &
-                 ni_value*(der_values(iy, 3, 1) - 2.0d0*kk*der_values(iy, 2, 1) + kk*kk*der_values(iy, 0, 1))
-          c_p2 = lambda_coeff*(der_values(iy, 2, 2) - kk*der_values(iy, 0, 2)) - &
-                 ni_value*(der_values(iy, 3, 2) - 2.0d0*kk*der_values(iy, 2, 2) + kk*kk*der_values(iy, 0, 2))
-        else
-          c_m2 = lambda_coeff*der_values(iy, 0, -2) - diffusion_coeff*ni_value*(der_values(iy, 2, -2) - kk*der_values(iy, 0, -2))
-          c_m1 = lambda_coeff*der_values(iy, 0, -1) - diffusion_coeff*ni_value*(der_values(iy, 2, -1) - kk*der_values(iy, 0, -1))
-          c_0 = lambda_coeff*der_values(iy, 0, 0) - diffusion_coeff*ni_value*(der_values(iy, 2, 0) - kk*der_values(iy, 0, 0))
-          c_p1 = lambda_coeff*der_values(iy, 0, 1) - diffusion_coeff*ni_value*(der_values(iy, 2, 1) - kk*der_values(iy, 0, 1))
-          c_p2 = lambda_coeff*der_values(iy, 0, 2) - diffusion_coeff*ni_value*(der_values(iy, 2, 2) - kk*der_values(iy, 0, 2))
-        end if
-
-        row_coeffs = (/c_m2, c_m1, c_0, c_p1, c_p2/)
-        call ys_eliminate_physical_boundary_row(iy - 1, ny_value - 1, .true., .true., rhs_value, row_coeffs, lower_ghost_value, &
-                                                lower_rhs0, lower_ghost_bc, lower_eq0, upper_ghost_value, upper_rhsn, &
-                                                upper_ghost_bc, upper_eqn)
-        c_m2 = row_coeffs(-2)
-        c_m1 = row_coeffs(-1)
-        c_0 = row_coeffs(0)
-        c_p1 = row_coeffs(1)
-        c_p2 = row_coeffs(2)
-
-        p = (iy - 1)*line_count + ilocal
-        ys_gpsv_x(p) = rhs_value
-        ys_gpsv_ds(p) = cmplx(c_m2, 0.0d0, kind=C_DOUBLE)
-        ys_gpsv_dl(p) = cmplx(c_m1, 0.0d0, kind=C_DOUBLE)
-        ys_gpsv_d(p) = cmplx(c_0, 0.0d0, kind=C_DOUBLE)
-        ys_gpsv_du(p) = cmplx(c_p1, 0.0d0, kind=C_DOUBLE)
-        ys_gpsv_dw(p) = cmplx(c_p2, 0.0d0, kind=C_DOUBLE)
-      end do
-    end do
-    !$omp end target teams distribute parallel do
-    call roctxPop("compact full-y pack")
-
-    call ys_solve_packed_pentadiagonal(ny_value - 1, line_count, solve_label)
-
-    call roctxPush("compact full-y unpack")
-    !$omp target teams distribute parallel do default(none) &
-    !$omp shared(slab_values, ys_gpsv_x, bc0_values, bcn_values, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
-    !$omp& lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, first_line, line_count, nlines_z, nz_value, nx0_value, ny_value) &
-    !$omp private(ilocal, iy, iline, ix, iz, p, lower_ghost_value, lower_boundary_value, upper_boundary_value, upper_ghost_value, &
-    !$omp& lower_rhs0, upper_rhsn, lower_eq0, upper_eqn)
-    do ilocal = 1, line_count
-      iline = first_line + ilocal - 1
-      ix = (iline - 1)/nlines_z + nx0_value
-      iz = mod(iline - 1, nlines_z) - nz_value
-      do iy = 1, ny_value - 1
-        p = (iy - 1)*line_count + ilocal
-        slab_values(iy + 2, ilocal) = ys_gpsv_x(p)
-      end do
-
-      lower_ghost_value = (0.0d0, 0.0d0)
-      if (lower_ghost_rhs_index > 0_C_INT) lower_ghost_value = bc0_values(iz, ix, lower_ghost_rhs_index)
-      if (lower_ghost_rhs_index < 0_C_INT) lower_ghost_value = bcn_values(iz, ix, -lower_ghost_rhs_index)
-      lower_boundary_value = (0.0d0, 0.0d0)
-      if (lower_rhs_index > 0_C_INT) lower_boundary_value = bc0_values(iz, ix, lower_rhs_index)
-      if (lower_rhs_index < 0_C_INT) lower_boundary_value = bcn_values(iz, ix, -lower_rhs_index)
-      upper_boundary_value = (0.0d0, 0.0d0)
-      if (upper_rhs_index > 0_C_INT) upper_boundary_value = bc0_values(iz, ix, upper_rhs_index)
-      if (upper_rhs_index < 0_C_INT) upper_boundary_value = bcn_values(iz, ix, -upper_rhs_index)
-      upper_ghost_value = (0.0d0, 0.0d0)
-      if (upper_ghost_rhs_index > 0_C_INT) upper_ghost_value = bc0_values(iz, ix, upper_ghost_rhs_index)
-      if (upper_ghost_rhs_index < 0_C_INT) upper_ghost_value = bcn_values(iz, ix, -upper_ghost_rhs_index)
-      call ys_compact_physical_boundary_equations(lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, lower_boundary_value, &
-                                                lower_ghost_value, upper_boundary_value, upper_ghost_value, lower_rhs0, lower_eq0, &
-                                                  upper_rhsn, upper_eqn)
-
-      slab_values(2, ilocal) = (lower_rhs0 - lower_eq0(0)*slab_values(3, ilocal) - lower_eq0(1)*slab_values(4, ilocal) - &
-                                lower_eq0(2)*slab_values(5, ilocal))/lower_eq0(-1)
-      slab_values(1, ilocal) = (lower_ghost_value - lower_ghost_bc(-1)*slab_values(2, ilocal) - &
-                                lower_ghost_bc(0)*slab_values(3, ilocal) - lower_ghost_bc(1)*slab_values(4, ilocal) - &
-                                lower_ghost_bc(2)*slab_values(5, ilocal))/lower_ghost_bc(-2)
-      slab_values(ny_value + 2, ilocal) = (upper_rhsn - upper_eqn(-2)*slab_values(ny_value - 1, ilocal) - &
-                                           upper_eqn(-1)*slab_values(ny_value, ilocal) - &
-                                           upper_eqn(0)*slab_values(ny_value + 1, ilocal))/upper_eqn(1)
-      slab_values(ny_value + 3, ilocal) = (upper_ghost_value - upper_ghost_bc(-2)*slab_values(ny_value - 1, ilocal) - &
-                                           upper_ghost_bc(-1)*slab_values(ny_value, ilocal) - &
-                                           upper_ghost_bc(0)*slab_values(ny_value + 1, ilocal) - &
-                                           upper_ghost_bc(1)*slab_values(ny_value + 2, ilocal))/upper_ghost_bc(2)
-    end do
-    !$omp end target teams distribute parallel do
-    call roctxPop("compact full-y unpack")
-  end subroutine ys_solve_full_y_lines_packed
-
   subroutine ys_solve_assembled_ghost_field(dst, ny, nz, response_mode)
     implicit none
     integer(C_INT), intent(in) :: ny, nz, response_mode
@@ -512,14 +295,14 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     if (npy_grid == 1) then
       call ys_pack_assembled_direct(row_start, active_n, nlines)
       call ys_solve_ghost_field_single_rank_packed(dst, ny, nz)
-      call ys_reconstruct_single_rank_boundaries(dst, ny, nz)
+ call ys_reconstruct_assembled_boundaries(dst, nz, has_lower_boundary, has_upper_boundary, active_n, nlines, nlines_z, dst_row_base)
       return
     end if
 
     call roctxPush("ys_endpoint_schur")
-    call ys_solve_endpoint_schur(dst, ny, nz, has_lower_boundary, has_upper_boundary, has_padded_dst, &
-                                 row_start, row_end, active_n, nlines, nlines_z, dst_row_base, response_mode)
+    call ys_solve_endpoint_schur(dst, ny, nz, has_padded_dst, row_start, row_end, active_n, nlines, nlines_z, dst_row_base, response_mode)
     call roctxPop("ys_endpoint_schur")
+ call ys_reconstruct_assembled_boundaries(dst, nz, has_lower_boundary, has_upper_boundary, active_n, nlines, nlines_z, dst_row_base)
   end subroutine ys_solve_assembled_ghost_field
 
   subroutine ys_eliminate_assembled_boundaries(row_start, active_n, nlines, has_lower_boundary, has_upper_boundary)
@@ -527,8 +310,11 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     integer(C_INT), intent(in) :: row_start, active_n, nlines
     logical, intent(in) :: has_lower_boundary, has_upper_boundary
     complex(C_DOUBLE_COMPLEX) :: lower_rhs0, upper_rhsn, rhs_value
-    real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-2:2), upper_eqn(-2:2)
+    complex(C_DOUBLE_COMPLEX) :: lower_ghost_value, lower_boundary_value, upper_ghost_value, upper_boundary_value
+    real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-1:2), upper_eqn(-2:1)
+    real(C_DOUBLE) :: lower_ghost_row(-2:2), lower_boundary_row(-2:2), upper_ghost_row(-2:2), upper_boundary_row(-2:2)
     integer(C_INT) :: iline, row, local_idx
+    real(C_DOUBLE) :: fac
 
     if (.not. has_lower_boundary .and. .not. has_upper_boundary) return
 
@@ -537,49 +323,42 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     !$omp shared(ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
     !$omp& ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, &
     !$omp& ys_boundary_lower_eq, ys_boundary_upper_eq, row_start, active_n, nlines, has_lower_boundary, has_upper_boundary) &
-    !$omp private(iline, lower_rhs0, upper_rhsn, rhs_value, row_coeffs, lower_eq0, upper_eqn, row, local_idx)
+    !$omp private(iline, lower_rhs0, upper_rhsn, rhs_value, lower_ghost_value, lower_boundary_value, upper_ghost_value, upper_boundary_value, &
+    !$omp& row_coeffs, lower_eq0, upper_eqn, lower_ghost_row, lower_boundary_row, upper_ghost_row, upper_boundary_row, row, local_idx, fac)
     do iline = 1, nlines
-      lower_rhs0 = (0.0d0, 0.0d0)
-      lower_eq0 = 0.0d0
       if (has_lower_boundary) then
-        lower_rhs0 = ys_lower_boundary_rhs(iline) - &
-                     ys_lower_ghost_rhs(iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
-        lower_eq0 = ys_lower_boundary_row(:, iline) - &
-                    ys_lower_ghost_row(:, iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
-        lower_eq0(-2) = 0.0d0
+        lower_ghost_row = ys_lower_ghost_row(:, iline)
+        lower_boundary_row = ys_lower_boundary_row(:, iline)
+        lower_ghost_value = ys_lower_ghost_rhs(iline)
+        lower_boundary_value = ys_lower_boundary_rhs(iline)
+      YS_MAKE_LOWER_BOUNDARY_EQ(lower_ghost_value, lower_boundary_value, lower_ghost_row, lower_boundary_row, lower_rhs0, lower_eq0)
         ys_boundary_lower_rhs0(iline) = lower_rhs0
-        ys_boundary_lower_eq(:, iline) = lower_eq0(-1:2)
+        ys_boundary_lower_eq(:, iline) = lower_eq0
 
         do local_idx = 0, 1
           row = row_start + local_idx
           rhs_value = ys_local_rhs(row, iline)
           row_coeffs = ys_local_operator(row, -2:2, iline)
-          call ys_eliminate_physical_boundary_row(local_idx, active_n, .true., .false., rhs_value, row_coeffs, ys_lower_ghost_rhs(iline), &
-                                                  lower_rhs0, ys_lower_ghost_row(:, iline), lower_eq0, (0.0d0, 0.0d0), &
-                                                  (0.0d0, 0.0d0), ys_upper_ghost_row(:, iline), upper_eqn)
+   YS_ELIMINATE_LOWER_BOUNDARY_ROW(local_idx, rhs_value, row_coeffs, lower_ghost_value, lower_rhs0, lower_ghost_row, lower_eq0, fac)
           ys_local_rhs(row, iline) = rhs_value
           ys_local_operator(row, -2:2, iline) = row_coeffs
         end do
       end if
 
-      upper_rhsn = (0.0d0, 0.0d0)
-      upper_eqn = 0.0d0
       if (has_upper_boundary) then
-        upper_rhsn = ys_upper_boundary_rhs(iline) - &
-                     ys_upper_ghost_rhs(iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
-        upper_eqn = ys_upper_boundary_row(:, iline) - &
-                    ys_upper_ghost_row(:, iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
-        upper_eqn(2) = 0.0d0
+        upper_ghost_row = ys_upper_ghost_row(:, iline)
+        upper_boundary_row = ys_upper_boundary_row(:, iline)
+        upper_ghost_value = ys_upper_ghost_rhs(iline)
+        upper_boundary_value = ys_upper_boundary_rhs(iline)
+      YS_MAKE_UPPER_BOUNDARY_EQ(upper_ghost_value, upper_boundary_value, upper_ghost_row, upper_boundary_row, upper_rhsn, upper_eqn)
         ys_boundary_upper_rhsn(iline) = upper_rhsn
-        ys_boundary_upper_eq(:, iline) = upper_eqn(-2:1)
+        ys_boundary_upper_eq(:, iline) = upper_eqn
 
         do local_idx = active_n - 2, active_n - 1
           row = row_start + local_idx
           rhs_value = ys_local_rhs(row, iline)
           row_coeffs = ys_local_operator(row, -2:2, iline)
-          call ys_eliminate_physical_boundary_row(local_idx, active_n, .false., .true., rhs_value, row_coeffs, (0.0d0, 0.0d0), &
-                                                  (0.0d0, 0.0d0), ys_lower_ghost_row(:, iline), lower_eq0, ys_upper_ghost_rhs(iline), &
-                                                  upper_rhsn, ys_upper_ghost_row(:, iline), upper_eqn)
+          YS_ELIMINATE_UPPER_BOUNDARY_ROW(local_idx, active_n, rhs_value, row_coeffs, upper_ghost_value, upper_rhsn, upper_ghost_row, upper_eqn, fac)
           ys_local_rhs(row, iline) = rhs_value
           ys_local_operator(row, -2:2, iline) = row_coeffs
         end do
@@ -605,24 +384,22 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     call ys_solve_assembled_ghost_field(dst, ny, nz, YS_ENDPOINT_RESPONSE_EVEN_Z)
   end subroutine ys_solve_ghost_field_reduced_symmetric_operator
 
-  subroutine ys_solve_endpoint_schur(dst, ny, nz, has_lower_boundary, has_upper_boundary, has_padded_dst, &
-                                     row_start, row_end, active_n, nlines, nlines_z, dst_row_base, response_mode)
+  subroutine ys_solve_endpoint_schur(dst, ny, nz, has_padded_dst, row_start, row_end, active_n, nlines, nlines_z, dst_row_base, response_mode)
     implicit none
     integer(C_INT), intent(in) :: ny, nz, row_start, row_end, active_n, nlines, nlines_z, dst_row_base, response_mode
-    logical, intent(in) :: has_lower_boundary, has_upper_boundary, has_padded_dst
+    logical, intent(in) :: has_padded_dst
     complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
-    complex(C_DOUBLE_COMPLEX) :: lower_rhs0, upper_rhsn, rhs_value
+    complex(C_DOUBLE_COMPLEX) :: rhs_value
     complex(C_DOUBLE_COMPLEX) :: c0, c1, y00, y01, y10, y11, g0, g1
     complex(C_DOUBLE_COMPLEX) :: s00, s01, s10, s11, t00, t01, t10, t11, det
     complex(C_DOUBLE_COMPLEX) :: vleft1, vleft2, vright1, vright2
     complex(C_DOUBLE_COMPLEX) :: s4(4, 4), rhs4(4, 5), pivot4, factor4
-    real(C_DOUBLE) :: row_coeffs(-2:2), lower_eq0(-2:2), upper_eqn(-2:2), coeff
+    real(C_DOUBLE) :: row_coeffs(-2:2), coeff
     integer(C_INT) :: nI, nresp, batch_count, exposed_n, interior_base
     integer(C_INT) :: sys, iline, ref_iline, resp, resp_index
     integer(C_INT) :: local_i, local_idx, row, col, coupled_row, p, j, offset
     integer(C_INT) :: exposed_slot, response_slot, rhs_col, iface, k, m
     integer(C_INT) :: ix, iz, abs_iz, ix_local
-    integer(C_INT) :: lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3
     logical :: is_actual
     logical :: has_left_interface, has_right_interface
 
@@ -650,10 +427,9 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
 
     call roctxPush("ys_endpoint_pack_plus_response")
     !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
-    !$omp& ys_lower_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, ys_upper_ghost_row, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, &
-    !$omp& ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, row_start, active_n, nI, nlines, nlines_z, nresp, batch_count, nz, nx0, &
-    !$omp& has_lower_boundary, has_upper_boundary, response_mode, ipy, has_left_interface, has_right_interface, exposed_n, interior_base) &
+    !$omp shared(ys_local_rhs, ys_local_operator, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, &
+    !$omp& row_start, active_n, nI, nlines, nlines_z, nresp, batch_count, nz, nx0, &
+    !$omp& response_mode, ipy, has_left_interface, has_right_interface, exposed_n, interior_base) &
     !$omp private(sys, iline, ref_iline, resp, local_i, local_idx, row, col, coupled_row, p, j, offset, is_actual, ix_local, abs_iz, &
     !$omp& rhs_value, row_coeffs, coeff, exposed_slot, response_slot)
     do local_i = 0, nI - 1
@@ -907,19 +683,12 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
 
     call ys_solve_reduced_interfaces()
 
-    lower_inner0 = dst_row_base
-    lower_inner2 = dst_row_base + 2
-    upper_inner0 = active_n + dst_row_base - 3
-    upper_inner2 = upper_inner0 + 2
-    upper_inner3 = upper_inner0 + 3
-
     call roctxPush("ys_endpoint_reconstruct")
     !$omp target teams distribute parallel do default(none) &
-    !$omp shared(dst, ys_gpsv_x, ys_reduced_rhs, ys_left_interface_values, ys_right_interface_values, ys_lower_ghost_rhs, ys_upper_ghost_rhs, &
-    !$omp& ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_lower_ghost_row, ys_upper_ghost_row, ys_lower_boundary_row, ys_upper_boundary_row, &
-    !$omp& nlines, nlines_z, nresp, nx0, nz, active_n, dst_row_base, has_lower_boundary, has_upper_boundary, lower_inner0, lower_inner2, &
-    !$omp& upper_inner0, upper_inner2, upper_inner3, has_padded_dst, nI, batch_count, response_mode, ipy, has_left_interface, has_right_interface, interior_base) &
-    !$omp private(iline, local_i, local_idx, p, ix, iz, abs_iz, resp_index, vleft1, vleft2, vright1, vright2, lower_rhs0, upper_rhsn, lower_eq0, upper_eqn, exposed_slot)
+    !$omp shared(dst, ys_gpsv_x, ys_reduced_rhs, ys_left_interface_values, ys_right_interface_values, nlines, nlines_z, nresp, nx0, nz, &
+    !$omp& active_n, dst_row_base, has_padded_dst, nI, batch_count, response_mode, ipy, has_left_interface, has_right_interface, interior_base) &
+    !$omp private(iline, local_i, local_idx, p, ix, iz, abs_iz, resp_index, vleft1, vleft2, vright1, vright2, &
+    !$omp& exposed_slot)
     do iline = 1, nlines
       ix = (iline - 1)/nlines_z + nx0
       iz = mod(iline - 1, nlines_z) - nz
@@ -973,41 +742,11 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
         end if
       end do
       if (has_padded_dst) then
-        if (has_lower_boundary) then
-          lower_rhs0 = ys_lower_boundary_rhs(iline) - &
-                       ys_lower_ghost_rhs(iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
-          lower_eq0 = ys_lower_boundary_row(:, iline) - &
-                      ys_lower_ghost_row(:, iline)*ys_lower_boundary_row(-2, iline)/ys_lower_ghost_row(-2, iline)
-          lower_eq0(-2) = 0.0d0
-          dst(2, iz + nz + 1, ix - nx0 + 1) = (lower_rhs0 - &
-                                               lower_eq0(0)*dst(lower_inner0, iz + nz + 1, ix - nx0 + 1) - &
-                                               lower_eq0(1)*dst(lower_inner0 + 1, iz + nz + 1, ix - nx0 + 1) - &
-                                               lower_eq0(2)*dst(lower_inner2, iz + nz + 1, ix - nx0 + 1))/lower_eq0(-1)
-          dst(1, iz + nz + 1, ix - nx0 + 1) = (ys_lower_ghost_rhs(iline) - &
-                                               ys_lower_ghost_row(-1, iline)*dst(2, iz + nz + 1, ix - nx0 + 1) - &
-                                               ys_lower_ghost_row(0, iline)*dst(3, iz + nz + 1, ix - nx0 + 1) - &
-                                               ys_lower_ghost_row(1, iline)*dst(4, iz + nz + 1, ix - nx0 + 1) - &
-                                       ys_lower_ghost_row(2, iline)*dst(5, iz + nz + 1, ix - nx0 + 1))/ys_lower_ghost_row(-2, iline)
-        else
+        if (has_left_interface) then
           dst(1, iz + nz + 1, ix - nx0 + 1) = ys_left_interface_values(1, iline)
           dst(2, iz + nz + 1, ix - nx0 + 1) = ys_left_interface_values(2, iline)
         end if
-        if (has_upper_boundary) then
-          upper_rhsn = ys_upper_boundary_rhs(iline) - &
-                       ys_upper_ghost_rhs(iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
-          upper_eqn = ys_upper_boundary_row(:, iline) - &
-                      ys_upper_ghost_row(:, iline)*ys_upper_boundary_row(2, iline)/ys_upper_ghost_row(2, iline)
-          upper_eqn(2) = 0.0d0
-          dst(active_n + 3, iz + nz + 1, ix - nx0 + 1) = (upper_rhsn - &
-                                                          upper_eqn(-2)*dst(upper_inner0, iz + nz + 1, ix - nx0 + 1) - &
-                                                          upper_eqn(-1)*dst(upper_inner0 + 1, iz + nz + 1, ix - nx0 + 1) - &
-                                                          upper_eqn(0)*dst(upper_inner2, iz + nz + 1, ix - nx0 + 1))/upper_eqn(1)
-          dst(active_n + 4, iz + nz + 1, ix - nx0 + 1) = (ys_upper_ghost_rhs(iline) - &
-                                                      ys_upper_ghost_row(-2, iline)*dst(upper_inner0, iz + nz + 1, ix - nx0 + 1) - &
-                                                  ys_upper_ghost_row(-1, iline)*dst(upper_inner0 + 1, iz + nz + 1, ix - nx0 + 1) - &
-                                                       ys_upper_ghost_row(0, iline)*dst(upper_inner2, iz + nz + 1, ix - nx0 + 1) - &
-                             ys_upper_ghost_row(1, iline)*dst(upper_inner3, iz + nz + 1, ix - nx0 + 1))/ys_upper_ghost_row(2, iline)
-        else
+        if (has_right_interface) then
           dst(active_n + 3, iz + nz + 1, ix - nx0 + 1) = ys_right_interface_values(1, iline)
           dst(active_n + 4, iz + nz + 1, ix - nx0 + 1) = ys_right_interface_values(2, iline)
         end if
@@ -1042,60 +781,57 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     call roctxPop("ys_direct_pack")
   end subroutine ys_pack_assembled_direct
 
-  subroutine ys_reconstruct_single_rank_boundaries(dst, ny, nz)
+  subroutine ys_reconstruct_assembled_boundaries(dst, nz, has_lower_boundary, has_upper_boundary, active_n, nlines, nlines_z, dst_row_base)
     implicit none
-    integer(C_INT), intent(in) :: ny, nz
+    integer(C_INT), intent(in) :: nz, active_n, nlines, nlines_z, dst_row_base
+    logical, intent(in) :: has_lower_boundary, has_upper_boundary
     complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
-    integer(C_INT) :: ix, iz, iline, nlines, nlines_z, active_n
-    integer(C_INT) :: dst_row_base, lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3
-    logical :: has_padded_dst
+    integer(C_INT) :: ix, iz, iline
+    integer(C_INT) :: lower_inner0, lower_inner2, upper_inner0, upper_inner2, upper_inner3
+    real(C_DOUBLE) :: lower_ghost_row(-2:2), upper_ghost_row(-2:2), lower_eq0(-1:2), upper_eqn(-2:1)
+    complex(C_DOUBLE_COMPLEX) :: lower_ghost_value, upper_ghost_value
+    complex(C_DOUBLE_COMPLEX) :: lower_ghost_dst, lower_boundary_dst, upper_boundary_dst, upper_ghost_dst
 
-    active_n = nyN - ny0 + 1
-    has_padded_dst = (size(dst, 1) == active_n + 4)
-    if (.not. has_padded_dst) return
-
-    dst_row_base = 3
-    nlines_z = 2*nz + 1
-    nlines = ys_workspace_nlines
+    if (size(dst, 1) /= active_n + 4) return
+    if (.not. has_lower_boundary .and. .not. has_upper_boundary) return
     lower_inner0 = dst_row_base
     lower_inner2 = dst_row_base + 2
     upper_inner0 = active_n + dst_row_base - 3
     upper_inner2 = upper_inner0 + 2
     upper_inner3 = upper_inner0 + 3
 
-    call roctxPush("ys_single_rank_reconstruct_boundaries")
+    call roctxPush("ys_reconstruct_assembled_boundaries")
     !$omp target teams distribute parallel do default(none) &
     !$omp shared(dst, ys_lower_ghost_rhs, ys_upper_ghost_rhs, ys_lower_ghost_row, ys_upper_ghost_row, ys_boundary_lower_rhs0, &
     !$omp& ys_boundary_upper_rhsn, ys_boundary_lower_eq, ys_boundary_upper_eq, nlines, nlines_z, nx0, nz, active_n, lower_inner0, &
-    !$omp& lower_inner2, upper_inner0, upper_inner2, upper_inner3) &
-    !$omp private(iline, ix, iz)
+    !$omp& lower_inner2, upper_inner0, upper_inner2, upper_inner3, has_lower_boundary, has_upper_boundary) &
+    !$omp private(iline, ix, iz, lower_ghost_row, upper_ghost_row, lower_eq0, upper_eqn, lower_ghost_value, upper_ghost_value, &
+    !$omp& lower_ghost_dst, lower_boundary_dst, upper_boundary_dst, upper_ghost_dst)
     do iline = 1, nlines
       ix = (iline - 1)/nlines_z + nx0
       iz = mod(iline - 1, nlines_z) - nz
 
-      dst(2, iz + nz + 1, ix - nx0 + 1) = (ys_boundary_lower_rhs0(iline) - &
-                                           ys_boundary_lower_eq(0, iline)*dst(lower_inner0, iz + nz + 1, ix - nx0 + 1) - &
-                                           ys_boundary_lower_eq(1, iline)*dst(lower_inner0 + 1, iz + nz + 1, ix - nx0 + 1) - &
-                        ys_boundary_lower_eq(2, iline)*dst(lower_inner2, iz + nz + 1, ix - nx0 + 1))/ys_boundary_lower_eq(-1, iline)
-      dst(1, iz + nz + 1, ix - nx0 + 1) = (ys_lower_ghost_rhs(iline) - &
-                                           ys_lower_ghost_row(-1, iline)*dst(2, iz + nz + 1, ix - nx0 + 1) - &
-                                           ys_lower_ghost_row(0, iline)*dst(3, iz + nz + 1, ix - nx0 + 1) - &
-                                           ys_lower_ghost_row(1, iline)*dst(4, iz + nz + 1, ix - nx0 + 1) - &
-                                       ys_lower_ghost_row(2, iline)*dst(5, iz + nz + 1, ix - nx0 + 1))/ys_lower_ghost_row(-2, iline)
+      if (has_lower_boundary) then
+        lower_ghost_row = ys_lower_ghost_row(:, iline)
+        lower_eq0 = ys_boundary_lower_eq(:, iline)
+        lower_ghost_value = ys_lower_ghost_rhs(iline)
+        YS_RECONSTRUCT_LOWER_BOUNDARY(lower_ghost_dst, lower_boundary_dst, dst(lower_inner0, iz + nz + 1, ix - nx0 + 1), dst(lower_inner0 + 1, iz + nz + 1, ix - nx0 + 1), dst(lower_inner2, iz + nz + 1, ix - nx0 + 1), lower_ghost_value, lower_ghost_row, ys_boundary_lower_rhs0(iline), lower_eq0)
+        dst(1, iz + nz + 1, ix - nx0 + 1) = lower_ghost_dst
+        dst(2, iz + nz + 1, ix - nx0 + 1) = lower_boundary_dst
+      end if
 
-      dst(active_n + 3, iz + nz + 1, ix - nx0 + 1) = (ys_boundary_upper_rhsn(iline) - &
-                                                    ys_boundary_upper_eq(-2, iline)*dst(upper_inner0, iz + nz + 1, ix - nx0 + 1) - &
-                                                ys_boundary_upper_eq(-1, iline)*dst(upper_inner0 + 1, iz + nz + 1, ix - nx0 + 1) - &
-                         ys_boundary_upper_eq(0, iline)*dst(upper_inner2, iz + nz + 1, ix - nx0 + 1))/ys_boundary_upper_eq(1, iline)
-      dst(active_n + 4, iz + nz + 1, ix - nx0 + 1) = (ys_upper_ghost_rhs(iline) - &
-                                                      ys_upper_ghost_row(-2, iline)*dst(upper_inner0, iz + nz + 1, ix - nx0 + 1) - &
-                                                  ys_upper_ghost_row(-1, iline)*dst(upper_inner0 + 1, iz + nz + 1, ix - nx0 + 1) - &
-                                                      ys_upper_ghost_row(0, iline)*dst(upper_inner2, iz + nz + 1, ix - nx0 + 1) - &
-                             ys_upper_ghost_row(1, iline)*dst(upper_inner3, iz + nz + 1, ix - nx0 + 1))/ys_upper_ghost_row(2, iline)
+      if (has_upper_boundary) then
+        upper_ghost_row = ys_upper_ghost_row(:, iline)
+        upper_eqn = ys_boundary_upper_eq(:, iline)
+        upper_ghost_value = ys_upper_ghost_rhs(iline)
+        YS_RECONSTRUCT_UPPER_BOUNDARY(upper_boundary_dst, upper_ghost_dst, dst(upper_inner0, iz + nz + 1, ix - nx0 + 1), dst(upper_inner0 + 1, iz + nz + 1, ix - nx0 + 1), dst(upper_inner2, iz + nz + 1, ix - nx0 + 1), upper_ghost_value, upper_ghost_row, ys_boundary_upper_rhsn(iline), upper_eqn)
+        dst(active_n + 3, iz + nz + 1, ix - nx0 + 1) = upper_boundary_dst
+        dst(active_n + 4, iz + nz + 1, ix - nx0 + 1) = upper_ghost_dst
+      end if
     end do
     !$omp end target teams distribute parallel do
-    call roctxPop("ys_single_rank_reconstruct_boundaries")
-  end subroutine ys_reconstruct_single_rank_boundaries
+    call roctxPop("ys_reconstruct_assembled_boundaries")
+  end subroutine ys_reconstruct_assembled_boundaries
 
   subroutine ys_solve_ghost_field_single_rank_packed(dst, ny, nz)
     implicit none
