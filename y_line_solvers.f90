@@ -15,10 +15,14 @@ module y_line_solvers
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_EVEN_Z = 2_C_INT
 
   public :: ys_prepare_assembled_workspace, ys_release_workspace
-  public :: ys_local_rhs, ys_local_operator
   public :: ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs
   public :: ys_eqm1, ys_eq0, ys_eqn, ys_eqnp1
   public :: ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, ys_boundary_lower_eq, ys_boundary_upper_eq
+  public :: ys_boundary_lower_rhs0_owner, ys_boundary_upper_rhsn_owner, ys_boundary_lower_eq_owner, ys_boundary_upper_eq_owner
+  public :: ys_lower_ghost_owner, ys_lower_boundary_owner, ys_upper_boundary_owner, ys_upper_ghost_owner
+  public :: ys_eqm1_owner, ys_eq0_owner, ys_eqn_owner, ys_eqnp1_owner
+  public :: ys_gpsv_matrix, ys_gpsv_rhs, ys_gpsv_line_matrix, ys_gpsv_line_rhs
+  public :: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, ys_owner_nz, ys_owner_nx, ys_owner_ix0, ys_owner_ixN
   public :: ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x
   public :: ys_solve_packed_pentadiagonal, ys_solve_endpoint_schur
 
@@ -28,12 +32,29 @@ module y_line_solvers
   integer(C_INT), save :: ys_workspace_nlines = 0
   integer(C_INT), save :: ys_workspace_active_n = 0
   integer(C_INT), save :: ys_workspace_npy = -1
-  complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_local_rhs(:, :)
-  real(C_DOUBLE), allocatable, save :: ys_local_operator(:, :, :)
-  complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_lower_ghost_rhs(:), ys_lower_boundary_rhs(:), ys_upper_boundary_rhs(:), ys_upper_ghost_rhs(:)
-  real(C_DOUBLE), allocatable, save :: ys_eqm1(:, :), ys_eq0(:, :), ys_eqn(:, :), ys_eqnp1(:, :)
-  complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_boundary_lower_rhs0(:), ys_boundary_upper_rhsn(:)
-  real(C_DOUBLE), allocatable, save :: ys_boundary_lower_eq(:, :), ys_boundary_upper_eq(:, :)
+  integer(C_INT), save :: ys_workspace_line_start = 1
+  integer(C_INT), save :: ys_workspace_line_end = 0
+  integer(C_INT), save :: ys_owner_nz = 0
+  integer(C_INT), save :: ys_owner_nx = 0
+  integer(C_INT), save :: ys_owner_ix0 = 1
+  integer(C_INT), save :: ys_owner_ixN = 0
+  complex(C_DOUBLE_COMPLEX), allocatable, target, save :: ys_gpsv_matrix_store(:), ys_gpsv_rhs_store(:)
+  complex(C_DOUBLE_COMPLEX), pointer, save :: ys_gpsv_ds(:), ys_gpsv_dl(:), ys_gpsv_d(:), ys_gpsv_du(:), ys_gpsv_dw(:), ys_gpsv_x(:)
+  complex(C_DOUBLE_COMPLEX), pointer, save :: ys_gpsv_matrix(:, :, :, :), ys_gpsv_rhs(:, :, :)
+  complex(C_DOUBLE_COMPLEX), pointer, save :: ys_gpsv_line_matrix(:, :, :), ys_gpsv_line_rhs(:, :)
+  complex(C_DOUBLE_COMPLEX), pointer, save :: ys_gpsv_owner_matrix(:, :, :, :), ys_gpsv_owner_rhs(:, :, :)
+  complex(C_DOUBLE_COMPLEX), allocatable, target, save :: ys_lower_ghost_store(:), ys_lower_boundary_store(:), ys_upper_boundary_store(:), ys_upper_ghost_store(:)
+  complex(C_DOUBLE_COMPLEX), pointer, save :: ys_lower_ghost_rhs(:), ys_lower_boundary_rhs(:), ys_upper_boundary_rhs(:), ys_upper_ghost_rhs(:)
+  complex(C_DOUBLE_COMPLEX), pointer, save :: ys_lower_ghost_owner(:, :), ys_lower_boundary_owner(:, :), ys_upper_boundary_owner(:, :), ys_upper_ghost_owner(:, :)
+  real(C_DOUBLE), allocatable, target, save :: ys_eqm1_store(:), ys_eq0_store(:), ys_eqn_store(:), ys_eqnp1_store(:)
+  real(C_DOUBLE), pointer, save :: ys_eqm1(:, :), ys_eq0(:, :), ys_eqn(:, :), ys_eqnp1(:, :)
+  real(C_DOUBLE), pointer, save :: ys_eqm1_owner(:, :, :), ys_eq0_owner(:, :, :), ys_eqn_owner(:, :, :), ys_eqnp1_owner(:, :, :)
+  complex(C_DOUBLE_COMPLEX), allocatable, target, save :: ys_boundary_lower_rhs0_store(:), ys_boundary_upper_rhsn_store(:)
+  complex(C_DOUBLE_COMPLEX), pointer, save :: ys_boundary_lower_rhs0(:), ys_boundary_upper_rhsn(:)
+  real(C_DOUBLE), allocatable, target, save :: ys_boundary_lower_eq_store(:), ys_boundary_upper_eq_store(:)
+  real(C_DOUBLE), pointer, save :: ys_boundary_lower_eq(:, :), ys_boundary_upper_eq(:, :)
+  complex(C_DOUBLE_COMPLEX), pointer, save :: ys_boundary_lower_rhs0_owner(:, :), ys_boundary_upper_rhsn_owner(:, :)
+  real(C_DOUBLE), pointer, save :: ys_boundary_lower_eq_owner(:, :, :), ys_boundary_upper_eq_owner(:, :, :)
   real(C_DOUBLE), allocatable, save :: ys_interior_lu(:, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_interior_response_columns(:, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_reduced_rows_send(:, :)
@@ -46,10 +67,11 @@ module y_line_solvers
   logical, save :: ys_gpsv_handle_created = .false.
 #endif
   integer(C_INT), save :: ys_gpsv_n = -1, ys_gpsv_batch = -1
+  integer(C_INT), save :: ys_batch_n = -1, ys_batch_count = -1
 #ifdef HAVE_CUDA
   integer(8), save :: ys_gpsv_buffer_size = 0_8
 #endif
-  complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_gpsv_ds(:), ys_gpsv_dl(:), ys_gpsv_d(:), ys_gpsv_du(:), ys_gpsv_dw(:), ys_gpsv_x(:)
+  complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_batch_ds(:), ys_batch_dl(:), ys_batch_d(:), ys_batch_du(:), ys_batch_dw(:), ys_batch_x(:)
 #ifdef HAVE_CUDA
   character(c_char), allocatable, save :: ys_gpsv_buffer(:)
 #endif
@@ -59,14 +81,22 @@ contains
   subroutine ys_release_core_workspace()
     implicit none
 
-    if (.not. allocated(ys_local_rhs)) return
+    if (.not. allocated(ys_gpsv_rhs_store)) return
 
-    !$omp target exit data map(delete: ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
-    !$omp& ys_eqm1, ys_eq0, ys_eqn, ys_eqnp1, ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, &
-    !$omp& ys_boundary_lower_eq, ys_boundary_upper_eq)
-  deallocate (ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs)
-    deallocate (ys_eqm1, ys_eq0, ys_eqn, ys_eqnp1)
-    deallocate (ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, ys_boundary_lower_eq, ys_boundary_upper_eq)
+    !$omp target exit data map(delete: ys_gpsv_matrix_store, ys_gpsv_rhs_store, &
+    !$omp& ys_lower_ghost_store, ys_lower_boundary_store, ys_upper_boundary_store, ys_upper_ghost_store, &
+    !$omp& ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store, ys_boundary_lower_rhs0_store, ys_boundary_upper_rhsn_store, &
+    !$omp& ys_boundary_lower_eq_store, ys_boundary_upper_eq_store)
+    nullify (ys_gpsv_matrix, ys_gpsv_rhs, ys_gpsv_line_matrix, ys_gpsv_line_rhs, ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, &
+             ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, ys_lower_ghost_rhs, ys_lower_boundary_rhs, &
+             ys_upper_boundary_rhs, ys_upper_ghost_rhs, ys_lower_ghost_owner, ys_lower_boundary_owner, ys_upper_boundary_owner, ys_upper_ghost_owner, &
+             ys_eqm1, ys_eq0, ys_eqn, ys_eqnp1, ys_eqm1_owner, ys_eq0_owner, ys_eqn_owner, ys_eqnp1_owner, ys_boundary_lower_rhs0, &
+   ys_boundary_upper_rhsn, ys_boundary_lower_eq, ys_boundary_upper_eq, ys_boundary_lower_rhs0_owner, ys_boundary_upper_rhsn_owner, &
+             ys_boundary_lower_eq_owner, ys_boundary_upper_eq_owner)
+    deallocate (ys_gpsv_matrix_store, ys_gpsv_rhs_store)
+    deallocate (ys_lower_ghost_store, ys_lower_boundary_store, ys_upper_boundary_store, ys_upper_ghost_store)
+    deallocate (ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
+    deallocate (ys_boundary_lower_rhs0_store, ys_boundary_upper_rhsn_store, ys_boundary_lower_eq_store, ys_boundary_upper_eq_store)
   end subroutine ys_release_core_workspace
 
   subroutine ys_release_reduced_workspace()
@@ -80,17 +110,56 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     deallocate (ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs)
   end subroutine ys_release_reduced_workspace
 
-  subroutine ys_allocate_core_workspace(row_start, row_end, nlines)
+  subroutine ys_allocate_core_workspace(row_start, row_end, line_start, nlines)
     implicit none
-    integer(C_INT), intent(in) :: row_start, row_end, nlines
+    integer(C_INT), intent(in) :: row_start, row_end, line_start, nlines
+    integer(C_INT) :: active_n, line_end
 
-    allocate (ys_local_rhs(row_start:row_end, nlines), ys_local_operator(row_start:row_end, -2:2, nlines))
-    allocate (ys_lower_ghost_rhs(nlines), ys_lower_boundary_rhs(nlines), ys_upper_boundary_rhs(nlines), ys_upper_ghost_rhs(nlines))
-    allocate (ys_eqm1(-2:2, nlines), ys_eq0(-2:2, nlines), ys_eqn(-2:2, nlines), ys_eqnp1(-2:2, nlines))
-    allocate (ys_boundary_lower_rhs0(nlines), ys_boundary_upper_rhsn(nlines), ys_boundary_lower_eq(-1:2, nlines), ys_boundary_upper_eq(-2:1, nlines))
-    !$omp target enter data map(alloc: ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
-    !$omp& ys_eqm1, ys_eq0, ys_eqn, ys_eqnp1, ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, &
-    !$omp& ys_boundary_lower_eq, ys_boundary_upper_eq)
+    active_n = row_end - row_start + 1
+    line_end = line_start + nlines - 1
+    allocate (ys_gpsv_matrix_store(5*nlines*active_n), ys_gpsv_rhs_store(nlines*active_n))
+    allocate (ys_lower_ghost_store(nlines), ys_lower_boundary_store(nlines), ys_upper_boundary_store(nlines), ys_upper_ghost_store(nlines))
+    allocate (ys_eqm1_store(5*nlines), ys_eq0_store(5*nlines), ys_eqn_store(5*nlines), ys_eqnp1_store(5*nlines))
+    allocate (ys_boundary_lower_rhs0_store(nlines), ys_boundary_upper_rhsn_store(nlines))
+    allocate (ys_boundary_lower_eq_store(4*nlines), ys_boundary_upper_eq_store(4*nlines))
+    ys_gpsv_ds(1:nlines*active_n) => ys_gpsv_matrix_store(1:nlines*active_n)
+    ys_gpsv_dl(1:nlines*active_n) => ys_gpsv_matrix_store(nlines*active_n + 1:2*nlines*active_n)
+    ys_gpsv_d(1:nlines*active_n) => ys_gpsv_matrix_store(2*nlines*active_n + 1:3*nlines*active_n)
+    ys_gpsv_du(1:nlines*active_n) => ys_gpsv_matrix_store(3*nlines*active_n + 1:4*nlines*active_n)
+    ys_gpsv_dw(1:nlines*active_n) => ys_gpsv_matrix_store(4*nlines*active_n + 1:5*nlines*active_n)
+    ys_gpsv_x(1:nlines*active_n) => ys_gpsv_rhs_store(1:nlines*active_n)
+    ys_gpsv_line_matrix(line_start:line_end, row_start:row_end, -2:2) => ys_gpsv_matrix_store
+    ys_gpsv_line_rhs(line_start:line_end, row_start:row_end) => ys_gpsv_rhs_store
+  ys_gpsv_owner_matrix(-ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN, row_start:row_end, -2:2) => ys_gpsv_matrix_store
+    ys_gpsv_owner_rhs(-ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN, row_start:row_end) => ys_gpsv_rhs_store
+    ys_lower_ghost_rhs(line_start:line_end) => ys_lower_ghost_store
+    ys_lower_boundary_rhs(line_start:line_end) => ys_lower_boundary_store
+    ys_upper_boundary_rhs(line_start:line_end) => ys_upper_boundary_store
+    ys_upper_ghost_rhs(line_start:line_end) => ys_upper_ghost_store
+    ys_lower_ghost_owner(-ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN) => ys_lower_ghost_store
+    ys_lower_boundary_owner(-ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN) => ys_lower_boundary_store
+    ys_upper_boundary_owner(-ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN) => ys_upper_boundary_store
+    ys_upper_ghost_owner(-ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN) => ys_upper_ghost_store
+    ys_eqm1(-2:2, line_start:line_end) => ys_eqm1_store
+    ys_eq0(-2:2, line_start:line_end) => ys_eq0_store
+    ys_eqn(-2:2, line_start:line_end) => ys_eqn_store
+    ys_eqnp1(-2:2, line_start:line_end) => ys_eqnp1_store
+    ys_eqm1_owner(-2:2, -ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN) => ys_eqm1_store
+    ys_eq0_owner(-2:2, -ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN) => ys_eq0_store
+    ys_eqn_owner(-2:2, -ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN) => ys_eqn_store
+    ys_eqnp1_owner(-2:2, -ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN) => ys_eqnp1_store
+    ys_boundary_lower_rhs0(line_start:line_end) => ys_boundary_lower_rhs0_store
+    ys_boundary_upper_rhsn(line_start:line_end) => ys_boundary_upper_rhsn_store
+    ys_boundary_lower_eq(-1:2, line_start:line_end) => ys_boundary_lower_eq_store
+    ys_boundary_upper_eq(-2:1, line_start:line_end) => ys_boundary_upper_eq_store
+    ys_boundary_lower_rhs0_owner(-ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN) => ys_boundary_lower_rhs0_store
+    ys_boundary_upper_rhsn_owner(-ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN) => ys_boundary_upper_rhsn_store
+    ys_boundary_lower_eq_owner(-1:2, -ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN) => ys_boundary_lower_eq_store
+    ys_boundary_upper_eq_owner(-2:1, -ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN) => ys_boundary_upper_eq_store
+    !$omp target enter data map(alloc: ys_gpsv_matrix_store, ys_gpsv_rhs_store, &
+    !$omp& ys_lower_ghost_store, ys_lower_boundary_store, ys_upper_boundary_store, ys_upper_ghost_store, &
+    !$omp& ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store, ys_boundary_lower_rhs0_store, ys_boundary_upper_rhsn_store, &
+    !$omp& ys_boundary_lower_eq_store, ys_boundary_upper_eq_store)
   end subroutine ys_allocate_core_workspace
 
   subroutine ys_allocate_reduced_workspace(active_n, nlines, npy_count)
@@ -104,29 +173,38 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     !$omp& ys_right_interface_values, ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs)
   end subroutine ys_allocate_reduced_workspace
 
-  subroutine ys_prepare_assembled_workspace(ny, nz, row_start, row_end, nlines, use_reduced_backend)
+  subroutine ys_prepare_assembled_workspace(ny, nz, row_start, row_end, line_start, nlines, use_reduced_backend)
     implicit none
-    integer(C_INT), intent(in) :: ny, nz, row_start, row_end, nlines
+    integer(C_INT), intent(in) :: ny, nz, row_start, row_end, line_start, nlines
     logical, intent(in) :: use_reduced_backend
-    integer(C_INT) :: active_n
+    integer(C_INT) :: active_n, line_end, nlines_z
 
     active_n = row_end - row_start + 1
+    line_end = line_start + nlines - 1
+    nlines_z = 2*nz + 1
     if (active_n < 1) error stop "ys_prepare_assembled_workspace requires at least one row"
+    if (mod(line_start - 1, nlines_z) /= 0) error stop "ys_prepare_assembled_workspace requires ix-aligned line_start"
+    if (mod(nlines, nlines_z) /= 0) error stop "ys_prepare_assembled_workspace requires full ix columns"
     if (use_reduced_backend) then
       if (npy_grid > 1 .and. active_n < 4) error stop "ys_solve_ghost_field requires at least four y rows per rank"
       if (active_n < 4) error stop "ys_solve_ghost_field requires at least four active y rows"
     end if
 
-    if (allocated(ys_local_rhs)) then
+    ys_owner_nz = nlines_z
+    ys_owner_nx = nlines/nlines_z
+    ys_owner_ix0 = nx0 + (line_start - 1)/nlines_z
+    ys_owner_ixN = ys_owner_ix0 + ys_owner_nx - 1
+    if (allocated(ys_gpsv_rhs_store)) then
       if (ys_workspace_ny /= ny .or. ys_workspace_nz /= nz .or. ys_workspace_nlines /= nlines .or. &
-          ys_workspace_active_n /= active_n .or. ys_workspace_npy /= merge(npy_grid, -1_C_INT, use_reduced_backend)) then
+          ys_workspace_active_n /= active_n .or. ys_workspace_npy /= merge(npy_grid, -1_C_INT, use_reduced_backend) .or. &
+          ys_workspace_line_start /= line_start) then
         call ys_release_core_workspace()
         call ys_release_reduced_workspace()
       end if
     end if
 
-    if (.not. allocated(ys_local_rhs)) then
-      call ys_allocate_core_workspace(row_start, row_end, nlines)
+    if (.not. allocated(ys_gpsv_rhs_store)) then
+      call ys_allocate_core_workspace(row_start, row_end, line_start, nlines)
     end if
     if (use_reduced_backend) then
       if (.not. allocated(ys_interior_lu)) call ys_allocate_reduced_workspace(active_n, nlines, npy_grid)
@@ -140,14 +218,48 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     ys_workspace_nlines = nlines
     ys_workspace_active_n = active_n
     ys_workspace_npy = merge(npy_grid, -1_C_INT, use_reduced_backend)
-    call ys_prepare_gpsv_workspace(active_n, nlines)
-
+    ys_workspace_line_start = line_start
+    ys_workspace_line_end = line_end
+    ys_gpsv_line_matrix(line_start:line_end, row_start:row_end, -2:2) => ys_gpsv_matrix_store
+    ys_gpsv_line_rhs(line_start:line_end, row_start:row_end) => ys_gpsv_rhs_store
+  ys_gpsv_owner_matrix(-ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN, row_start:row_end, -2:2) => ys_gpsv_matrix_store
+    ys_gpsv_owner_rhs(-ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN, row_start:row_end) => ys_gpsv_rhs_store
+    ys_lower_ghost_rhs(line_start:line_end) => ys_lower_ghost_store
+    ys_lower_boundary_rhs(line_start:line_end) => ys_lower_boundary_store
+    ys_upper_boundary_rhs(line_start:line_end) => ys_upper_boundary_store
+    ys_upper_ghost_rhs(line_start:line_end) => ys_upper_ghost_store
+    ys_lower_ghost_owner(-ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN) => ys_lower_ghost_store
+    ys_lower_boundary_owner(-ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN) => ys_lower_boundary_store
+    ys_upper_boundary_owner(-ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN) => ys_upper_boundary_store
+    ys_upper_ghost_owner(-ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN) => ys_upper_ghost_store
+    ys_eqm1(-2:2, line_start:line_end) => ys_eqm1_store
+    ys_eq0(-2:2, line_start:line_end) => ys_eq0_store
+    ys_eqn(-2:2, line_start:line_end) => ys_eqn_store
+    ys_eqnp1(-2:2, line_start:line_end) => ys_eqnp1_store
+    ys_eqm1_owner(-2:2, -ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN) => ys_eqm1_store
+    ys_eq0_owner(-2:2, -ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN) => ys_eq0_store
+    ys_eqn_owner(-2:2, -ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN) => ys_eqn_store
+    ys_eqnp1_owner(-2:2, -ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN) => ys_eqnp1_store
+    ys_boundary_lower_rhs0(line_start:line_end) => ys_boundary_lower_rhs0_store
+    ys_boundary_upper_rhsn(line_start:line_end) => ys_boundary_upper_rhsn_store
+    ys_boundary_lower_eq(-1:2, line_start:line_end) => ys_boundary_lower_eq_store
+    ys_boundary_upper_eq(-2:1, line_start:line_end) => ys_boundary_upper_eq_store
+    ys_boundary_lower_rhs0_owner(-ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN) => ys_boundary_lower_rhs0_store
+    ys_boundary_upper_rhsn_owner(-ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN) => ys_boundary_upper_rhsn_store
+    ys_boundary_lower_eq_owner(-1:2, -ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN) => ys_boundary_lower_eq_store
+    ys_boundary_upper_eq_owner(-2:1, -ys_workspace_nz:ys_workspace_nz, ys_owner_ix0:ys_owner_ixN) => ys_boundary_upper_eq_store
+    if (line_start == 1_C_INT .and. nlines == (nxN - nx0 + 1)*(2*nz + 1)) then
+      ys_gpsv_matrix(-nz:nz, nx0:nxN, row_start:row_end, -2:2) => ys_gpsv_matrix_store
+      ys_gpsv_rhs(-nz:nz, nx0:nxN, row_start:row_end) => ys_gpsv_rhs_store
+    else
+      nullify (ys_gpsv_matrix, ys_gpsv_rhs)
+    end if
   end subroutine ys_prepare_assembled_workspace
 
   subroutine ys_release_workspace()
     implicit none
 
-    if (.not. allocated(ys_local_rhs)) return
+    if (.not. allocated(ys_gpsv_rhs_store)) return
 
     call ys_release_core_workspace()
     call ys_release_reduced_workspace()
@@ -159,6 +271,12 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     ys_workspace_nlines = 0
     ys_workspace_active_n = 0
     ys_workspace_npy = -1
+    ys_workspace_line_start = 1
+    ys_workspace_line_end = 0
+    ys_owner_nz = 0
+    ys_owner_nx = 0
+    ys_owner_ix0 = 1
+    ys_owner_ixN = 0
   end subroutine ys_release_workspace
 
 #ifdef HAVE_CUDA
@@ -179,9 +297,9 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     integer(C_INT) :: status
 #endif
 
-    if (allocated(ys_gpsv_ds)) then
-      !$omp target exit data map(delete: ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x)
-      deallocate (ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x)
+    if (allocated(ys_batch_ds)) then
+      !$omp target exit data map(delete: ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
+      deallocate (ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
     end if
 #ifdef HAVE_CUDA
     if (allocated(ys_gpsv_buffer)) then
@@ -196,36 +314,37 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
 #endif
     ys_gpsv_n = -1
     ys_gpsv_batch = -1
+    ys_batch_n = -1
+    ys_batch_count = -1
 #ifdef HAVE_CUDA
     ys_gpsv_buffer_size = 0_8
 #endif
   end subroutine ys_release_gpsv_workspace
 
-  subroutine ys_prepare_gpsv_workspace(n, batch_count)
+  subroutine ys_prepare_cusparse_workspace(n, batch_count, ds, dl, d, du, dw, x)
     implicit none
     integer(C_INT), intent(in) :: n, batch_count
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: ds(:), dl(:), d(:), du(:), dw(:), x(:)
 #ifdef HAVE_CUDA
     integer(C_INT) :: status
     integer(8) :: buffer_size
 #endif
 
-    if (ys_gpsv_n == n .and. ys_gpsv_batch == batch_count .and. allocated(ys_gpsv_ds)) return
-
-    call ys_release_gpsv_workspace()
+    if (ys_gpsv_n == n .and. ys_gpsv_batch == batch_count .and. allocated(ys_gpsv_buffer)) return
 
 #ifdef HAVE_CUDA
-    status = cusparseCreate(ys_gpsv_handle)
-    call ys_check_cusparse(status, "cusparseCreate")
-    ys_gpsv_handle_created = .true.
-#endif
+    if (allocated(ys_gpsv_buffer)) then
+      !$omp target exit data map(delete: ys_gpsv_buffer)
+      deallocate (ys_gpsv_buffer)
+    end if
 
-    allocate (ys_gpsv_ds(n*batch_count), ys_gpsv_dl(n*batch_count), ys_gpsv_d(n*batch_count), &
-              ys_gpsv_du(n*batch_count), ys_gpsv_dw(n*batch_count), ys_gpsv_x(n*batch_count))
-    !$omp target enter data map(alloc: ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x)
-#ifdef HAVE_CUDA
-    !$omp target data use_device_addr(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x)
-    status = cusparseZgpsvInterleavedBatch_bufferSize(ys_gpsv_handle, 0_C_INT, n, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, &
-                                                      ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, batch_count, buffer_size)
+    if (.not. ys_gpsv_handle_created) then
+      status = cusparseCreate(ys_gpsv_handle)
+      call ys_check_cusparse(status, "cusparseCreate")
+      ys_gpsv_handle_created = .true.
+    end if
+    !$omp target data use_device_addr(ds, dl, d, du, dw, x)
+    status = cusparseZgpsvInterleavedBatch_bufferSize(ys_gpsv_handle, 0_C_INT, n, ds, dl, d, du, dw, x, batch_count, buffer_size)
     !$omp end target data
     call ys_check_cusparse(status, "cusparseZgpsvInterleavedBatch_bufferSize")
     ys_gpsv_buffer_size = buffer_size
@@ -235,10 +354,30 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
 
     ys_gpsv_n = n
     ys_gpsv_batch = batch_count
-  end subroutine ys_prepare_gpsv_workspace
+  end subroutine ys_prepare_cusparse_workspace
 
-  subroutine ys_solve_packed_pentadiagonal(n, batch_count, label)
+  subroutine ys_prepare_batch_workspace(n, batch_count)
     implicit none
+    integer(C_INT), intent(in) :: n, batch_count
+
+    if (ys_batch_n /= n .or. ys_batch_count /= batch_count) then
+      if (allocated(ys_batch_ds)) then
+        !$omp target exit data map(delete: ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
+        deallocate (ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
+      end if
+      allocate (ys_batch_ds(n*batch_count), ys_batch_dl(n*batch_count), ys_batch_d(n*batch_count), &
+                ys_batch_du(n*batch_count), ys_batch_dw(n*batch_count), ys_batch_x(n*batch_count))
+      !$omp target enter data map(alloc: ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
+      ys_batch_n = n
+      ys_batch_count = batch_count
+    end if
+
+    call ys_prepare_cusparse_workspace(n, batch_count, ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
+  end subroutine ys_prepare_batch_workspace
+
+  subroutine ys_solve_interleaved_pentadiagonal(ds, dl, d, du, dw, x, n, batch_count, label)
+    implicit none
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: ds(:), dl(:), d(:), du(:), dw(:), x(:)
     integer(C_INT), intent(in) :: n, batch_count
     character(*), intent(in) :: label
 #ifdef HAVE_CUDA
@@ -249,23 +388,31 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
 
     call roctxPush(label)
 #ifdef HAVE_CUDA
-    !$omp target data use_device_addr(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, ys_gpsv_buffer)
-    status = cusparseZgpsvInterleavedBatch(ys_gpsv_handle, 0_C_INT, n, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, &
-                                           ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, batch_count, ys_gpsv_buffer)
+    call ys_prepare_cusparse_workspace(n, batch_count, ds, dl, d, du, dw, x)
+    !$omp target data use_device_addr(ds, dl, d, du, dw, x, ys_gpsv_buffer)
+    status = cusparseZgpsvInterleavedBatch(ys_gpsv_handle, 0_C_INT, n, ds, dl, d, du, dw, x, batch_count, ys_gpsv_buffer)
     !$omp end target data
     call ys_check_cusparse(status, "cusparseZgpsvInterleavedBatch "//trim(label))
 #else
     !$omp target teams distribute parallel do default(none) &
-    !$omp shared(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, n, batch_count) &
+    !$omp shared(ds, dl, d, du, dw, x, n, batch_count) &
     !$omp private(iline)
     do iline = 1, batch_count
-      call ys_factor_penta_interleaved(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, batch_count, iline, n)
-      call ys_solve_factored_penta_interleaved(ys_gpsv_x, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, &
-                                               batch_count, iline, n)
+      call ys_factor_penta_interleaved(ds, dl, d, du, dw, batch_count, iline, n)
+      call ys_solve_factored_penta_interleaved(x, ds, dl, d, du, dw, batch_count, iline, n)
     end do
     !$omp end target teams distribute parallel do
 #endif
     call roctxPop(label)
+  end subroutine ys_solve_interleaved_pentadiagonal
+
+  subroutine ys_solve_packed_pentadiagonal(n, batch_count, label)
+    implicit none
+    integer(C_INT), intent(in) :: n, batch_count
+    character(*), intent(in) :: label
+
+    call ys_solve_interleaved_pentadiagonal(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, &
+                                            n, batch_count, label)
   end subroutine ys_solve_packed_pentadiagonal
 
   subroutine ys_solve_endpoint_schur(dst, symmetric_operator)
@@ -277,11 +424,11 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     complex(C_DOUBLE_COMPLEX) :: s00, s01, s10, s11, t00, t01, t10, t11, det
     complex(C_DOUBLE_COMPLEX) :: vleft1, vleft2, vright1, vright2
     complex(C_DOUBLE_COMPLEX) :: s4(4, 4), rhs4(4, 5), pivot4, factor4
-    real(C_DOUBLE) :: row_coeffs(-2:2), coeff
+    complex(C_DOUBLE_COMPLEX) :: row_coeffs(-2:2), coeff
     integer(C_INT) :: row_start, row_end, active_n, nlines, nlines_z, nz, dst_row_base, response_mode
     integer(C_INT) :: nI, nresp, batch_count, exposed_n, interior_base
     integer(C_INT) :: sys, iline, ref_iline, resp, resp_index
-    integer(C_INT) :: local_i, local_idx, row, col, coupled_row, p, j, offset
+    integer(C_INT) :: local_i, local_idx, row, col, coupled_row, p, j, offset, actual_p
     integer(C_INT) :: exposed_slot, response_slot, rhs_col, iface, k, m
     integer(C_INT) :: ix, iz, abs_iz, ix_local
     logical :: is_actual
@@ -316,14 +463,14 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
     end select
     batch_count = nlines + exposed_n*nresp
 
-    call ys_prepare_gpsv_workspace(nI, batch_count)
+    call ys_prepare_batch_workspace(nI, batch_count)
 
     call roctxPush("ys_endpoint_pack_plus_response")
     !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(ys_local_rhs, ys_local_operator, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, &
+    !$omp shared(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x, &
     !$omp& row_start, active_n, nI, nlines, nlines_z, nresp, batch_count, nz, nx0, &
     !$omp& response_mode, ipy, has_left_interface, has_right_interface, exposed_n, interior_base) &
-    !$omp private(sys, iline, ref_iline, resp, local_i, local_idx, row, col, coupled_row, p, j, offset, is_actual, ix_local, abs_iz, &
+    !$omp private(sys, iline, ref_iline, resp, local_i, local_idx, row, col, coupled_row, p, j, offset, actual_p, is_actual, ix_local, abs_iz, &
     !$omp& rhs_value, row_coeffs, coeff, exposed_slot, response_slot)
     do local_i = 0, nI - 1
       do sys = 1, batch_count
@@ -346,15 +493,19 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
         local_idx = interior_base + local_i
         row = row_start + local_idx
         rhs_value = (0.0d0, 0.0d0)
-        if (is_actual) rhs_value = ys_local_rhs(row, iline)
-        row_coeffs = ys_local_operator(row, -2:2, ref_iline)
+        if (is_actual) then
+          actual_p = local_idx*nlines + iline
+          rhs_value = ys_gpsv_x(actual_p)
+        end if
+        actual_p = local_idx*nlines + ref_iline
+        row_coeffs = (/ys_gpsv_ds(actual_p), ys_gpsv_dl(actual_p), ys_gpsv_d(actual_p), ys_gpsv_du(actual_p), ys_gpsv_dw(actual_p)/)
 
         p = local_i*batch_count + sys
-        ys_gpsv_ds(p) = (0.0d0, 0.0d0)
-        ys_gpsv_dl(p) = (0.0d0, 0.0d0)
-        ys_gpsv_d(p) = (0.0d0, 0.0d0)
-        ys_gpsv_du(p) = (0.0d0, 0.0d0)
-        ys_gpsv_dw(p) = (0.0d0, 0.0d0)
+        ys_batch_ds(p) = (0.0d0, 0.0d0)
+        ys_batch_dl(p) = (0.0d0, 0.0d0)
+        ys_batch_d(p) = (0.0d0, 0.0d0)
+        ys_batch_du(p) = (0.0d0, 0.0d0)
+        ys_batch_dw(p) = (0.0d0, 0.0d0)
 
         do col = -2, 2
           coeff = row_coeffs(col)
@@ -376,7 +527,7 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
             if (exposed_slot > 0) then
               if (sys > nlines) then
                 response_slot = (sys - nlines - 1)/nresp + 1
-                if (response_slot == exposed_slot) rhs_value = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+                if (response_slot == exposed_slot) rhs_value = coeff
               end if
             end if
             cycle
@@ -384,32 +535,33 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
 
           select case (offset)
           case (-2)
-            ys_gpsv_ds(p) = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+            ys_batch_ds(p) = coeff
           case (-1)
-            ys_gpsv_dl(p) = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+            ys_batch_dl(p) = coeff
           case (0)
-            ys_gpsv_d(p) = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+            ys_batch_d(p) = coeff
           case (1)
-            ys_gpsv_du(p) = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+            ys_batch_du(p) = coeff
           case (2)
-            ys_gpsv_dw(p) = cmplx(coeff, 0.0d0, kind=C_DOUBLE)
+            ys_batch_dw(p) = coeff
           end select
         end do
-        ys_gpsv_x(p) = rhs_value
+        ys_batch_x(p) = rhs_value
       end do
     end do
     !$omp end target teams distribute parallel do
     call roctxPop("ys_endpoint_pack_plus_response")
 
-    call ys_solve_packed_pentadiagonal(nI, batch_count, "ys_endpoint_gpsv_plus_response")
+    call ys_solve_interleaved_pentadiagonal(ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x, &
+                                            nI, batch_count, "ys_endpoint_gpsv_plus_response")
 
     call roctxPush("ys_endpoint_pack_schur")
     !$omp target teams distribute parallel do default(none) &
-    !$omp shared(ys_local_rhs, ys_local_operator, ys_gpsv_x, ys_reduced_rows_send, nI, nlines, nlines_z, nresp, batch_count, &
+    !$omp shared(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, ys_batch_x, ys_reduced_rows_send, nI, nlines, nlines_z, nresp, batch_count, &
     !$omp& nz, nx0, row_start, active_n, response_mode, ipy, has_left_interface, has_right_interface, exposed_n, interior_base) &
     !$omp private(iline, row, ix, iz, abs_iz, resp_index, c0, c1, y00, y01, y10, y11, g0, g1, s00, s01, s10, s11, &
     !$omp& t00, t01, t10, t11, det, row_coeffs, s4, rhs4, pivot4, factor4, local_idx, col, coeff, coupled_row, j, &
-    !$omp& exposed_slot, iface, k, m, rhs_col)
+    !$omp& exposed_slot, iface, k, m, rhs_col, actual_p)
     do iline = 1, nlines
       ix = (iline - 1)/nlines_z + nx0
       iz = mod(iline - 1, nlines_z) - nz
@@ -423,29 +575,31 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
       ys_reduced_rows_send(:, iline) = (0.0d0, 0.0d0)
       if (.not. has_left_interface) then
         row = row_start + nI
-        row_coeffs = ys_local_operator(row, -2:2, iline)
-        c0 = ys_gpsv_x((nI - 2)*batch_count + iline)
-        c1 = ys_gpsv_x((nI - 1)*batch_count + iline)
-        y00 = ys_gpsv_x((nI - 2)*batch_count + nlines + resp_index)
-        y10 = ys_gpsv_x((nI - 1)*batch_count + nlines + resp_index)
-        y01 = ys_gpsv_x((nI - 2)*batch_count + nlines + nresp + resp_index)
-        y11 = ys_gpsv_x((nI - 1)*batch_count + nlines + nresp + resp_index)
-        g0 = ys_local_rhs(row, iline) - row_coeffs(-2)*c0 - row_coeffs(-1)*c1
-        s00 = cmplx(row_coeffs(0), 0.0d0, kind=C_DOUBLE) - row_coeffs(-2)*y00 - row_coeffs(-1)*y10
-        s01 = cmplx(row_coeffs(1), 0.0d0, kind=C_DOUBLE) - row_coeffs(-2)*y01 - row_coeffs(-1)*y11
-        t00 = cmplx(row_coeffs(2), 0.0d0, kind=C_DOUBLE)
+        actual_p = (row - row_start)*nlines + iline
+        row_coeffs = (/ys_gpsv_ds(actual_p), ys_gpsv_dl(actual_p), ys_gpsv_d(actual_p), ys_gpsv_du(actual_p), ys_gpsv_dw(actual_p)/)
+        c0 = ys_batch_x((nI - 2)*batch_count + iline)
+        c1 = ys_batch_x((nI - 1)*batch_count + iline)
+        y00 = ys_batch_x((nI - 2)*batch_count + nlines + resp_index)
+        y10 = ys_batch_x((nI - 1)*batch_count + nlines + resp_index)
+        y01 = ys_batch_x((nI - 2)*batch_count + nlines + nresp + resp_index)
+        y11 = ys_batch_x((nI - 1)*batch_count + nlines + nresp + resp_index)
+        g0 = ys_gpsv_x(actual_p) - row_coeffs(-2)*c0 - row_coeffs(-1)*c1
+        s00 = row_coeffs(0) - row_coeffs(-2)*y00 - row_coeffs(-1)*y10
+        s01 = row_coeffs(1) - row_coeffs(-2)*y01 - row_coeffs(-1)*y11
+        t00 = row_coeffs(2)
         t01 = (0.0d0, 0.0d0)
 
         row = row_start + nI + 1
-        row_coeffs = ys_local_operator(row, -2:2, iline)
-        c1 = ys_gpsv_x((nI - 1)*batch_count + iline)
-        y10 = ys_gpsv_x((nI - 1)*batch_count + nlines + resp_index)
-        y11 = ys_gpsv_x((nI - 1)*batch_count + nlines + nresp + resp_index)
-        g1 = ys_local_rhs(row, iline) - row_coeffs(-2)*c1
-        s10 = cmplx(row_coeffs(-1), 0.0d0, kind=C_DOUBLE) - row_coeffs(-2)*y10
-        s11 = cmplx(row_coeffs(0), 0.0d0, kind=C_DOUBLE) - row_coeffs(-2)*y11
-        t10 = cmplx(row_coeffs(1), 0.0d0, kind=C_DOUBLE)
-        t11 = cmplx(row_coeffs(2), 0.0d0, kind=C_DOUBLE)
+        actual_p = (row - row_start)*nlines + iline
+        row_coeffs = (/ys_gpsv_ds(actual_p), ys_gpsv_dl(actual_p), ys_gpsv_d(actual_p), ys_gpsv_du(actual_p), ys_gpsv_dw(actual_p)/)
+        c1 = ys_batch_x((nI - 1)*batch_count + iline)
+        y10 = ys_batch_x((nI - 1)*batch_count + nlines + resp_index)
+        y11 = ys_batch_x((nI - 1)*batch_count + nlines + nresp + resp_index)
+        g1 = ys_gpsv_x(actual_p) - row_coeffs(-2)*c1
+        s10 = row_coeffs(-1) - row_coeffs(-2)*y10
+        s11 = row_coeffs(0) - row_coeffs(-2)*y11
+        t10 = row_coeffs(1)
+        t11 = row_coeffs(2)
 
         det = s00*s11 - s01*s10
         ys_reduced_rows_send(3, iline) = (s11*g0 - s01*g1)/det
@@ -456,29 +610,31 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
         ys_reduced_rows_send(20, iline) = -((-s10*t01 + s00*t11)/det)
       else if (.not. has_right_interface) then
         row = row_start
-        row_coeffs = ys_local_operator(row, -2:2, iline)
-        c0 = ys_gpsv_x(iline)
-        y00 = ys_gpsv_x(nlines + resp_index)
-        y01 = ys_gpsv_x(nlines + nresp + resp_index)
-        g0 = ys_local_rhs(row, iline) - row_coeffs(2)*c0
-        s00 = cmplx(row_coeffs(0), 0.0d0, kind=C_DOUBLE) - row_coeffs(2)*y00
-        s01 = cmplx(row_coeffs(1), 0.0d0, kind=C_DOUBLE) - row_coeffs(2)*y01
-        t00 = cmplx(row_coeffs(-2), 0.0d0, kind=C_DOUBLE)
-        t01 = cmplx(row_coeffs(-1), 0.0d0, kind=C_DOUBLE)
+        actual_p = iline
+        row_coeffs = (/ys_gpsv_ds(actual_p), ys_gpsv_dl(actual_p), ys_gpsv_d(actual_p), ys_gpsv_du(actual_p), ys_gpsv_dw(actual_p)/)
+        c0 = ys_batch_x(iline)
+        y00 = ys_batch_x(nlines + resp_index)
+        y01 = ys_batch_x(nlines + nresp + resp_index)
+        g0 = ys_gpsv_x(actual_p) - row_coeffs(2)*c0
+        s00 = row_coeffs(0) - row_coeffs(2)*y00
+        s01 = row_coeffs(1) - row_coeffs(2)*y01
+        t00 = row_coeffs(-2)
+        t01 = row_coeffs(-1)
 
         row = row_start + 1
-        row_coeffs = ys_local_operator(row, -2:2, iline)
-        c0 = ys_gpsv_x(iline)
-        c1 = ys_gpsv_x(batch_count + iline)
-        y00 = ys_gpsv_x(nlines + resp_index)
-        y10 = ys_gpsv_x(batch_count + nlines + resp_index)
-        y01 = ys_gpsv_x(nlines + nresp + resp_index)
-        y11 = ys_gpsv_x(batch_count + nlines + nresp + resp_index)
-        g1 = ys_local_rhs(row, iline) - row_coeffs(1)*c0 - row_coeffs(2)*c1
-        s10 = cmplx(row_coeffs(-1), 0.0d0, kind=C_DOUBLE) - row_coeffs(1)*y00 - row_coeffs(2)*y10
-        s11 = cmplx(row_coeffs(0), 0.0d0, kind=C_DOUBLE) - row_coeffs(1)*y01 - row_coeffs(2)*y11
+        actual_p = nlines + iline
+        row_coeffs = (/ys_gpsv_ds(actual_p), ys_gpsv_dl(actual_p), ys_gpsv_d(actual_p), ys_gpsv_du(actual_p), ys_gpsv_dw(actual_p)/)
+        c0 = ys_batch_x(iline)
+        c1 = ys_batch_x(batch_count + iline)
+        y00 = ys_batch_x(nlines + resp_index)
+        y10 = ys_batch_x(batch_count + nlines + resp_index)
+        y01 = ys_batch_x(nlines + nresp + resp_index)
+        y11 = ys_batch_x(batch_count + nlines + nresp + resp_index)
+        g1 = ys_gpsv_x(actual_p) - row_coeffs(1)*c0 - row_coeffs(2)*c1
+        s10 = row_coeffs(-1) - row_coeffs(1)*y00 - row_coeffs(2)*y10
+        s11 = row_coeffs(0) - row_coeffs(1)*y01 - row_coeffs(2)*y11
         t10 = (0.0d0, 0.0d0)
-        t11 = cmplx(row_coeffs(-2), 0.0d0, kind=C_DOUBLE)
+        t11 = row_coeffs(-2)
 
         det = s00*s11 - s01*s10
         ys_reduced_rows_send(1, iline) = (s11*g0 - s01*g1)/det
@@ -508,18 +664,19 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
             local_idx = active_n - 1
           end select
           row = row_start + local_idx
-          row_coeffs = ys_local_operator(row, -2:2, iline)
-          rhs4(iface, 1) = ys_local_rhs(row, iline)
+          actual_p = local_idx*nlines + iline
+        row_coeffs = (/ys_gpsv_ds(actual_p), ys_gpsv_dl(actual_p), ys_gpsv_d(actual_p), ys_gpsv_du(actual_p), ys_gpsv_dw(actual_p)/)
+          rhs4(iface, 1) = ys_gpsv_x(actual_p)
           do col = -2, 2
             coeff = row_coeffs(col)
             if (coeff == 0.0d0) cycle
             coupled_row = local_idx + col
             if (coupled_row >= interior_base .and. coupled_row <= interior_base + nI - 1) then
               j = coupled_row - interior_base
-              rhs4(iface, 1) = rhs4(iface, 1) - coeff*ys_gpsv_x(j*batch_count + iline)
+              rhs4(iface, 1) = rhs4(iface, 1) - coeff*ys_batch_x(j*batch_count + iline)
               do exposed_slot = 1, exposed_n
                 s4(iface, exposed_slot) = s4(iface, exposed_slot) - &
-                                          coeff*ys_gpsv_x(j*batch_count + nlines + (exposed_slot - 1)*nresp + resp_index)
+                                          coeff*ys_batch_x(j*batch_count + nlines + (exposed_slot - 1)*nresp + resp_index)
               end do
             else if (coupled_row == -2) then
               rhs4(iface, 2) = rhs4(iface, 2) + coeff
@@ -578,7 +735,7 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
 
     call roctxPush("ys_endpoint_reconstruct")
     !$omp target teams distribute parallel do default(none) &
-    !$omp shared(dst, ys_gpsv_x, ys_reduced_rhs, ys_left_interface_values, ys_right_interface_values, nlines, nlines_z, nresp, nx0, nz, &
+    !$omp shared(dst, ys_batch_x, ys_reduced_rhs, ys_left_interface_values, ys_right_interface_values, nlines, nlines_z, nresp, nx0, nz, &
     !$omp& active_n, dst_row_base, has_padded_dst, nI, batch_count, response_mode, ipy, has_left_interface, has_right_interface, interior_base) &
     !$omp private(iline, local_i, local_idx, p, ix, iz, abs_iz, resp_index, vleft1, vleft2, vright1, vright2, &
     !$omp& exposed_slot)
@@ -611,27 +768,27 @@ deallocate (ys_interior_lu, ys_interior_response_columns, ys_reduced_rows_send, 
       do local_i = 0, nI - 1
         p = local_i*batch_count + iline
         local_idx = interior_base + local_i
-        dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) = ys_gpsv_x(p)
+        dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) = ys_batch_x(p)
         exposed_slot = 0
         if (has_left_interface) then
           exposed_slot = exposed_slot + 1
           dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) = &
             dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) - &
-            ys_gpsv_x(local_i*batch_count + nlines + (exposed_slot - 1)*nresp + resp_index)*vleft1
+            ys_batch_x(local_i*batch_count + nlines + (exposed_slot - 1)*nresp + resp_index)*vleft1
           exposed_slot = exposed_slot + 1
           dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) = &
             dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) - &
-            ys_gpsv_x(local_i*batch_count + nlines + (exposed_slot - 1)*nresp + resp_index)*vleft2
+            ys_batch_x(local_i*batch_count + nlines + (exposed_slot - 1)*nresp + resp_index)*vleft2
         end if
         if (has_right_interface) then
           exposed_slot = exposed_slot + 1
           dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) = &
             dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) - &
-            ys_gpsv_x(local_i*batch_count + nlines + (exposed_slot - 1)*nresp + resp_index)*vright1
+            ys_batch_x(local_i*batch_count + nlines + (exposed_slot - 1)*nresp + resp_index)*vright1
           exposed_slot = exposed_slot + 1
           dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) = &
             dst(local_idx + dst_row_base, iz + nz + 1, ix - nx0 + 1) - &
-            ys_gpsv_x(local_i*batch_count + nlines + (exposed_slot - 1)*nresp + resp_index)*vright2
+            ys_batch_x(local_i*batch_count + nlines + (exposed_slot - 1)*nresp + resp_index)*vright2
         end if
       end do
       if (has_padded_dst) then

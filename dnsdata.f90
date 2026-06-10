@@ -63,13 +63,13 @@ MODULE dnsdata
 #endif
   !Solution
   complex(C_DOUBLE_COMPLEX), allocatable :: oldrhs(:, :, :, :)
-  complex(C_DOUBLE_COMPLEX), allocatable :: V(:, :, :, :)
+  complex(C_DOUBLE_COMPLEX), allocatable, target :: V(:, :, :, :)
 #ifdef bodyforce
   complex(C_DOUBLE_COMPLEX), allocatable :: F(:, :, :, :)
 #endif
   !Boundary conditions
   real(C_DOUBLE), dimension(-2:2) :: v0bc, v0m1bc, vnbc, vnp1bc, eta0bc, eta0m1bc, etanbc, etanp1bc,phi0bc,phi0m1bc,phinbc,phinp1bc
-  complex(C_DOUBLE_COMPLEX), allocatable :: bc0(:, :, :), bcn(:, :, :)
+  complex(C_DOUBLE_COMPLEX), allocatable :: bc0(:, :, :), bcn(:, :, :), zero_bc(:, :)
   !Mean pressure correction
   real(C_DOUBLE), private :: corrpx = 0.d0, corrpz = 0.d0
   complex(C_DOUBLE_COMPLEX), allocatable :: ucor(:), tcor(:, :)
@@ -90,8 +90,20 @@ MODULE dnsdata
 
   public :: get_solver_memory_estimate, sync_velocity_to_device, apply_complex_derivative_current_layout
   public :: eliminate_assembled_boundaries, reconstruct_assembled_boundaries
-  public :: pack_assembled_pentadiagonal, unpack_assembled_pentadiagonal
-  public :: prepare_full_y_line_solve, solve_assembled_local_lines, solve_assembled_distributed_field
+  abstract interface
+    subroutine compact_component_assembly(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end)
+      use, intrinsic :: iso_c_binding
+      complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
+      real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
+      integer(C_INT), intent(in) :: row_start, row_end
+    end subroutine compact_component_assembly
+    subroutine compact_boundary_assembly(owner_src, row_start, row_end, has_lower_boundary, has_upper_boundary)
+      use, intrinsic :: iso_c_binding
+      complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
+      integer(C_INT), intent(in) :: row_start, row_end
+      logical, intent(in) :: has_lower_boundary, has_upper_boundary
+    end subroutine compact_boundary_assembly
+  end interface
 
 CONTAINS
 
@@ -216,10 +228,12 @@ CONTAINS
     !$omp target enter data map(to: F)
 #endif
     ALLOCATE (bc0(-nz:nz, nx0:nxN, 1:5 + nPhi), &
-              bcn(-nz:nz, nx0:nxN, 1:5 + nPhi))
+              bcn(-nz:nz, nx0:nxN, 1:5 + nPhi), &
+              zero_bc(-nz:nz, nx0:nxN))
     bc0 = 0.0
     bcn = 0.0
-    !$omp target enter data map(to: bc0, bcn)
+    zero_bc = 0.0
+    !$omp target enter data map(to: bc0, bcn, zero_bc)
     IF (solveNS) then
       ALLOCATE (memrhs(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:2 + nPhi), &
                 oldrhs(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:2 + nPhi), &
@@ -253,9 +267,9 @@ CONTAINS
     IF (solveNS .AND. has_terminal) OPEN (UNIT=121, FILE='Runtimedata', ACTION='write')
 
     allocate (fr(3 + 2*nPhi)); fr = 0.0
-    call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, nxB*(2*nz + 1), .true.)
+    call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, nxB*(2*nz + 1), .true.)
     if (solveNS .and. use_yslab_linsolve) then
-      call yslab_line_range(ipy, (nxN - nx0 + 1)*(2*nz + 1), yslab_first_line, yslab_line_count)
+      call yslab_line_range(ipy, 2*nz + 1, (nxN - nx0 + 1)*(2*nz + 1), yslab_first_line, yslab_line_count)
       call prepare_yslab_scratch(ny + 3, yslab_line_count)
     end if
   END SUBROUTINE init_memory
@@ -300,8 +314,8 @@ CONTAINS
     !$omp target exit data map(delete: F)
 #endif
     DEALLOCATE (V, der, d0mat, y, dy)
-    !$omp target exit data map(delete: bc0, bcn)
-    DEALLOCATE (bc0, bcn)
+    !$omp target exit data map(delete: bc0, bcn, zero_bc)
+    DEALLOCATE (bc0, bcn, zero_bc)
     IF (solveNS) THEN
       if (associated(memrhs) .or. associated(linsolve_mat) .or. allocated(oldrhs)) then
         !$omp target exit data map(delete: memrhs, oldrhs, linsolve_mat)
@@ -467,452 +481,413 @@ CONTAINS
 #define D2(f,g) D_MASTER(f,g,2)
 #define D4(f,g) D_MASTER(f,g,3)
   SUBROUTINE apply_complex_derivative_current_layout(src, dst, update_device)
-    use y_line_solvers, only: ys_prepare_assembled_workspace, ys_solve_endpoint_schur, ys_solve_packed_pentadiagonal
     IMPLICIT NONE
-    complex(C_DOUBLE_COMPLEX), intent(in) :: src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    complex(C_DOUBLE_COMPLEX), target, intent(in) :: src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     logical, optional, intent(in) :: update_device
-    integer(C_INT) :: nlines_z, nlines, first_line, line_count
-    logical :: has_lower_boundary, has_upper_boundary
-
-    if (use_yslab_linsolve) then
-      call prepare_full_y_line_solve(first_line, line_count, nlines, nlines_z)
-      if (line_count <= 0) return
-
-      call roctxPush("yslab derivative transpose_to_full")
-      call yslab_transpose_to_full(src, yslab_workspace, ny, nz, nlines, nlines_z, .true.)
-      call roctxPop("yslab derivative transpose_to_full")
-
-      call ys_prepare_assembled_workspace(ny, nz, 1_C_INT, ny - 1, line_count, .false.)
-      call assemble_compact_derivative_system(src, .true., line_count, 1_C_INT, ny - 1)
-      call solve_assembled_local_lines(yslab_workspace, 1_C_INT, ny - 1, line_count, .true., .true., "yslab derivative gpsv")
-
-      call roctxPush("yslab derivative transpose_from_full")
-      call yslab_transpose_from_full(yslab_workspace, dst, ny, nz, nlines, nlines_z)
-      call roctxPop("yslab derivative transpose_from_full")
-      return
-    end if
-    call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, (nxN - nx0 + 1)*(2*nz + 1), .true.)
-    call assemble_compact_derivative_system(src, .false., (nxN - nx0 + 1)*(2*nz + 1), ny0, nyN)
-    line_count = (nxN - nx0 + 1)*(2*nz + 1)
-    has_lower_boundary = (ny0 == 1)
-    has_upper_boundary = (nyN == ny - 1)
-    call solve_assembled_distributed_field(dst, ny0, nyN, line_count, has_lower_boundary, has_upper_boundary, .false.)
+    call solve_compact_component_current_layout(dst, assemble_compact_derivative_interior, d040, d040, d04n, d04n, zero_bc, zero_bc, zero_bc, zero_bc, &
+                                                0.0d0, 0.0d0, src, boundary_system=assemble_compact_derivative_boundary, &
+                                       solve_label="yslab derivative gpsv", symmetric_operator=.false., transpose_derivative=.true.)
   END SUBROUTINE apply_complex_derivative_current_layout
 
-  subroutine assemble_compact_derivative_system(src, use_yslab, line_count, row_start, row_end)
-    use y_line_solvers, only: ys_local_rhs, ys_local_operator, &
-                              ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
-                              ys_eqm1, ys_eq0, ys_eqn, ys_eqnp1
+  subroutine assemble_compact_derivative_interior(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end)
+    use y_line_solvers, only: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs
     IMPLICIT NONE
-    complex(C_DOUBLE_COMPLEX), intent(in) :: src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    logical, intent(in) :: use_yslab
-    integer(C_INT), intent(in) :: line_count, row_start, row_end
-    integer(C_INT) :: ix, iz, iy, iline, ilocal, nlines_z, ix_first, ix_last, iz_first, iz_last
-
-    nlines_z = 2*nz + 1
-    ix_first = nx0
-    ix_last = nxN
-    iz_first = -nz
-    iz_last = nz
-
-    !$omp target teams distribute parallel do default(none) &
-    !$omp shared(src, yslab_workspace, der, ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, &
-    !$omp& ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, ys_eqm1, ys_eq0, ys_eqn, ys_eqnp1, &
-    !$omp& d140, d14m1, d14n, d14np1, use_yslab, ny, nz, nlines_z, ix_first, ix_last, iz_first, iz_last, line_count, row_start, row_end) &
-    !$omp private(ix, iz, iy, iline, ilocal)
-    do ilocal = 1, line_count
-      if (use_yslab) then
-        iline = ilocal
-      else
-        iline = ilocal
-        ix = (iline - 1)/nlines_z + ix_first
-        iz = mod(iline - 1, nlines_z) - nz
-      end if
-
-      do iy = row_start, row_end
-        ys_local_operator(iy, -2:2, ilocal) = der(iy, 0, -2:2)
-        if (use_yslab) then
-          ys_local_rhs(iy, ilocal) = sum(der(iy, 1, -2:2)*yslab_workspace(iy - 2:iy + 2, ilocal))
-        else
-          ys_local_rhs(iy, ilocal) = sum(der(iy, 1, -2:2)*src(iy - 2:iy + 2, iz, ix))
-        end if
+    complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
+    real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
+    integer(C_INT), intent(in) :: row_start, row_end
+    integer(C_INT) :: ix, iz, iy
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(owner_src, der, ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, row_start, row_end, nz, nx0, nxN) &
+    !$omp private(ix, iz, iy)
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        do iy = row_start, row_end
+          ys_gpsv_owner_matrix(iz, ix, iy, -2:2) = cmplx(der(iy, 0, -2:2), 0.0d0, kind=C_DOUBLE)
+          ys_gpsv_owner_rhs(iz, ix, iy) = sum(der(iy, 1, -2:2)*owner_src(iy - 2:iy + 2, iz, ix))
+        end do
       end do
-
-      if (row_start == 1) then
-        ys_eqm1(:, ilocal) = 0.0d0
-        ys_eq0(:, ilocal) = 0.0d0
-        if (use_yslab) then
-          ys_lower_boundary_rhs(ilocal) = sum(d140(-2:2)*yslab_workspace(-1:3, ilocal))
-          ys_lower_ghost_rhs(ilocal) = sum(d14m1(-2:2)*yslab_workspace(-1:3, ilocal))
-        else
-          ys_lower_boundary_rhs(ilocal) = sum(d140(-2:2)*src(-1:3, iz, ix))
-          ys_lower_ghost_rhs(ilocal) = sum(d14m1(-2:2)*src(-1:3, iz, ix))
-        end if
-        ys_eqm1(-2, ilocal) = 1.0d0
-        ys_eq0(-1, ilocal) = 1.0d0
-      end if
-      if (row_end == ny - 1) then
-        ys_eqn(:, ilocal) = 0.0d0
-        ys_eqnp1(:, ilocal) = 0.0d0
-        if (use_yslab) then
-          ys_upper_boundary_rhs(ilocal) = sum(d14n(-2:2)*yslab_workspace(ny - 3:ny + 1, ilocal))
-          ys_upper_ghost_rhs(ilocal) = sum(d14np1(-2:2)*yslab_workspace(ny - 3:ny + 1, ilocal))
-        else
-          ys_upper_boundary_rhs(ilocal) = sum(d14n(-2:2)*src(ny - 3:ny + 1, iz, ix))
-          ys_upper_ghost_rhs(ilocal) = sum(d14np1(-2:2)*src(ny - 3:ny + 1, iz, ix))
-        end if
-        ys_eqn(1, ilocal) = 1.0d0
-        ys_eqnp1(2, ilocal) = 1.0d0
-      end if
     end do
     !$omp end target teams distribute parallel do
-  end subroutine assemble_compact_derivative_system
+  end subroutine assemble_compact_derivative_interior
 
-  subroutine assemble_compact_component_system(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
-                                               lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
-                                               lambda_coeff, diffusion_coeff, use_yslab, first_line, line_count, row_start, row_end)
-    use y_line_solvers, only: ys_local_rhs, ys_local_operator, &
-                              ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
-                              ys_eqm1, ys_eq0, ys_eqn, ys_eqnp1
+  subroutine assemble_compact_derivative_boundary(owner_src, row_start, row_end, has_lower_boundary, has_upper_boundary)
+    use y_line_solvers, only: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, ys_lower_ghost_owner, ys_lower_boundary_owner, ys_upper_boundary_owner, ys_upper_ghost_owner, &
+                              ys_eqm1_owner, ys_eq0_owner, ys_eqn_owner, ys_eqnp1_owner
     IMPLICIT NONE
-    integer(C_INT), intent(in) :: component_index, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index
-    integer(C_INT), intent(in) :: first_line, line_count, row_start, row_end
-    logical, intent(in) :: use_yslab
+    complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
+    integer(C_INT), intent(in) :: row_start, row_end
+    logical, intent(in) :: has_lower_boundary, has_upper_boundary
+    integer(C_INT) :: ix, iz, iy
+
+    if (has_lower_boundary) then
+      !$omp target teams distribute parallel do collapse(2) default(none) &
+      !$omp shared(owner_src, ys_lower_ghost_owner, ys_lower_boundary_owner, ys_eqm1_owner, ys_eq0_owner, d140, d14m1, nz, nx0, nxN) &
+      !$omp private(ix, iz)
+      do ix = nx0, nxN
+        do iz = -nz, nz
+          ys_eqm1_owner(:, iz, ix) = 0.0d0
+          ys_eq0_owner(:, iz, ix) = 0.0d0
+          ys_lower_boundary_owner(iz, ix) = sum(d140(-2:2)*owner_src(-1:3, iz, ix))
+          ys_lower_ghost_owner(iz, ix) = sum(d14m1(-2:2)*owner_src(-1:3, iz, ix))
+          ys_eqm1_owner(-2, iz, ix) = 1.0d0
+          ys_eq0_owner(-1, iz, ix) = 1.0d0
+        end do
+      end do
+      !$omp end target teams distribute parallel do
+    end if
+
+    if (has_upper_boundary) then
+      !$omp target teams distribute parallel do collapse(2) default(none) &
+      !$omp shared(owner_src, ys_upper_boundary_owner, ys_upper_ghost_owner, ys_eqn_owner, ys_eqnp1_owner, d14n, d14np1, ny, nz, nx0, nxN) &
+      !$omp private(ix, iz)
+      do ix = nx0, nxN
+        do iz = -nz, nz
+          ys_eqn_owner(:, iz, ix) = 0.0d0
+          ys_eqnp1_owner(:, iz, ix) = 0.0d0
+          ys_upper_boundary_owner(iz, ix) = sum(d14n(-2:2)*owner_src(ny - 3:ny + 1, iz, ix))
+          ys_upper_ghost_owner(iz, ix) = sum(d14np1(-2:2)*owner_src(ny - 3:ny + 1, iz, ix))
+          ys_eqn_owner(1, iz, ix) = 1.0d0
+          ys_eqnp1_owner(2, iz, ix) = 1.0d0
+        end do
+      end do
+      !$omp end target teams distribute parallel do
+    end if
+  end subroutine assemble_compact_derivative_boundary
+
+  subroutine assemble_compact_component_boundary_data(lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
+                                               lower_rhs_values, lower_ghost_rhs_values, upper_rhs_values, upper_ghost_rhs_values, &
+                                                      row_start, row_end)
+    use y_line_solvers, only: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, ys_lower_ghost_owner, ys_lower_boundary_owner, ys_upper_boundary_owner, ys_upper_ghost_owner, &
+                              ys_eqm1_owner, ys_eq0_owner, ys_eqn_owner, ys_eqnp1_owner
+    IMPLICIT NONE
+    integer(C_INT), intent(in) :: row_start, row_end
     real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: lower_rhs_values(-nz:, nx0:), lower_ghost_rhs_values(-nz:, nx0:)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: upper_rhs_values(-nz:, nx0:), upper_ghost_rhs_values(-nz:, nx0:)
+    integer(C_INT) :: ix, iz
+
+    if (row_start == 1) then
+      !$omp target teams distribute parallel do collapse(2) default(none) &
+      !$omp shared(ys_lower_ghost_owner, ys_lower_boundary_owner, ys_eqm1_owner, ys_eq0_owner, lower_bc, lower_ghost_bc, &
+      !$omp& lower_rhs_values, lower_ghost_rhs_values, nz, nx0, nxN) &
+      !$omp private(ix, iz)
+      do ix = nx0, nxN
+        do iz = -nz, nz
+          ys_lower_ghost_owner(iz, ix) = lower_ghost_rhs_values(iz, ix)
+          ys_lower_boundary_owner(iz, ix) = lower_rhs_values(iz, ix)
+          ys_eqm1_owner(:, iz, ix) = lower_ghost_bc
+          ys_eq0_owner(:, iz, ix) = lower_bc
+        end do
+      end do
+      !$omp end target teams distribute parallel do
+    end if
+
+    if (row_end == ny - 1) then
+      !$omp target teams distribute parallel do collapse(2) default(none) &
+      !$omp shared(ys_upper_boundary_owner, ys_upper_ghost_owner, ys_eqn_owner, ys_eqnp1_owner, upper_bc, upper_ghost_bc, &
+      !$omp& upper_rhs_values, upper_ghost_rhs_values, nz, nx0, nxN) &
+      !$omp private(ix, iz)
+      do ix = nx0, nxN
+        do iz = -nz, nz
+          ys_upper_boundary_owner(iz, ix) = upper_rhs_values(iz, ix)
+          ys_upper_ghost_owner(iz, ix) = upper_ghost_rhs_values(iz, ix)
+          ys_eqn_owner(:, iz, ix) = upper_bc
+          ys_eqnp1_owner(:, iz, ix) = upper_ghost_bc
+        end do
+      end do
+      !$omp end target teams distribute parallel do
+    end if
+  end subroutine assemble_compact_component_boundary_data
+
+  subroutine assemble_compact_biharmonic_system(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end)
+    use y_line_solvers, only: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs
+    implicit none
+    integer(C_INT), intent(in) :: row_start, row_end
     real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
+    complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
     complex(C_DOUBLE_COMPLEX) :: rhs_value
     real(C_DOUBLE) :: row_coeffs(-2:2)
-    integer(C_INT) :: ix, iz, iy, ilocal, iline, nlines_z, ix_first, ix_last, iz_first, iz_last
+    integer(C_INT) :: ix, iz, iy
 
-    nlines_z = 2*nz + 1
-    ix_first = nx0
-    ix_last = nxN
-    iz_first = -nz
-    iz_last = nz
-
-    !$omp target teams distribute parallel do default(none) &
-    !$omp shared(V, yslab_workspace, der, k2, ni, lambda_coeff, diffusion_coeff, component_index, ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, &
-    !$omp& ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, ys_eqm1, ys_eq0, ys_eqn, ys_eqnp1, &
-    !$omp& lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, bc0, bcn, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
-    !$omp& use_yslab, first_line, line_count, &
-    !$omp& nlines_z, ix_first, ix_last, iz_first, iz_last, row_start, row_end, nz) &
-    !$omp private(ilocal, ix, iz, iy, iline, rhs_value, row_coeffs)
-    do ilocal = 1, line_count
-      iline = first_line + ilocal - 1
-      ix = (iline - 1)/nlines_z + ix_first
-      iz = mod(iline - 1, nlines_z) - nz
-
-      call compact_boundary_rhs_value(bc0, bcn, nz, ix_first, iz, ix, lower_ghost_rhs_index, ys_lower_ghost_rhs(ilocal))
-      call compact_boundary_rhs_value(bc0, bcn, nz, ix_first, iz, ix, lower_rhs_index, ys_lower_boundary_rhs(ilocal))
-      call compact_boundary_rhs_value(bc0, bcn, nz, ix_first, iz, ix, upper_rhs_index, ys_upper_boundary_rhs(ilocal))
-      call compact_boundary_rhs_value(bc0, bcn, nz, ix_first, iz, ix, upper_ghost_rhs_index, ys_upper_ghost_rhs(ilocal))
-      ys_eqm1(:, ilocal) = lower_ghost_bc
-      ys_eq0(:, ilocal) = lower_bc
-      ys_eqn(:, ilocal) = upper_bc
-      ys_eqnp1(:, ilocal) = upper_ghost_bc
-
-      do iy = row_start, row_end
-        if (use_yslab) then
-          rhs_value = yslab_workspace(iy, ilocal)
-        else
-          rhs_value = V(iy, iz, ix, component_index)
-        end if
-        if (component_index == 2_C_INT) then
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(owner_src, der, k2, ni, lambda_coeff, ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, nz, nx0, nxN, row_start, row_end) &
+    !$omp private(ix, iz, iy, rhs_value, row_coeffs)
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        do iy = row_start, row_end
+          rhs_value = owner_src(iy, iz, ix)
           row_coeffs = lambda_coeff*(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)) - &
                        ni*(der(iy, 3, -2:2) - 2.0d0*k2(iz, ix)*der(iy, 2, -2:2) + k2(iz, ix)*k2(iz, ix)*der(iy, 0, -2:2))
-        else
-          row_coeffs = lambda_coeff*der(iy, 0, -2:2) - diffusion_coeff*ni*(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2))
-        end if
-        ys_local_rhs(iy, ilocal) = rhs_value
-        ys_local_operator(iy, -2:2, ilocal) = row_coeffs
+          ys_gpsv_owner_matrix(iz, ix, iy, -2:2) = cmplx(row_coeffs(-2:2), 0.0d0, kind=C_DOUBLE)
+          ys_gpsv_owner_rhs(iz, ix, iy) = rhs_value
+        end do
       end do
     end do
     !$omp end target teams distribute parallel do
-  end subroutine assemble_compact_component_system
+  end subroutine assemble_compact_biharmonic_system
 
-  subroutine eliminate_assembled_boundaries(row_start, row_end, nlines, has_lower_boundary, has_upper_boundary)
-    use y_line_solvers, only: ys_local_rhs, ys_local_operator, &
-          ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, ys_eqm1, ys_eq0, ys_eqn, ys_eqnp1, &
-                              ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, ys_boundary_lower_eq, ys_boundary_upper_eq
+  subroutine assemble_compact_helmholtz_system(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end)
+    use y_line_solvers, only: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs
     implicit none
-    integer(C_INT), intent(in) :: row_start, row_end, nlines
-    logical, intent(in) :: has_lower_boundary, has_upper_boundary
+    integer(C_INT), intent(in) :: row_start, row_end
+    real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
+    complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
     complex(C_DOUBLE_COMPLEX) :: rhs_value
-    real(C_DOUBLE) :: row_coeffs(-2:2), eq0(-1:2), eqn(-2:1)
-    integer(C_INT) :: iline
-    real(C_DOUBLE) :: fac
+    real(C_DOUBLE) :: row_coeffs(-2:2)
+    integer(C_INT) :: ix, iz, iy
+
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(owner_src, der, k2, ni, lambda_coeff, diffusion_coeff, ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, nz, nx0, nxN, row_start, row_end) &
+    !$omp private(ix, iz, iy, rhs_value, row_coeffs)
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        do iy = row_start, row_end
+          rhs_value = owner_src(iy, iz, ix)
+          row_coeffs = lambda_coeff*der(iy, 0, -2:2) - diffusion_coeff*ni*(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2))
+          ys_gpsv_owner_matrix(iz, ix, iy, -2:2) = cmplx(row_coeffs(-2:2), 0.0d0, kind=C_DOUBLE)
+          ys_gpsv_owner_rhs(iz, ix, iy) = rhs_value
+        end do
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+  end subroutine assemble_compact_helmholtz_system
+
+  subroutine eliminate_assembled_boundaries(row_start, row_end, has_lower_boundary, has_upper_boundary)
+    use y_line_solvers, only: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, &
+          ys_lower_ghost_owner, ys_lower_boundary_owner, ys_upper_boundary_owner, ys_upper_ghost_owner, ys_eqm1_owner, ys_eq0_owner, ys_eqn_owner, ys_eqnp1_owner, &
+                  ys_boundary_lower_rhs0_owner, ys_boundary_upper_rhsn_owner, ys_boundary_lower_eq_owner, ys_boundary_upper_eq_owner
+    implicit none
+    integer(C_INT), intent(in) :: row_start, row_end
+    logical, intent(in) :: has_lower_boundary, has_upper_boundary
+    complex(C_DOUBLE_COMPLEX) :: rhs_value, row_coeffs(-2:2)
+    real(C_DOUBLE) :: eq0(-1:2), eqn(-2:1)
+    integer(C_INT) :: ix, iz
+    complex(C_DOUBLE_COMPLEX) :: fac
 
     if (.not. has_lower_boundary .and. .not. has_upper_boundary) return
 
-    call roctxPush("assembled_boundary_eliminate")
-    !$omp target teams distribute parallel do default(none) &
-    !$omp shared(ys_local_rhs, ys_local_operator, ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, ys_eqm1, ys_eq0, ys_eqn, ys_eqnp1, &
-    !$omp& ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, &
-    !$omp& ys_boundary_lower_eq, ys_boundary_upper_eq, row_start, row_end, nlines, has_lower_boundary, has_upper_boundary) &
-    !$omp private(iline, rhs_value, row_coeffs, eq0, eqn, fac)
-    do iline = 1, nlines
-      if (has_lower_boundary) then
-       ys_boundary_lower_rhs0(iline) = ys_lower_boundary_rhs(iline) - ys_lower_ghost_rhs(iline)*ys_eq0(-2, iline)/ys_eqm1(-2, iline)
-        ys_boundary_lower_eq(:, iline) = ys_eq0(-1:2, iline) - ys_eqm1(-1:2, iline)*ys_eq0(-2, iline)/ys_eqm1(-2, iline)
-        eq0 = ys_boundary_lower_eq(:, iline)
+    if (has_lower_boundary) then
+      call roctxPush("assembled_boundary_eliminate_lower")
+      !$omp target teams distribute parallel do default(none) &
+      !$omp shared(ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, ys_lower_ghost_owner, ys_lower_boundary_owner, ys_eqm1_owner, ys_eq0_owner, &
+      !$omp& ys_boundary_lower_rhs0_owner, ys_boundary_lower_eq_owner, row_start, nx0, nxN, nz) &
+      !$omp private(ix, iz, rhs_value, row_coeffs, eq0, fac) collapse(2)
+      do ix = nx0, nxN
+        do iz = -nz, nz
+          ys_boundary_lower_rhs0_owner(iz, ix) = ys_lower_boundary_owner(iz, ix) - ys_lower_ghost_owner(iz, ix)*ys_eq0_owner(-2, iz, ix)/ys_eqm1_owner(-2, iz, ix)
+          ys_boundary_lower_eq_owner(:, iz, ix) = ys_eq0_owner(-1:2, iz, ix) - ys_eqm1_owner(-1:2, iz, ix)*ys_eq0_owner(-2, iz, ix)/ys_eqm1_owner(-2, iz, ix)
+          eq0 = ys_boundary_lower_eq_owner(:, iz, ix)
 
-        rhs_value = ys_local_rhs(row_start, iline)
-        row_coeffs = ys_local_operator(row_start, -2:2, iline)
-        fac = row_coeffs(-2)/ys_eqm1(-2, iline)
-        rhs_value = rhs_value - ys_lower_ghost_rhs(iline)*fac
-        row_coeffs = row_coeffs - ys_eqm1(:, iline)*fac
-        row_coeffs(-2) = 0.0d0
-        fac = row_coeffs(-1)/eq0(-1)
-        rhs_value = rhs_value - ys_boundary_lower_rhs0(iline)*fac
-        row_coeffs(-1:2) = row_coeffs(-1:2) - eq0*fac
-        row_coeffs(-1) = 0.0d0
-        ys_local_rhs(row_start, iline) = rhs_value
-        ys_local_operator(row_start, -2:2, iline) = row_coeffs
+          rhs_value = ys_gpsv_owner_rhs(iz, ix, row_start)
+          row_coeffs = ys_gpsv_owner_matrix(iz, ix, row_start, -2:2)
+          fac = row_coeffs(-2)/ys_eqm1_owner(-2, iz, ix)
+          rhs_value = rhs_value - ys_lower_ghost_owner(iz, ix)*fac
+          row_coeffs = row_coeffs - ys_eqm1_owner(:, iz, ix)*fac
+          row_coeffs(-2) = 0.0d0
+          fac = row_coeffs(-1)/eq0(-1)
+          rhs_value = rhs_value - ys_boundary_lower_rhs0_owner(iz, ix)*fac
+          row_coeffs(-1:2) = row_coeffs(-1:2) - eq0*fac
+          row_coeffs(-1) = 0.0d0
+          ys_gpsv_owner_rhs(iz, ix, row_start) = rhs_value
+          ys_gpsv_owner_matrix(iz, ix, row_start, -2:2) = row_coeffs
 
-        rhs_value = ys_local_rhs(row_start + 1, iline)
-        row_coeffs = ys_local_operator(row_start + 1, -2:2, iline)
-        fac = row_coeffs(-2)/eq0(-1)
-        rhs_value = rhs_value - ys_boundary_lower_rhs0(iline)*fac
-        row_coeffs(-2:1) = row_coeffs(-2:1) - eq0(-1:2)*fac
-        row_coeffs(-2) = 0.0d0
-        ys_local_rhs(row_start + 1, iline) = rhs_value
-        ys_local_operator(row_start + 1, -2:2, iline) = row_coeffs
-      end if
+          rhs_value = ys_gpsv_owner_rhs(iz, ix, row_start + 1)
+          row_coeffs = ys_gpsv_owner_matrix(iz, ix, row_start + 1, -2:2)
+          fac = row_coeffs(-2)/eq0(-1)
+          rhs_value = rhs_value - ys_boundary_lower_rhs0_owner(iz, ix)*fac
+          row_coeffs(-2:1) = row_coeffs(-2:1) - eq0(-1:2)*fac
+          row_coeffs(-2) = 0.0d0
+          ys_gpsv_owner_rhs(iz, ix, row_start + 1) = rhs_value
+          ys_gpsv_owner_matrix(iz, ix, row_start + 1, -2:2) = row_coeffs
+        end do
+      end do
+      !$omp end target teams distribute parallel do
+      call roctxPop("assembled_boundary_eliminate_lower")
+    end if
 
-      if (has_upper_boundary) then
-        ys_boundary_upper_rhsn(iline) = ys_upper_boundary_rhs(iline) - ys_upper_ghost_rhs(iline)*ys_eqn(2, iline)/ys_eqnp1(2, iline)
-        ys_boundary_upper_eq(:, iline) = ys_eqn(-2:1, iline) - ys_eqnp1(-2:1, iline)*ys_eqn(2, iline)/ys_eqnp1(2, iline)
-        eqn = ys_boundary_upper_eq(:, iline)
+    if (has_upper_boundary) then
+      call roctxPush("assembled_boundary_eliminate_upper")
+      !$omp target teams distribute parallel do default(none) &
+      !$omp shared(ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, ys_upper_boundary_owner, ys_upper_ghost_owner, ys_eqn_owner, ys_eqnp1_owner, &
+      !$omp& ys_boundary_upper_rhsn_owner, ys_boundary_upper_eq_owner, row_end, nx0, nxN, nz) &
+      !$omp private(ix, iz, rhs_value, row_coeffs, eqn, fac) collapse(2)
+      do ix = nx0, nxN
+        do iz = -nz, nz
+          ys_boundary_upper_rhsn_owner(iz, ix) = ys_upper_boundary_owner(iz, ix) - ys_upper_ghost_owner(iz, ix)*ys_eqn_owner(2, iz, ix)/ys_eqnp1_owner(2, iz, ix)
+          ys_boundary_upper_eq_owner(:, iz, ix) = ys_eqn_owner(-2:1, iz, ix) - ys_eqnp1_owner(-2:1, iz, ix)*ys_eqn_owner(2, iz, ix)/ys_eqnp1_owner(2, iz, ix)
+          eqn = ys_boundary_upper_eq_owner(:, iz, ix)
 
-        rhs_value = ys_local_rhs(row_end - 1, iline)
-        row_coeffs = ys_local_operator(row_end - 1, -2:2, iline)
-        fac = row_coeffs(2)/eqn(1)
-        rhs_value = rhs_value - ys_boundary_upper_rhsn(iline)*fac
-        row_coeffs(-1:2) = row_coeffs(-1:2) - eqn(-2:1)*fac
-        row_coeffs(2) = 0.0d0
-        ys_local_rhs(row_end - 1, iline) = rhs_value
-        ys_local_operator(row_end - 1, -2:2, iline) = row_coeffs
+          rhs_value = ys_gpsv_owner_rhs(iz, ix, row_end - 1)
+          row_coeffs = ys_gpsv_owner_matrix(iz, ix, row_end - 1, -2:2)
+          fac = row_coeffs(2)/eqn(1)
+          rhs_value = rhs_value - ys_boundary_upper_rhsn_owner(iz, ix)*fac
+          row_coeffs(-1:2) = row_coeffs(-1:2) - eqn(-2:1)*fac
+          row_coeffs(2) = 0.0d0
+          ys_gpsv_owner_rhs(iz, ix, row_end - 1) = rhs_value
+          ys_gpsv_owner_matrix(iz, ix, row_end - 1, -2:2) = row_coeffs
 
-        rhs_value = ys_local_rhs(row_end, iline)
-        row_coeffs = ys_local_operator(row_end, -2:2, iline)
-        fac = row_coeffs(2)/ys_eqnp1(2, iline)
-        rhs_value = rhs_value - ys_upper_ghost_rhs(iline)*fac
-        row_coeffs = row_coeffs - ys_eqnp1(:, iline)*fac
-        row_coeffs(2) = 0.0d0
-        fac = row_coeffs(1)/eqn(1)
-        rhs_value = rhs_value - ys_boundary_upper_rhsn(iline)*fac
-        row_coeffs(-2:1) = row_coeffs(-2:1) - eqn*fac
-        row_coeffs(1) = 0.0d0
-        ys_local_rhs(row_end, iline) = rhs_value
-        ys_local_operator(row_end, -2:2, iline) = row_coeffs
-      end if
-    end do
-    !$omp end target teams distribute parallel do
-    call roctxPop("assembled_boundary_eliminate")
+          rhs_value = ys_gpsv_owner_rhs(iz, ix, row_end)
+          row_coeffs = ys_gpsv_owner_matrix(iz, ix, row_end, -2:2)
+          fac = row_coeffs(2)/ys_eqnp1_owner(2, iz, ix)
+          rhs_value = rhs_value - ys_upper_ghost_owner(iz, ix)*fac
+          row_coeffs = row_coeffs - ys_eqnp1_owner(:, iz, ix)*fac
+          row_coeffs(2) = 0.0d0
+          fac = row_coeffs(1)/eqn(1)
+          rhs_value = rhs_value - ys_boundary_upper_rhsn_owner(iz, ix)*fac
+          row_coeffs(-2:1) = row_coeffs(-2:1) - eqn*fac
+          row_coeffs(1) = 0.0d0
+          ys_gpsv_owner_rhs(iz, ix, row_end) = rhs_value
+          ys_gpsv_owner_matrix(iz, ix, row_end, -2:2) = row_coeffs
+        end do
+      end do
+      !$omp end target teams distribute parallel do
+      call roctxPop("assembled_boundary_eliminate_upper")
+    end if
   end subroutine eliminate_assembled_boundaries
 
-  subroutine reconstruct_assembled_boundaries(line_values, row_start, row_end, line_count, has_lower_boundary, has_upper_boundary)
-    use y_line_solvers, only: ys_lower_ghost_rhs, ys_upper_ghost_rhs, ys_eqm1, ys_eqnp1, &
-                              ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, ys_boundary_lower_eq, ys_boundary_upper_eq
+  subroutine reconstruct_assembled_boundaries(line_values, row_start, row_end, has_lower_boundary, has_upper_boundary)
+    use y_line_solvers, only: ys_lower_ghost_owner, ys_upper_ghost_owner, ys_eqm1_owner, ys_eqnp1_owner, &
+                  ys_boundary_lower_rhs0_owner, ys_boundary_upper_rhsn_owner, ys_boundary_lower_eq_owner, ys_boundary_upper_eq_owner
     implicit none
-    integer(C_INT), intent(in) :: row_start, row_end, line_count
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: line_values(row_start - 2:row_end + 2, line_count)
+    integer(C_INT), intent(in) :: row_start, row_end
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: line_values(row_start - 2:, -nz:, nx0:)
     logical, intent(in) :: has_lower_boundary, has_upper_boundary
-    integer(C_INT) :: ilocal
+    integer(C_INT) :: ix, iz
 
     if (.not. has_lower_boundary .and. .not. has_upper_boundary) return
-    if (line_count <= 0) return
 
-    call roctxPush("assembled_boundary_reconstruct")
-    !$omp target teams distribute parallel do default(none) &
-    !$omp shared(line_values, ys_lower_ghost_rhs, ys_upper_ghost_rhs, ys_eqm1, ys_eqnp1, ys_boundary_lower_rhs0, &
-    !$omp& ys_boundary_upper_rhsn, ys_boundary_lower_eq, ys_boundary_upper_eq, line_count, has_lower_boundary, has_upper_boundary, ny) &
-    !$omp private(ilocal)
-    do ilocal = 1, line_count
-      if (has_lower_boundary) then
-        line_values(0, ilocal) = (ys_boundary_lower_rhs0(ilocal) - ys_boundary_lower_eq(0, ilocal)*line_values(1, ilocal) - &
-                                  ys_boundary_lower_eq(1, ilocal)*line_values(2, ilocal) - &
-                                  ys_boundary_lower_eq(2, ilocal)*line_values(3, ilocal))/ys_boundary_lower_eq(-1, ilocal)
-        line_values(-1, ilocal) = (ys_lower_ghost_rhs(ilocal) - ys_eqm1(-1, ilocal)*line_values(0, ilocal) - &
-                                   ys_eqm1(0, ilocal)*line_values(1, ilocal) - ys_eqm1(1, ilocal)*line_values(2, ilocal) - &
-                                   ys_eqm1(2, ilocal)*line_values(3, ilocal))/ys_eqm1(-2, ilocal)
-      end if
+    if (has_lower_boundary) then
+      call roctxPush("assembled_boundary_reconstruct_lower")
+      !$omp target teams distribute parallel do default(none) &
+      !$omp shared(line_values, ys_lower_ghost_owner, ys_eqm1_owner, ys_boundary_lower_rhs0_owner, ys_boundary_lower_eq_owner, nz, nx0, nxN) &
+      !$omp private(ix, iz) collapse(2)
+      do ix = nx0, nxN
+        do iz = -nz, nz
+   line_values(0, iz, ix) = (ys_boundary_lower_rhs0_owner(iz, ix) - ys_boundary_lower_eq_owner(0, iz, ix)*line_values(1, iz, ix) - &
+                                    ys_boundary_lower_eq_owner(1, iz, ix)*line_values(2, iz, ix) - &
+                                ys_boundary_lower_eq_owner(2, iz, ix)*line_values(3, iz, ix))/ys_boundary_lower_eq_owner(-1, iz, ix)
+          line_values(-1, iz, ix) = (ys_lower_ghost_owner(iz, ix) - ys_eqm1_owner(-1, iz, ix)*line_values(0, iz, ix) - &
+                               ys_eqm1_owner(0, iz, ix)*line_values(1, iz, ix) - ys_eqm1_owner(1, iz, ix)*line_values(2, iz, ix) - &
+                                     ys_eqm1_owner(2, iz, ix)*line_values(3, iz, ix))/ys_eqm1_owner(-2, iz, ix)
+        end do
+      end do
+      !$omp end target teams distribute parallel do
+      call roctxPop("assembled_boundary_reconstruct_lower")
+    end if
 
-      if (has_upper_boundary) then
-        line_values(ny, ilocal) = (ys_boundary_upper_rhsn(ilocal) - ys_boundary_upper_eq(-2, ilocal)*line_values(ny - 3, ilocal) - &
-                                   ys_boundary_upper_eq(-1, ilocal)*line_values(ny - 2, ilocal) - &
-                                   ys_boundary_upper_eq(0, ilocal)*line_values(ny - 1, ilocal))/ys_boundary_upper_eq(1, ilocal)
-        line_values(ny + 1, ilocal) = (ys_upper_ghost_rhs(ilocal) - ys_eqnp1(-2, ilocal)*line_values(ny - 3, ilocal) - &
-                              ys_eqnp1(-1, ilocal)*line_values(ny - 2, ilocal) - ys_eqnp1(0, ilocal)*line_values(ny - 1, ilocal) - &
-                                       ys_eqnp1(1, ilocal)*line_values(ny, ilocal))/ys_eqnp1(2, ilocal)
-      end if
-    end do
-    !$omp end target teams distribute parallel do
-    call roctxPop("assembled_boundary_reconstruct")
+    if (has_upper_boundary) then
+      call roctxPush("assembled_boundary_reconstruct_upper")
+      !$omp target teams distribute parallel do default(none) &
+      !$omp shared(line_values, ys_upper_ghost_owner, ys_eqnp1_owner, ys_boundary_upper_rhsn_owner, ys_boundary_upper_eq_owner, ny, nz, nx0, nxN) &
+      !$omp private(ix, iz) collapse(2)
+      do ix = nx0, nxN
+        do iz = -nz, nz
+          line_values(ny, iz, ix) = (ys_boundary_upper_rhsn_owner(iz, ix) - ys_boundary_upper_eq_owner(-2, iz, ix)*line_values(ny - 3, iz, ix) - &
+                                     ys_boundary_upper_eq_owner(-1, iz, ix)*line_values(ny - 2, iz, ix) - &
+                            ys_boundary_upper_eq_owner(0, iz, ix)*line_values(ny - 1, iz, ix))/ys_boundary_upper_eq_owner(1, iz, ix)
+          line_values(ny + 1, iz, ix) = (ys_upper_ghost_owner(iz, ix) - ys_eqnp1_owner(-2, iz, ix)*line_values(ny - 3, iz, ix) - &
+                  ys_eqnp1_owner(-1, iz, ix)*line_values(ny - 2, iz, ix) - ys_eqnp1_owner(0, iz, ix)*line_values(ny - 1, iz, ix) - &
+                                         ys_eqnp1_owner(1, iz, ix)*line_values(ny, iz, ix))/ys_eqnp1_owner(2, iz, ix)
+        end do
+      end do
+      !$omp end target teams distribute parallel do
+      call roctxPop("assembled_boundary_reconstruct_upper")
+    end if
   end subroutine reconstruct_assembled_boundaries
 
-  subroutine pack_assembled_pentadiagonal(row_start, row_end, line_count)
-    use y_line_solvers, only: ys_local_rhs, ys_local_operator, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x
-    implicit none
-    integer(C_INT), intent(in) :: row_start, row_end, line_count
-    integer(C_INT) :: iline, iy, p, local_row
-
-    if (line_count <= 0) return
-
-    call roctxPush("assembled_pack")
-    !$omp target teams distribute parallel do default(none) &
-    !$omp shared(ys_local_rhs, ys_local_operator, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, &
-    !$omp& row_start, row_end, line_count) &
-    !$omp private(iline, iy, p, local_row)
-    do iline = 1, line_count
-      do iy = row_start, row_end
-        local_row = iy - row_start
-        p = local_row*line_count + iline
-        ys_gpsv_x(p) = ys_local_rhs(iy, iline)
-        ys_gpsv_ds(p) = cmplx(ys_local_operator(iy, -2, iline), 0.0d0, kind=C_DOUBLE)
-        ys_gpsv_dl(p) = cmplx(ys_local_operator(iy, -1, iline), 0.0d0, kind=C_DOUBLE)
-        ys_gpsv_d(p) = cmplx(ys_local_operator(iy, 0, iline), 0.0d0, kind=C_DOUBLE)
-        ys_gpsv_du(p) = cmplx(ys_local_operator(iy, 1, iline), 0.0d0, kind=C_DOUBLE)
-        ys_gpsv_dw(p) = cmplx(ys_local_operator(iy, 2, iline), 0.0d0, kind=C_DOUBLE)
-      end do
-    end do
-    !$omp end target teams distribute parallel do
-    call roctxPop("assembled_pack")
-  end subroutine pack_assembled_pentadiagonal
-
-  subroutine unpack_assembled_pentadiagonal(line_values, row_start, row_end, line_count)
-    use y_line_solvers, only: ys_gpsv_x
-    implicit none
-    integer(C_INT), intent(in) :: row_start, row_end, line_count
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: line_values(row_start - 2:row_end + 2, line_count)
-    integer(C_INT) :: ilocal, iy, p, local_row
-
-    if (line_count <= 0) return
-
-    call roctxPush("assembled_unpack")
-    !$omp target teams distribute parallel do default(none) &
-    !$omp shared(line_values, ys_gpsv_x, row_start, row_end, line_count) &
-    !$omp private(ilocal, iy, p, local_row)
-    do ilocal = 1, line_count
-      do iy = row_start, row_end
-        local_row = iy - row_start
-        p = local_row*line_count + ilocal
-        line_values(iy, ilocal) = ys_gpsv_x(p)
-      end do
-    end do
-    !$omp end target teams distribute parallel do
-    call roctxPop("assembled_unpack")
-  end subroutine unpack_assembled_pentadiagonal
-
-  subroutine solve_assembled_local_lines(line_values, row_start, row_end, line_count, has_lower_boundary, has_upper_boundary, solve_label)
-    use y_line_solvers, only: ys_solve_packed_pentadiagonal
-    implicit none
-    integer(C_INT), intent(in) :: row_start, row_end, line_count
-    logical, intent(in) :: has_lower_boundary, has_upper_boundary
-    character(len=*), intent(in) :: solve_label
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: line_values(row_start - 2:row_end + 2, line_count)
-
-    call eliminate_assembled_boundaries(row_start, row_end, line_count, has_lower_boundary, has_upper_boundary)
-    call pack_assembled_pentadiagonal(row_start, row_end, line_count)
-    call ys_solve_packed_pentadiagonal(row_end - row_start + 1, line_count, solve_label)
-    call unpack_assembled_pentadiagonal(line_values, row_start, row_end, line_count)
-    call reconstruct_assembled_boundaries(line_values, row_start, row_end, line_count, has_lower_boundary, has_upper_boundary)
-  end subroutine solve_assembled_local_lines
-
-  subroutine solve_assembled_distributed_field(dst, row_start, row_end, line_count, has_lower_boundary, has_upper_boundary, symmetric_operator)
-    use y_line_solvers, only: ys_solve_endpoint_schur
-    implicit none
-    integer(C_INT), intent(in) :: row_start, row_end, line_count
-    logical, intent(in) :: has_lower_boundary, has_upper_boundary, symmetric_operator
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-
-    call eliminate_assembled_boundaries(row_start, row_end, line_count, has_lower_boundary, has_upper_boundary)
-    call ys_solve_endpoint_schur(dst, symmetric_operator)
-    call reconstruct_assembled_boundaries(dst(row_start - 2, -nz, nx0), row_start, row_end, line_count, has_lower_boundary, has_upper_boundary)
-  end subroutine solve_assembled_distributed_field
-
-  subroutine prepare_full_y_line_solve(first_line, line_count, nlines, nlines_z)
-    implicit none
-    integer(C_INT), intent(out) :: first_line, line_count, nlines, nlines_z
-
-    nlines_z = 2*nz + 1
-    nlines = (nxN - nx0 + 1)*nlines_z
-    call yslab_line_range(ipy, nlines, first_line, line_count)
-    if (line_count > 0) call prepare_yslab_scratch(ny + 3, line_count)
-  end subroutine prepare_full_y_line_solve
-
-  !$omp declare target(compact_boundary_rhs_value)
-  subroutine compact_boundary_rhs_value(bc0_values, bcn_values, nz_value, nx0_value, iz, ix, rhs_index, value)
-    implicit none
-    integer(C_INT), intent(in) :: nz_value, nx0_value, iz, ix, rhs_index
-    complex(C_DOUBLE_COMPLEX), intent(in) :: bc0_values(-nz_value:, nx0_value:, :)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: bcn_values(-nz_value:, nx0_value:, :)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: value
-
-    if (rhs_index == 0_C_INT) then
-      value = (0.0d0, 0.0d0)
-    else if (rhs_index > 0_C_INT) then
-      value = bc0_values(iz, ix, rhs_index)
-    else
-      value = bcn_values(iz, ix, -rhs_index)
-    end if
-  end subroutine compact_boundary_rhs_value
-
-  SUBROUTINE solve_compact_component_current_layout(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
-                                                   lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, &
-                                                    lambda_coeff, diffusion_coeff)
-    use y_line_solvers, only: ys_prepare_assembled_workspace, ys_solve_endpoint_schur, ys_solve_packed_pentadiagonal
+  SUBROUTINE solve_compact_component_current_layout(field_values, assemble_system, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
+                                               lower_rhs_values, lower_ghost_rhs_values, upper_rhs_values, upper_ghost_rhs_values, &
+               lambda_coeff, diffusion_coeff, source_values, boundary_system, solve_label, symmetric_operator, transpose_derivative)
+ use y_line_solvers, only: ys_prepare_assembled_workspace, ys_solve_endpoint_schur, ys_solve_packed_pentadiagonal, ys_gpsv_owner_rhs
     IMPLICIT NONE
-    integer(C_INT), intent(in) :: component_index, lower_rhs_index, lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index
+    complex(C_DOUBLE_COMPLEX), target, intent(inout) :: field_values(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    procedure(compact_component_assembly) :: assemble_system
     real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: lower_rhs_values(-nz:, nx0:), lower_ghost_rhs_values(-nz:, nx0:)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: upper_rhs_values(-nz:, nx0:), upper_ghost_rhs_values(-nz:, nx0:)
     real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
-    integer(C_INT) :: nlines_z, nlines, first_line, line_count
-    logical :: has_lower_boundary, has_upper_boundary
+    complex(C_DOUBLE_COMPLEX), target, intent(in) :: source_values(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    procedure(compact_boundary_assembly), optional :: boundary_system
+    character(len=*), optional, intent(in) :: solve_label
+    logical, optional, intent(in) :: symmetric_operator, transpose_derivative
+    integer(C_INT) :: line_count, ix, iz, iy
+    logical :: has_lower_boundary, has_upper_boundary, symmetric_operator_value, transpose_derivative_value
+    complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :), owner_dst(:, :, :)
+    character(len=64) :: solve_label_value
 
+    symmetric_operator_value = .true.
+    if (present(symmetric_operator)) symmetric_operator_value = symmetric_operator
+    transpose_derivative_value = .false.
+    if (present(transpose_derivative)) transpose_derivative_value = transpose_derivative
+    solve_label_value = "compact full-y gpsv"
+    if (present(solve_label)) solve_label_value = solve_label
     if (use_yslab_linsolve) then
-      call prepare_full_y_line_solve(first_line, line_count, nlines, nlines_z)
+      line_count = (nxN - nx0 + 1)*(2*nz + 1)
+      if (line_count > 0) call prepare_yslab_scratch(ny + 3, line_count)
       if (line_count <= 0) return
 
       call roctxPush("yslab compact transpose_to_full")
-      call yslab_transpose_to_full(V(:, :, :, component_index), yslab_workspace, ny, nz, nlines, nlines_z, .false.)
+      call yslab_transpose_to_full(source_values, yslab_workspace, ny, nz, line_count, 2*nz + 1, transpose_derivative_value)
       call roctxPop("yslab compact transpose_to_full")
 
-      call ys_prepare_assembled_workspace(ny, nz, 1_C_INT, ny - 1, line_count, .false.)
-      call assemble_compact_component_system(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, lower_rhs_index, &
-                                     lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, lambda_coeff, diffusion_coeff, &
-                                             .true., first_line, line_count, 1_C_INT, ny - 1)
-      call solve_assembled_local_lines(yslab_workspace, 1_C_INT, ny - 1, line_count, .true., .true., "compact full-y gpsv")
+      call ys_prepare_assembled_workspace(ny, nz, 1_C_INT, ny - 1, 1_C_INT, line_count, .false.)
+      owner_src(-1:ny + 1, -nz:nz, nx0:nxN) => yslab_workspace
+      call assemble_system(owner_src, lambda_coeff, diffusion_coeff, 1_C_INT, ny - 1)
+      if (present(boundary_system)) then
+        call boundary_system(owner_src, 1_C_INT, ny - 1, .true., .true.)
+      else
+        call assemble_compact_component_boundary_data(lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, lower_rhs_values, &
+                                                  lower_ghost_rhs_values, upper_rhs_values, upper_ghost_rhs_values, 1_C_INT, ny - 1)
+      end if
+      call eliminate_assembled_boundaries(1_C_INT, ny - 1, .true., .true.)
+      owner_dst(-1:ny + 1, -nz:nz, nx0:nxN) => yslab_workspace
+      call ys_solve_packed_pentadiagonal(ny - 1, line_count, trim(solve_label_value))
+      call roctxPush("assembled_scatter_solution")
+      !$omp target teams distribute parallel do default(none) &
+      !$omp shared(owner_dst, ys_gpsv_owner_rhs, ny, nx0, nxN, nz) &
+      !$omp private(ix, iz, iy) collapse(2)
+      do ix = nx0, nxN
+        do iz = -nz, nz
+          do iy = 1, ny - 1
+            owner_dst(iy, iz, ix) = ys_gpsv_owner_rhs(iz, ix, iy)
+          end do
+        end do
+      end do
+      !$omp end target teams distribute parallel do
+      call roctxPop("assembled_scatter_solution")
+      call reconstruct_assembled_boundaries(owner_dst, 1_C_INT, ny - 1, .true., .true.)
 
       call roctxPush("yslab compact transpose_from_full")
-      call yslab_transpose_from_full(yslab_workspace, V(:, :, :, component_index), ny, nz, nlines, nlines_z)
+      call yslab_transpose_from_full(yslab_workspace, field_values, ny, nz, line_count, 2*nz + 1)
       call roctxPop("yslab compact transpose_from_full")
       return
     end if
-    call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, (nxN - nx0 + 1)*(2*nz + 1), .true.)
-    call assemble_compact_component_system(component_index, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, lower_rhs_index, &
-                                     lower_ghost_rhs_index, upper_rhs_index, upper_ghost_rhs_index, lambda_coeff, diffusion_coeff, &
-                                           .false., 1_C_INT, (nxN - nx0 + 1)*(2*nz + 1), ny0, nyN)
-    line_count = (nxN - nx0 + 1)*(2*nz + 1)
+    call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, (nxN - nx0 + 1)*(2*nz + 1), .true.)
+    owner_src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => source_values
     has_lower_boundary = (ny0 == 1)
     has_upper_boundary = (nyN == ny - 1)
-    call solve_assembled_distributed_field(V(:, :, :, component_index), ny0, nyN, line_count, has_lower_boundary, has_upper_boundary, .true.)
+    call assemble_system(owner_src, lambda_coeff, diffusion_coeff, ny0, nyN)
+    if (present(boundary_system)) then
+      call boundary_system(owner_src, ny0, nyN, has_lower_boundary, has_upper_boundary)
+    else
+      call assemble_compact_component_boundary_data(lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, lower_rhs_values, &
+                                                    lower_ghost_rhs_values, upper_rhs_values, upper_ghost_rhs_values, ny0, nyN)
+    end if
+    call eliminate_assembled_boundaries(ny0, nyN, has_lower_boundary, has_upper_boundary)
+    call ys_solve_endpoint_schur(field_values, symmetric_operator_value)
+    call reconstruct_assembled_boundaries(field_values, ny0, nyN, has_lower_boundary, has_upper_boundary)
   END SUBROUTINE solve_compact_component_current_layout
 
   SUBROUTINE scatter_full_y_line(full_line, local_line)
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), intent(in) :: full_line(-1:ny + 1)
     complex(C_DOUBLE_COMPLEX), intent(inout) :: local_line(ny0 - 2:)
-    integer(C_INT) :: local_y_first, local_y_last
-
-    if (lbound(local_line, 1) <= -1 .and. ubound(local_line, 1) >= ny + 1) then
+    if (ny0 == 1 .and. nyN == ny - 1) then
       local_line(-1:ny + 1) = full_line(-1:ny + 1)
       return
     end if
-
-    local_y_first = lbound(local_line, 1)
-    local_y_last = ubound(local_line, 1)
-    local_line(local_y_first:local_y_last) = full_line(local_y_first:local_y_last)
+    local_line(ny0 - 2:nyN + 2) = full_line(ny0 - 2:nyN + 2)
   END SUBROUTINE scatter_full_y_line
 
   SUBROUTINE solve_mean_correction_line(x, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, lambda_coeff, diffusion_coeff)
@@ -949,12 +924,12 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX) :: zero_mode_u(-1:ny + 1), zero_mode_w(-1:ny + 1), zero_mode_ucor(-1:ny + 1)
 
     call roctxPush("linsolve solve_v")
-    call solve_compact_component_current_layout(2_C_INT, v0bc, v0m1bc, vnbc, vnp1bc, &
-                                                2_C_INT, 4_C_INT, -2_C_INT, -4_C_INT, lambda, 1.0d0)
+    call solve_compact_component_current_layout(V(:, :, :, 2), assemble_compact_biharmonic_system, v0bc, v0m1bc, vnbc, vnp1bc, &
+                                               bc0(:, :, 2), bc0(:, :, 4), bcn(:, :, 2), bcn(:, :, 4), lambda, 1.0d0, V(:, :, :, 2))
     call roctxPop("linsolve solve_v")
     call roctxPush("linsolve solve_eta")
-    call solve_compact_component_current_layout(1_C_INT, eta0bc, eta0m1bc, etanbc, etanp1bc, &
-                                                5_C_INT, 0_C_INT, -5_C_INT, 0_C_INT, lambda, 1.0d0)
+ call solve_compact_component_current_layout(V(:, :, :, 1), assemble_compact_helmholtz_system, eta0bc, eta0m1bc, etanbc, etanp1bc, &
+                                                bc0(:, :, 5), zero_bc, bcn(:, :, 5), zero_bc, lambda, 1.0d0, V(:, :, :, 1))
     call roctxPop("linsolve solve_eta")
     call roctxPush("linsolve d_v_dy")
     call apply_complex_derivative_current_layout(V(:, :, :, 2), V(:, :, :, 3))
@@ -1013,8 +988,8 @@ CONTAINS
     integer(C_INT) :: ix, iz, i, j
     complex(C_DOUBLE_COMPLEX) :: temp
     complex(C_DOUBLE_COMPLEX) :: zero_mode_scalar(-1:ny + 1), zero_mode_tcor(-1:ny + 1)
-    call solve_compact_component_current_layout(3_C_INT + iPhi, phi0bc, phi0m1bc, phinbc, phinp1bc, 5_C_INT + iPhi, 0_C_INT, &
-                                                -(5_C_INT + iPhi), 0_C_INT, lambda, pra(iPhi))
+    call solve_compact_component_current_layout(V(:, :, :, 3 + iPhi), assemble_compact_helmholtz_system, phi0bc, phi0m1bc, phinbc, phinp1bc, bc0(:, :, 5 + iPhi), zero_bc, &
+                                                bcn(:, :, 5 + iPhi), zero_bc, lambda, pra(iPhi), V(:, :, :, 3 + iPhi))
 
     if (nx0 == 0) then
       !$omp target update from(V(:, 0, 0, 3 + iPhi))
