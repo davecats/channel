@@ -69,7 +69,7 @@ MODULE dnsdata
 #endif
   !Boundary conditions
   real(C_DOUBLE), dimension(-2:2) :: v0bc, v0m1bc, vnbc, vnp1bc, eta0bc, eta0m1bc, etanbc, etanp1bc,phi0bc,phi0m1bc,phinbc,phinp1bc
-  complex(C_DOUBLE_COMPLEX), allocatable :: bc0(:, :, :), bcn(:, :, :), zero_bc(:, :)
+  complex(C_DOUBLE_COMPLEX), allocatable, target :: bc0(:, :, :), bcn(:, :, :), zero_bc(:, :)
   !Mean pressure correction
   real(C_DOUBLE), private :: corrpx = 0.d0, corrpz = 0.d0
   complex(C_DOUBLE_COMPLEX), allocatable :: ucor(:), tcor(:, :)
@@ -104,6 +104,9 @@ MODULE dnsdata
       logical, intent(in) :: has_lower_boundary, has_upper_boundary
     end subroutine compact_boundary_assembly
   end interface
+  real(C_DOUBLE), save :: compact_lower_bc(-2:2), compact_lower_ghost_bc(-2:2), compact_upper_bc(-2:2), compact_upper_ghost_bc(-2:2)
+  complex(C_DOUBLE_COMPLEX), pointer, save :: compact_lower_rhs(:, :) => null(), compact_lower_ghost_rhs(:, :) => null()
+  complex(C_DOUBLE_COMPLEX), pointer, save :: compact_upper_rhs(:, :) => null(), compact_upper_ghost_rhs(:, :) => null()
 
 CONTAINS
 
@@ -485,8 +488,7 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), target, intent(in) :: src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     logical, optional, intent(in) :: update_device
-    call solve_compact_component_current_layout(dst, assemble_compact_derivative_interior, d040, d040, d04n, d04n, zero_bc, zero_bc, zero_bc, zero_bc, &
-                                                0.0d0, 0.0d0, src, boundary_system=assemble_compact_derivative_boundary, &
+    call solve_compact_component_current_layout(dst, assemble_compact_derivative_interior, assemble_compact_derivative_boundary, 0.0d0, 0.0d0, src, &
                                        solve_label="yslab derivative gpsv", symmetric_operator=.false., transpose_derivative=.true.)
   END SUBROUTINE apply_complex_derivative_current_layout
 
@@ -555,50 +557,64 @@ CONTAINS
     end if
   end subroutine assemble_compact_derivative_boundary
 
-  subroutine assemble_compact_component_boundary_data(lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
-                                               lower_rhs_values, lower_ghost_rhs_values, upper_rhs_values, upper_ghost_rhs_values, &
-                                                      row_start, row_end)
+  subroutine select_compact_component_boundaries(lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
+                                                 lower_rhs_values, lower_ghost_rhs_values, upper_rhs_values, upper_ghost_rhs_values)
+    implicit none
+    real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
+    complex(C_DOUBLE_COMPLEX), target, intent(in) :: lower_rhs_values(-nz:, nx0:), lower_ghost_rhs_values(-nz:, nx0:)
+    complex(C_DOUBLE_COMPLEX), target, intent(in) :: upper_rhs_values(-nz:, nx0:), upper_ghost_rhs_values(-nz:, nx0:)
+
+    compact_lower_bc = lower_bc
+    compact_lower_ghost_bc = lower_ghost_bc
+    compact_upper_bc = upper_bc
+    compact_upper_ghost_bc = upper_ghost_bc
+    compact_lower_rhs => lower_rhs_values
+    compact_lower_ghost_rhs => lower_ghost_rhs_values
+    compact_upper_rhs => upper_rhs_values
+    compact_upper_ghost_rhs => upper_ghost_rhs_values
+  end subroutine select_compact_component_boundaries
+
+  subroutine assemble_selected_compact_component_boundaries(owner_src, row_start, row_end, has_lower_boundary, has_upper_boundary)
     use y_line_solvers, only: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, ys_lower_ghost_owner, ys_lower_boundary_owner, ys_upper_boundary_owner, ys_upper_ghost_owner, &
                               ys_eqm1_owner, ys_eq0_owner, ys_eqn_owner, ys_eqnp1_owner
     IMPLICIT NONE
+    complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
     integer(C_INT), intent(in) :: row_start, row_end
-    real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: lower_rhs_values(-nz:, nx0:), lower_ghost_rhs_values(-nz:, nx0:)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: upper_rhs_values(-nz:, nx0:), upper_ghost_rhs_values(-nz:, nx0:)
+    logical, intent(in) :: has_lower_boundary, has_upper_boundary
     integer(C_INT) :: ix, iz
 
-    if (row_start == 1) then
+    if (has_lower_boundary) then
       !$omp target teams distribute parallel do collapse(2) default(none) &
-      !$omp shared(ys_lower_ghost_owner, ys_lower_boundary_owner, ys_eqm1_owner, ys_eq0_owner, lower_bc, lower_ghost_bc, &
-      !$omp& lower_rhs_values, lower_ghost_rhs_values, nz, nx0, nxN) &
+      !$omp shared(ys_lower_ghost_owner, ys_lower_boundary_owner, ys_eqm1_owner, ys_eq0_owner, compact_lower_bc, compact_lower_ghost_bc, &
+      !$omp& compact_lower_rhs, compact_lower_ghost_rhs, nz, nx0, nxN) &
       !$omp private(ix, iz)
       do ix = nx0, nxN
         do iz = -nz, nz
-          ys_lower_ghost_owner(iz, ix) = lower_ghost_rhs_values(iz, ix)
-          ys_lower_boundary_owner(iz, ix) = lower_rhs_values(iz, ix)
-          ys_eqm1_owner(:, iz, ix) = lower_ghost_bc
-          ys_eq0_owner(:, iz, ix) = lower_bc
+          ys_lower_ghost_owner(iz, ix) = compact_lower_ghost_rhs(iz, ix)
+          ys_lower_boundary_owner(iz, ix) = compact_lower_rhs(iz, ix)
+          ys_eqm1_owner(:, iz, ix) = compact_lower_ghost_bc
+          ys_eq0_owner(:, iz, ix) = compact_lower_bc
         end do
       end do
       !$omp end target teams distribute parallel do
     end if
 
-    if (row_end == ny - 1) then
+    if (has_upper_boundary) then
       !$omp target teams distribute parallel do collapse(2) default(none) &
-      !$omp shared(ys_upper_boundary_owner, ys_upper_ghost_owner, ys_eqn_owner, ys_eqnp1_owner, upper_bc, upper_ghost_bc, &
-      !$omp& upper_rhs_values, upper_ghost_rhs_values, nz, nx0, nxN) &
+      !$omp shared(ys_upper_boundary_owner, ys_upper_ghost_owner, ys_eqn_owner, ys_eqnp1_owner, compact_upper_bc, compact_upper_ghost_bc, &
+      !$omp& compact_upper_rhs, compact_upper_ghost_rhs, nz, nx0, nxN) &
       !$omp private(ix, iz)
       do ix = nx0, nxN
         do iz = -nz, nz
-          ys_upper_boundary_owner(iz, ix) = upper_rhs_values(iz, ix)
-          ys_upper_ghost_owner(iz, ix) = upper_ghost_rhs_values(iz, ix)
-          ys_eqn_owner(:, iz, ix) = upper_bc
-          ys_eqnp1_owner(:, iz, ix) = upper_ghost_bc
+          ys_upper_boundary_owner(iz, ix) = compact_upper_rhs(iz, ix)
+          ys_upper_ghost_owner(iz, ix) = compact_upper_ghost_rhs(iz, ix)
+          ys_eqn_owner(:, iz, ix) = compact_upper_bc
+          ys_eqnp1_owner(:, iz, ix) = compact_upper_ghost_bc
         end do
       end do
       !$omp end target teams distribute parallel do
     end if
-  end subroutine assemble_compact_component_boundary_data
+  end subroutine assemble_selected_compact_component_boundaries
 
   subroutine assemble_compact_biharmonic_system(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end)
     use y_line_solvers, only: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs
@@ -796,19 +812,15 @@ CONTAINS
     end if
   end subroutine reconstruct_assembled_boundaries
 
-  SUBROUTINE solve_compact_component_current_layout(field_values, assemble_system, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
-                                               lower_rhs_values, lower_ghost_rhs_values, upper_rhs_values, upper_ghost_rhs_values, &
-               lambda_coeff, diffusion_coeff, source_values, boundary_system, solve_label, symmetric_operator, transpose_derivative)
+  SUBROUTINE solve_compact_component_current_layout(field_values, assemble_system, boundary_system, lambda_coeff, diffusion_coeff, source_values, &
+                                                    solve_label, symmetric_operator, transpose_derivative)
  use y_line_solvers, only: ys_prepare_assembled_workspace, ys_solve_endpoint_schur, ys_solve_packed_pentadiagonal, ys_gpsv_owner_rhs
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), target, intent(inout) :: field_values(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     procedure(compact_component_assembly) :: assemble_system
-    real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: lower_rhs_values(-nz:, nx0:), lower_ghost_rhs_values(-nz:, nx0:)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: upper_rhs_values(-nz:, nx0:), upper_ghost_rhs_values(-nz:, nx0:)
+    procedure(compact_boundary_assembly) :: boundary_system
     real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
     complex(C_DOUBLE_COMPLEX), target, intent(in) :: source_values(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    procedure(compact_boundary_assembly), optional :: boundary_system
     character(len=*), optional, intent(in) :: solve_label
     logical, optional, intent(in) :: symmetric_operator, transpose_derivative
     integer(C_INT) :: line_count, ix, iz, iy
@@ -834,12 +846,7 @@ CONTAINS
       call ys_prepare_assembled_workspace(ny, nz, 1_C_INT, ny - 1, 1_C_INT, line_count, .false.)
       owner_src(-1:ny + 1, -nz:nz, nx0:nxN) => yslab_workspace
       call assemble_system(owner_src, lambda_coeff, diffusion_coeff, 1_C_INT, ny - 1)
-      if (present(boundary_system)) then
-        call boundary_system(owner_src, 1_C_INT, ny - 1, .true., .true.)
-      else
-        call assemble_compact_component_boundary_data(lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, lower_rhs_values, &
-                                                  lower_ghost_rhs_values, upper_rhs_values, upper_ghost_rhs_values, 1_C_INT, ny - 1)
-      end if
+      call boundary_system(owner_src, 1_C_INT, ny - 1, .true., .true.)
       call eliminate_assembled_boundaries(1_C_INT, ny - 1, .true., .true.)
       owner_dst(-1:ny + 1, -nz:nz, nx0:nxN) => yslab_workspace
       call ys_solve_packed_pentadiagonal(ny - 1, line_count, trim(solve_label_value))
@@ -868,12 +875,7 @@ CONTAINS
     has_lower_boundary = (ny0 == 1)
     has_upper_boundary = (nyN == ny - 1)
     call assemble_system(owner_src, lambda_coeff, diffusion_coeff, ny0, nyN)
-    if (present(boundary_system)) then
-      call boundary_system(owner_src, ny0, nyN, has_lower_boundary, has_upper_boundary)
-    else
-      call assemble_compact_component_boundary_data(lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, lower_rhs_values, &
-                                                    lower_ghost_rhs_values, upper_rhs_values, upper_ghost_rhs_values, ny0, nyN)
-    end if
+    call boundary_system(owner_src, ny0, nyN, has_lower_boundary, has_upper_boundary)
     call eliminate_assembled_boundaries(ny0, nyN, has_lower_boundary, has_upper_boundary)
     call ys_solve_endpoint_schur(field_values, symmetric_operator_value)
     call reconstruct_assembled_boundaries(field_values, ny0, nyN, has_lower_boundary, has_upper_boundary)
@@ -924,12 +926,14 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX) :: zero_mode_u(-1:ny + 1), zero_mode_w(-1:ny + 1), zero_mode_ucor(-1:ny + 1)
 
     call roctxPush("linsolve solve_v")
-    call solve_compact_component_current_layout(V(:, :, :, 2), assemble_compact_biharmonic_system, v0bc, v0m1bc, vnbc, vnp1bc, &
-                                               bc0(:, :, 2), bc0(:, :, 4), bcn(:, :, 2), bcn(:, :, 4), lambda, 1.0d0, V(:, :, :, 2))
+    call select_compact_component_boundaries(v0bc, v0m1bc, vnbc, vnp1bc, bc0(:, :, 2), bc0(:, :, 4), bcn(:, :, 2), bcn(:, :, 4))
+    call solve_compact_component_current_layout(V(:, :, :, 2), assemble_compact_biharmonic_system, assemble_selected_compact_component_boundaries, &
+                                                lambda, 1.0d0, V(:, :, :, 2))
     call roctxPop("linsolve solve_v")
     call roctxPush("linsolve solve_eta")
- call solve_compact_component_current_layout(V(:, :, :, 1), assemble_compact_helmholtz_system, eta0bc, eta0m1bc, etanbc, etanp1bc, &
-                                                bc0(:, :, 5), zero_bc, bcn(:, :, 5), zero_bc, lambda, 1.0d0, V(:, :, :, 1))
+    call select_compact_component_boundaries(eta0bc, eta0m1bc, etanbc, etanp1bc, bc0(:, :, 5), zero_bc, bcn(:, :, 5), zero_bc)
+    call solve_compact_component_current_layout(V(:, :, :, 1), assemble_compact_helmholtz_system, assemble_selected_compact_component_boundaries, &
+                                                lambda, 1.0d0, V(:, :, :, 1))
     call roctxPop("linsolve solve_eta")
     call roctxPush("linsolve d_v_dy")
     call apply_complex_derivative_current_layout(V(:, :, :, 2), V(:, :, :, 3))
@@ -988,8 +992,9 @@ CONTAINS
     integer(C_INT) :: ix, iz, i, j
     complex(C_DOUBLE_COMPLEX) :: temp
     complex(C_DOUBLE_COMPLEX) :: zero_mode_scalar(-1:ny + 1), zero_mode_tcor(-1:ny + 1)
-    call solve_compact_component_current_layout(V(:, :, :, 3 + iPhi), assemble_compact_helmholtz_system, phi0bc, phi0m1bc, phinbc, phinp1bc, bc0(:, :, 5 + iPhi), zero_bc, &
-                                                bcn(:, :, 5 + iPhi), zero_bc, lambda, pra(iPhi), V(:, :, :, 3 + iPhi))
+    call select_compact_component_boundaries(phi0bc, phi0m1bc, phinbc, phinp1bc, bc0(:, :, 5 + iPhi), zero_bc, bcn(:, :, 5 + iPhi), zero_bc)
+    call solve_compact_component_current_layout(V(:, :, :, 3 + iPhi), assemble_compact_helmholtz_system, assemble_selected_compact_component_boundaries, &
+                                                lambda, pra(iPhi), V(:, :, :, 3 + iPhi))
 
     if (nx0 == 0) then
       !$omp target update from(V(:, 0, 0, 3 + iPhi))

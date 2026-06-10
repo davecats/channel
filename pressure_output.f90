@@ -5,20 +5,19 @@ MODULE pressure_output
   USE, intrinsic :: iso_c_binding
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
   USE dnsdata, ONLY: V, der, k2, ialfa, ibeta, d140, d240, d24n, ni, alfa0, beta0, factor, &
-                     ny, nz, nxd, izd, eliminate_assembled_boundaries, reconstruct_assembled_boundaries
+                     ny, nz, nxd, izd, d040, zero_bc, use_yslab_linsolve, solve_compact_component_current_layout
   USE ffts, ONLY: FFT, IFT, RFT, HFT, VVdz, VVdx
 #else
   USE dnsdata, ONLY: V, der, k2, ialfa, ibeta, d140, d240, d24n, ni, alfa0, beta0, factor, &
-                     ny, nz, nxd, izd, VVdz, VVdx, eliminate_assembled_boundaries, reconstruct_assembled_boundaries
+                     ny, nz, nxd, izd, VVdz, VVdx, d040, zero_bc, use_yslab_linsolve, solve_compact_component_current_layout
   USE ffts, ONLY: FFT, IFT, RFT, HFT
 #endif
   USE mpi_transpose, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, npy_grid, ierr, &
                            sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, &
                            fft_transpose_is_local, repack_zTOx_local, repack_xTOz_local
   USE roctx, ONLY: roctxPush, roctxPop
-  USE y_line_solvers, ONLY: ys_prepare_assembled_workspace, ys_solve_endpoint_schur, ys_solve_packed_pentadiagonal, ys_gpsv_matrix, ys_gpsv_rhs, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, &
-                            ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
-                            ys_eqm1, ys_eq0, ys_eqn, ys_eqnp1
+  USE y_line_solvers, ONLY: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, ys_lower_ghost_owner, ys_lower_boundary_owner, &
+                            ys_upper_boundary_owner, ys_upper_ghost_owner, ys_eqm1_owner, ys_eq0_owner, ys_eqn_owner, ys_eqnp1_owner
 #ifdef HAVE_MPI
   USE mpi_f08
 #endif
@@ -484,7 +483,10 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(in) :: src0(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(in) :: src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: p(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    call solve_pressure_like_field(src0, src1, p, .false.)
+    call assemble_pressure_rhs(src0, src1, p)
+    call solve_compact_component_current_layout(p, assemble_pressure_operator,
+    assemble_pressure_boundaries, 0.0d0, 0.0d0, p, &
+      solve_label = "pressure current-layout gpsv", symmetric_operator = .true., transpose_derivative = .true.)
   END SUBROUTINE solve_pressure_field
 
   SUBROUTINE solve_dpdy_field(src0, src1, dpdy)
@@ -492,130 +494,206 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(in) :: src0(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(in) :: src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dpdy(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    call solve_pressure_like_field(src0, src1, dpdy, .true.)
+    call assemble_dpdy_rhs(src0, src1, dpdy)
+    call solve_compact_component_current_layout(dpdy, assemble_dpdy_operator, assemble_dpdy_boundaries, 0.0d0, 0.0d0, dpdy, &
+                                                solve_label="pressure current-layout gpsv", symmetric_operator=.true.)
   END SUBROUTINE solve_dpdy_field
 
-  subroutine solve_pressure_like_field(src0, src1, dst, solve_dpdy)
+  subroutine assemble_pressure_rhs(src0, src1, rhs)
     implicit none
     complex(C_DOUBLE_COMPLEX), intent(in) :: src0(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(in) :: src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    logical, intent(in) :: solve_dpdy
-    integer(C_INT) :: ix, iz, iy, iline, nlines_z, row_start, row_end, line_count, p
-    logical :: has_lower_boundary, has_upper_boundary
+    complex(C_DOUBLE_COMPLEX), intent(out) :: rhs(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    integer(C_INT) :: ix, iz, iy, y_first, y_last
 
-    nlines_z = 2*nz + 1
-    row_start = ny0
-    row_end = nyN
-    line_count = (nxN - nx0 + 1)*(2*nz + 1)
-    call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, line_count, .true.)
+    y_first = ny0
+    y_last = nyN
 
     !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(src0, src1, V, der, k2, ialfa, ibeta, ni, d140, d240, d24n, ys_gpsv_matrix, ys_gpsv_rhs, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, ys_lower_ghost_rhs, &
-    !$omp& ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, ys_eqm1, ys_eq0, ys_eqn, ys_eqnp1, &
-    !$omp& row_start, row_end, solve_dpdy, nlines_z, nx0, nxN, nz, ny, line_count) &
-    !$omp private(ix, iz, iy, iline, p)
+    !$omp shared(src0, src1, rhs, der, y_first, y_last, nz, nx0, nxN) &
+    !$omp private(ix, iz, iy)
     do ix = nx0, nxN
       do iz = -nz, nz
-        iline = (ix - nx0)*nlines_z + iz + nz + 1
-
-        do iy = row_start, row_end
-          if (solve_dpdy) then
-            ys_gpsv_matrix(iz, ix, iy, -2) = cmplx(der(iy, 2, -2) - k2(iz, ix)*der(iy, 0, -2), 0.0d0, kind=C_DOUBLE)
-            ys_gpsv_matrix(iz, ix, iy, -1) = cmplx(der(iy, 2, -1) - k2(iz, ix)*der(iy, 0, -1), 0.0d0, kind=C_DOUBLE)
-            ys_gpsv_matrix(iz, ix, iy, 0) = cmplx(der(iy, 2, 0) - k2(iz, ix)*der(iy, 0, 0), 0.0d0, kind=C_DOUBLE)
-            ys_gpsv_matrix(iz, ix, iy, 1) = cmplx(der(iy, 2, 1) - k2(iz, ix)*der(iy, 0, 1), 0.0d0, kind=C_DOUBLE)
-            ys_gpsv_matrix(iz, ix, iy, 2) = cmplx(der(iy, 2, 2) - k2(iz, ix)*der(iy, 0, 2), 0.0d0, kind=C_DOUBLE)
-            ys_gpsv_rhs(iz, ix, iy) = sum(der(iy, 1, -2:2)*src0(iy - 2:iy + 2, iz, ix)) + &
-                                      sum(der(iy, 2, -2:2)*src1(iy - 2:iy + 2, iz, ix))
-          else
-            ys_gpsv_rhs(iz, ix, iy) = sum(der(iy, 0, -2:2)*src0(iy - 2:iy + 2, iz, ix)) + &
-                                      sum(der(iy, 1, -2:2)*src1(iy - 2:iy + 2, iz, ix))
-            if (ix == 0 .and. iz == 0) then
-              ys_gpsv_matrix(iz, ix, iy, -2:2) = cmplx(der(iy, 2, -2:2), 0.0d0, kind=C_DOUBLE)
-            else
-              ys_gpsv_matrix(iz, ix, iy, -2) = cmplx(der(iy, 2, -2) - k2(iz, ix)*der(iy, 0, -2), 0.0d0, kind=C_DOUBLE)
-              ys_gpsv_matrix(iz, ix, iy, -1) = cmplx(der(iy, 2, -1) - k2(iz, ix)*der(iy, 0, -1), 0.0d0, kind=C_DOUBLE)
-              ys_gpsv_matrix(iz, ix, iy, 0) = cmplx(der(iy, 2, 0) - k2(iz, ix)*der(iy, 0, 0), 0.0d0, kind=C_DOUBLE)
-              ys_gpsv_matrix(iz, ix, iy, 1) = cmplx(der(iy, 2, 1) - k2(iz, ix)*der(iy, 0, 1), 0.0d0, kind=C_DOUBLE)
-              ys_gpsv_matrix(iz, ix, iy, 2) = cmplx(der(iy, 2, 2) - k2(iz, ix)*der(iy, 0, 2), 0.0d0, kind=C_DOUBLE)
-            end if
-          end if
+        do iy = y_first, y_last
+          rhs(iy, iz, ix) = sum(der(iy, 0, -2:2)*src0(iy - 2:iy + 2, iz, ix)) + &
+                            sum(der(iy, 1, -2:2)*src1(iy - 2:iy + 2, iz, ix))
         end do
-
-        if (solve_dpdy) then
-          if (row_start == 1) then
-            ys_eq0(:, iline) = 0.0d0
-            ys_eq0(-1, iline) = 1.0d0
-            ys_eqm1(:, iline) = der(1, 3, :)
-            ys_lower_ghost_rhs(iline) = (0.0d0, 0.0d0)
-            ys_lower_boundary_rhs(iline) = ni*sum(d240(-2:2)*V(-1:3, iz, ix, 2))
-          end if
-          if (row_end == ny - 1) then
-            ys_eqn(:, iline) = 0.0d0
-            ys_eqn(1, iline) = 1.0d0
-            ys_eqnp1(:, iline) = der(ny - 1, 3, :)
-            ys_upper_ghost_rhs(iline) = (0.0d0, 0.0d0)
-            ys_upper_boundary_rhs(iline) = ni*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 2))
-          end if
-        else if (ix == 0 .and. iz == 0) then
-          if (row_start == 1) then
-            ys_eqm1(:, iline) = d140
-            ys_eq0(:, iline) = d240
-            ys_lower_ghost_rhs(iline) = ni*sum(d240(-2:2)*V(-1:3, iz, ix, 2))
-            ys_lower_boundary_rhs(iline) = src0(0, iz, ix) + src1(0, iz, ix)
-          end if
-          if (row_end == ny - 1) then
-            ys_eqn(:, iline) = 0.0d0
-            ys_eqn(1, iline) = 1.0d0
-            ys_eqnp1(:, iline) = der(ny - 1, 3, :)
-            ys_upper_boundary_rhs(iline) = (0.0d0, 0.0d0)
-            ys_upper_ghost_rhs(iline) = (0.0d0, 0.0d0)
-          end if
-        else
-          if (row_start == 1) then
-            ys_eqm1(:, iline) = der(1, 3, :)
-            ys_eq0(:, iline) = 0.0d0
-            ys_eq0(-1, iline) = 1.0d0
-            ys_lower_ghost_rhs(iline) = (0.0d0, 0.0d0)
-            ys_lower_boundary_rhs(iline) = -ni*(ialfa(ix)*sum(d240(-2:2)*V(-1:3, iz, ix, 1)) + &
-                                                ibeta(iz)*sum(d240(-2:2)*V(-1:3, iz, ix, 3)))/k2(iz, ix)
-          end if
-          if (row_end == ny - 1) then
-            ys_eqn(:, iline) = 0.0d0
-            ys_eqn(1, iline) = 1.0d0
-            ys_eqnp1(:, iline) = der(ny - 1, 3, :)
-            ys_upper_ghost_rhs(iline) = (0.0d0, 0.0d0)
-            ys_upper_boundary_rhs(iline) = -ni*(ialfa(ix)*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 1)) + &
-                                                ibeta(iz)*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 3)))/k2(iz, ix)
-          end if
-        end if
       end do
     end do
     !$omp end target teams distribute parallel do
+    if (ny0 == 1) then
+      !$omp target teams distribute parallel do default(none) &
+      !$omp shared(rhs, src0, src1) private(ix)
+      do ix = 0, 0
+        rhs(0, 0, 0) = src0(0, 0, 0) + src1(0, 0, 0)
+      end do
+      !$omp end target teams distribute parallel do
+    end if
+  end subroutine assemble_pressure_rhs
 
-    has_lower_boundary = (ny0 == 1)
-    has_upper_boundary = (nyN == ny - 1)
-    call eliminate_assembled_boundaries(ny0, nyN, has_lower_boundary, has_upper_boundary)
-    if (npy_grid == 1) then
-      call ys_solve_packed_pentadiagonal(nyN - ny0 + 1, line_count, "pressure current-layout gpsv")
+  subroutine assemble_dpdy_rhs(src0, src1, rhs)
+    implicit none
+    complex(C_DOUBLE_COMPLEX), intent(in) :: src0(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: rhs(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    integer(C_INT) :: ix, iz, iy, y_first, y_last
+
+    y_first = ny0
+    y_last = nyN
+
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(src0, src1, rhs, der, y_first, y_last, nz, nx0, nxN) &
+    !$omp private(ix, iz, iy)
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        do iy = y_first, y_last
+          rhs(iy, iz, ix) = sum(der(iy, 1, -2:2)*src0(iy - 2:iy + 2, iz, ix)) + &
+                            sum(der(iy, 2, -2:2)*src1(iy - 2:iy + 2, iz, ix))
+        end do
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+  end subroutine assemble_dpdy_rhs
+
+  subroutine assemble_pressure_operator(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end)
+    implicit none
+    complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
+    real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
+    integer(C_INT), intent(in) :: row_start, row_end
+    integer(C_INT) :: ix, iz, iy
+
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(owner_src, der, k2, ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, row_start, row_end, nz, nx0, nxN) &
+    !$omp private(ix, iz, iy)
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        do iy = row_start, row_end
+          ys_gpsv_owner_rhs(iz, ix, iy) = owner_src(iy, iz, ix)
+          if (ix == 0 .and. iz == 0) then
+            ys_gpsv_owner_matrix(iz, ix, iy, -2:2) = cmplx(der(iy, 2, -2:2), 0.0d0, kind=C_DOUBLE)
+          else
+            ys_gpsv_owner_matrix(iz, ix, iy, -2:2) = cmplx(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2), 0.0d0, kind=C_DOUBLE)
+          end if
+        end do
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+  end subroutine assemble_pressure_operator
+
+  subroutine assemble_dpdy_operator(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end)
+    implicit none
+    complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
+    real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
+    integer(C_INT), intent(in) :: row_start, row_end
+    integer(C_INT) :: ix, iz, iy
+
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(owner_src, der, k2, ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, row_start, row_end, nz, nx0, nxN) &
+    !$omp private(ix, iz, iy)
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        do iy = row_start, row_end
+          ys_gpsv_owner_rhs(iz, ix, iy) = owner_src(iy, iz, ix)
+          ys_gpsv_owner_matrix(iz, ix, iy, -2:2) = cmplx(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2), 0.0d0, kind=C_DOUBLE)
+        end do
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+  end subroutine assemble_dpdy_operator
+
+  subroutine assemble_pressure_boundaries(owner_src, row_start, row_end, has_lower_boundary, has_upper_boundary)
+    implicit none
+    complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
+    integer(C_INT), intent(in) :: row_start, row_end
+    logical, intent(in) :: has_lower_boundary, has_upper_boundary
+    integer(C_INT) :: ix, iz
+
+    if (has_lower_boundary) then
       !$omp target teams distribute parallel do collapse(2) default(none) &
-      !$omp shared(dst, ys_gpsv_x, row_start, row_end, line_count, nlines_z, nx0, nxN, nz) &
-      !$omp private(ix, iz, iy, iline, p)
+      !$omp shared(owner_src, V, ys_eqm1_owner, ys_eq0_owner, ys_lower_ghost_owner, ys_lower_boundary_owner, &
+      !$omp& d140, d240, der, ialfa, ibeta, k2, ni, nz, nx0, nxN) &
+      !$omp private(ix, iz)
       do ix = nx0, nxN
         do iz = -nz, nz
-          iline = (ix - nx0)*nlines_z + iz + nz + 1
-          do iy = row_start, row_end
-            p = (iy - row_start)*line_count + iline
-            dst(iy, iz, ix) = ys_gpsv_x(p)
-          end do
+          if (ix == 0 .and. iz == 0) then
+            ys_eqm1_owner(:, iz, ix) = d140
+            ys_eq0_owner(:, iz, ix) = d240
+            ys_lower_ghost_owner(iz, ix) = ni*sum(d240(-2:2)*V(-1:3, iz, ix, 2))
+            ys_lower_boundary_owner(iz, ix) = owner_src(0, iz, ix)
+          else
+            ys_eqm1_owner(:, iz, ix) = der(1, 3, :)
+            ys_eq0_owner(:, iz, ix) = 0.0d0
+            ys_eq0_owner(-1, iz, ix) = 1.0d0
+            ys_lower_ghost_owner(iz, ix) = (0.0d0, 0.0d0)
+            ys_lower_boundary_owner(iz, ix) = -ni*(ialfa(ix)*sum(d240(-2:2)*V(-1:3, iz, ix, 1)) + &
+                                                   ibeta(iz)*sum(d240(-2:2)*V(-1:3, iz, ix, 3)))/k2(iz, ix)
+          end if
         end do
       end do
       !$omp end target teams distribute parallel do
-    else
-      call ys_solve_endpoint_schur(dst, .true.)
     end if
-    call reconstruct_assembled_boundaries(dst, ny0, nyN, has_lower_boundary, has_upper_boundary)
-  end subroutine solve_pressure_like_field
+
+    if (has_upper_boundary) then
+      !$omp target teams distribute parallel do collapse(2) default(none) &
+      !$omp shared(V, ys_eqn_owner, ys_eqnp1_owner, ys_upper_boundary_owner, ys_upper_ghost_owner, &
+      !$omp& d24n, der, ialfa, ibeta, k2, ni, ny, nz, nx0, nxN) &
+      !$omp private(ix, iz)
+      do ix = nx0, nxN
+        do iz = -nz, nz
+          ys_eqn_owner(:, iz, ix) = 0.0d0
+          ys_eqn_owner(1, iz, ix) = 1.0d0
+          ys_eqnp1_owner(:, iz, ix) = der(ny - 1, 3, :)
+          ys_upper_ghost_owner(iz, ix) = (0.0d0, 0.0d0)
+          if (ix == 0 .and. iz == 0) then
+            ys_upper_boundary_owner(iz, ix) = (0.0d0, 0.0d0)
+          else
+            ys_upper_boundary_owner(iz, ix) = -ni*(ialfa(ix)*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 1)) + &
+                                                   ibeta(iz)*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 3)))/k2(iz, ix)
+          end if
+        end do
+      end do
+      !$omp end target teams distribute parallel do
+    end if
+  end subroutine assemble_pressure_boundaries
+
+  subroutine assemble_dpdy_boundaries(owner_src, row_start, row_end, has_lower_boundary, has_upper_boundary)
+    implicit none
+    complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
+    integer(C_INT), intent(in) :: row_start, row_end
+    logical, intent(in) :: has_lower_boundary, has_upper_boundary
+    integer(C_INT) :: ix, iz
+
+    if (has_lower_boundary) then
+      !$omp target teams distribute parallel do collapse(2) default(none) &
+      !$omp shared(V, ys_eqm1_owner, ys_eq0_owner, ys_lower_ghost_owner, ys_lower_boundary_owner, d240, der, ni, nz, nx0, nxN) &
+      !$omp private(ix, iz)
+      do ix = nx0, nxN
+        do iz = -nz, nz
+          ys_eq0_owner(:, iz, ix) = 0.0d0
+          ys_eq0_owner(-1, iz, ix) = 1.0d0
+          ys_eqm1_owner(:, iz, ix) = der(1, 3, :)
+          ys_lower_ghost_owner(iz, ix) = (0.0d0, 0.0d0)
+          ys_lower_boundary_owner(iz, ix) = ni*sum(d240(-2:2)*V(-1:3, iz, ix, 2))
+        end do
+      end do
+      !$omp end target teams distribute parallel do
+    end if
+
+    if (has_upper_boundary) then
+      !$omp target teams distribute parallel do collapse(2) default(none) &
+      !$omp shared(V, ys_eqn_owner, ys_eqnp1_owner, ys_upper_boundary_owner, ys_upper_ghost_owner, d24n, der, ni, ny, nz, nx0, nxN) &
+      !$omp private(ix, iz)
+      do ix = nx0, nxN
+        do iz = -nz, nz
+          ys_eqn_owner(:, iz, ix) = 0.0d0
+          ys_eqn_owner(1, iz, ix) = 1.0d0
+          ys_eqnp1_owner(:, iz, ix) = der(ny - 1, 3, :)
+          ys_upper_ghost_owner(iz, ix) = (0.0d0, 0.0d0)
+          ys_upper_boundary_owner(iz, ix) = ni*sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, 2))
+        end do
+      end do
+      !$omp end target teams distribute parallel do
+    end if
+  end subroutine assemble_dpdy_boundaries
 
 END MODULE pressure_output
