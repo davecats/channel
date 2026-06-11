@@ -112,3 +112,7 @@ tests/convvel/*.fld
 *.bin.fields
 !tests/convvelo/Dati.cart.*.out
 *.nfs*
+bench*
+nsys_*
+ncu_runs*
+plain_runs*

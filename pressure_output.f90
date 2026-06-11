@@ -133,11 +133,9 @@ CONTAINS
 
     if (present(p_out)) then
       call solve_pressure_field(pressure_src0, pressure_src1, p_out)
-      !$omp target update to(p_out)
     end if
     if (present(dpdy_out)) then
       call solve_dpdy_field(pressure_src0, pressure_src1, dpdy_out)
-      !$omp target update to(dpdy_out)
     end if
   END SUBROUTINE compute_pressure_output
 

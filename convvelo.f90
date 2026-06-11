@@ -635,7 +635,6 @@ contains
     else
       call compute_poisson(convvelo_work)
     end if
-    !$omp target update to(convvelo_work)
     call multiply_work_by_conjugate(lhs_component)
     call finish_convvelo_field(field_index)
   end subroutine accumulate_cross_pressure

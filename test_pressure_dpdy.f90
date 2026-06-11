@@ -36,6 +36,7 @@ program test_pressure_dpdy
   allocate (dpdy_ref(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
 
   call compute_pressure_output(p_out=p, dpdy_out=dpdy)
+  !$omp target update from(p, dpdy)
 
   call read_reference_field_mpi('tests/poisson/pField35.fld', p_ref)
   call read_reference_field_mpi('tests/poisson/dpdyField35.fld', dpdy_ref)

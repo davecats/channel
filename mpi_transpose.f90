@@ -81,7 +81,10 @@ CONTAINS
 
     if (nlines <= 0) return
     if (allocated(yslab_workspace)) then
-      if (yslab_scratch_rows /= nrows .or. yslab_scratch_lines /= nlines) then
+      ! Treat nlines as a minimum capacity.  This lets pressure_output reserve
+      ! extra y-slab columns for transposed V while the common line solve reuses
+      ! the first block for the RHS/solution.
+      if (yslab_scratch_rows /= nrows .or. yslab_scratch_lines < nlines) then
         !$omp target exit data map(delete: yslab_workspace)
         deallocate (yslab_workspace)
         yslab_scratch_rows = -1
