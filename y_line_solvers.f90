@@ -749,10 +749,9 @@ contains
     implicit none
     integer(C_INT), parameter :: bw = YS_REDUCED_BW
     complex(C_DOUBLE_COMPLEX) :: packed_remote(20)
-    integer(C_INT) :: nlines, niface, iline, iblock, row0
+    integer(C_INT) :: nlines, iline, iblock, row0
 
     nlines = size(ys_reduced_rows_send, 2)
-    niface = 4*npy_grid
 
     call allgather_y_device_complex_rows(ys_reduced_rows_send, ys_reduced_rows_recv, 20_C_INT, nlines, &
                                          "MPI_Allgather reduced_y_interfaces")
@@ -760,43 +759,39 @@ contains
     call roctxPush("ys_reduced_interfaces_solve")
     !$omp target teams distribute parallel do default(none) &
     !$omp shared(ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs, ys_left_interface_values, &
-    !$omp& ys_right_interface_values, nlines, niface, npy_grid, ipy) &
+    !$omp& ys_right_interface_values, nlines, npy_grid, ipy) &
     !$omp private(iline, iblock, row0, packed_remote)
     do iline = 1, nlines
       ys_reduced_matrix_lu(:, :, iline) = (0.0d0, 0.0d0)
       ys_reduced_rhs(:, iline) = (0.0d0, 0.0d0)
-
       do iblock = 0, npy_grid - 1
         row0 = 4*iblock
         packed_remote = ys_reduced_rows_recv(:, iline, iblock + 1)
-        ys_reduced_matrix_lu(row0 + 1:row0 + 4, bw + 1, iline) = (1.0d0, 0.0d0)
+        ys_reduced_matrix_lu(row0 + 1, bw + 1, iline) = (1.0d0, 0.0d0)
+        ys_reduced_matrix_lu(row0 + 2, bw + 1, iline) = (1.0d0, 0.0d0)
+        ys_reduced_matrix_lu(row0 + 3, bw + 1, iline) = (1.0d0, 0.0d0)
+        ys_reduced_matrix_lu(row0 + 4, bw + 1, iline) = (1.0d0, 0.0d0)
         ys_reduced_rhs(row0 + 1:row0 + 4, iline) = packed_remote(1:4)
-      end do
-
-      do iblock = 1, npy_grid - 1
-        row0 = 4*iblock
-        packed_remote = ys_reduced_rows_recv(:, iline, iblock + 1)
-        ys_reduced_matrix_lu(row0 + 1, bw - 1, iline) = -packed_remote(5)
-        ys_reduced_matrix_lu(row0 + 2, bw - 2, iline) = -packed_remote(6)
-        ys_reduced_matrix_lu(row0 + 3, bw - 3, iline) = -packed_remote(7)
-        ys_reduced_matrix_lu(row0 + 4, bw - 4, iline) = -packed_remote(8)
-        ys_reduced_matrix_lu(row0 + 1, bw, iline) = -packed_remote(9)
-        ys_reduced_matrix_lu(row0 + 2, bw - 1, iline) = -packed_remote(10)
-        ys_reduced_matrix_lu(row0 + 3, bw - 2, iline) = -packed_remote(11)
-        ys_reduced_matrix_lu(row0 + 4, bw - 3, iline) = -packed_remote(12)
-      end do
-
-      do iblock = 0, npy_grid - 2
-        row0 = 4*iblock
-        packed_remote = ys_reduced_rows_recv(:, iline, iblock + 1)
-        ys_reduced_matrix_lu(row0 + 1, bw + 5, iline) = -packed_remote(13)
-        ys_reduced_matrix_lu(row0 + 2, bw + 4, iline) = -packed_remote(14)
-        ys_reduced_matrix_lu(row0 + 3, bw + 3, iline) = -packed_remote(15)
-        ys_reduced_matrix_lu(row0 + 4, bw + 2, iline) = -packed_remote(16)
-        ys_reduced_matrix_lu(row0 + 1, bw + 6, iline) = -packed_remote(17)
-        ys_reduced_matrix_lu(row0 + 2, bw + 5, iline) = -packed_remote(18)
-        ys_reduced_matrix_lu(row0 + 3, bw + 4, iline) = -packed_remote(19)
-        ys_reduced_matrix_lu(row0 + 4, bw + 3, iline) = -packed_remote(20)
+        if (iblock > 0) then
+          ys_reduced_matrix_lu(row0 + 1, bw - 1, iline) = -packed_remote(5)
+          ys_reduced_matrix_lu(row0 + 2, bw - 2, iline) = -packed_remote(6)
+          ys_reduced_matrix_lu(row0 + 3, bw - 3, iline) = -packed_remote(7)
+          ys_reduced_matrix_lu(row0 + 4, bw - 4, iline) = -packed_remote(8)
+          ys_reduced_matrix_lu(row0 + 1, bw, iline) = -packed_remote(9)
+          ys_reduced_matrix_lu(row0 + 2, bw - 1, iline) = -packed_remote(10)
+          ys_reduced_matrix_lu(row0 + 3, bw - 2, iline) = -packed_remote(11)
+          ys_reduced_matrix_lu(row0 + 4, bw - 3, iline) = -packed_remote(12)
+        end if
+        if (iblock < npy_grid - 1) then
+          ys_reduced_matrix_lu(row0 + 1, bw + 5, iline) = -packed_remote(13)
+          ys_reduced_matrix_lu(row0 + 2, bw + 4, iline) = -packed_remote(14)
+          ys_reduced_matrix_lu(row0 + 3, bw + 3, iline) = -packed_remote(15)
+          ys_reduced_matrix_lu(row0 + 4, bw + 2, iline) = -packed_remote(16)
+          ys_reduced_matrix_lu(row0 + 1, bw + 6, iline) = -packed_remote(17)
+          ys_reduced_matrix_lu(row0 + 2, bw + 5, iline) = -packed_remote(18)
+          ys_reduced_matrix_lu(row0 + 3, bw + 4, iline) = -packed_remote(19)
+          ys_reduced_matrix_lu(row0 + 4, bw + 3, iline) = -packed_remote(20)
+        end if
       end do
 
       call ys_factor_banded_complex(ys_reduced_matrix_lu(:, :, iline))
@@ -805,8 +800,12 @@ contains
       ys_left_interface_values(:, iline) = (0.0d0, 0.0d0)
       ys_right_interface_values(:, iline) = (0.0d0, 0.0d0)
       row0 = 4*ipy
-      if (ipy > 0) ys_left_interface_values(:, iline) = ys_reduced_rhs(row0 - 1:row0, iline)
-      if (ipy < npy_grid - 1) ys_right_interface_values(:, iline) = ys_reduced_rhs(row0 + 5:row0 + 6, iline)
+      if (ipy > 0) then
+        ys_left_interface_values(:, iline) = ys_reduced_rhs(row0 - 1:row0, iline)
+      end if
+      if (ipy < npy_grid - 1) then
+        ys_right_interface_values(:, iline) = ys_reduced_rhs(row0 + 5:row0 + 6, iline)
+      end if
     end do
     !$omp end target teams distribute parallel do
     call roctxPop("ys_reduced_interfaces_solve")
@@ -819,7 +818,7 @@ contains
     implicit none
     complex(C_DOUBLE_COMPLEX), intent(inout) :: a(:, :)
     integer(C_INT), parameter :: bw = YS_REDUCED_BW
-    integer(C_INT) :: n, i, j, last
+    integer(C_INT) :: n, i, j, t, last
     complex(C_DOUBLE_COMPLEX) :: piv, factor
 
     n = size(a, 1)
@@ -829,8 +828,9 @@ contains
       do j = 1, last
         factor = a(i + j, bw + 1 - j)/piv
         a(i + j, bw + 1 - j) = factor
-        a(i + j, bw + 2 - j:bw + 1 + last - j) = &
-          a(i + j, bw + 2 - j:bw + 1 + last - j) - factor*a(i, bw + 2:bw + 1 + last)
+        do t = 1, last
+          a(i + j, bw + 1 + t - j) = a(i + j, bw + 1 + t - j) - factor*a(i, bw + 1 + t)
+        end do
       end do
     end do
   end subroutine ys_factor_banded_complex
@@ -843,20 +843,19 @@ contains
     complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs(:)
     complex(C_DOUBLE_COMPLEX), intent(in) :: a(:, :)
     integer(C_INT), parameter :: bw = YS_REDUCED_BW
-    integer(C_INT) :: n, i, lo, hi
+    integer(C_INT) :: n, i, j
 
     n = size(a, 1)
-    if (n <= 0) return
-
-    do i = 2, n
-      lo = max(1_C_INT, i - bw)
-      rhs(i) = rhs(i) - sum(a(i, bw + 1 + lo - i:bw)*rhs(lo:i - 1))
+    do i = 1, n
+      do j = max(1_C_INT, i - bw), i - 1
+        rhs(i) = rhs(i) - a(i, bw + 1 + j - i)*rhs(j)
+      end do
     end do
 
-    rhs(n) = rhs(n)/a(n, bw + 1)
-    do i = n - 1, 1, -1
-      hi = min(n, i + bw)
-      rhs(i) = rhs(i) - sum(a(i, bw + 2:bw + 1 + hi - i)*rhs(i + 1:hi))
+    do i = n, 1, -1
+      do j = i + 1, min(n, i + bw)
+        rhs(i) = rhs(i) - a(i, bw + 1 + j - i)*rhs(j)
+      end do
       rhs(i) = rhs(i)/a(i, bw + 1)
     end do
   end subroutine ys_solve_factored_banded_complex

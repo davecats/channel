@@ -50,6 +50,7 @@ MODULE mpi_transpose
 
 CONTAINS
 
+  !$omp declare target(split_block)
   SUBROUTINE split_block(total, nparts, part, start, count)
     integer(C_INT), intent(in) :: total, nparts, part
     integer(C_INT), intent(out) :: start, count
@@ -67,9 +68,11 @@ CONTAINS
     implicit none
     integer(C_INT), intent(in) :: rank, nlines_z, nlines
     integer(C_INT), intent(out) :: first_line, line_count
+    integer(C_INT) :: first_col, col_count
 
-    first_line = 1
-    line_count = nlines
+    call split_block(nlines/nlines_z, npy_grid, rank, first_col, col_count)
+    first_line = (first_col - 1)*nlines_z + 1
+    line_count = col_count*nlines_z
   end subroutine yslab_line_range
 
   subroutine prepare_yslab_scratch(nrows, nlines)
@@ -147,7 +150,8 @@ CONTAINS
     logical, intent(in) :: include_physical_ghosts
     complex(C_DOUBLE_COMPLEX), allocatable :: send(:), recv(:)
     integer, allocatable :: send_counts(:), recv_counts(:), send_displs(:), recv_displs(:)
-    integer(C_INT) :: dest, src, y_first, y_last, rows, total_send, total_recv
+    integer(C_INT) :: dest, src, first_line, line_count, my_first_line, my_line_count
+    integer(C_INT) :: y_first, y_last, rows, total_send, total_recv
     integer(C_INT) :: ilocal, iline, ix, iz, iy, p
 
     if (npy_grid == 1) then
@@ -159,19 +163,21 @@ CONTAINS
 
     call roctxPush("yslab_to_full setup_counts")
     allocate (send_counts(npy_grid), recv_counts(npy_grid), send_displs(npy_grid), recv_displs(npy_grid))
+    call yslab_line_range(ipy, nlines_z, nlines, my_first_line, my_line_count)
 
     total_send = 0
     total_recv = 0
     do dest = 0, npy_grid - 1
+      call yslab_line_range(dest, nlines_z, nlines, first_line, line_count)
       call yslab_unique_range(ipy, ny, include_physical_ghosts, y_first, y_last)
       rows = y_last - y_first + 1
-      send_counts(dest + 1) = nlines*rows
+      send_counts(dest + 1) = line_count*rows
       send_displs(dest + 1) = total_send
       total_send = total_send + send_counts(dest + 1)
 
       call yslab_unique_range(dest, ny, include_physical_ghosts, y_first, y_last)
       rows = y_last - y_first + 1
-      recv_counts(dest + 1) = nlines*rows
+      recv_counts(dest + 1) = my_line_count*rows
       recv_displs(dest + 1) = total_recv
       total_recv = total_recv + recv_counts(dest + 1)
     end do
@@ -188,11 +194,13 @@ CONTAINS
     !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp shared(field, send, send_displs, nlines_z, rows, y_first, y_last, nlines, nz, nx0, npy_grid) &
     !$omp shared(include_physical_ghosts) &
-    !$omp private(dest, ilocal, iy, iline, ix, iz, p)
+    !$omp private(dest, ilocal, iy, first_line, line_count, iline, ix, iz, p)
     do dest = 0, npy_grid - 1
       do ilocal = 1, nlines
         do iy = y_first, y_last
-          iline = ilocal
+          call yslab_line_range(dest, nlines_z, nlines, first_line, line_count)
+          if (ilocal > line_count) cycle
+          iline = first_line + ilocal - 1
           ix = (iline - 1)/nlines_z + nx0
           iz = mod(iline - 1, nlines_z) - nz
           p = send_displs(dest + 1) + (ilocal - 1)*rows + (iy - y_first + 1)
@@ -216,10 +224,10 @@ CONTAINS
 
     call roctxPush("yslab_to_full unpack")
     !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(slab, recv, recv_displs, nlines, include_physical_ghosts, ny, npy_grid) &
+    !$omp shared(slab, recv, recv_displs, my_line_count, include_physical_ghosts, ny, npy_grid) &
     !$omp private(src, ilocal, iy, y_first, y_last, rows, p)
     do src = 0, npy_grid - 1
-      do ilocal = 1, nlines
+      do ilocal = 1, my_line_count
         do iy = -1, ny + 1
           call yslab_unique_range(src, ny, include_physical_ghosts, y_first, y_last)
           if (iy < y_first .or. iy > y_last) cycle
@@ -245,7 +253,8 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(inout) :: field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), allocatable :: send(:), recv(:)
     integer, allocatable :: send_counts(:), recv_counts(:), send_displs(:), recv_displs(:)
-    integer(C_INT) :: dest, src, y_first, y_last, rows, total_send, total_recv
+    integer(C_INT) :: dest, src, first_line, line_count, my_first_line, my_line_count
+    integer(C_INT) :: y_first, y_last, rows, total_send, total_recv
     integer(C_INT) :: ilocal, iline, ix, iz, iy, p
 
     if (npy_grid == 1) then
@@ -257,19 +266,21 @@ CONTAINS
 
     call roctxPush("yslab_from_full setup_counts")
     allocate (send_counts(npy_grid), recv_counts(npy_grid), send_displs(npy_grid), recv_displs(npy_grid))
+    call yslab_line_range(ipy, nlines_z, nlines, my_first_line, my_line_count)
 
     total_send = 0
     total_recv = 0
     do dest = 0, npy_grid - 1
       call yslab_padded_range(dest, ny, y_first, y_last)
       rows = y_last - y_first + 1
-      send_counts(dest + 1) = nlines*rows
+      send_counts(dest + 1) = my_line_count*rows
       send_displs(dest + 1) = total_send
       total_send = total_send + send_counts(dest + 1)
 
+      call yslab_line_range(dest, nlines_z, nlines, first_line, line_count)
       call yslab_padded_range(ipy, ny, y_first, y_last)
       rows = y_last - y_first + 1
-      recv_counts(dest + 1) = nlines*rows
+      recv_counts(dest + 1) = line_count*rows
       recv_displs(dest + 1) = total_recv
       total_recv = total_recv + recv_counts(dest + 1)
     end do
@@ -282,10 +293,10 @@ CONTAINS
 
     call roctxPush("yslab_from_full pack")
     !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(slab, send, send_displs, nlines, ny, npy_grid) &
+    !$omp shared(slab, send, send_displs, my_line_count, ny, npy_grid) &
     !$omp private(dest, ilocal, iy, y_first, y_last, rows, p)
     do dest = 0, npy_grid - 1
-      do ilocal = 1, nlines
+      do ilocal = 1, my_line_count
         do iy = -1, ny + 1
           call yslab_padded_range(dest, ny, y_first, y_last)
           if (iy < y_first .or. iy > y_last) cycle
@@ -314,11 +325,13 @@ CONTAINS
     call roctxPush("yslab_from_full unpack")
     !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp shared(field, recv, recv_displs, nlines_z, rows, y_first, y_last, nz, nx0, nlines, npy_grid) &
-    !$omp private(src, ilocal, iy, iline, ix, iz, p)
+    !$omp private(src, ilocal, iy, first_line, line_count, iline, ix, iz, p)
     do src = 0, npy_grid - 1
       do ilocal = 1, nlines
         do iy = y_first, y_last
-          iline = ilocal
+          call yslab_line_range(src, nlines_z, nlines, first_line, line_count)
+          if (ilocal > line_count) cycle
+          iline = first_line + ilocal - 1
           ix = (iline - 1)/nlines_z + nx0
           iz = mod(iline - 1, nlines_z) - nz
           p = recv_displs(src + 1) + (ilocal - 1)*rows + (iy - y_first + 1)
