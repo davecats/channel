@@ -44,6 +44,14 @@ module y_line_solvers
     end function hipsparseZgpsvInterleavedBatch_
   end interface
 
+  interface
+    function hipDeviceSynchronize() bind(c, name="hipDeviceSynchronize")
+      use, intrinsic :: iso_c_binding
+      implicit none
+      integer(c_int) :: hipDeviceSynchronize
+    end function hipDeviceSynchronize
+  end interface
+
 #endif
 
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_CONST = 1_C_INT
@@ -388,6 +396,18 @@ contains
 #endif
   end subroutine ys_check_gpusparse
 
+#ifdef HAVE_HIP
+  subroutine ys_check_hip(status, where)
+    integer(C_INT), intent(in) :: status
+    character(*), intent(in) :: where
+
+    if (status /= 0_C_INT) then
+      print *, "HIP runtime error in ", trim(where), ": status=", status
+      error stop
+    end if
+  end subroutine ys_check_hip
+#endif
+
   subroutine ys_create_gpusparse_handle()
     implicit none
     integer(C_INT) :: status
@@ -437,9 +457,11 @@ contains
     status = cusparseZgpsvInterleavedBatch_bufferSize(ys_gpsv_handle, 0_C_INT, n, ds, dl, d, du, dw, x, &
                                                       batch_count, buffer_size)
 #elif defined(HAVE_HIP)
+    call ys_check_hip(hipDeviceSynchronize(), "hipDeviceSynchronize before gpsvInterleavedBatch_bufferSize")
     status = hipsparseZgpsvInterleavedBatch_bufferSizeExt(ys_gpsv_handle, 0_C_INT, n, c_loc(ds(1)), c_loc(dl(1)), &
                                                           c_loc(d(1)), c_loc(du(1)), c_loc(dw(1)), c_loc(x(1)), &
                                                           batch_count, buffer_size)
+    call ys_check_hip(hipDeviceSynchronize(), "hipDeviceSynchronize after gpsvInterleavedBatch_bufferSize")
 #endif
     !$omp end target data
     call ys_check_gpusparse(status, "gpsvInterleavedBatch_bufferSize")
@@ -460,9 +482,11 @@ contains
     !$omp end target data
 #elif defined(HAVE_HIP)
     !$omp target data use_device_addr(ds, dl, d, du, dw, x)
+    call ys_check_hip(hipDeviceSynchronize(), "hipDeviceSynchronize before "//trim(label))
     status = hipsparseZgpsvInterleavedBatch(ys_gpsv_handle, 0_C_INT, n, c_loc(ds(1)), c_loc(dl(1)), c_loc(d(1)), &
                                             c_loc(du(1)), c_loc(dw(1)), c_loc(x(1)), batch_count, ys_gpsv_buffer)
     call ys_check_gpusparse(status, "hipsparseZgpsvInterleavedBatch "//trim(label))
+    call ys_check_hip(hipDeviceSynchronize(), "hipDeviceSynchronize after "//trim(label))
     !$omp end target data
 #endif
   end subroutine ys_call_gpsv_interleaved
