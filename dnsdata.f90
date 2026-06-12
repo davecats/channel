@@ -238,36 +238,28 @@ CONTAINS
     implicit none
     character(*), intent(in) :: label
     complex(C_DOUBLE_COMPLEX), target, intent(in) :: arr(:, :, :)
-    complex(C_DOUBLE_COMPLEX), allocatable :: host_copy(:, :, :)
     real(C_DOUBLE) :: l1_norm, max_abs
 
     if (.not. debug_compact_flow) return
 
-    allocate (host_copy(lbound(arr, 1):ubound(arr, 1), lbound(arr, 2):ubound(arr, 2), lbound(arr, 3):ubound(arr, 3)))
     !$omp target update from(arr)
-    host_copy = arr
-    l1_norm = sum(abs(host_copy))
-    max_abs = maxval(abs(host_copy))
+    l1_norm = sum(abs(arr))
+    max_abs = maxval(abs(arr))
     if (iproc == 0) print *, "COMPACT_DEBUG ", trim(label), " l1=", l1_norm, " max=", max_abs
-    deallocate (host_copy)
   end subroutine debug_print_complex_norm3
 
   subroutine debug_print_complex_norm2(label, arr)
     implicit none
     character(*), intent(in) :: label
     complex(C_DOUBLE_COMPLEX), target, intent(in) :: arr(:, :)
-    complex(C_DOUBLE_COMPLEX), allocatable :: host_copy(:, :)
     real(C_DOUBLE) :: l1_norm, max_abs
 
     if (.not. debug_compact_flow) return
 
-    allocate (host_copy(lbound(arr, 1):ubound(arr, 1), lbound(arr, 2):ubound(arr, 2)))
     !$omp target update from(arr)
-    host_copy = arr
-    l1_norm = sum(abs(host_copy))
-    max_abs = maxval(abs(host_copy))
+    l1_norm = sum(abs(arr))
+    max_abs = maxval(abs(arr))
     if (iproc == 0) print *, "COMPACT_DEBUG ", trim(label), " l1=", l1_norm, " max=", max_abs
-    deallocate (host_copy)
   end subroutine debug_print_complex_norm2
 
   !--------------------------------------------------------------!
