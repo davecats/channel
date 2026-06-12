@@ -95,7 +95,7 @@ run_case() {
     if [[ "${PROFILE}" == "nsys" || "${PROFILE}" == "nvtx" ]]; then
       env CHANNEL_DISABLE_RESTART_WRITE=1 "${env_vars[@]}" \
         nsys profile --trace="${NSYS_TRACE}" --sample=none --cpuctxsw=none \
-          --stats=false --force-overwrite=true --export=sqlite \
+          --stats=true --force-overwrite=true --export=sqlite \
           -o "${family}_${label}" mpirun -np "${np}" "${exe}" \
           > stdout.log 2> nsys.log
     else
@@ -123,6 +123,7 @@ run_case head "${CURRENT_EXE}" 2 2 np2_npy2_yslab CHANNEL_USE_YSLAB_LINSOLVE=1
 run_case head "${CURRENT_EXE}" 4 1 np4_npy1_xz
 run_case head "${CURRENT_EXE}" 4 2 np4_npy2_schur
 run_case head "${CURRENT_EXE}" 4 2 np4_npy2_yslab CHANNEL_USE_YSLAB_LINSOLVE=1
+run_case head "${CURRENT_EXE}" 4 4 np4_npy4_schur
 run_case head "${CURRENT_EXE}" 4 4 np4_npy4_yslab CHANNEL_USE_YSLAB_LINSOLVE=1
 
 if [[ "${RUN_GPU2}" == "1" ]]; then

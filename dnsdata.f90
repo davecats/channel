@@ -36,6 +36,7 @@ MODULE dnsdata
   !$omp declare target(ni)
   real(C_DOUBLE) :: u0, uN, t0, tN
   real(C_DOUBLE) :: meanpx, meanpz, meanflowx, meanflowz, meantx, meantb
+  real(C_DOUBLE) :: perturbation_amplitude = 5.54d-5
   integer(C_INT), allocatable :: izd(:)
   complex(C_DOUBLE_COMPLEX), allocatable :: ialfa(:), ibeta(:)
   real(C_DOUBLE), allocatable :: k2(:, :)
@@ -160,6 +161,7 @@ CONTAINS
     call require_real(cfg, "velocity", "meanflowz", meanflowz)
     call require_real(cfg, "velocity", "u0", u0)
     call require_real(cfg, "velocity", "un", uN)
+    call get_real(cfg, "velocity", "perturbation_amplitude", perturbation_amplitude, found)
 
     call require_integer(cfg, "scalars", "nphi", nPhi)
     call require_real(cfg, "scalars", "meantx", meantx)
@@ -1632,7 +1634,9 @@ CONTAINS
       IF (has_terminal) WRITE (*, *) "Generating initial field..."
       DO iy = ny0 - 2, nyN + 2; DO ix = nx0, nxN; DO iz = -nz, nz
           CALL RANDOM_NUMBER(rn)
-          R(iy, iz, ix, 1) = 0.0000554*EXP(dcmplx(0, rn(1) - 0.5)); R(iy, iz, ix, 2) = 0.0000554*EXP(dcmplx(0, rn(2) - 0.5)); R(iy, iz, ix, 3) = 0.0000554*EXP(dcmplx(0, rn(3) - 0.5)); 
+          R(iy, iz, ix, 1) = perturbation_amplitude*EXP(dcmplx(0, rn(1) - 0.5))
+          R(iy, iz, ix, 2) = perturbation_amplitude*EXP(dcmplx(0, rn(2) - 0.5))
+          R(iy, iz, ix, 3) = perturbation_amplitude*EXP(dcmplx(0, rn(3) - 0.5))
           !!R(iy,iz,ix,1) = 0.0001*EXP(dcmplx(0,rn(1)-0.5));  R(iy,iz,ix,2) = 0.0001*EXP(dcmplx(0,rn(2)-0.5));  R(iy,iz,ix,3) = 0.0001*EXP(dcmplx(0,rn(3)-0.5));
         END DO; END DO; END DO
       IF (has_average) THEN
