@@ -8,6 +8,7 @@ module y_line_solvers
 #ifdef HAVE_CUDA
   use cusparse
 #elif defined(HAVE_HIP)
+  use omp_lib
   use hipfort_hipsparse
 #endif
 
@@ -42,6 +43,7 @@ module y_line_solvers
       type(c_ptr), value :: ds, dl, d, du, dw, x, pBuffer
     end function hipsparseZgpsvInterleavedBatch_
   end interface
+
 #endif
 
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_CONST = 1_C_INT
@@ -108,6 +110,7 @@ module y_line_solvers
   logical, save :: ys_gpsv_handle_created = .false.
 #elif defined(HAVE_HIP)
   type(c_ptr), save :: ys_gpsv_handle = c_null_ptr
+  type(c_ptr), save :: ys_gpsv_buffer = c_null_ptr
   logical, save :: ys_gpsv_handle_created = .false.
 #endif
   integer(C_INT), save :: ys_gpsv_n = -1, ys_gpsv_batch = -1
@@ -125,8 +128,6 @@ module y_line_solvers
   !$omp declare target(ys_solve_factored_banded_complex)
   !$omp declare target(ys_factor_penta_interleaved)
   !$omp declare target(ys_solve_factored_penta_interleaved)
-#elif defined(HAVE_HIP)
-  character(c_char), allocatable, target, save :: ys_gpsv_buffer(:)
 #endif
 
 contains
@@ -451,18 +452,19 @@ contains
     character(*), intent(in) :: label
     integer(C_INT) :: status
 
-    !$omp target data use_device_addr(ds, dl, d, du, dw, x, ys_gpsv_buffer)
 #ifdef HAVE_CUDA
+    !$omp target data use_device_addr(ds, dl, d, du, dw, x, ys_gpsv_buffer)
     status = cusparseZgpsvInterleavedBatch(ys_gpsv_handle, 0_C_INT, n, ds, dl, d, du, dw, x, &
                                            batch_count, ys_gpsv_buffer)
     call ys_check_gpusparse(status, "cusparseZgpsvInterleavedBatch "//trim(label))
-#elif defined(HAVE_HIP)
-    status = hipsparseZgpsvInterleavedBatch(ys_gpsv_handle, 0_C_INT, n, c_loc(ds(1)), c_loc(dl(1)), c_loc(d(1)), &
-                                            c_loc(du(1)), c_loc(dw(1)), c_loc(x(1)), batch_count, &
-                                            c_loc(ys_gpsv_buffer(1)))
-    call ys_check_gpusparse(status, "hipsparseZgpsvInterleavedBatch "//trim(label))
-#endif
     !$omp end target data
+#elif defined(HAVE_HIP)
+    !$omp target data use_device_addr(ds, dl, d, du, dw, x)
+    status = hipsparseZgpsvInterleavedBatch(ys_gpsv_handle, 0_C_INT, n, c_loc(ds(1)), c_loc(dl(1)), c_loc(d(1)), &
+                                            c_loc(du(1)), c_loc(dw(1)), c_loc(x(1)), batch_count, ys_gpsv_buffer)
+    call ys_check_gpusparse(status, "hipsparseZgpsvInterleavedBatch "//trim(label))
+    !$omp end target data
+#endif
   end subroutine ys_call_gpsv_interleaved
 #endif
 
@@ -473,10 +475,15 @@ contains
       !$omp target exit data map(delete: ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
       deallocate (ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
     end if
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+#ifdef HAVE_CUDA
     if (allocated(ys_gpsv_buffer)) then
       !$omp target exit data map(delete: ys_gpsv_buffer)
       deallocate (ys_gpsv_buffer)
+    end if
+#elif defined(HAVE_HIP)
+    if (c_associated(ys_gpsv_buffer)) then
+      call omp_target_free(ys_gpsv_buffer, omp_get_default_device())
+      ys_gpsv_buffer = c_null_ptr
     end if
 #endif
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
@@ -490,6 +497,7 @@ contains
     ys_gpsv_buffer_size = 0_8
 #elif defined(HAVE_HIP)
     ys_gpsv_buffer_size = 0_C_SIZE_T
+    ys_gpsv_buffer = c_null_ptr
 #endif
   end subroutine ys_release_gpsv_workspace
 
@@ -504,19 +512,44 @@ contains
     integer(C_SIZE_T) :: buffer_size
 #endif
 
-    if (ys_gpsv_n == n .and. ys_gpsv_batch == batch_count .and. allocated(ys_gpsv_buffer)) return
+    if (ys_gpsv_n == n .and. ys_gpsv_batch == batch_count &
+#ifdef HAVE_CUDA
+        .and. allocated(ys_gpsv_buffer) &
+#elif defined(HAVE_HIP)
+        .and. c_associated(ys_gpsv_buffer) &
+#endif
+        ) return
 
+#ifdef HAVE_CUDA
     if (allocated(ys_gpsv_buffer)) then
       !$omp target exit data map(delete: ys_gpsv_buffer)
       deallocate (ys_gpsv_buffer)
     end if
+#elif defined(HAVE_HIP)
+    if (c_associated(ys_gpsv_buffer)) then
+      call omp_target_free(ys_gpsv_buffer, omp_get_default_device())
+      ys_gpsv_buffer = c_null_ptr
+    end if
+#endif
 
     call ys_create_gpusparse_handle()
     call ys_query_gpsv_buffer_size(ds, dl, d, du, dw, x, n, batch_count, buffer_size)
 
     ys_gpsv_buffer_size = buffer_size
+#ifdef HAVE_CUDA
     allocate (ys_gpsv_buffer(max(1, int(buffer_size))))
     !$omp target enter data map(alloc: ys_gpsv_buffer)
+#elif defined(HAVE_HIP)
+    ! On MI300A, hipSPARSE gpsv rejects a workspace buffer created by mapping a
+    ! Fortran character array with OpenMP target data, even though the operand
+    ! arrays from use_device_addr() are accepted. omp_target_alloc() and hipMalloc()
+    ! both work for this buffer; use the OpenMP allocator here to match mpi_transpose.
+    ys_gpsv_buffer = omp_target_alloc(max(1_C_SIZE_T, buffer_size), omp_get_default_device())
+    if (.not. c_associated(ys_gpsv_buffer)) then
+      print *, "OpenMP target allocation failed in ys_prepare_gpusparse_workspace"
+      error stop
+    end if
+#endif
 
     ys_gpsv_n = n
     ys_gpsv_batch = batch_count
