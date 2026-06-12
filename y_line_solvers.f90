@@ -7,10 +7,43 @@ module y_line_solvers
   use roctx, only: roctxPush, roctxPop
 #ifdef HAVE_CUDA
   use cusparse
+#elif defined(HAVE_HIP)
+  use hipfort_hipsparse
+  use hipfort_hipsparse_enums
 #endif
 
   implicit none
   private
+
+#ifdef HAVE_HIP
+  interface hipsparseZgpsvInterleavedBatch_bufferSizeExt
+    function hipsparseZgpsvInterleavedBatch_bufferSizeExt_(handle, algo, m, ds, dl, d, du, dw, x, &
+                                                           batch_count, pBufferSizeInBytes) &
+      bind(c, name="hipsparseZgpsvInterleavedBatch_bufferSizeExt")
+      use, intrinsic :: iso_c_binding
+      use hipfort_hipsparse_enums
+      implicit none
+      integer(kind(HIPSPARSE_STATUS_SUCCESS)) :: hipsparseZgpsvInterleavedBatch_bufferSizeExt_
+      type(c_ptr), value :: handle
+      integer(c_int), value :: algo, m, batch_count
+      type(c_ptr), value :: ds, dl, d, du, dw, x
+      integer(c_size_t) :: pBufferSizeInBytes
+    end function hipsparseZgpsvInterleavedBatch_bufferSizeExt_
+  end interface
+
+  interface hipsparseZgpsvInterleavedBatch
+    function hipsparseZgpsvInterleavedBatch_(handle, algo, m, ds, dl, d, du, dw, x, batch_count, pBuffer) &
+      bind(c, name="hipsparseZgpsvInterleavedBatch")
+      use, intrinsic :: iso_c_binding
+      use hipfort_hipsparse_enums
+      implicit none
+      integer(kind(HIPSPARSE_STATUS_SUCCESS)) :: hipsparseZgpsvInterleavedBatch_
+      type(c_ptr), value :: handle
+      integer(c_int), value :: algo, m, batch_count
+      type(c_ptr), value :: ds, dl, d, du, dw, x, pBuffer
+    end function hipsparseZgpsvInterleavedBatch_
+  end interface
+#endif
 
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_CONST = 1_C_INT
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_EVEN_Z = 2_C_INT
@@ -74,16 +107,21 @@ module y_line_solvers
 #ifdef HAVE_CUDA
   type(cusparseHandle), save :: ys_gpsv_handle
   logical, save :: ys_gpsv_handle_created = .false.
+#elif defined(HAVE_HIP)
+  type(c_ptr), save :: ys_gpsv_handle = c_null_ptr
+  logical, save :: ys_gpsv_handle_created = .false.
 #endif
   integer(C_INT), save :: ys_gpsv_n = -1, ys_gpsv_batch = -1
   integer(C_INT), save :: ys_batch_n = -1, ys_batch_count = -1
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA)
   integer(8), save :: ys_gpsv_buffer_size = 0_8
+#elif defined(HAVE_HIP)
+  integer(C_SIZE_T), save :: ys_gpsv_buffer_size = 0_C_SIZE_T
 #endif
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_batch_ds(:), ys_batch_dl(:), ys_batch_d(:)
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_batch_du(:), ys_batch_dw(:), ys_batch_x(:)
-#ifdef HAVE_CUDA
-  character(c_char), allocatable, save :: ys_gpsv_buffer(:)
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+  character(c_char), allocatable, target, save :: ys_gpsv_buffer(:)
 #endif
 
 contains
@@ -326,38 +364,118 @@ contains
     call ys_reset_workspace_state()
   end subroutine ys_release_workspace
 
-#ifdef HAVE_CUDA
-  subroutine ys_check_cusparse(status, where)
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+  subroutine ys_check_gpusparse(status, where)
     integer(C_INT), intent(in) :: status
     character(*), intent(in) :: where
 
+#ifdef HAVE_CUDA
     if (status /= CUSPARSE_STATUS_SUCCESS) then
       print *, "cuSPARSE error in ", trim(where), ": status=", status
       error stop
     end if
-  end subroutine ys_check_cusparse
+#elif defined(HAVE_HIP)
+    if (status /= HIPSPARSE_STATUS_SUCCESS) then
+      print *, "hipSPARSE error in ", trim(where), ": status=", status
+      error stop
+    end if
+#endif
+  end subroutine ys_check_gpusparse
+
+  subroutine ys_create_gpusparse_handle()
+    implicit none
+    integer(C_INT) :: status
+
+    if (ys_gpsv_handle_created) return
+
+#ifdef HAVE_CUDA
+    status = cusparseCreate(ys_gpsv_handle)
+    call ys_check_gpusparse(status, "cusparseCreate")
+#elif defined(HAVE_HIP)
+    status = hipsparseCreate(ys_gpsv_handle)
+    call ys_check_gpusparse(status, "hipsparseCreate")
+#endif
+    ys_gpsv_handle_created = .true.
+  end subroutine ys_create_gpusparse_handle
+
+  subroutine ys_destroy_gpusparse_handle()
+    implicit none
+    integer(C_INT) :: status
+
+    if (.not. ys_gpsv_handle_created) return
+
+#ifdef HAVE_CUDA
+    status = cusparseDestroy(ys_gpsv_handle)
+    call ys_check_gpusparse(status, "cusparseDestroy")
+#elif defined(HAVE_HIP)
+    status = hipsparseDestroy(ys_gpsv_handle)
+    call ys_check_gpusparse(status, "hipsparseDestroy")
+    ys_gpsv_handle = c_null_ptr
+#endif
+    ys_gpsv_handle_created = .false.
+  end subroutine ys_destroy_gpusparse_handle
+
+  subroutine ys_query_gpsv_buffer_size(ds, dl, d, du, dw, x, n, batch_count, buffer_size)
+    implicit none
+    complex(C_DOUBLE_COMPLEX), intent(inout), target :: ds(:), dl(:), d(:), du(:), dw(:), x(:)
+    integer(C_INT), intent(in) :: n, batch_count
+#ifdef HAVE_CUDA
+    integer(8), intent(out) :: buffer_size
+#elif defined(HAVE_HIP)
+    integer(C_SIZE_T), intent(out) :: buffer_size
+#endif
+    integer(C_INT) :: status
+
+    !$omp target data use_device_addr(ds, dl, d, du, dw, x)
+#ifdef HAVE_CUDA
+    status = cusparseZgpsvInterleavedBatch_bufferSize(ys_gpsv_handle, 0_C_INT, n, ds, dl, d, du, dw, x, &
+                                                      batch_count, buffer_size)
+#elif defined(HAVE_HIP)
+    status = hipsparseZgpsvInterleavedBatch_bufferSizeExt(ys_gpsv_handle, 0_C_INT, n, c_loc(ds(1)), c_loc(dl(1)), &
+                                                          c_loc(d(1)), c_loc(du(1)), c_loc(dw(1)), c_loc(x(1)), &
+                                                          batch_count, buffer_size)
+#endif
+    !$omp end target data
+    call ys_check_gpusparse(status, "gpsvInterleavedBatch_bufferSize")
+  end subroutine ys_query_gpsv_buffer_size
+
+  subroutine ys_call_gpsv_interleaved(ds, dl, d, du, dw, x, n, batch_count, label)
+    implicit none
+    complex(C_DOUBLE_COMPLEX), intent(inout), target :: ds(:), dl(:), d(:), du(:), dw(:), x(:)
+    integer(C_INT), intent(in) :: n, batch_count
+    character(*), intent(in) :: label
+    integer(C_INT) :: status
+
+    !$omp target data use_device_addr(ds, dl, d, du, dw, x, ys_gpsv_buffer)
+#ifdef HAVE_CUDA
+    status = cusparseZgpsvInterleavedBatch(ys_gpsv_handle, 0_C_INT, n, ds, dl, d, du, dw, x, &
+                                           batch_count, ys_gpsv_buffer)
+    call ys_check_gpusparse(status, "cusparseZgpsvInterleavedBatch "//trim(label))
+#elif defined(HAVE_HIP)
+    status = hipsparseZgpsvInterleavedBatch(ys_gpsv_handle, 0_C_INT, n, c_loc(ds(1)), c_loc(dl(1)), c_loc(d(1)), &
+                                            c_loc(du(1)), c_loc(dw(1)), c_loc(x(1)), batch_count, &
+                                            c_loc(ys_gpsv_buffer(1)))
+    call ys_check_gpusparse(status, "hipsparseZgpsvInterleavedBatch "//trim(label))
+#endif
+    !$omp end target data
+  end subroutine ys_call_gpsv_interleaved
 #endif
 
   subroutine ys_release_gpsv_workspace()
     implicit none
-#ifdef HAVE_CUDA
-    integer(C_INT) :: status
-#endif
 
     if (allocated(ys_batch_ds)) then
       !$omp target exit data map(delete: ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
       deallocate (ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
     end if
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
     if (allocated(ys_gpsv_buffer)) then
       !$omp target exit data map(delete: ys_gpsv_buffer)
       deallocate (ys_gpsv_buffer)
     end if
-    if (ys_gpsv_handle_created) then
-      status = cusparseDestroy(ys_gpsv_handle)
-      call ys_check_cusparse(status, "cusparseDestroy")
-      ys_gpsv_handle_created = .false.
-    end if
+#endif
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    call ys_destroy_gpusparse_handle()
 #endif
     ys_gpsv_n = -1
     ys_gpsv_batch = -1
@@ -365,19 +483,22 @@ contains
     ys_batch_count = -1
 #ifdef HAVE_CUDA
     ys_gpsv_buffer_size = 0_8
+#elif defined(HAVE_HIP)
+    ys_gpsv_buffer_size = 0_C_SIZE_T
 #endif
   end subroutine ys_release_gpsv_workspace
 
-  subroutine ys_prepare_cusparse_workspace(n, batch_count, ds, dl, d, du, dw, x)
+  subroutine ys_prepare_gpusparse_workspace(n, batch_count, ds, dl, d, du, dw, x)
     implicit none
     integer(C_INT), intent(in) :: n, batch_count
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: ds(:), dl(:), d(:), du(:), dw(:), x(:)
+    complex(C_DOUBLE_COMPLEX), intent(inout), target :: ds(:), dl(:), d(:), du(:), dw(:), x(:)
 #ifdef HAVE_CUDA
-    integer(C_INT) :: status
     integer(8) :: buffer_size
+#elif defined(HAVE_HIP)
+    integer(C_SIZE_T) :: buffer_size
 #endif
 
-#ifndef HAVE_CUDA
+#if !defined(HAVE_CUDA) && !defined(HAVE_HIP)
     ys_gpsv_n = n
     ys_gpsv_batch = batch_count
 #else
@@ -388,17 +509,8 @@ contains
       deallocate (ys_gpsv_buffer)
     end if
 
-    if (.not. ys_gpsv_handle_created) then
-      status = cusparseCreate(ys_gpsv_handle)
-      call ys_check_cusparse(status, "cusparseCreate")
-      ys_gpsv_handle_created = .true.
-    end if
-
-    !$omp target data use_device_addr(ds, dl, d, du, dw, x)
-    status = cusparseZgpsvInterleavedBatch_bufferSize(ys_gpsv_handle, 0_C_INT, n, ds, dl, d, du, dw, x, &
-                                                      batch_count, buffer_size)
-    !$omp end target data
-    call ys_check_cusparse(status, "cusparseZgpsvInterleavedBatch_bufferSize")
+    call ys_create_gpusparse_handle()
+    call ys_query_gpsv_buffer_size(ds, dl, d, du, dw, x, n, batch_count, buffer_size)
 
     ys_gpsv_buffer_size = buffer_size
     allocate (ys_gpsv_buffer(max(1, int(buffer_size))))
@@ -407,7 +519,7 @@ contains
     ys_gpsv_n = n
     ys_gpsv_batch = batch_count
 #endif
-  end subroutine ys_prepare_cusparse_workspace
+  end subroutine ys_prepare_gpusparse_workspace
 
   subroutine ys_prepare_batch_workspace(n, batch_count)
     implicit none
@@ -425,29 +537,23 @@ contains
       ys_batch_count = batch_count
     end if
 
-    call ys_prepare_cusparse_workspace(n, batch_count, ys_batch_ds, ys_batch_dl, ys_batch_d, &
-                                       ys_batch_du, ys_batch_dw, ys_batch_x)
+    call ys_prepare_gpusparse_workspace(n, batch_count, ys_batch_ds, ys_batch_dl, ys_batch_d, &
+                                        ys_batch_du, ys_batch_dw, ys_batch_x)
   end subroutine ys_prepare_batch_workspace
 
   subroutine ys_solve_interleaved_pentadiagonal(ds, dl, d, du, dw, x, n, batch_count, label)
     implicit none
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: ds(:), dl(:), d(:), du(:), dw(:), x(:)
+    complex(C_DOUBLE_COMPLEX), intent(inout), target :: ds(:), dl(:), d(:), du(:), dw(:), x(:)
     integer(C_INT), intent(in) :: n, batch_count
     character(*), intent(in) :: label
-#ifdef HAVE_CUDA
-    integer(C_INT) :: status
-#else
+#if !defined(HAVE_CUDA) && !defined(HAVE_HIP)
     integer(C_INT) :: iline
 #endif
 
     call roctxPush(label)
-#ifdef HAVE_CUDA
-    call ys_prepare_cusparse_workspace(n, batch_count, ds, dl, d, du, dw, x)
-    !$omp target data use_device_addr(ds, dl, d, du, dw, x, ys_gpsv_buffer)
-    status = cusparseZgpsvInterleavedBatch(ys_gpsv_handle, 0_C_INT, n, ds, dl, d, du, dw, x, &
-                                           batch_count, ys_gpsv_buffer)
-    !$omp end target data
-    call ys_check_cusparse(status, "cusparseZgpsvInterleavedBatch "//trim(label))
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    call ys_prepare_gpusparse_workspace(n, batch_count, ds, dl, d, du, dw, x)
+    call ys_call_gpsv_interleaved(ds, dl, d, du, dw, x, n, batch_count, label)
 #else
     !$omp target teams distribute parallel do default(none) &
     !$omp shared(ds, dl, d, du, dw, x, n, batch_count) private(iline)
