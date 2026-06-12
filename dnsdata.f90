@@ -1311,11 +1311,13 @@ CONTAINS
         call roctxPush("transform_to_physical zero_vvdx_hft")
         CALL zero_vvdx_hft(from)
         call roctxPop("transform_to_physical zero_vvdx_hft")
-   call debug_print_complex_norm3("transform_to_physical after_zero_vvdx_hft from="//trim(adjustl(itoa(from))), VVdx(:, :, :, from))
+        call debug_print_complex_norm3("transform_to_physical after_zero_vvdx_hft from="//trim(adjustl(itoa(from))), &
+                                       VVdx(1:nxd + 1, 1:nzB, ny0 - 2:nyN + 2, from))
         call roctxPush("transform_to_physical RFT")
         CALL RFT(VVdx(:, :, :, from), rVVdx(:, :, :, mm1))
         call roctxPop("transform_to_physical RFT")
-        call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl(itoa(mm1)))//" from="//trim(adjustl(itoa(from))), rVVdx(:, :, :, mm1))
+call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl(itoa(mm1)))//" from="//trim(adjustl(itoa(from))), &
+                                    rVVdx(1:2*nxd, 1:nzB, ny0 - 2:nyN + 2, mm1))
       end if
     END DO
   END SUBROUTINE transform_to_physical
@@ -1342,7 +1344,8 @@ CONTAINS
         call roctxPush("transform_back build_products")
         call build_products(m, to)
         call roctxPop("transform_back build_products")
-        call debug_print_real_norm3("transform_back after_build_products m="//trim(adjustl(itoa(m)))//" to="//trim(adjustl(itoa(to))), products(:, :, :, to))
+    call debug_print_real_norm3("transform_back after_build_products m="//trim(adjustl(itoa(m)))//" to="//trim(adjustl(itoa(to))), &
+                                    products(1:2*nxd, 1:nzB, ny0 - 2:nyN + 2, to))
         call roctxPush("transform_back HFT")
         call HFT(products(:, :, :, to), VVdx(:, :, :, to))
         call roctxPop("transform_back HFT")
@@ -1380,9 +1383,12 @@ CONTAINS
         call roctxPush("transform_back buildrhs")
         call buildrhs(ODE, mm1, from)
         call roctxPop("transform_back buildrhs")
-        call debug_print_complex_norm3("transform_back after_buildrhs component="//trim(adjustl(itoa(mm1)))//" V1", V(:, :, :, 1))
-        call debug_print_complex_norm3("transform_back after_buildrhs component="//trim(adjustl(itoa(mm1)))//" V2", V(:, :, :, 2))
-        if (nPhi > 0) call debug_print_complex_norm3("transform_back after_buildrhs component="//trim(adjustl(itoa(mm1)))//" Vphi1", V(:, :, :, 4))
+        call debug_print_complex_norm3("transform_back after_buildrhs component="//trim(adjustl(itoa(mm1)))//" V1", &
+                                       V(ny0:nyN, -nz:nz, nx0:nxN, 1))
+        call debug_print_complex_norm3("transform_back after_buildrhs component="//trim(adjustl(itoa(mm1)))//" V2", &
+                                       V(ny0:nyN, -nz:nz, nx0:nxN, 2))
+      if (nPhi > 0) call debug_print_complex_norm3("transform_back after_buildrhs component="//trim(adjustl(itoa(mm1)))//" Vphi1", &
+                                                     V(ny0:nyN, -nz:nz, nx0:nxN, 4))
       end if
     END DO
   END SUBROUTINE transform_back_and_build_rhs
@@ -1535,9 +1541,9 @@ CONTAINS
     END DO
     END DO
 
-    call debug_print_complex_norm3("buildrhs_prepare after_init V1", V(:, :, :, 1))
-    call debug_print_complex_norm3("buildrhs_prepare after_init V2", V(:, :, :, 2))
-    if (nPhi > 0) call debug_print_complex_norm3("buildrhs_prepare after_init Vphi1", V(:, :, :, 4))
+    call debug_print_complex_norm3("buildrhs_prepare after_init V1", V(ny0:nyN, -nz:nz, nx0:nxN, 1))
+    call debug_print_complex_norm3("buildrhs_prepare after_init V2", V(ny0:nyN, -nz:nz, nx0:nxN, 2))
+    if (nPhi > 0) call debug_print_complex_norm3("buildrhs_prepare after_init Vphi1", V(ny0:nyN, -nz:nz, nx0:nxN, 4))
 
   END SUBROUTINE buildrhs_prepare
 
