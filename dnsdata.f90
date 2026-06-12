@@ -237,7 +237,7 @@ CONTAINS
   subroutine debug_print_complex_norm3(label, arr)
     implicit none
     character(*), intent(in) :: label
-    complex(C_DOUBLE_COMPLEX), target, intent(inout) :: arr(:, :, :)
+    complex(C_DOUBLE_COMPLEX), target, intent(in) :: arr(:, :, :)
     complex(C_DOUBLE_COMPLEX), allocatable :: host_copy(:, :, :)
     real(C_DOUBLE) :: l1_norm, max_abs
 
@@ -255,7 +255,7 @@ CONTAINS
   subroutine debug_print_complex_norm2(label, arr)
     implicit none
     character(*), intent(in) :: label
-    complex(C_DOUBLE_COMPLEX), target, intent(inout) :: arr(:, :)
+    complex(C_DOUBLE_COMPLEX), target, intent(in) :: arr(:, :)
     complex(C_DOUBLE_COMPLEX), allocatable :: host_copy(:, :)
     real(C_DOUBLE) :: l1_norm, max_abs
 
