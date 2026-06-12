@@ -306,6 +306,22 @@ CONTAINS
     end if
   end subroutine debug_print_rhs_samples
 
+  subroutine debug_print_rhs_term_samples(label, terms)
+    implicit none
+    character(*), intent(in) :: label
+    complex(C_DOUBLE_COMPLEX), target, intent(in) :: terms(2, 3)
+
+    if (.not. debug_compact_flow) return
+
+    !$omp target update from(terms)
+    if (iproc == 0) then
+      print *, "COMPACT_DEBUG ", trim(label), " zero_unkn=", terms(1, 1), " zero_tmp=", terms(1, 2), &
+        " zero_oldrhs=", terms(1, 3)
+      print *, "COMPACT_DEBUG ", trim(label), " nonzero_unkn=", terms(2, 1), " nonzero_tmp=", terms(2, 2), &
+        " nonzero_oldrhs=", terms(2, 3)
+    end if
+  end subroutine debug_print_rhs_term_samples
+
   function itoa(i) result(str)
     implicit none
     integer(C_INT), intent(in) :: i
@@ -1436,9 +1452,14 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
     IMPLICIT NONE
     real(C_DOUBLE), intent(in) :: ODE(1:3)
     integer(C_INT) :: iy, iz, ix, i, k, iPhi, y_first, y_last
+    integer(C_INT) :: sample_ix
     complex(C_DOUBLE_COMPLEX) :: tmp, unkn
+    complex(C_DOUBLE_COMPLEX) :: debug_d2v_terms(2, 3), debug_eta_terms(2, 3)
     y_first = ny0
     y_last = nyN
+    sample_ix = merge(1_C_INT, nx0, nxN >= 1_C_INT)
+    debug_d2v_terms = 0.0
+    debug_eta_terms = 0.0
     call init_debug_compact_flow_flag()
 #ifdef bodyforce
     iy = 1; F(-1:0, :, :, :) = 0
@@ -1463,15 +1484,31 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
     !$omp target teams distribute parallel do collapse(3) default(none)  &
     !$omp private(iz, ix, iy, tmp, k, unkn) &
     !$omp shared(nz, nx0, nxN, ny, y_first, y_last) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) &
-    !$omp shared(meanpx, meanpz, ni, deltat, ode) shared(vvdz, v, pra)
+    !$omp shared(meanpx, meanpz, ni, deltat, ode) shared(vvdz, v, pra) shared(sample_ix, debug_d2v_terms)
     DO iz = -nz, nz
       DO ix = nx0, nxN
         DO iy = y_first, y_last
+          if (debug_compact_flow) then
+            if (iy == ny0 .and. iz == 0 .and. ix == 0) then
+              debug_d2v_terms(1, 3) = oldrhs(iy, iz, ix, 2)
+            else if (iy == ny0 .and. iz == 1 .and. ix == sample_ix) then
+              debug_d2v_terms(2, 3) = oldrhs(iy, iz, ix, 2)
+            end if
+          end if
           unkn = D2(V, 2) - k2(iz, ix)*D0(V, 2)
           tmp = 0.0
           DO k = -2, 2
             tmp = tmp + OS(iy, k)*V(iy + k, iz, ix, 2)
           END DO
+          if (debug_compact_flow) then
+            if (iy == ny0 .and. iz == 0 .and. ix == 0) then
+              debug_d2v_terms(1, 1) = unkn
+              debug_d2v_terms(1, 2) = tmp
+            else if (iy == ny0 .and. iz == 1 .and. ix == sample_ix) then
+              debug_d2v_terms(2, 1) = unkn
+              debug_d2v_terms(2, 2) = tmp
+            end if
+          end if
 
           !initialize D2v
           newrhs(iy, iz, ix, 2) = ODE(1)*unkn/deltat + tmp - ODE(3)*oldrhs(iy, iz, ix, 2)
@@ -1481,14 +1518,22 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
     END DO
     call debug_print_complex_norm3("buildrhs_prepare after_init_d2v newrhs2", memrhs(ny0:nyN, -nz:nz, nx0:nxN, 2))
     call debug_print_rhs_samples("buildrhs_prepare after_init_d2v newrhs2", memrhs(:, :, :, 2))
+    call debug_print_rhs_term_samples("buildrhs_prepare after_init_d2v newrhs2", debug_d2v_terms)
 
     !$omp target teams distribute parallel do collapse(3) default(none)  &
     !$omp private(iz, ix, iy, tmp, k, unkn) &
     !$omp shared(nz, nx0, nxN, ny, y_first, y_last) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) &
-    !$omp shared(meanpx, meanpz, ni, deltat, ode) shared(vvdz, v, pra)
+    !$omp shared(meanpx, meanpz, ni, deltat, ode) shared(vvdz, v, pra) shared(sample_ix, debug_eta_terms)
     DO iz = -nz, nz
       DO ix = nx0, nxN
         DO iy = y_first, y_last
+          if (debug_compact_flow) then
+            if (iy == ny0 .and. iz == 0 .and. ix == 0) then
+              debug_eta_terms(1, 3) = oldrhs(iy, iz, ix, 1)
+            else if (iy == ny0 .and. iz == 1 .and. ix == sample_ix) then
+              debug_eta_terms(2, 3) = oldrhs(iy, iz, ix, 1)
+            end if
+          end if
           IF (ix == 0 .AND. iz == 0) THEN
             unkn = rD0(V, 1, 3)
             tmp = ni*rD2(V, 1, 3)
@@ -1499,6 +1544,15 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
             END DO
             unkn = ibeta(iz)*D0(V, 1) - ialfa(ix)*D0(V, 3)
           END IF
+          if (debug_compact_flow) then
+            if (iy == ny0 .and. iz == 0 .and. ix == 0) then
+              debug_eta_terms(1, 1) = unkn
+              debug_eta_terms(1, 2) = tmp
+            else if (iy == ny0 .and. iz == 1 .and. ix == sample_ix) then
+              debug_eta_terms(2, 1) = unkn
+              debug_eta_terms(2, 2) = tmp
+            end if
+          end if
           !initialize eta
           newrhs(iy, iz, ix, 1) = ODE(1)*unkn/deltat + tmp - ODE(3)*oldrhs(iy, iz, ix, 1)
           oldrhs(iy, iz, ix, 1) = 0.0
@@ -1507,6 +1561,7 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
     END DO
     call debug_print_complex_norm3("buildrhs_prepare after_init_eta newrhs1", memrhs(ny0:nyN, -nz:nz, nx0:nxN, 1))
     call debug_print_rhs_samples("buildrhs_prepare after_init_eta newrhs1", memrhs(:, :, :, 1))
+    call debug_print_rhs_term_samples("buildrhs_prepare after_init_eta newrhs1", debug_eta_terms)
 
     !$omp target teams distribute parallel do collapse(3) default(none)  &
     !$omp private(iz, ix, iy, tmp, k, unkn) &
