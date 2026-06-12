@@ -3,6 +3,7 @@
 program test_hipsparse_gpsv_allocations
   use, intrinsic :: iso_c_binding
 #ifdef HAVE_HIP
+  use omp_lib
   use hipfort_hipsparse_enums
 #endif
   implicit none
@@ -18,7 +19,7 @@ program test_hipsparse_gpsv_allocations
   complex(C_DOUBLE_COMPLEX), allocatable, target :: ds_map(:), dl_map(:), d_map(:), du_map(:), dw_map(:), x_map(:)
   character(C_CHAR), allocatable, target :: buffer_map(:)
   type(C_PTR) :: handle
-  type(C_PTR) :: ds_dev, dl_dev, d_dev, du_dev, dw_dev, x_dev, buffer_dev
+  type(C_PTR) :: ds_dev, dl_dev, d_dev, du_dev, dw_dev, x_dev, buffer_dev, buffer_omp
   integer(C_SIZE_T) :: buffer_size
   integer(C_INT) :: status
   logical :: ok, all_ok
@@ -125,6 +126,17 @@ call copy_rhs_to_mapped_arrays(ds_map, dl_map, d_map, du_map, dw_map, x_map, ds_
   if (ok) ok = compare_solution("omp_map_arrays+hipmalloc_buffer", x_out_host, x_exact_host)
   all_ok = all_ok .and. ok
 
+call copy_rhs_to_mapped_arrays(ds_map, dl_map, d_map, du_map, dw_map, x_map, ds_host, dl_host, d_host, du_host, dw_host, x_rhs_host)
+  buffer_omp = omp_target_alloc(max(1_C_SIZE_T, buffer_size), omp_get_default_device())
+  if (.not. c_associated(buffer_omp)) error stop "omp_target_alloc buffer_omp failed"
+  !$omp target data use_device_addr(ds_map, dl_map, d_map, du_map, dw_map, x_map)
+  call run_case_from_ptrs("omp_map_arrays+omp_target_buffer", handle, c_loc(ds_map(1)), c_loc(dl_map(1)), c_loc(d_map(1)), &
+                          c_loc(du_map(1)), c_loc(dw_map(1)), c_loc(x_map(1)), buffer_omp, x_out_host, ok)
+  !$omp end target data
+  call omp_target_free(buffer_omp, omp_get_default_device())
+  if (ok) ok = compare_solution("omp_map_arrays+omp_target_buffer", x_out_host, x_exact_host)
+  all_ok = all_ok .and. ok
+
   status = hipMalloc(ds_dev, int(storage_size(ds_host(1))/8, kind=C_SIZE_T)*size(ds_host, kind=C_SIZE_T))
   call check_hip_status(status, "hipMalloc ds_dev")
   status = hipMalloc(dl_dev, int(storage_size(dl_host(1))/8, kind=C_SIZE_T)*size(dl_host, kind=C_SIZE_T))
@@ -150,6 +162,14 @@ call copy_rhs_to_mapped_arrays(ds_map, dl_map, d_map, du_map, dw_map, x_map, ds_
                           c_loc(buffer_map(1)), x_out_host, ok)
   !$omp end target data
   if (ok) ok = compare_solution("hipmalloc_arrays+omp_map_buffer", x_out_host, x_exact_host)
+  all_ok = all_ok .and. ok
+
+  buffer_omp = omp_target_alloc(max(1_C_SIZE_T, buffer_size), omp_get_default_device())
+  if (.not. c_associated(buffer_omp)) error stop "omp_target_alloc buffer_omp failed"
+  call run_case_from_ptrs("hipmalloc_arrays+omp_target_buffer", handle, ds_dev, dl_dev, d_dev, du_dev, dw_dev, x_dev, &
+                          buffer_omp, x_out_host, ok)
+  call omp_target_free(buffer_omp, omp_get_default_device())
+  if (ok) ok = compare_solution("hipmalloc_arrays+omp_target_buffer", x_out_host, x_exact_host)
   all_ok = all_ok .and. ok
 
   call check_hip_status(hipFree(ds_dev), "hipFree ds_dev")
