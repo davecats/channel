@@ -9,7 +9,6 @@ module y_line_solvers
   use cusparse
 #elif defined(HAVE_HIP)
   use hipfort_hipsparse
-  use hipfort_hipsparse_enums
 #endif
 
   implicit none
@@ -120,7 +119,13 @@ module y_line_solvers
 #endif
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_batch_ds(:), ys_batch_dl(:), ys_batch_d(:)
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_batch_du(:), ys_batch_dw(:), ys_batch_x(:)
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+#if defined(HAVE_CUDA)
+  character(c_char), allocatable, target, save :: ys_gpsv_buffer(:)
+  !$omp declare target(ys_factor_banded_complex)
+  !$omp declare target(ys_solve_factored_banded_complex)
+  !$omp declare target(ys_factor_penta_interleaved)
+  !$omp declare target(ys_solve_factored_penta_interleaved)
+#elif defined(HAVE_HIP)
   character(c_char), allocatable, target, save :: ys_gpsv_buffer(:)
 #endif
 
@@ -926,9 +931,6 @@ contains
     call roctxPop("ys_reduced_interfaces_solve")
   end subroutine ys_solve_reduced_interfaces
 
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
-  !$omp declare target(ys_factor_banded_complex)
-#endif
   subroutine ys_factor_banded_complex(a)
     implicit none
     complex(C_DOUBLE_COMPLEX), intent(inout) :: a(:, :)
@@ -950,9 +952,6 @@ contains
     end do
   end subroutine ys_factor_banded_complex
 
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
-  !$omp declare target(ys_solve_factored_banded_complex)
-#endif
   subroutine ys_solve_factored_banded_complex(rhs, a)
     implicit none
     complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs(:)
@@ -975,9 +974,6 @@ contains
     end do
   end subroutine ys_solve_factored_banded_complex
 
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
-  !$omp declare target(ys_factor_penta_interleaved)
-#endif
   subroutine ys_factor_penta_interleaved(ds, dl, d, du, dw, stride, first, n)
     implicit none
     complex(C_DOUBLE_COMPLEX), intent(inout) :: ds(:), dl(:), d(:), du(:), dw(:)
@@ -1018,9 +1014,6 @@ contains
     d(p1) = 1.0d0/d(p1)
   end subroutine ys_factor_penta_interleaved
 
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
-  !$omp declare target(ys_solve_factored_penta_interleaved)
-#endif
   subroutine ys_solve_factored_penta_interleaved(rhs, ds, dl, d, du, dw, stride, first, n)
     implicit none
     complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs(:)
