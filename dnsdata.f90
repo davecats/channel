@@ -262,6 +262,28 @@ CONTAINS
     if (iproc == 0) print *, "COMPACT_DEBUG ", trim(label), " l1=", l1_norm, " max=", max_abs
   end subroutine debug_print_complex_norm2
 
+  subroutine debug_print_real_norm3(label, arr)
+    implicit none
+    character(*), intent(in) :: label
+    real(C_DOUBLE), target, intent(in) :: arr(:, :, :)
+    real(C_DOUBLE) :: l1_norm, max_abs
+
+    if (.not. debug_compact_flow) return
+
+    !$omp target update from(arr)
+    l1_norm = sum(abs(arr))
+    max_abs = maxval(abs(arr))
+    if (iproc == 0) print *, "COMPACT_DEBUG ", trim(label), " l1=", l1_norm, " max=", max_abs
+  end subroutine debug_print_real_norm3
+
+  function itoa(i) result(str)
+    implicit none
+    integer(C_INT), intent(in) :: i
+    character(len=16) :: str
+
+    write (str, '(I0)') i
+  end function itoa
+
   !--------------------------------------------------------------!
   !---------------- Allocate memory for solution ----------------!
   SUBROUTINE init_memory(solveNS)
@@ -1228,6 +1250,7 @@ CONTAINS
     integer(C_INT) ::  m, to, from, mm1
     type(MPI_Request), dimension(:) :: requests(3 + nPhi)
     type(MPI_Status)  :: status
+    call init_debug_compact_flow_flag()
     DO m = 1, MERGE(3 + nPhi + 1, 3 + nPhi, overlapping)
 
       ! Compute indices depending on overlap mode
@@ -1240,17 +1263,21 @@ CONTAINS
         call roctxPush("transform_to_physical assemble_vvdz")
         CALL assemble_vvdz(m, to)
         call roctxPop("transform_to_physical assemble_vvdz")
+        call debug_print_complex_norm3("transform_to_physical assemble_vvdz m="//trim(adjustl(itoa(m)))//" to="//trim(adjustl(itoa(to))), VVdz(:, :, :, to))
         call roctxPush("transform_to_physical IFT")
         CALL IFT(VVdz(:, :, :, to))
         call roctxPop("transform_to_physical IFT")
+        call debug_print_complex_norm3("transform_to_physical after_IFT m="//trim(adjustl(itoa(m)))//" to="//trim(adjustl(itoa(to))), VVdz(:, :, :, to))
         if (fft_transpose_is_local) then
           call roctxPush("transform_to_physical repack_zTOx_local")
           call repack_zTOx_local(VVdz(:, :, :, to), VVdx(:, :, :, to), ny)
           call roctxPop("transform_to_physical repack_zTOx_local")
+          call debug_print_complex_norm3("transform_to_physical after_repack_zTOx_local m="//trim(adjustl(itoa(m)))//" to="//trim(adjustl(itoa(to))), VVdx(:, :, :, to))
         else
           call roctxPush("transform_to_physical pack_zTOx")
           CALL pack_zTOx(VVdz(:, :, :, to), sendbuf(:, to), ny)
           call roctxPop("transform_to_physical pack_zTOx")
+          call debug_print_complex_norm2("transform_to_physical packed_sendbuf m="//trim(adjustl(itoa(m)))//" to="//trim(adjustl(itoa(to))), sendbuf(:, to))
           CALL alltoall(sendbuf(:, to), recvbuf(:, to), requests(m), "zTOx transform_to_physical")
         end if
       end if
@@ -1261,16 +1288,20 @@ CONTAINS
           call roctxPush("MPI_Wait zTOx transform_to_physical")
           CALL MPI_WAIT(requests(mm1), status, ierr)
           call roctxPop("MPI_Wait zTOx transform_to_physical")
+          call debug_print_complex_norm2("transform_to_physical recvbuf_after_wait mm1="//trim(adjustl(itoa(mm1)))//" from="//trim(adjustl(itoa(from))), recvbuf(:, from))
           call roctxPush("transform_to_physical unpack_zTOx")
           CALL unpack_zTOx(recvbuf(:, from), VVdx(:, :, :, from), ny)
           call roctxPop("transform_to_physical unpack_zTOx")
+          call debug_print_complex_norm3("transform_to_physical after_unpack_zTOx mm1="//trim(adjustl(itoa(mm1)))//" from="//trim(adjustl(itoa(from))), VVdx(:, :, :, from))
         end if
         call roctxPush("transform_to_physical zero_vvdx_hft")
         CALL zero_vvdx_hft(from)
         call roctxPop("transform_to_physical zero_vvdx_hft")
+   call debug_print_complex_norm3("transform_to_physical after_zero_vvdx_hft from="//trim(adjustl(itoa(from))), VVdx(:, :, :, from))
         call roctxPush("transform_to_physical RFT")
         CALL RFT(VVdx(:, :, :, from), rVVdx(:, :, :, mm1))
         call roctxPop("transform_to_physical RFT")
+        call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl(itoa(mm1)))//" from="//trim(adjustl(itoa(from))), rVVdx(:, :, :, mm1))
       end if
     END DO
   END SUBROUTINE transform_to_physical
@@ -1281,6 +1312,7 @@ CONTAINS
     real(C_DOUBLE), intent(in) :: ODE(1:3)
     type(MPI_Request), dimension(:) :: requests(6 + 3*nPhi)
     type(MPI_Status)  :: status
+    call init_debug_compact_flow_flag()
 
     ! Reverse pass to build rVVdx
     DO m = 1, MERGE(6 + 3*nPhi + 1, 6 + 3*nPhi, overlapping)
@@ -1296,17 +1328,21 @@ CONTAINS
         call roctxPush("transform_back build_products")
         call build_products(m, to)
         call roctxPop("transform_back build_products")
+        call debug_print_real_norm3("transform_back after_build_products m="//trim(adjustl(itoa(m)))//" to="//trim(adjustl(itoa(to))), products(:, :, :, to))
         call roctxPush("transform_back HFT")
         call HFT(products(:, :, :, to), VVdx(:, :, :, to))
         call roctxPop("transform_back HFT")
+        call debug_print_complex_norm3("transform_back after_HFT m="//trim(adjustl(itoa(m)))//" to="//trim(adjustl(itoa(to))), VVdx(:, :, :, to))
         if (fft_transpose_is_local) then
           call roctxPush("transform_back repack_xTOz_local")
           call repack_xTOz_local(VVdx(:, :, :, to), VVdz(:, :, :, to), ny)
           call roctxPop("transform_back repack_xTOz_local")
+          call debug_print_complex_norm3("transform_back after_repack_xTOz_local m="//trim(adjustl(itoa(m)))//" to="//trim(adjustl(itoa(to))), VVdz(:, :, :, to))
         else
           call roctxPush("transform_back pack_xTOz")
           call pack_xTOz(VVdx(:, :, :, to), sendbuf(:, to), ny)
           call roctxPop("transform_back pack_xTOz")
+          call debug_print_complex_norm2("transform_back packed_sendbuf m="//trim(adjustl(itoa(m)))//" to="//trim(adjustl(itoa(to))), sendbuf(:, to))
           call alltoall(sendbuf(:, to), recvbuf(:, to), requests(m), "xTOz transform_back_and_build_rhs")
         end if
       end if
@@ -1317,16 +1353,22 @@ CONTAINS
           call roctxPush("MPI_Wait xTOz transform_back_and_build_rhs")
           call MPI_WAIT(requests(mm1), status, ierr)
           call roctxPop("MPI_Wait xTOz transform_back_and_build_rhs")
+          call debug_print_complex_norm2("transform_back recvbuf_after_wait mm1="//trim(adjustl(itoa(mm1)))//" from="//trim(adjustl(itoa(from))), recvbuf(:, from))
           call roctxPush("transform_back unpack_xTOz")
           call unpack_xTOz(recvbuf(:, from), VVdz(:, :, :, from), ny)
           call roctxPop("transform_back unpack_xTOz")
+          call debug_print_complex_norm3("transform_back after_unpack_xTOz mm1="//trim(adjustl(itoa(mm1)))//" from="//trim(adjustl(itoa(from))), VVdz(:, :, :, from))
         end if
         call roctxPush("transform_back FFT")
         call FFT(VVdz(:, :, :, from))
         call roctxPop("transform_back FFT")
+        call debug_print_complex_norm3("transform_back after_FFT mm1="//trim(adjustl(itoa(mm1)))//" from="//trim(adjustl(itoa(from))), VVdz(:, :, :, from))
         call roctxPush("transform_back buildrhs")
         call buildrhs(ODE, mm1, from)
         call roctxPop("transform_back buildrhs")
+        call debug_print_complex_norm3("transform_back after_buildrhs component="//trim(adjustl(itoa(mm1)))//" V1", V(:, :, :, 1))
+        call debug_print_complex_norm3("transform_back after_buildrhs component="//trim(adjustl(itoa(mm1)))//" V2", V(:, :, :, 2))
+        if (nPhi > 0) call debug_print_complex_norm3("transform_back after_buildrhs component="//trim(adjustl(itoa(mm1)))//" Vphi1", V(:, :, :, 4))
       end if
     END DO
   END SUBROUTINE transform_back_and_build_rhs
@@ -1361,6 +1403,7 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX) :: tmp, unkn
     y_first = ny0
     y_last = nyN
+    call init_debug_compact_flow_flag()
 #ifdef bodyforce
     iy = 1; F(-1:0, :, :, :) = 0
     DO iz = -nz, nz
@@ -1477,6 +1520,10 @@ CONTAINS
     END DO
     END DO
     END DO
+
+    call debug_print_complex_norm3("buildrhs_prepare after_init V1", V(:, :, :, 1))
+    call debug_print_complex_norm3("buildrhs_prepare after_init V2", V(:, :, :, 2))
+    if (nPhi > 0) call debug_print_complex_norm3("buildrhs_prepare after_init Vphi1", V(:, :, :, 4))
 
   END SUBROUTINE buildrhs_prepare
 
