@@ -43,8 +43,6 @@ MODULE dnsdata
   logical :: time_from_restart
   logical :: disable_restart_write = .false.
   logical :: use_yslab_linsolve = .false.
-  logical, save :: debug_compact_flow = .false.
-  logical, save :: debug_compact_flow_initialized = .false.
   !Grid
   real(C_DOUBLE), allocatable :: y(:), dy(:)
   real(C_DOUBLE) :: dx, dz, factor
@@ -216,112 +214,6 @@ CONTAINS
     end if
     if (npy == 1) use_yslab_linsolve = .true.
   END SUBROUTINE read_dnsin
-
-  subroutine init_debug_compact_flow_flag()
-    implicit none
-    character(len=16) :: env_value
-    integer :: status, length
-
-    if (debug_compact_flow_initialized) return
-    debug_compact_flow_initialized = .true.
-    debug_compact_flow = .false.
-
-    call get_environment_variable("CHANNEL_DEBUG_COMPACT_FLOW", env_value, length, status)
-    if (status /= 0 .or. length <= 0) return
-
-    select case (adjustl(trim(env_value(:length))))
-    case ("1", "true", "TRUE", "yes", "YES", "on", "ON")
-      debug_compact_flow = .true.
-    end select
-  end subroutine init_debug_compact_flow_flag
-
-  subroutine debug_print_complex_norm3(label, arr)
-    implicit none
-    character(*), intent(in) :: label
-    complex(C_DOUBLE_COMPLEX), target, intent(in) :: arr(:, :, :)
-    real(C_DOUBLE) :: l1_norm, max_abs
-
-    if (.not. debug_compact_flow) return
-
-    !$omp target update from(arr)
-    l1_norm = sum(abs(arr))
-    max_abs = maxval(abs(arr))
-    if (iproc == 0) print *, "COMPACT_DEBUG ", trim(label), " l1=", l1_norm, " max=", max_abs
-  end subroutine debug_print_complex_norm3
-
-  subroutine debug_print_complex_norm2(label, arr)
-    implicit none
-    character(*), intent(in) :: label
-    complex(C_DOUBLE_COMPLEX), target, intent(in) :: arr(:, :)
-    real(C_DOUBLE) :: l1_norm, max_abs
-
-    if (.not. debug_compact_flow) return
-
-    !$omp target update from(arr)
-    l1_norm = sum(abs(arr))
-    max_abs = maxval(abs(arr))
-    if (iproc == 0) print *, "COMPACT_DEBUG ", trim(label), " l1=", l1_norm, " max=", max_abs
-  end subroutine debug_print_complex_norm2
-
-  subroutine debug_print_complex_norm1(label, arr)
-    implicit none
-    character(*), intent(in) :: label
-    complex(C_DOUBLE_COMPLEX), target, intent(in) :: arr(:)
-    real(C_DOUBLE) :: l1_norm, max_abs
-
-    if (.not. debug_compact_flow) return
-
-    !$omp target update from(arr)
-    l1_norm = sum(abs(arr))
-    max_abs = maxval(abs(arr))
-    if (iproc == 0) print *, "COMPACT_DEBUG ", trim(label), " l1=", l1_norm, " max=", max_abs
-  end subroutine debug_print_complex_norm1
-
-  subroutine debug_print_real_norm3(label, arr)
-    implicit none
-    character(*), intent(in) :: label
-    real(C_DOUBLE), target, intent(in) :: arr(:, :, :)
-    real(C_DOUBLE) :: l1_norm, max_abs
-
-    if (.not. debug_compact_flow) return
-
-    !$omp target update from(arr)
-    l1_norm = sum(abs(arr))
-    max_abs = maxval(abs(arr))
-    if (iproc == 0) print *, "COMPACT_DEBUG ", trim(label), " l1=", l1_norm, " max=", max_abs
-  end subroutine debug_print_real_norm3
-
-  subroutine debug_print_rhs_samples(label, arr)
-    implicit none
-    character(*), intent(in) :: label
-    complex(C_DOUBLE_COMPLEX), target, intent(inout) :: arr(ny0:nyN, -nz:nz, nx0:nxN)
-    integer(C_INT) :: sample_ix
-
-    if (.not. debug_compact_flow) return
-
-    sample_ix = merge(1_C_INT, nx0, nxN >= 1_C_INT)
-    !$omp target update from(arr(ny0:ny0, 0:1, 0:sample_ix))
-    if (iproc == 0) then
-      print *, "COMPACT_DEBUG ", trim(label), " sample_zero=", arr(ny0, 0, 0), &
-        " sample_nonzero=", arr(ny0, 1, sample_ix)
-    end if
-  end subroutine debug_print_rhs_samples
-
-  subroutine debug_print_rhs_term_samples(label, terms)
-    implicit none
-    character(*), intent(in) :: label
-    complex(C_DOUBLE_COMPLEX), target, intent(in) :: terms(2, 3)
-
-    if (.not. debug_compact_flow) return
-
-    !$omp target update from(terms)
-    if (iproc == 0) then
-      print *, "COMPACT_DEBUG ", trim(label), " zero_unkn=", terms(1, 1), " zero_tmp=", terms(1, 2), &
-        " zero_oldrhs=", terms(1, 3)
-      print *, "COMPACT_DEBUG ", trim(label), " nonzero_unkn=", terms(2, 1), " nonzero_tmp=", terms(2, 2), &
-        " nonzero_oldrhs=", terms(2, 3)
-    end if
-  end subroutine debug_print_rhs_term_samples
 
   function itoa(i) result(str)
     implicit none
@@ -977,20 +869,15 @@ CONTAINS
     if (present(transpose_derivative)) transpose_derivative_value = transpose_derivative
     solve_label_value = "compact full-y gpsv"
     if (present(solve_label)) solve_label_value = solve_label
-    call init_debug_compact_flow_flag()
-
     if (use_yslab_linsolve) then
       nlines_z = 2*nz + 1
       total_line_count = (nxN - nx0 + 1)*nlines_z
       if (total_line_count <= 0) return
 
       call prepare_yslab_scratch(ny + 3, max(1_C_INT, yslab_owned_line_count))
-      call debug_print_complex_norm3(trim(solve_label_value)//" source_before_transpose_to_full", source_values)
-
       call roctxPush("yslab compact transpose_to_full")
       call yslab_transpose_to_full(source_values, yslab_workspace, ny, nz, total_line_count, nlines_z, transpose_derivative_value)
       call roctxPop("yslab compact transpose_to_full")
-      call debug_print_complex_norm2(trim(solve_label_value)//" yslab_after_transpose_to_full", yslab_workspace)
 
       if (yslab_owned_line_count > 0) then
         ix_first = nx0 + (yslab_owned_first_line - 1)/nlines_z
@@ -1003,7 +890,6 @@ CONTAINS
         call eliminate_assembled_boundaries(1_C_INT, ny - 1, .true., .true.)
         owner_dst(-1:ny + 1, -nz:nz, ix_first:ix_last) => yslab_workspace
         call ys_solve_packed_pentadiagonal(ny - 1, yslab_owned_line_count, trim(solve_label_value))
-        call debug_print_complex_norm3(trim(solve_label_value)//" rhs_after_packed_solve", ys_gpsv_owner_rhs)
         call roctxPush("assembled_scatter_solution")
         !$omp target teams distribute parallel do default(none) &
         !$omp shared(owner_dst, ys_gpsv_owner_rhs, ny, ix_first, ix_last, nz) &
@@ -1017,15 +903,12 @@ CONTAINS
         end do
         !$omp end target teams distribute parallel do
         call roctxPop("assembled_scatter_solution")
-        call debug_print_complex_norm2(trim(solve_label_value)//" yslab_after_scatter", yslab_workspace)
         call reconstruct_assembled_boundaries(owner_dst, 1_C_INT, ny - 1, .true., .true., ix_first, ix_last)
-        call debug_print_complex_norm2(trim(solve_label_value)//" yslab_after_reconstruct", yslab_workspace)
       end if
 
       call roctxPush("yslab compact transpose_from_full")
       call yslab_transpose_from_full(yslab_workspace, field_values, ny, nz, total_line_count, nlines_z)
       call roctxPop("yslab compact transpose_from_full")
-      call debug_print_complex_norm3(trim(solve_label_value)//" field_after_transpose_from_full", field_values)
       return
     end if
     call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, (nxN - nx0 + 1)*(2*nz + 1), .true.)
@@ -1085,14 +968,11 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX) :: zero_mode_u(-1:ny + 1), zero_mode_w(-1:ny + 1), zero_mode_ucor(-1:ny + 1)
 
     call roctxPush("linsolve solve_v")
-    call init_debug_compact_flow_flag()
-    call debug_print_complex_norm3("linsolve solve_v input_V2", V(:, :, :, 2))
     call select_compact_component_boundaries(v0bc, v0m1bc, vnbc, vnp1bc, bc0(:, :, 2), bc0(:, :, 4), bcn(:, :, 2), bcn(:, :, 4))
     call solve_compact_component_current_layout(V(:, :, :, 2), assemble_compact_biharmonic_system, assemble_selected_compact_component_boundaries, &
                                                 lambda, 1.0d0, V(:, :, :, 2))
     call roctxPop("linsolve solve_v")
     call roctxPush("linsolve solve_eta")
-    call debug_print_complex_norm3("linsolve solve_eta input_V1", V(:, :, :, 1))
     call select_compact_component_boundaries(eta0bc, eta0m1bc, etanbc, etanp1bc, bc0(:, :, 5), zero_bc, bcn(:, :, 5), zero_bc)
     call solve_compact_component_current_layout(V(:, :, :, 1), assemble_compact_helmholtz_system, assemble_selected_compact_component_boundaries, &
                                                 lambda, 1.0d0, V(:, :, :, 1))
@@ -1297,7 +1177,6 @@ CONTAINS
     integer(C_INT) ::  m, to, from, mm1
     type(MPI_Request), dimension(:) :: requests(3 + nPhi)
     type(MPI_Status)  :: status
-    call init_debug_compact_flow_flag()
     DO m = 1, MERGE(3 + nPhi + 1, 3 + nPhi, overlapping)
 
       ! Compute indices depending on overlap mode
@@ -1310,21 +1189,17 @@ CONTAINS
         call roctxPush("transform_to_physical assemble_vvdz")
         CALL assemble_vvdz(m, to)
         call roctxPop("transform_to_physical assemble_vvdz")
-        call debug_print_complex_norm3("transform_to_physical assemble_vvdz m="//trim(adjustl(itoa(m)))//" to="//trim(adjustl(itoa(to))), VVdz(:, :, :, to))
         call roctxPush("transform_to_physical IFT")
         CALL IFT(VVdz(:, :, :, to))
         call roctxPop("transform_to_physical IFT")
-        call debug_print_complex_norm3("transform_to_physical after_IFT m="//trim(adjustl(itoa(m)))//" to="//trim(adjustl(itoa(to))), VVdz(:, :, :, to))
         if (fft_transpose_is_local) then
           call roctxPush("transform_to_physical repack_zTOx_local")
           call repack_zTOx_local(VVdz(:, :, :, to), VVdx(:, :, :, to), ny)
           call roctxPop("transform_to_physical repack_zTOx_local")
-          call debug_print_complex_norm3("transform_to_physical after_repack_zTOx_local m="//trim(adjustl(itoa(m)))//" to="//trim(adjustl(itoa(to))), VVdx(:, :, :, to))
         else
           call roctxPush("transform_to_physical pack_zTOx")
           CALL pack_zTOx(VVdz(:, :, :, to), sendbuf(:, to), ny)
           call roctxPop("transform_to_physical pack_zTOx")
-          call debug_print_complex_norm1("transform_to_physical packed_sendbuf m="//trim(adjustl(itoa(m)))//" to="//trim(adjustl(itoa(to))), sendbuf(:, to))
           CALL alltoall(sendbuf(:, to), recvbuf(:, to), requests(m), "zTOx transform_to_physical")
         end if
       end if
@@ -1335,22 +1210,16 @@ CONTAINS
           call roctxPush("MPI_Wait zTOx transform_to_physical")
           CALL MPI_WAIT(requests(mm1), status, ierr)
           call roctxPop("MPI_Wait zTOx transform_to_physical")
-          call debug_print_complex_norm1("transform_to_physical recvbuf_after_wait mm1="//trim(adjustl(itoa(mm1)))//" from="//trim(adjustl(itoa(from))), recvbuf(:, from))
           call roctxPush("transform_to_physical unpack_zTOx")
           CALL unpack_zTOx(recvbuf(:, from), VVdx(:, :, :, from), ny)
           call roctxPop("transform_to_physical unpack_zTOx")
-          call debug_print_complex_norm3("transform_to_physical after_unpack_zTOx mm1="//trim(adjustl(itoa(mm1)))//" from="//trim(adjustl(itoa(from))), VVdx(:, :, :, from))
         end if
         call roctxPush("transform_to_physical zero_vvdx_hft")
         CALL zero_vvdx_hft(from)
         call roctxPop("transform_to_physical zero_vvdx_hft")
-        call debug_print_complex_norm3("transform_to_physical after_zero_vvdx_hft from="//trim(adjustl(itoa(from))), &
-                                       VVdx(1:nxd + 1, 1:nzB, ny0 - 2:nyN + 2, from))
         call roctxPush("transform_to_physical RFT")
         CALL RFT(VVdx(:, :, :, from), rVVdx(:, :, :, mm1))
         call roctxPop("transform_to_physical RFT")
-call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl(itoa(mm1)))//" from="//trim(adjustl(itoa(from))), &
-                                    rVVdx(1:2*nxd, 1:nzB, ny0 - 2:nyN + 2, mm1))
       end if
     END DO
   END SUBROUTINE transform_to_physical
@@ -1361,8 +1230,6 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
     real(C_DOUBLE), intent(in) :: ODE(1:3)
     type(MPI_Request), dimension(:) :: requests(6 + 3*nPhi)
     type(MPI_Status)  :: status
-    call init_debug_compact_flow_flag()
-
     ! Reverse pass to build rVVdx
     DO m = 1, MERGE(6 + 3*nPhi + 1, 6 + 3*nPhi, overlapping)
 
@@ -1377,22 +1244,17 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
         call roctxPush("transform_back build_products")
         call build_products(m, to)
         call roctxPop("transform_back build_products")
-    call debug_print_real_norm3("transform_back after_build_products m="//trim(adjustl(itoa(m)))//" to="//trim(adjustl(itoa(to))), &
-                                    products(1:2*nxd, 1:nzB, ny0 - 2:nyN + 2, to))
         call roctxPush("transform_back HFT")
         call HFT(products(:, :, :, to), VVdx(:, :, :, to))
         call roctxPop("transform_back HFT")
-        call debug_print_complex_norm3("transform_back after_HFT m="//trim(adjustl(itoa(m)))//" to="//trim(adjustl(itoa(to))), VVdx(:, :, :, to))
         if (fft_transpose_is_local) then
           call roctxPush("transform_back repack_xTOz_local")
           call repack_xTOz_local(VVdx(:, :, :, to), VVdz(:, :, :, to), ny)
           call roctxPop("transform_back repack_xTOz_local")
-          call debug_print_complex_norm3("transform_back after_repack_xTOz_local m="//trim(adjustl(itoa(m)))//" to="//trim(adjustl(itoa(to))), VVdz(:, :, :, to))
         else
           call roctxPush("transform_back pack_xTOz")
           call pack_xTOz(VVdx(:, :, :, to), sendbuf(:, to), ny)
           call roctxPop("transform_back pack_xTOz")
-          call debug_print_complex_norm1("transform_back packed_sendbuf m="//trim(adjustl(itoa(m)))//" to="//trim(adjustl(itoa(to))), sendbuf(:, to))
           call alltoall(sendbuf(:, to), recvbuf(:, to), requests(m), "xTOz transform_back_and_build_rhs")
         end if
       end if
@@ -1403,25 +1265,16 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
           call roctxPush("MPI_Wait xTOz transform_back_and_build_rhs")
           call MPI_WAIT(requests(mm1), status, ierr)
           call roctxPop("MPI_Wait xTOz transform_back_and_build_rhs")
-          call debug_print_complex_norm1("transform_back recvbuf_after_wait mm1="//trim(adjustl(itoa(mm1)))//" from="//trim(adjustl(itoa(from))), recvbuf(:, from))
           call roctxPush("transform_back unpack_xTOz")
           call unpack_xTOz(recvbuf(:, from), VVdz(:, :, :, from), ny)
           call roctxPop("transform_back unpack_xTOz")
-          call debug_print_complex_norm3("transform_back after_unpack_xTOz mm1="//trim(adjustl(itoa(mm1)))//" from="//trim(adjustl(itoa(from))), VVdz(:, :, :, from))
         end if
         call roctxPush("transform_back FFT")
         call FFT(VVdz(:, :, :, from))
         call roctxPop("transform_back FFT")
-        call debug_print_complex_norm3("transform_back after_FFT mm1="//trim(adjustl(itoa(mm1)))//" from="//trim(adjustl(itoa(from))), VVdz(:, :, :, from))
         call roctxPush("transform_back buildrhs")
         call buildrhs(ODE, mm1, from)
         call roctxPop("transform_back buildrhs")
-        call debug_print_complex_norm3("transform_back after_buildrhs component="//trim(adjustl(itoa(mm1)))//" V1", &
-                                       V(ny0:nyN, -nz:nz, nx0:nxN, 1))
-        call debug_print_complex_norm3("transform_back after_buildrhs component="//trim(adjustl(itoa(mm1)))//" V2", &
-                                       V(ny0:nyN, -nz:nz, nx0:nxN, 2))
-      if (nPhi > 0) call debug_print_complex_norm3("transform_back after_buildrhs component="//trim(adjustl(itoa(mm1)))//" Vphi1", &
-                                                     V(ny0:nyN, -nz:nz, nx0:nxN, 4))
       end if
     END DO
   END SUBROUTINE transform_back_and_build_rhs
@@ -1453,16 +1306,9 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
     IMPLICIT NONE
     real(C_DOUBLE), intent(in) :: ODE(1:3)
     integer(C_INT) :: iy, iz, ix, i, k, iPhi, y_first, y_last
-    integer(C_INT) :: sample_ix
     complex(C_DOUBLE_COMPLEX) :: tmp, unkn
-    real(C_DOUBLE) :: tmp_re, tmp_im, visc, kk, coeff
-    complex(C_DOUBLE_COMPLEX) :: debug_d2v_terms(2, 3), debug_eta_terms(2, 3)
     y_first = ny0
     y_last = nyN
-    sample_ix = merge(1_C_INT, nx0, nxN >= 1_C_INT)
-    debug_d2v_terms = 0.0
-    debug_eta_terms = 0.0
-    call init_debug_compact_flow_flag()
 #ifdef bodyforce
     iy = 1; F(-1:0, :, :, :) = 0
     DO iz = -nz, nz
@@ -1484,40 +1330,17 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
 
     ! contribution known a-priori
     !$omp target teams distribute parallel do collapse(3) default(none)  &
-    !$omp private(iz, ix, iy, tmp, tmp_re, tmp_im, visc, kk, coeff, k, unkn) &
+    !$omp private(iz, ix, iy, tmp, k, unkn) &
     !$omp shared(nz, nx0, nxN, ny, y_first, y_last) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) &
-    !$omp shared(meanpx, meanpz, ni, deltat, ode) shared(vvdz, v, pra) shared(sample_ix, debug_d2v_terms) &
-    !$omp shared(debug_compact_flow, ny0)
+    !$omp shared(meanpx, meanpz, ni, deltat, ode) shared(vvdz, v, pra)
     DO iz = -nz, nz
       DO ix = nx0, nxN
         DO iy = y_first, y_last
-          if (debug_compact_flow) then
-            if (iy == ny0 .and. iz == 0 .and. ix == 0) then
-              debug_d2v_terms(1, 3) = oldrhs(iy, iz, ix, 2)
-            else if (iy == ny0 .and. iz == 1 .and. ix == sample_ix) then
-              debug_d2v_terms(2, 3) = oldrhs(iy, iz, ix, 2)
-            end if
-          end if
-          visc = ni
-          kk = k2(iz, ix)
           unkn = D2(V, 2) - k2(iz, ix)*D0(V, 2)
-          tmp_re = 0.0d0
-          tmp_im = 0.0d0
+          tmp = 0.0
           DO k = -2, 2
-            coeff = visc*(der(iy, 3, k) - 2.0d0*kk*der(iy, 2, k) + kk*kk*der(iy, 0, k))
-            tmp_re = tmp_re + coeff*dble(V(iy + k, iz, ix, 2))
-            tmp_im = tmp_im + coeff*dimag(V(iy + k, iz, ix, 2))
+            tmp = tmp + OS(iy, k)*V(iy + k, iz, ix, 2)
           END DO
-          tmp = dcmplx(tmp_re, tmp_im)
-          if (debug_compact_flow) then
-            if (iy == ny0 .and. iz == 0 .and. ix == 0) then
-              debug_d2v_terms(1, 1) = unkn
-              debug_d2v_terms(1, 2) = tmp
-            else if (iy == ny0 .and. iz == 1 .and. ix == sample_ix) then
-              debug_d2v_terms(2, 1) = unkn
-              debug_d2v_terms(2, 2) = tmp
-            end if
-          end if
 
           !initialize D2v
           newrhs(iy, iz, ix, 2) = ODE(1)*unkn/deltat + tmp - ODE(3)*oldrhs(iy, iz, ix, 2)
@@ -1525,60 +1348,30 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
         END DO
       END DO
     END DO
-    call debug_print_complex_norm3("buildrhs_prepare after_init_d2v newrhs2", memrhs(ny0:nyN, -nz:nz, nx0:nxN, 2))
-    call debug_print_rhs_samples("buildrhs_prepare after_init_d2v newrhs2", memrhs(:, :, :, 2))
-    call debug_print_rhs_term_samples("buildrhs_prepare after_init_d2v newrhs2", debug_d2v_terms)
 
     !$omp target teams distribute parallel do collapse(3) default(none)  &
-    !$omp private(iz, ix, iy, tmp, tmp_re, tmp_im, visc, kk, coeff, k, unkn) &
+    !$omp private(iz, ix, iy, tmp, k, unkn) &
     !$omp shared(nz, nx0, nxN, ny, y_first, y_last) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) &
-    !$omp shared(meanpx, meanpz, ni, deltat, ode) shared(vvdz, v, pra) shared(sample_ix, debug_eta_terms) &
-    !$omp shared(debug_compact_flow, ny0)
+    !$omp shared(meanpx, meanpz, ni, deltat, ode) shared(vvdz, v, pra)
     DO iz = -nz, nz
       DO ix = nx0, nxN
         DO iy = y_first, y_last
-          if (debug_compact_flow) then
-            if (iy == ny0 .and. iz == 0 .and. ix == 0) then
-              debug_eta_terms(1, 3) = oldrhs(iy, iz, ix, 1)
-            else if (iy == ny0 .and. iz == 1 .and. ix == sample_ix) then
-              debug_eta_terms(2, 3) = oldrhs(iy, iz, ix, 1)
-            end if
-          end if
-          visc = ni
-          kk = k2(iz, ix)
           IF (ix == 0 .AND. iz == 0) THEN
             unkn = rD0(V, 1, 3)
-            tmp_re = visc*dble(rD2(V, 1, 3))
-            tmp_im = visc*dimag(rD2(V, 1, 3))
+            tmp = ni*rD2(V, 1, 3)
           ELSE
-            tmp_re = 0.0d0
-            tmp_im = 0.0d0
+            tmp = 0.0
             DO k = -2, 2
-              coeff = visc*(der(iy, 2, k) - kk*der(iy, 0, k))
-              tmp_re = tmp_re + dble(coeff*(ibeta(iz)*V(iy + k, iz, ix, 1) - ialfa(ix)*V(iy + k, iz, ix, 3)))
-              tmp_im = tmp_im + dimag(coeff*(ibeta(iz)*V(iy + k, iz, ix, 1) - ialfa(ix)*V(iy + k, iz, ix, 3)))
+              tmp = tmp + SQ(iy, k)*(ibeta(iz)*V(iy + k, iz, ix, 1) - ialfa(ix)*V(iy + k, iz, ix, 3))
             END DO
             unkn = ibeta(iz)*D0(V, 1) - ialfa(ix)*D0(V, 3)
           END IF
-          tmp = dcmplx(tmp_re, tmp_im)
-          if (debug_compact_flow) then
-            if (iy == ny0 .and. iz == 0 .and. ix == 0) then
-              debug_eta_terms(1, 1) = unkn
-              debug_eta_terms(1, 2) = tmp
-            else if (iy == ny0 .and. iz == 1 .and. ix == sample_ix) then
-              debug_eta_terms(2, 1) = unkn
-              debug_eta_terms(2, 2) = tmp
-            end if
-          end if
           !initialize eta
           newrhs(iy, iz, ix, 1) = ODE(1)*unkn/deltat + tmp - ODE(3)*oldrhs(iy, iz, ix, 1)
           oldrhs(iy, iz, ix, 1) = 0.0
         END DO
       END DO
     END DO
-    call debug_print_complex_norm3("buildrhs_prepare after_init_eta newrhs1", memrhs(ny0:nyN, -nz:nz, nx0:nxN, 1))
-    call debug_print_rhs_samples("buildrhs_prepare after_init_eta newrhs1", memrhs(:, :, :, 1))
-    call debug_print_rhs_term_samples("buildrhs_prepare after_init_eta newrhs1", debug_eta_terms)
 
     !$omp target teams distribute parallel do collapse(3) default(none)  &
     !$omp private(iz, ix, iy, tmp, k, unkn) &
@@ -1598,10 +1391,6 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
         end do
       end do
     end do
-    call debug_print_complex_norm3("buildrhs_prepare after_meanforce newrhs1", memrhs(ny0:nyN, -nz:nz, nx0:nxN, 1))
-    call debug_print_complex_norm3("buildrhs_prepare after_meanforce newrhs2", memrhs(ny0:nyN, -nz:nz, nx0:nxN, 2))
-    call debug_print_rhs_samples("buildrhs_prepare after_meanforce newrhs1", memrhs(:, :, :, 1))
-    call debug_print_rhs_samples("buildrhs_prepare after_meanforce newrhs2", memrhs(:, :, :, 2))
 
     !initialize phi
     DO iPhi = 1, nPhi
@@ -1622,25 +1411,20 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
         END DO
       END DO
     END DO
-    if (nPhi > 0) call debug_print_complex_norm3("buildrhs_prepare after_init_phi newrhsphi1", memrhs(ny0:nyN, -nz:nz, nx0:nxN, 3))
 
     !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp shared(memrhs, V) shared(nz, nx0, nxN, ny, y_first, y_last, nPhi) private(iy, ix, iz, iPhi)
     DO iz = -nz, nz
     DO ix = nx0, nxN
     DO iy = y_first, y_last
-      V(iy, iz, ix, 1) = newrhs(iy, iz, ix, 1); 
-      V(iy, iz, ix, 2) = newrhs(iy, iz, ix, 2); 
+      V(iy, iz, ix, 1) = newrhs(iy, iz, ix, 1)
+      V(iy, iz, ix, 2) = newrhs(iy, iz, ix, 2)
       DO iPhi = 1, nPhi
-        V(iy, iz, ix, 3 + iPhi) = newrhs(iy, iz, ix, 2 + iPhi); 
+        V(iy, iz, ix, 3 + iPhi) = newrhs(iy, iz, ix, 2 + iPhi)
       END DO
     END DO
     END DO
     END DO
-
-    call debug_print_complex_norm3("buildrhs_prepare after_init V1", V(ny0:nyN, -nz:nz, nx0:nxN, 1))
-    call debug_print_complex_norm3("buildrhs_prepare after_init V2", V(ny0:nyN, -nz:nz, nx0:nxN, 2))
-    if (nPhi > 0) call debug_print_complex_norm3("buildrhs_prepare after_init Vphi1", V(ny0:nyN, -nz:nz, nx0:nxN, 4))
 
   END SUBROUTINE buildrhs_prepare
 

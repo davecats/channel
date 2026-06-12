@@ -79,9 +79,6 @@ target_link_libraries(test_y_pencil_transpose PRIVATE channel_core)
 add_executable(test_mean_correction test_mean_correction.f90)
 target_link_libraries(test_mean_correction PRIVATE channel_core)
 
-add_executable(test_hipsparse_gpsv_allocations test_hipsparse_gpsv_allocations.f90)
-target_link_libraries(test_hipsparse_gpsv_allocations PRIVATE channel_core)
-
 # Add a CTest target
 enable_testing()
 include(cmake/tests.cmake)
@@ -117,9 +114,6 @@ elseif (CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
 
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cpp -O3 -mp -mp=gpu -Minfo=mp -Mcache_align -cuda") #
     target_compile_definitions(channel_core PRIVATE HAVE_CUDA)
-    target_compile_definitions(test_hipsparse_gpsv_allocations PRIVATE HAVE_CUDA)
-
-
 elseif (CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -fpp -O0 -fp-model=precise")
     target_compile_definitions(channel_core PRIVATE HAVE_FFTW)
@@ -132,9 +126,6 @@ elseif (CMAKE_Fortran_COMPILER_ID MATCHES "Cray")
     find_package(hipfort REQUIRED COMPONENTS hip hipfft hipsparse)
     target_link_libraries(channel_core PRIVATE hipfort::hipfft hipfort::hipsparse)
     target_compile_definitions(channel_core PRIVATE HAVE_HIP)
-    target_link_libraries(test_hipsparse_gpsv_allocations PRIVATE hipfort::hipsparse)
-    target_compile_definitions(test_hipsparse_gpsv_allocations PRIVATE HAVE_HIP)
-
     message(STATUS "hipfort_DIR = ${hipfort_DIR}")
 elseif (CMAKE_Fortran_COMPILER_ID MATCHES "LLVMFlang")
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cpp -O2 -fopenmp -fopenmp -fopenmp-targets=amdgcn-amd-amdhsa --offload-arch=gfx942")
@@ -142,9 +133,6 @@ elseif (CMAKE_Fortran_COMPILER_ID MATCHES "LLVMFlang")
     find_package(hipfort REQUIRED COMPONENTS hip hipfft hipsparse)
     target_link_libraries(channel_core PUBLIC hipfort::hipfft hipfort::hipsparse)
     target_compile_definitions(channel_core PRIVATE HAVE_HIP)
-    target_link_libraries(test_hipsparse_gpsv_allocations PRIVATE hipfort::hipsparse)
-    target_compile_definitions(test_hipsparse_gpsv_allocations PRIVATE HAVE_HIP)
-
     message(STATUS "hipfort_DIR = ${hipfort_DIR}")
 
 endif()
