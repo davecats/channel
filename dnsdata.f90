@@ -1484,7 +1484,8 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
     !$omp target teams distribute parallel do collapse(3) default(none)  &
     !$omp private(iz, ix, iy, tmp, k, unkn) &
     !$omp shared(nz, nx0, nxN, ny, y_first, y_last) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) &
-    !$omp shared(meanpx, meanpz, ni, deltat, ode) shared(vvdz, v, pra) shared(sample_ix, debug_d2v_terms)
+    !$omp shared(meanpx, meanpz, ni, deltat, ode) shared(vvdz, v, pra) shared(sample_ix, debug_d2v_terms) &
+    !$omp shared(debug_compact_flow, ny0)
     DO iz = -nz, nz
       DO ix = nx0, nxN
         DO iy = y_first, y_last
@@ -1523,7 +1524,8 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
     !$omp target teams distribute parallel do collapse(3) default(none)  &
     !$omp private(iz, ix, iy, tmp, k, unkn) &
     !$omp shared(nz, nx0, nxN, ny, y_first, y_last) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) &
-    !$omp shared(meanpx, meanpz, ni, deltat, ode) shared(vvdz, v, pra) shared(sample_ix, debug_eta_terms)
+    !$omp shared(meanpx, meanpz, ni, deltat, ode) shared(vvdz, v, pra) shared(sample_ix, debug_eta_terms) &
+    !$omp shared(debug_compact_flow, ny0)
     DO iz = -nz, nz
       DO ix = nx0, nxN
         DO iy = y_first, y_last
