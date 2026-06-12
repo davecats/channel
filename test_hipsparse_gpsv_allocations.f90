@@ -17,6 +17,8 @@ program test_hipsparse_gpsv_allocations
   complex(C_DOUBLE_COMPLEX), allocatable, target :: ds_host(:), dl_host(:), d_host(:), du_host(:), dw_host(:)
   complex(C_DOUBLE_COMPLEX), allocatable, target :: x_rhs_host(:), x_exact_host(:), x_out_host(:)
   complex(C_DOUBLE_COMPLEX), allocatable, target :: ds_map(:), dl_map(:), d_map(:), du_map(:), dw_map(:), x_map(:)
+  complex(C_DOUBLE_COMPLEX), allocatable, target :: matrix_store(:), rhs_store(:)
+  complex(C_DOUBLE_COMPLEX), pointer :: ds_view(:), dl_view(:), d_view(:), du_view(:), dw_view(:), x_view(:)
   character(C_CHAR), allocatable, target :: buffer_map(:)
   type(C_PTR) :: handle
   type(C_PTR) :: ds_dev, dl_dev, d_dev, du_dev, dw_dev, x_dev, buffer_dev, buffer_omp
@@ -136,6 +138,22 @@ call copy_rhs_to_mapped_arrays(ds_map, dl_map, d_map, du_map, dw_map, x_map, ds_
   call omp_target_free(buffer_omp, omp_get_default_device())
   if (ok) ok = compare_solution("omp_map_arrays+omp_target_buffer", x_out_host, x_exact_host)
   all_ok = all_ok .and. ok
+
+  allocate (matrix_store(5*M*BATCH_COUNT), rhs_store(M*BATCH_COUNT))
+  call bind_interleaved_views(matrix_store, rhs_store, ds_view, dl_view, d_view, du_view, dw_view, x_view)
+  call copy_rhs_to_mapped_arrays(ds_view, dl_view, d_view, du_view, dw_view, x_view, ds_host, dl_host, d_host, du_host, dw_host, x_rhs_host)
+  buffer_omp = omp_target_alloc(max(1_C_SIZE_T, buffer_size), omp_get_default_device())
+  if (.not. c_associated(buffer_omp)) error stop "omp_target_alloc buffer_omp failed"
+  !$omp target enter data map(to: matrix_store, rhs_store)
+  !$omp target data use_device_addr(ds_view, dl_view, d_view, du_view, dw_view, x_view)
+  call run_case_from_ptrs("omp_pointer_views+omp_target_buffer", handle, c_loc(ds_view(1)), c_loc(dl_view(1)), c_loc(d_view(1)), &
+                          c_loc(du_view(1)), c_loc(dw_view(1)), c_loc(x_view(1)), buffer_omp, x_out_host, ok)
+  !$omp end target data
+  !$omp target exit data map(delete: matrix_store, rhs_store)
+  call omp_target_free(buffer_omp, omp_get_default_device())
+  if (ok) ok = compare_solution("omp_pointer_views+omp_target_buffer", x_out_host, x_exact_host)
+  all_ok = all_ok .and. ok
+  deallocate (matrix_store, rhs_store)
 
   status = hipMalloc(ds_dev, int(storage_size(ds_host(1))/8, kind=C_SIZE_T)*size(ds_host, kind=C_SIZE_T))
   call check_hip_status(status, "hipMalloc ds_dev")
@@ -293,6 +311,20 @@ contains
     x_map = x_h
     !$omp target update to(ds_map, dl_map, d_map, du_map, dw_map, x_map)
   end subroutine copy_rhs_to_mapped_arrays
+
+  subroutine bind_interleaved_views(matrix_store, rhs_store, ds_view, dl_view, d_view, du_view, dw_view, x_view)
+    complex(C_DOUBLE_COMPLEX), target, intent(inout) :: matrix_store(:), rhs_store(:)
+    complex(C_DOUBLE_COMPLEX), pointer, intent(out) :: ds_view(:), dl_view(:), d_view(:), du_view(:), dw_view(:), x_view(:)
+    integer(C_INT) :: nall
+
+    nall = M*BATCH_COUNT
+    ds_view(1:nall) => matrix_store(1:nall)
+    dl_view(1:nall) => matrix_store(nall + 1:2*nall)
+    d_view(1:nall) => matrix_store(2*nall + 1:3*nall)
+    du_view(1:nall) => matrix_store(3*nall + 1:4*nall)
+    dw_view(1:nall) => matrix_store(4*nall + 1:5*nall)
+    x_view(1:nall) => rhs_store(1:nall)
+  end subroutine bind_interleaved_views
 
   subroutine run_case_from_ptrs(label, handle, ds_ptr, dl_ptr, d_ptr, du_ptr, dw_ptr, x_ptr, buffer_ptr, x_out, ok)
     character(*), intent(in) :: label

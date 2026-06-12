@@ -123,6 +123,8 @@ module y_line_solvers
 #endif
   integer(C_INT), save :: ys_gpsv_n = -1, ys_gpsv_batch = -1
   integer(C_INT), save :: ys_batch_n = -1, ys_batch_count = -1
+  logical, save :: ys_debug_compare_hip_gpsv = .false.
+  logical, save :: ys_debug_compare_hip_gpsv_initialized = .false.
 #if defined(HAVE_CUDA)
   integer(8), save :: ys_gpsv_buffer_size = 0_8
 #elif defined(HAVE_HIP)
@@ -424,6 +426,24 @@ contains
     ys_gpsv_handle_created = .true.
   end subroutine ys_create_gpusparse_handle
 
+  subroutine ys_init_debug_compare_flag()
+    implicit none
+    character(len=32) :: env_value
+    integer :: length, status
+
+    if (ys_debug_compare_hip_gpsv_initialized) return
+    ys_debug_compare_hip_gpsv_initialized = .true.
+    ys_debug_compare_hip_gpsv = .false.
+
+    call get_environment_variable("CHANNEL_DEBUG_COMPARE_HIP_GPSV", env_value, length, status)
+    if (status /= 0 .or. length <= 0) return
+
+    select case (trim(env_value(:length)))
+    case ("1", "true", "TRUE", "yes", "YES", "on", "ON")
+      ys_debug_compare_hip_gpsv = .true.
+    end select
+  end subroutine ys_init_debug_compare_flag
+
   subroutine ys_destroy_gpusparse_handle()
     implicit none
     integer(C_INT) :: status
@@ -619,12 +639,44 @@ contains
     character(*), intent(in) :: label
 #if !defined(HAVE_CUDA) && !defined(HAVE_HIP)
     integer(C_INT) :: iline
+#elif defined(HAVE_HIP)
+    complex(C_DOUBLE_COMPLEX), allocatable :: ds_ref(:), dl_ref(:), d_ref(:), du_ref(:), dw_ref(:), x_ref(:), x_hip(:)
+    integer(C_INT) :: iline
+    real(C_DOUBLE) :: max_err
 #endif
 
     call roctxPush(label)
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
+#ifdef HAVE_HIP
+    call ys_init_debug_compare_flag()
+    if (ys_debug_compare_hip_gpsv) then
+      !$omp target update from(ds, dl, d, du, dw, x)
+   allocate (ds_ref(size(ds)), dl_ref(size(dl)), d_ref(size(d)), du_ref(size(du)), dw_ref(size(dw)), x_ref(size(x)), x_hip(size(x)))
+      ds_ref = ds
+      dl_ref = dl
+      d_ref = d
+      du_ref = du
+      dw_ref = dw
+      x_ref = x
+    end if
+#endif
     call ys_prepare_gpusparse_workspace(n, batch_count, ds, dl, d, du, dw, x)
     call ys_call_gpsv_interleaved(ds, dl, d, du, dw, x, n, batch_count, label)
+#ifdef HAVE_HIP
+    if (ys_debug_compare_hip_gpsv) then
+      !$omp target update from(x)
+      x_hip = x
+      do iline = 1, batch_count
+        call ys_factor_penta_interleaved(ds_ref, dl_ref, d_ref, du_ref, dw_ref, batch_count, iline, n)
+        call ys_solve_factored_penta_interleaved(x_ref, ds_ref, dl_ref, d_ref, du_ref, dw_ref, batch_count, iline, n)
+      end do
+      max_err = maxval(abs(x_hip - x_ref))
+      if (ipy == 0 .and. nx0 == 0) then
+        print *, "HIP gpsv debug compare ", trim(label), ": n=", n, " batch=", batch_count, " max_err=", max_err
+      end if
+      deallocate (ds_ref, dl_ref, d_ref, du_ref, dw_ref, x_ref, x_hip)
+    end if
+#endif
 #else
     !$omp target teams distribute parallel do default(none) &
     !$omp shared(ds, dl, d, du, dw, x, n, batch_count) private(iline)
