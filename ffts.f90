@@ -43,8 +43,107 @@ MODULE ffts
   type(c_ptr) :: hip_pFFT, hip_pIFT, hip_pRFT, hip_pHFT
 #endif
   integer(C_INT), save :: fft_y0, fft_yN, fft_ny
+  logical, save :: debug_fft_compare = .false.
+  logical, save :: debug_fft_compare_initialized = .false.
+  integer(C_INT), save :: debug_rft_prints = 0
+  integer(C_INT), save :: debug_hft_prints = 0
 
 CONTAINS
+
+  subroutine init_debug_fft_compare_flag()
+    implicit none
+    character(len=16) :: env_value
+    integer :: status, length
+
+    if (debug_fft_compare_initialized) return
+    debug_fft_compare_initialized = .true.
+    debug_fft_compare = .false.
+    call get_environment_variable("CHANNEL_DEBUG_FFT_COMPARE", env_value, length, status)
+    if (status /= 0) return
+
+    select case (adjustl(trim(env_value(:length))))
+    case ("1", "true", "TRUE", "yes", "YES", "on", "ON")
+      debug_fft_compare = .true.
+    case ("0", "false", "FALSE", "no", "NO", "off", "OFF")
+      debug_fft_compare = .false.
+    case default
+      print *, "Warning: invalid value for CHANNEL_DEBUG_FFT_COMPARE:", trim(env_value(:length))
+    end select
+  end subroutine init_debug_fft_compare_flag
+
+  subroutine debug_compare_rft(label, x, rx)
+    implicit none
+    character(len=*), intent(in) :: label
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, :)
+    real(C_DOUBLE), intent(inout) :: rx(:, :, :)
+    integer(C_INT) :: nreal, ix, iz, iy, k
+    real(C_DOUBLE) :: theta, max_err, ref_val
+    complex(C_DOUBLE_COMPLEX) :: phase
+
+    call init_debug_fft_compare_flag()
+    if (.not. debug_fft_compare) return
+    if (debug_rft_prints >= 6) return
+    if (size(x, 1) == 0 .or. size(x, 2) == 0 .or. size(x, 3) == 0) return
+
+    nreal = 2*(size(x, 1) - 1)
+    if (nreal <= 0) return
+
+    !$omp target update from(x, rx)
+
+    iz = 1
+    iy = 1
+    max_err = 0.0d0
+    do ix = 1, nreal
+      ref_val = real(x(1, iz, iy), C_DOUBLE) + (-1.0d0)**(ix - 1)*real(x(size(x, 1), iz, iy), C_DOUBLE)
+      do k = 2, size(x, 1) - 1
+        theta = 2.0d0*acos(-1.0d0)*real((ix - 1)*(k - 1), C_DOUBLE)/real(nreal, C_DOUBLE)
+        phase = cmplx(cos(theta), sin(theta), C_DOUBLE_COMPLEX)
+        ref_val = ref_val + 2.0d0*real(x(k, iz, iy)*phase, C_DOUBLE)
+      end do
+      max_err = max(max_err, abs(rx(ix, iz, iy) - ref_val))
+    end do
+
+    debug_rft_prints = debug_rft_prints + 1
+    print *, "FFT_DEBUG RFT ", trim(label), " n=", nreal, " max_err=", max_err, &
+      " sample_out=", rx(1, iz, iy)
+  end subroutine debug_compare_rft
+
+  subroutine debug_compare_hft(label, rx, x)
+    implicit none
+    character(len=*), intent(in) :: label
+    real(C_DOUBLE), intent(inout) :: rx(:, :, :)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, :)
+    integer(C_INT) :: nreal, ix, iz, iy, k
+    real(C_DOUBLE) :: theta, max_err
+    complex(C_DOUBLE_COMPLEX) :: ref_val, phase
+
+    call init_debug_fft_compare_flag()
+    if (.not. debug_fft_compare) return
+    if (debug_hft_prints >= 6) return
+    if (size(x, 1) == 0 .or. size(x, 2) == 0 .or. size(x, 3) == 0) return
+
+    nreal = size(rx, 1)
+    if (nreal <= 0) return
+
+    !$omp target update from(rx, x)
+
+    iz = 1
+    iy = 1
+    max_err = 0.0d0
+    do k = 1, size(x, 1)
+      ref_val = cmplx(0.0d0, 0.0d0, C_DOUBLE_COMPLEX)
+      do ix = 1, nreal
+        theta = -2.0d0*acos(-1.0d0)*real((ix - 1)*(k - 1), C_DOUBLE)/real(nreal, C_DOUBLE)
+        phase = cmplx(cos(theta), sin(theta), C_DOUBLE_COMPLEX)
+        ref_val = ref_val + rx(ix, iz, iy)*phase
+      end do
+      max_err = max(max_err, abs(x(k, iz, iy) - ref_val))
+    end do
+
+    debug_hft_prints = debug_hft_prints + 1
+    print *, "FFT_DEBUG HFT ", trim(label), " n=", nreal, " max_err=", max_err, &
+      " sample_out=", x(1, iz, iy)
+  end subroutine debug_compare_hft
 
   subroutine get_fft_memory_estimate(nxd, nxB, nzd, nzB, nPhi, overlapping, n_floats)
     implicit none
@@ -209,6 +308,13 @@ CONTAINS
     istat = hipfftPlanMany(hip_pHFT, int(1, c_int), c_loc(n), c_loc(onembed), ostride, odist, &
                            c_loc(inembed), istride, idist, HIPFFT_D2Z, int(nzB*fft_ny, c_int))
 
+    call init_debug_fft_compare_flag()
+    if (debug_fft_compare) then
+      print *, "FFT_DEBUG init_hipfft nzd=", nzd, " nxd=", nxd, " nxB=", nxB, " nzB=", nzB, &
+        " fft_ny=", fft_ny, " RFT batch=", batch, " idist=", idist, " odist=", odist, &
+        " inembed=", inembed(1), " onembed=", onembed(1)
+    end if
+
   END SUBROUTINE init_hipfft
 #endif
 
@@ -315,6 +421,7 @@ CONTAINS
     istat = hipfftExecZ2D(hip_pRFT, c_loc(x(1, 1, x_y0)), c_loc(rx(1, 1, rx_y0)))
     istat = hipDeviceSynchronize()
     !$omp end target data
+    call debug_compare_rft("hipfftExecZ2D", x, rx)
 #elif defined(HAVE_FFTW)
     DO i = fft_y0, fft_yN
       CALL fftw_execute_dft_c2r(pRFT, x(:, :, i), rx(:, :, i))
@@ -351,6 +458,7 @@ CONTAINS
     istat = hipfftExecD2Z(hip_pHFT, c_loc(rx(1, 1, rx_y0)), c_loc(x(1, 1, x_y0)))
     istat = hipDeviceSynchronize()
     !$omp end target data
+    call debug_compare_hft("hipfftExecD2Z", rx, x)
 #elif defined(HAVE_FFTW)
     DO i = fft_y0, fft_yN
       CALL fftw_execute_dft_r2c(pHFT, rx(:, :, i), x(:, :, i)); 
