@@ -262,6 +262,20 @@ CONTAINS
     if (iproc == 0) print *, "COMPACT_DEBUG ", trim(label), " l1=", l1_norm, " max=", max_abs
   end subroutine debug_print_complex_norm2
 
+  subroutine debug_print_complex_norm1(label, arr)
+    implicit none
+    character(*), intent(in) :: label
+    complex(C_DOUBLE_COMPLEX), target, intent(in) :: arr(:)
+    real(C_DOUBLE) :: l1_norm, max_abs
+
+    if (.not. debug_compact_flow) return
+
+    !$omp target update from(arr)
+    l1_norm = sum(abs(arr))
+    max_abs = maxval(abs(arr))
+    if (iproc == 0) print *, "COMPACT_DEBUG ", trim(label), " l1=", l1_norm, " max=", max_abs
+  end subroutine debug_print_complex_norm1
+
   subroutine debug_print_real_norm3(label, arr)
     implicit none
     character(*), intent(in) :: label
@@ -1277,7 +1291,7 @@ CONTAINS
           call roctxPush("transform_to_physical pack_zTOx")
           CALL pack_zTOx(VVdz(:, :, :, to), sendbuf(:, to), ny)
           call roctxPop("transform_to_physical pack_zTOx")
-          call debug_print_complex_norm2("transform_to_physical packed_sendbuf m="//trim(adjustl(itoa(m)))//" to="//trim(adjustl(itoa(to))), sendbuf(:, to))
+          call debug_print_complex_norm1("transform_to_physical packed_sendbuf m="//trim(adjustl(itoa(m)))//" to="//trim(adjustl(itoa(to))), sendbuf(:, to))
           CALL alltoall(sendbuf(:, to), recvbuf(:, to), requests(m), "zTOx transform_to_physical")
         end if
       end if
@@ -1288,7 +1302,7 @@ CONTAINS
           call roctxPush("MPI_Wait zTOx transform_to_physical")
           CALL MPI_WAIT(requests(mm1), status, ierr)
           call roctxPop("MPI_Wait zTOx transform_to_physical")
-          call debug_print_complex_norm2("transform_to_physical recvbuf_after_wait mm1="//trim(adjustl(itoa(mm1)))//" from="//trim(adjustl(itoa(from))), recvbuf(:, from))
+          call debug_print_complex_norm1("transform_to_physical recvbuf_after_wait mm1="//trim(adjustl(itoa(mm1)))//" from="//trim(adjustl(itoa(from))), recvbuf(:, from))
           call roctxPush("transform_to_physical unpack_zTOx")
           CALL unpack_zTOx(recvbuf(:, from), VVdx(:, :, :, from), ny)
           call roctxPop("transform_to_physical unpack_zTOx")
@@ -1342,7 +1356,7 @@ CONTAINS
           call roctxPush("transform_back pack_xTOz")
           call pack_xTOz(VVdx(:, :, :, to), sendbuf(:, to), ny)
           call roctxPop("transform_back pack_xTOz")
-          call debug_print_complex_norm2("transform_back packed_sendbuf m="//trim(adjustl(itoa(m)))//" to="//trim(adjustl(itoa(to))), sendbuf(:, to))
+          call debug_print_complex_norm1("transform_back packed_sendbuf m="//trim(adjustl(itoa(m)))//" to="//trim(adjustl(itoa(to))), sendbuf(:, to))
           call alltoall(sendbuf(:, to), recvbuf(:, to), requests(m), "xTOz transform_back_and_build_rhs")
         end if
       end if
@@ -1353,7 +1367,7 @@ CONTAINS
           call roctxPush("MPI_Wait xTOz transform_back_and_build_rhs")
           call MPI_WAIT(requests(mm1), status, ierr)
           call roctxPop("MPI_Wait xTOz transform_back_and_build_rhs")
-          call debug_print_complex_norm2("transform_back recvbuf_after_wait mm1="//trim(adjustl(itoa(mm1)))//" from="//trim(adjustl(itoa(from))), recvbuf(:, from))
+          call debug_print_complex_norm1("transform_back recvbuf_after_wait mm1="//trim(adjustl(itoa(mm1)))//" from="//trim(adjustl(itoa(from))), recvbuf(:, from))
           call roctxPush("transform_back unpack_xTOz")
           call unpack_xTOz(recvbuf(:, from), VVdz(:, :, :, from), ny)
           call roctxPop("transform_back unpack_xTOz")
