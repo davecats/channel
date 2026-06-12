@@ -50,7 +50,7 @@ MODULE mpi_transpose
 
 CONTAINS
 
-  !$omp declare target(split_block)
+  !$omp begin declare target
   SUBROUTINE split_block(total, nparts, part, start, count)
     integer(C_INT), intent(in) :: total, nparts, part
     integer(C_INT), intent(out) :: start, count
@@ -63,7 +63,6 @@ CONTAINS
     start = part*base + min(part, rem) + 1
   END SUBROUTINE split_block
 
-  !$omp declare target(yslab_line_range)
   subroutine yslab_line_range(rank, nlines_z, nlines, first_line, line_count)
     implicit none
     integer(C_INT), intent(in) :: rank, nlines_z, nlines
@@ -74,6 +73,7 @@ CONTAINS
     first_line = (first_col - 1)*nlines_z + 1
     line_count = col_count*nlines_z
   end subroutine yslab_line_range
+  !$omp end declare target
 
   subroutine prepare_yslab_scratch(nrows, nlines)
     implicit none
@@ -109,7 +109,7 @@ CONTAINS
     yslab_scratch_lines = -1
   end subroutine release_yslab_scratch
 
-  !$omp declare target(yslab_active_range)
+  !$omp begin declare target
   subroutine yslab_active_range(rank, ny, first_y, last_y)
     implicit none
     integer(C_INT), intent(in) :: rank, ny
@@ -119,7 +119,6 @@ CONTAINS
     last_y = (rank + 1)*(ny - 1)/npy_grid
   end subroutine yslab_active_range
 
-  !$omp declare target(yslab_unique_range)
   subroutine yslab_unique_range(rank, ny, include_physical_ghosts, first_y, last_y)
     implicit none
     integer(C_INT), intent(in) :: rank, ny
@@ -133,7 +132,6 @@ CONTAINS
     end if
   end subroutine yslab_unique_range
 
-  !$omp declare target(yslab_padded_range)
   subroutine yslab_padded_range(rank, ny, first_y, last_y)
     implicit none
     integer(C_INT), intent(in) :: rank, ny
@@ -143,6 +141,7 @@ CONTAINS
     first_y = first_y - 2
     last_y = last_y + 2
   end subroutine yslab_padded_range
+  !$omp end declare target
 
 #ifdef HAVE_MPI
   subroutine yslab_transpose_to_full(field, slab, ny, nz, nlines, nlines_z, include_physical_ghosts)
