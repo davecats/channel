@@ -122,7 +122,7 @@ CONTAINS
     if (debug_hft_prints >= 6) return
     if (size(x, 1) == 0 .or. size(x, 2) == 0 .or. size(x, 3) == 0) return
 
-    nreal = size(rx, 1)
+    nreal = 2*(size(x, 1) - 1)
     if (nreal <= 0) return
 
     !$omp target update from(rx, x)
@@ -401,7 +401,7 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX) :: x(:, :, ny0 - 2:)
     real(C_DOUBLE) :: rx(:, :, ny0 - 2:)
 #endif
-    integer :: x_y0, rx_y0
+    integer :: x_y0, rx_y0, nreal
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
     integer :: istat
 #elif defined(HAVE_FFTW)
@@ -409,6 +409,7 @@ CONTAINS
 #endif
     x_y0 = lbound(x, 3)
     rx_y0 = lbound(rx, 3)
+    nreal = 2*(size(x, 1) - 1)
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(x, rx)
     istat = cudaDeviceSynchronize()
@@ -420,6 +421,9 @@ CONTAINS
     istat = hipDeviceSynchronize()
     istat = hipfftExecZ2D(hip_pRFT, c_loc(x(1, 1, x_y0)), c_loc(rx(1, 1, rx_y0)))
     istat = hipDeviceSynchronize()
+    if (nreal < size(rx, 1)) then
+      rx(nreal + 1:size(rx, 1), :, :) = 0.0d0
+    end if
     !$omp end target data
     call debug_compare_rft("hipfftExecZ2D", x, rx)
 #elif defined(HAVE_FFTW)
