@@ -47,14 +47,22 @@
 #endif
 #if defined(HAVE_HIP)
     complex(C_DOUBLE_COMPLEX), pointer:: sendbuf(:, :), recvbuf(:, :)
+    complex(C_DOUBLE_COMPLEX), pointer:: ycomm_sendbuf(:), ycomm_recvbuf(:)
 #else
     complex(C_DOUBLE_COMPLEX), allocatable :: sendbuf(:, :), recvbuf(:, :)
+    complex(C_DOUBLE_COMPLEX), allocatable, target :: ycomm_sendbuf(:), ycomm_recvbuf(:)
 #endif
+#if defined(HAVE_HIP)
+    type(c_ptr), save :: ycomm_sendptr = c_null_ptr, ycomm_recvptr = c_null_ptr
+#endif
+    integer(C_INT), save :: ycomm_send_capacity = 0, ycomm_recv_capacity = 0
     complex(C_DOUBLE_COMPLEX), allocatable, target, save :: yslab_workspace(:, :)
     integer(C_INT), save :: yslab_scratch_rows = -1
     integer(C_INT), save :: yslab_scratch_lines = -1
     integer(C_INT), allocatable, save :: yslab_first_line_by_rank(:), yslab_line_count_by_rank(:)
     integer(C_INT), allocatable, save :: yslab_active_first_y_by_rank(:)
+    integer, allocatable, target, save :: yslab_send_counts(:), yslab_recv_counts(:)
+    integer, allocatable, target, save :: yslab_send_displs(:), yslab_recv_displs(:)
     integer(C_INT), save :: yslab_owned_first_line = 1
     integer(C_INT), save :: yslab_owned_line_count = 0
     integer(C_INT), save :: nproc, iproc, ierr, nzd, nx
@@ -81,13 +89,16 @@
 
       if (allocated(yslab_first_line_by_rank)) then
         !$omp target exit data map(delete: yslab_first_line_by_rank, yslab_line_count_by_rank, &
-        !$omp& yslab_active_first_y_by_rank)
+        !$omp& yslab_active_first_y_by_rank, yslab_send_counts, yslab_recv_counts, &
+        !$omp& yslab_send_displs, yslab_recv_displs)
         deallocate (yslab_first_line_by_rank, yslab_line_count_by_rank, &
-                    yslab_active_first_y_by_rank)
+                    yslab_active_first_y_by_rank, yslab_send_counts, yslab_recv_counts, &
+                    yslab_send_displs, yslab_recv_displs)
       end if
 
       allocate (yslab_first_line_by_rank(0:npy_grid - 1), yslab_line_count_by_rank(0:npy_grid - 1), &
-                yslab_active_first_y_by_rank(0:npy_grid - 1))
+                yslab_active_first_y_by_rank(0:npy_grid - 1), yslab_send_counts(npy_grid), &
+                yslab_recv_counts(npy_grid), yslab_send_displs(npy_grid), yslab_recv_displs(npy_grid))
 
       base_count = nx_lines/npy_grid
       remainder = mod(nx_lines, npy_grid)
@@ -107,7 +118,8 @@
       yslab_owned_line_count = yslab_line_count_by_rank(ipy)
 
       !$omp target enter data map(to: yslab_first_line_by_rank, yslab_line_count_by_rank, &
-      !$omp& yslab_active_first_y_by_rank)
+      !$omp& yslab_active_first_y_by_rank, yslab_send_counts, yslab_recv_counts, &
+      !$omp& yslab_send_displs, yslab_recv_displs)
     end subroutine setup_y_decomposition
 
     subroutine prepare_yslab_scratch(nrows, nlines)
@@ -144,6 +156,31 @@
       yslab_scratch_lines = -1
     end subroutine release_yslab_scratch
 
+    subroutine ensure_ycomm_buffers(send_elems, recv_elems)
+      implicit none
+      integer(C_INT), intent(in) :: send_elems, recv_elems
+
+      if (send_elems <= ycomm_send_capacity .and. recv_elems <= ycomm_recv_capacity) return
+
+#if defined(HAVE_HIP)
+      if (c_associated(ycomm_sendptr)) call omp_target_free(ycomm_sendptr, omp_get_default_device())
+      if (c_associated(ycomm_recvptr)) call omp_target_free(ycomm_recvptr, omp_get_default_device())
+      ycomm_sendptr = omp_target_alloc(int(max(1_C_INT, send_elems), c_size_t)*int(16, c_size_t), omp_get_default_device())
+      ycomm_recvptr = omp_target_alloc(int(max(1_C_INT, recv_elems), c_size_t)*int(16, c_size_t), omp_get_default_device())
+      call c_f_pointer(ycomm_sendptr, ycomm_sendbuf, [max(1_C_INT, send_elems)])
+      call c_f_pointer(ycomm_recvptr, ycomm_recvbuf, [max(1_C_INT, recv_elems)])
+#else
+      if (allocated(ycomm_sendbuf)) then
+        !$omp target exit data map(delete: ycomm_sendbuf, ycomm_recvbuf)
+        deallocate (ycomm_sendbuf, ycomm_recvbuf)
+      end if
+      allocate (ycomm_sendbuf(max(1_C_INT, send_elems)), ycomm_recvbuf(max(1_C_INT, recv_elems)))
+      !$omp target enter data map(alloc: ycomm_sendbuf, ycomm_recvbuf)
+#endif
+      ycomm_send_capacity = max(1_C_INT, send_elems)
+      ycomm_recv_capacity = max(1_C_INT, recv_elems)
+    end subroutine ensure_ycomm_buffers
+
 #ifdef HAVE_MPI
     subroutine yslab_transpose_to_full(field, slab, ny, nz, nlines, nlines_z, include_physical_ghosts)
       implicit none
@@ -151,8 +188,6 @@
       complex(C_DOUBLE_COMPLEX), intent(in) :: field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
       complex(C_DOUBLE_COMPLEX), intent(inout) :: slab(-1:, :)
       logical, intent(in) :: include_physical_ghosts
-      complex(C_DOUBLE_COMPLEX), allocatable :: send(:), recv(:)
-      integer, allocatable :: send_counts(:), recv_counts(:), send_displs(:), recv_displs(:)
       integer(C_INT) :: dest, src, first_line, line_count
       integer(C_INT) :: y_first, y_last, rows, local_rows, peer_rows, total_send, total_recv
       integer(C_INT) :: ilocal, iline, ix, iz, iy, p
@@ -165,35 +200,34 @@
       end if
 
       call roctxPush("yslab_to_full setup_counts")
-      allocate (send_counts(npy_grid), recv_counts(npy_grid), send_displs(npy_grid), recv_displs(npy_grid))
       total_send = 0
       total_recv = 0
       YSLAB_RANGE_FROM_CACHE(ipy, ny, 0_C_INT, 0_C_INT, include_physical_ghosts, y_first, y_last)
       local_rows = y_last - y_first + 1
       do dest = 0, npy_grid - 1
         line_count = yslab_line_count_by_rank(dest)
-        send_counts(dest + 1) = line_count*local_rows
-        send_displs(dest + 1) = total_send
-        total_send = total_send + send_counts(dest + 1)
+        yslab_send_counts(dest + 1) = line_count*local_rows
+        yslab_send_displs(dest + 1) = total_send
+        total_send = total_send + yslab_send_counts(dest + 1)
 
         YSLAB_RANGE_FROM_CACHE(dest, ny, 0_C_INT, 0_C_INT, include_physical_ghosts, y_first, y_last)
         peer_rows = y_last - y_first + 1
-        recv_counts(dest + 1) = yslab_owned_line_count*peer_rows
-        recv_displs(dest + 1) = total_recv
-        total_recv = total_recv + recv_counts(dest + 1)
+        yslab_recv_counts(dest + 1) = yslab_owned_line_count*peer_rows
+        yslab_recv_displs(dest + 1) = total_recv
+        total_recv = total_recv + yslab_recv_counts(dest + 1)
       end do
       call roctxPop("yslab_to_full setup_counts")
 
-      call roctxPush("yslab_to_full allocate_buffers")
-      allocate (send(max(1, total_send)), recv(max(1, total_recv)))
-      !$omp target enter data map(alloc: send, recv) map(to: send_displs, recv_displs)
-      call roctxPop("yslab_to_full allocate_buffers")
+      if (total_send > size(sendbuf, 1) .or. total_recv > size(recvbuf, 1)) then
+        error stop "yslab_transpose_to_full: persistent transpose buffers too small"
+      end if
+      !$omp target update to(yslab_send_displs, yslab_recv_displs)
 
       YSLAB_RANGE_FROM_CACHE(ipy, ny, 0_C_INT, 0_C_INT, include_physical_ghosts, y_first, y_last)
       rows = y_last - y_first + 1
       call roctxPush("yslab_to_full pack")
       !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(field, send, send_displs, nlines_z, rows, y_first, y_last, nlines, nz, nx0, npy_grid) &
+      !$omp shared(field, sendbuf, yslab_send_displs, nlines_z, rows, y_first, y_last, nlines, nz, nx0, npy_grid) &
       !$omp shared(yslab_first_line_by_rank, yslab_line_count_by_rank) &
       !$omp private(dest, ilocal, iy, first_line, line_count, iline, ix, iz, p)
       do dest = 0, npy_grid - 1
@@ -205,8 +239,8 @@
             iline = first_line + ilocal - 1
             ix = (iline - 1)/nlines_z + nx0
             iz = mod(iline - 1, nlines_z) - nz
-            p = send_displs(dest + 1) + (ilocal - 1)*rows + (iy - y_first + 1)
-            send(p) = field(iy, iz, ix)
+            p = yslab_send_displs(dest + 1) + (ilocal - 1)*rows + (iy - y_first + 1)
+            sendbuf(p, 1) = field(iy, iz, ix)
           end do
         end do
       end do
@@ -215,10 +249,10 @@
 
       call roctxPush("MPI_Alltoallv yslab_to_full")
 #ifndef HAVE_HIP
-      !$omp target data use_device_addr(send, recv)
+      !$omp target data use_device_addr(sendbuf, recvbuf)
 #endif
-      call MPI_Alltoallv(send, send_counts, send_displs, MPI_DOUBLE_COMPLEX, &
-                         recv, recv_counts, recv_displs, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
+      call MPI_Alltoallv(sendbuf(1:total_send, 1), yslab_send_counts, yslab_send_displs, MPI_DOUBLE_COMPLEX, &
+                         recvbuf(1:total_recv, 1), yslab_recv_counts, yslab_recv_displs, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
 #ifndef HAVE_HIP
       !$omp end target data
 #endif
@@ -226,7 +260,7 @@
 
       call roctxPush("yslab_to_full unpack")
       !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(slab, recv, recv_displs, yslab_owned_line_count, include_physical_ghosts, ny, npy_grid) &
+      !$omp shared(slab, recvbuf, yslab_recv_displs, yslab_owned_line_count, include_physical_ghosts, ny, npy_grid) &
       !$omp shared(yslab_active_first_y_by_rank) &
       !$omp private(src, ilocal, iy, y_first, y_last, rows, p)
       do src = 0, npy_grid - 1
@@ -235,18 +269,13 @@
             YSLAB_RANGE_FROM_CACHE(src, ny, 0_C_INT, 0_C_INT, include_physical_ghosts, y_first, y_last)
             if (iy < y_first .or. iy > y_last) cycle
             rows = y_last - y_first + 1
-            p = recv_displs(src + 1) + (ilocal - 1)*rows + (iy - y_first + 1)
-            slab(iy, ilocal) = recv(p)
+            p = yslab_recv_displs(src + 1) + (ilocal - 1)*rows + (iy - y_first + 1)
+            slab(iy, ilocal) = recvbuf(p, 1)
           end do
         end do
       end do
       !$omp end target teams distribute parallel do
       call roctxPop("yslab_to_full unpack")
-
-      call roctxPush("yslab_to_full cleanup")
-      !$omp target exit data map(delete: send, recv, send_displs, recv_displs)
-      deallocate (send, recv, send_counts, recv_counts, send_displs, recv_displs)
-      call roctxPop("yslab_to_full cleanup")
     end subroutine yslab_transpose_to_full
 
     subroutine yslab_transpose_from_full(slab, field, ny, nz, nlines, nlines_z)
@@ -254,8 +283,6 @@
       integer(C_INT), intent(in) :: ny, nz, nlines, nlines_z
       complex(C_DOUBLE_COMPLEX), intent(in) :: slab(-1:, :)
       complex(C_DOUBLE_COMPLEX), intent(inout) :: field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-      complex(C_DOUBLE_COMPLEX), allocatable :: send(:), recv(:)
-      integer, allocatable :: send_counts(:), recv_counts(:), send_displs(:), recv_displs(:)
       integer(C_INT) :: dest, src, first_line, line_count
       integer(C_INT) :: y_first, y_last, rows, local_rows, peer_rows, total_send, total_recv
       integer(C_INT) :: ilocal, iline, ix, iz, iy, p
@@ -268,7 +295,6 @@
       end if
 
       call roctxPush("yslab_from_full setup_counts")
-      allocate (send_counts(npy_grid), recv_counts(npy_grid), send_displs(npy_grid), recv_displs(npy_grid))
       total_send = 0
       total_recv = 0
       YSLAB_RANGE_FROM_CACHE(ipy, ny, 2_C_INT, 2_C_INT, .true., y_first, y_last)
@@ -276,25 +302,25 @@
       do dest = 0, npy_grid - 1
         YSLAB_RANGE_FROM_CACHE(dest, ny, 2_C_INT, 2_C_INT, .true., y_first, y_last)
         peer_rows = y_last - y_first + 1
-        send_counts(dest + 1) = yslab_owned_line_count*peer_rows
-        send_displs(dest + 1) = total_send
-        total_send = total_send + send_counts(dest + 1)
+        yslab_send_counts(dest + 1) = yslab_owned_line_count*peer_rows
+        yslab_send_displs(dest + 1) = total_send
+        total_send = total_send + yslab_send_counts(dest + 1)
 
         line_count = yslab_line_count_by_rank(dest)
-        recv_counts(dest + 1) = line_count*local_rows
-        recv_displs(dest + 1) = total_recv
-        total_recv = total_recv + recv_counts(dest + 1)
+        yslab_recv_counts(dest + 1) = line_count*local_rows
+        yslab_recv_displs(dest + 1) = total_recv
+        total_recv = total_recv + yslab_recv_counts(dest + 1)
       end do
       call roctxPop("yslab_from_full setup_counts")
 
-      call roctxPush("yslab_from_full allocate_buffers")
-      allocate (send(max(1, total_send)), recv(max(1, total_recv)))
-      !$omp target enter data map(alloc: send, recv) map(to: send_displs, recv_displs)
-      call roctxPop("yslab_from_full allocate_buffers")
+      if (total_send > size(sendbuf, 1) .or. total_recv > size(recvbuf, 1)) then
+        error stop "yslab_transpose_from_full: persistent transpose buffers too small"
+      end if
+      !$omp target update to(yslab_send_displs, yslab_recv_displs)
 
       call roctxPush("yslab_from_full pack")
       !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(slab, send, send_displs, yslab_owned_line_count, ny, npy_grid) &
+      !$omp shared(slab, sendbuf, yslab_send_displs, yslab_owned_line_count, ny, npy_grid) &
       !$omp shared(yslab_active_first_y_by_rank) &
       !$omp private(dest, ilocal, iy, y_first, y_last, rows, p)
       do dest = 0, npy_grid - 1
@@ -303,8 +329,8 @@
             YSLAB_RANGE_FROM_CACHE(dest, ny, 2_C_INT, 2_C_INT, .true., y_first, y_last)
             if (iy < y_first .or. iy > y_last) cycle
             rows = y_last - y_first + 1
-            p = send_displs(dest + 1) + (ilocal - 1)*rows + (iy - y_first + 1)
-            send(p) = slab(iy, ilocal)
+            p = yslab_send_displs(dest + 1) + (ilocal - 1)*rows + (iy - y_first + 1)
+            sendbuf(p, 1) = slab(iy, ilocal)
           end do
         end do
       end do
@@ -313,10 +339,10 @@
 
       call roctxPush("MPI_Alltoallv yslab_from_full")
 #ifndef HAVE_HIP
-      !$omp target data use_device_addr(send, recv)
+      !$omp target data use_device_addr(sendbuf, recvbuf)
 #endif
-      call MPI_Alltoallv(send, send_counts, send_displs, MPI_DOUBLE_COMPLEX, &
-                         recv, recv_counts, recv_displs, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
+      call MPI_Alltoallv(sendbuf(1:total_send, 1), yslab_send_counts, yslab_send_displs, MPI_DOUBLE_COMPLEX, &
+                         recvbuf(1:total_recv, 1), yslab_recv_counts, yslab_recv_displs, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
 #ifndef HAVE_HIP
       !$omp end target data
 #endif
@@ -326,7 +352,7 @@
       rows = y_last - y_first + 1
       call roctxPush("yslab_from_full unpack")
       !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(field, recv, recv_displs, nlines_z, rows, y_first, y_last, nz, nx0, nlines, npy_grid) &
+      !$omp shared(field, recvbuf, yslab_recv_displs, nlines_z, rows, y_first, y_last, nz, nx0, nlines, npy_grid) &
       !$omp shared(yslab_first_line_by_rank, yslab_line_count_by_rank) &
       !$omp private(src, ilocal, iy, first_line, line_count, iline, ix, iz, p)
       do src = 0, npy_grid - 1
@@ -338,18 +364,13 @@
             iline = first_line + ilocal - 1
             ix = (iline - 1)/nlines_z + nx0
             iz = mod(iline - 1, nlines_z) - nz
-            p = recv_displs(src + 1) + (ilocal - 1)*rows + (iy - y_first + 1)
-            field(iy, iz, ix) = recv(p)
+            p = yslab_recv_displs(src + 1) + (ilocal - 1)*rows + (iy - y_first + 1)
+            field(iy, iz, ix) = recvbuf(p, 1)
           end do
         end do
       end do
       !$omp end target teams distribute parallel do
       call roctxPop("yslab_from_full unpack")
-
-      call roctxPush("yslab_from_full cleanup")
-      !$omp target exit data map(delete: send, recv, send_displs, recv_displs)
-      deallocate (send, recv, send_counts, recv_counts, send_displs, recv_displs)
-      call roctxPop("yslab_from_full cleanup")
     end subroutine yslab_transpose_from_full
 #endif
 
@@ -596,18 +617,42 @@
       character(len=*), intent(in) :: marker
 #ifndef HAVE_MPI
       integer(C_INT) :: irow, icol
+#else
+      integer(C_INT) :: send_elems, recv_elems, src, dst_col, irow, icol
 #endif
 
 #ifdef HAVE_MPI
+      send_elems = nrows*ncols
+      recv_elems = send_elems*npy_grid
+      call ensure_ycomm_buffers(send_elems, recv_elems)
+      !$omp target teams distribute parallel do collapse(2) default(none) &
+      !$omp shared(send_rows, ycomm_sendbuf, nrows, ncols) private(irow, icol)
+      do icol = 1, ncols
+        do irow = 1, nrows
+          ycomm_sendbuf(irow + (icol - 1)*nrows) = send_rows(irow, icol)
+        end do
+      end do
+      !$omp end target teams distribute parallel do
       call roctxPush(marker)
 #ifndef HAVE_HIP
-      !$omp target data use_device_addr(send_rows, recv_rows)
+      !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
 #endif
-      call MPI_Allgather(send_rows, nrows*ncols, MPI_DOUBLE_COMPLEX, recv_rows, nrows*ncols, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
+      call MPI_Allgather(ycomm_sendbuf(1:send_elems), send_elems, MPI_DOUBLE_COMPLEX, &
+                         ycomm_recvbuf(1:recv_elems), send_elems, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
 #ifndef HAVE_HIP
       !$omp end target data
 #endif
       call roctxPop(marker)
+      !$omp target teams distribute parallel do collapse(3) default(none) &
+      !$omp shared(recv_rows, ycomm_recvbuf, nrows, ncols, npy_grid, send_elems) private(src, dst_col, irow)
+      do src = 1, npy_grid
+        do dst_col = 1, ncols
+          do irow = 1, nrows
+            recv_rows(irow, dst_col, src) = ycomm_recvbuf(irow + (dst_col - 1)*nrows + (src - 1)*send_elems)
+          end do
+        end do
+      end do
+      !$omp end target teams distribute parallel do
 #else
       !$omp target teams distribute parallel do collapse(2) default(none) &
       !$omp shared(send_rows, recv_rows, nrows, ncols) private(irow, icol)
