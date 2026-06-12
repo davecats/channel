@@ -847,7 +847,10 @@ CONTAINS
     procedure(compact_component_assembly) :: assemble_system
     procedure(compact_boundary_assembly) :: boundary_system
     real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
-    complex(C_DOUBLE_COMPLEX), target, intent(in) :: source_values(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    complex(C_DOUBLE_COMPLEX), target, intent(in) :: source_values( &
+                                                     lbound(field_values, 1):ubound(field_values, 1), &
+                                                     lbound(field_values, 2):ubound(field_values, 2), &
+                                                     lbound(field_values, 3):ubound(field_values, 3))
     character(len=*), optional, intent(in) :: solve_label
     logical, optional, intent(in) :: symmetric_operator, transpose_derivative
     integer(C_INT) :: nlines_z, total_line_count, owned_first_line, owned_line_count

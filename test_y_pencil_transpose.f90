@@ -2,6 +2,7 @@
 
 program test_y_reduced_known_good_local_dst
   use, intrinsic :: iso_c_binding
+  use dnsdata, only: eliminate_assembled_boundaries, nz
   use mpi_transpose
   use y_line_solvers, only: ys_prepare_assembled_workspace, ys_solve_endpoint_schur, &
                             ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, &
@@ -77,6 +78,7 @@ program test_y_reduced_known_good_local_dst
   reduced_local = cmplx(-999.0d0, -999.0d0, kind=C_DOUBLE)
 
   call ys_prepare_assembled_workspace(ny_test, nz_test, ny0, nyN, 1_C_INT, nxB*(2*nz_test + 1), .true.)
+  nz = nz_test
 
   do ix = 1, nxB
     global_x = nx0 + ix - 1
@@ -92,6 +94,7 @@ program test_y_reduced_known_good_local_dst
     end do
   end do
 
+  call eliminate_assembled_boundaries(ny0, nyN, ny0 == 1_C_INT, nyN == ny_test - 1)
   call ys_solve_endpoint_schur(reduced_local, .false.)
 
   local_err = 0.0d0
