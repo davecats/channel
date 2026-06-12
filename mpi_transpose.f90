@@ -18,25 +18,15 @@
   if ((part) < mod((total), (nparts))) count = count + 1; \
   start = (part)*((total)/(nparts)) + min((part), mod((total), (nparts))) + 1
 
-#define YSLAB_LINE_RANGE(rank, nlines_z, nlines, first_line, line_count) \
-  line_count = (((nlines)/(nlines_z))/npy_grid + merge(1_C_INT, 0_C_INT, (rank) < mod((nlines)/(nlines_z), npy_grid)))*(nlines_z); \
-  first_line = (((rank)*(((nlines)/(nlines_z))/npy_grid) + min((rank), mod((nlines)/(nlines_z), npy_grid)))*(nlines_z)) + 1
-
-#define YSLAB_ACTIVE_RANGE(rank, ny, first_y, last_y) \
-  first_y = 1 + (rank)*((ny) - 1)/npy_grid; \
-  last_y = ((rank) + 1)*((ny) - 1)/npy_grid
-
-#define YSLAB_UNIQUE_RANGE(rank, ny, include_physical_ghosts, first_y, last_y) \
-  YSLAB_ACTIVE_RANGE(rank, ny, first_y, last_y); \
-  if (include_physical_ghosts) then; \
-    if ((rank) == 0) first_y = -1; \
-    if ((rank) == npy_grid - 1) last_y = (ny) + 1; \
-  end if
-
-#define YSLAB_PADDED_RANGE(rank, ny, first_y, last_y) \
-  YSLAB_ACTIVE_RANGE(rank, ny, first_y, last_y); \
-  first_y = first_y - 2; \
-  last_y = last_y + 2
+#define YSLAB_RANGE_FROM_CACHE(rank, ny, lower_pad, upper_pad, include_physical_ghosts, first_y, last_y) \
+  first_y = yslab_active_first_y_by_rank(rank) - (lower_pad); \
+  if ((include_physical_ghosts) .and. (rank) == 0) first_y = min(first_y, -1_C_INT); \
+  if ((rank) == npy_grid - 1) then; \
+    last_y = (ny) - 1 + (upper_pad); \
+  else; \
+    last_y = yslab_active_first_y_by_rank((rank) + 1) - 1 + (upper_pad); \
+  end if; \
+  if ((include_physical_ghosts) .and. (rank) == npy_grid - 1) last_y = max(last_y, (ny) + 1)
 
   MODULE mpi_transpose
 
@@ -63,6 +53,10 @@
     complex(C_DOUBLE_COMPLEX), allocatable, target, save :: yslab_workspace(:, :)
     integer(C_INT), save :: yslab_scratch_rows = -1
     integer(C_INT), save :: yslab_scratch_lines = -1
+    integer(C_INT), allocatable, save :: yslab_first_line_by_rank(:), yslab_line_count_by_rank(:)
+    integer(C_INT), allocatable, save :: yslab_active_first_y_by_rank(:)
+    integer(C_INT), save :: yslab_owned_first_line = 1
+    integer(C_INT), save :: yslab_owned_line_count = 0
     integer(C_INT), save :: nproc, iproc, ierr, nzd, nx
     integer(C_INT), save :: npy_grid = 1, npxz = 1, ipy = 0, ipxz = 0
     integer(C_INT), save :: nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN, sendcount
@@ -74,6 +68,47 @@
 #endif
 
   CONTAINS
+
+    subroutine setup_y_decomposition(ny, nlines_z, nx_lines)
+      implicit none
+      integer(C_INT), intent(in) :: ny, nlines_z, nx_lines
+      integer(C_INT) :: rank, first_x, x_count, base_count, remainder
+
+      ! For y slabs, the x subrange is further decomposed instead of a pencil decomposition
+      ! That way we can always keep the full z range in the local workspace, which makes the code simpler
+      ! Computationally it makes no difference since the line solve does not require any x/z ghost information,
+      ! and the number of systems we solve per rank is identical
+
+      if (allocated(yslab_first_line_by_rank)) then
+        !$omp target exit data map(delete: yslab_first_line_by_rank, yslab_line_count_by_rank, &
+        !$omp& yslab_active_first_y_by_rank)
+        deallocate (yslab_first_line_by_rank, yslab_line_count_by_rank, &
+                    yslab_active_first_y_by_rank)
+      end if
+
+      allocate (yslab_first_line_by_rank(0:npy_grid - 1), yslab_line_count_by_rank(0:npy_grid - 1), &
+                yslab_active_first_y_by_rank(0:npy_grid - 1))
+
+      base_count = nx_lines/npy_grid
+      remainder = mod(nx_lines, npy_grid)
+
+      do rank = 0, npy_grid - 1
+        x_count = base_count
+        if (rank < remainder) x_count = x_count + 1
+        first_x = rank*base_count + min(rank, remainder)
+
+        yslab_line_count_by_rank(rank) = x_count*nlines_z
+        yslab_first_line_by_rank(rank) = first_x*nlines_z + 1
+
+        yslab_active_first_y_by_rank(rank) = 1 + rank*(ny - 1)/npy_grid
+      end do
+
+      yslab_owned_first_line = yslab_first_line_by_rank(ipy)
+      yslab_owned_line_count = yslab_line_count_by_rank(ipy)
+
+      !$omp target enter data map(to: yslab_first_line_by_rank, yslab_line_count_by_rank, &
+      !$omp& yslab_active_first_y_by_rank)
+    end subroutine setup_y_decomposition
 
     subroutine prepare_yslab_scratch(nrows, nlines)
       implicit none
@@ -118,8 +153,8 @@
       logical, intent(in) :: include_physical_ghosts
       complex(C_DOUBLE_COMPLEX), allocatable :: send(:), recv(:)
       integer, allocatable :: send_counts(:), recv_counts(:), send_displs(:), recv_displs(:)
-      integer(C_INT) :: dest, src, first_line, line_count, my_first_line, my_line_count
-      integer(C_INT) :: y_first, y_last, rows, total_send, total_recv
+      integer(C_INT) :: dest, src, first_line, line_count
+      integer(C_INT) :: y_first, y_last, rows, local_rows, peer_rows, total_send, total_recv
       integer(C_INT) :: ilocal, iline, ix, iz, iy, p
 
       if (npy_grid == 1) then
@@ -131,21 +166,19 @@
 
       call roctxPush("yslab_to_full setup_counts")
       allocate (send_counts(npy_grid), recv_counts(npy_grid), send_displs(npy_grid), recv_displs(npy_grid))
-      YSLAB_LINE_RANGE(ipy, nlines_z, nlines, my_first_line, my_line_count)
-
       total_send = 0
       total_recv = 0
+      YSLAB_RANGE_FROM_CACHE(ipy, ny, 0_C_INT, 0_C_INT, include_physical_ghosts, y_first, y_last)
+      local_rows = y_last - y_first + 1
       do dest = 0, npy_grid - 1
-        YSLAB_LINE_RANGE(dest, nlines_z, nlines, first_line, line_count)
-        YSLAB_UNIQUE_RANGE(ipy, ny, include_physical_ghosts, y_first, y_last)
-        rows = y_last - y_first + 1
-        send_counts(dest + 1) = line_count*rows
+        line_count = yslab_line_count_by_rank(dest)
+        send_counts(dest + 1) = line_count*local_rows
         send_displs(dest + 1) = total_send
         total_send = total_send + send_counts(dest + 1)
 
-        YSLAB_UNIQUE_RANGE(dest, ny, include_physical_ghosts, y_first, y_last)
-        rows = y_last - y_first + 1
-        recv_counts(dest + 1) = my_line_count*rows
+        YSLAB_RANGE_FROM_CACHE(dest, ny, 0_C_INT, 0_C_INT, include_physical_ghosts, y_first, y_last)
+        peer_rows = y_last - y_first + 1
+        recv_counts(dest + 1) = yslab_owned_line_count*peer_rows
         recv_displs(dest + 1) = total_recv
         total_recv = total_recv + recv_counts(dest + 1)
       end do
@@ -156,17 +189,18 @@
       !$omp target enter data map(alloc: send, recv) map(to: send_displs, recv_displs)
       call roctxPop("yslab_to_full allocate_buffers")
 
-      YSLAB_UNIQUE_RANGE(ipy, ny, include_physical_ghosts, y_first, y_last)
+      YSLAB_RANGE_FROM_CACHE(ipy, ny, 0_C_INT, 0_C_INT, include_physical_ghosts, y_first, y_last)
       rows = y_last - y_first + 1
       call roctxPush("yslab_to_full pack")
       !$omp target teams distribute parallel do collapse(3) default(none) &
       !$omp shared(field, send, send_displs, nlines_z, rows, y_first, y_last, nlines, nz, nx0, npy_grid) &
-      !$omp shared(include_physical_ghosts) &
+      !$omp shared(yslab_first_line_by_rank, yslab_line_count_by_rank) &
       !$omp private(dest, ilocal, iy, first_line, line_count, iline, ix, iz, p)
       do dest = 0, npy_grid - 1
         do ilocal = 1, nlines
           do iy = y_first, y_last
-            YSLAB_LINE_RANGE(dest, nlines_z, nlines, first_line, line_count)
+            first_line = yslab_first_line_by_rank(dest)
+            line_count = yslab_line_count_by_rank(dest)
             if (ilocal > line_count) cycle
             iline = first_line + ilocal - 1
             ix = (iline - 1)/nlines_z + nx0
@@ -192,12 +226,13 @@
 
       call roctxPush("yslab_to_full unpack")
       !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(slab, recv, recv_displs, my_line_count, include_physical_ghosts, ny, npy_grid) &
+      !$omp shared(slab, recv, recv_displs, yslab_owned_line_count, include_physical_ghosts, ny, npy_grid) &
+      !$omp shared(yslab_active_first_y_by_rank) &
       !$omp private(src, ilocal, iy, y_first, y_last, rows, p)
       do src = 0, npy_grid - 1
-        do ilocal = 1, my_line_count
+        do ilocal = 1, yslab_owned_line_count
           do iy = -1, ny + 1
-            YSLAB_UNIQUE_RANGE(src, ny, include_physical_ghosts, y_first, y_last)
+            YSLAB_RANGE_FROM_CACHE(src, ny, 0_C_INT, 0_C_INT, include_physical_ghosts, y_first, y_last)
             if (iy < y_first .or. iy > y_last) cycle
             rows = y_last - y_first + 1
             p = recv_displs(src + 1) + (ilocal - 1)*rows + (iy - y_first + 1)
@@ -221,8 +256,8 @@
       complex(C_DOUBLE_COMPLEX), intent(inout) :: field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
       complex(C_DOUBLE_COMPLEX), allocatable :: send(:), recv(:)
       integer, allocatable :: send_counts(:), recv_counts(:), send_displs(:), recv_displs(:)
-      integer(C_INT) :: dest, src, first_line, line_count, my_first_line, my_line_count
-      integer(C_INT) :: y_first, y_last, rows, total_send, total_recv
+      integer(C_INT) :: dest, src, first_line, line_count
+      integer(C_INT) :: y_first, y_last, rows, local_rows, peer_rows, total_send, total_recv
       integer(C_INT) :: ilocal, iline, ix, iz, iy, p
 
       if (npy_grid == 1) then
@@ -234,21 +269,19 @@
 
       call roctxPush("yslab_from_full setup_counts")
       allocate (send_counts(npy_grid), recv_counts(npy_grid), send_displs(npy_grid), recv_displs(npy_grid))
-      YSLAB_LINE_RANGE(ipy, nlines_z, nlines, my_first_line, my_line_count)
-
       total_send = 0
       total_recv = 0
+      YSLAB_RANGE_FROM_CACHE(ipy, ny, 2_C_INT, 2_C_INT, .true., y_first, y_last)
+      local_rows = y_last - y_first + 1
       do dest = 0, npy_grid - 1
-        YSLAB_PADDED_RANGE(dest, ny, y_first, y_last)
-        rows = y_last - y_first + 1
-        send_counts(dest + 1) = my_line_count*rows
+        YSLAB_RANGE_FROM_CACHE(dest, ny, 2_C_INT, 2_C_INT, .true., y_first, y_last)
+        peer_rows = y_last - y_first + 1
+        send_counts(dest + 1) = yslab_owned_line_count*peer_rows
         send_displs(dest + 1) = total_send
         total_send = total_send + send_counts(dest + 1)
 
-        YSLAB_LINE_RANGE(dest, nlines_z, nlines, first_line, line_count)
-        YSLAB_PADDED_RANGE(ipy, ny, y_first, y_last)
-        rows = y_last - y_first + 1
-        recv_counts(dest + 1) = line_count*rows
+        line_count = yslab_line_count_by_rank(dest)
+        recv_counts(dest + 1) = line_count*local_rows
         recv_displs(dest + 1) = total_recv
         total_recv = total_recv + recv_counts(dest + 1)
       end do
@@ -261,12 +294,13 @@
 
       call roctxPush("yslab_from_full pack")
       !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(slab, send, send_displs, my_line_count, ny, npy_grid) &
+      !$omp shared(slab, send, send_displs, yslab_owned_line_count, ny, npy_grid) &
+      !$omp shared(yslab_active_first_y_by_rank) &
       !$omp private(dest, ilocal, iy, y_first, y_last, rows, p)
       do dest = 0, npy_grid - 1
-        do ilocal = 1, my_line_count
+        do ilocal = 1, yslab_owned_line_count
           do iy = -1, ny + 1
-            YSLAB_PADDED_RANGE(dest, ny, y_first, y_last)
+            YSLAB_RANGE_FROM_CACHE(dest, ny, 2_C_INT, 2_C_INT, .true., y_first, y_last)
             if (iy < y_first .or. iy > y_last) cycle
             rows = y_last - y_first + 1
             p = send_displs(dest + 1) + (ilocal - 1)*rows + (iy - y_first + 1)
@@ -288,16 +322,18 @@
 #endif
       call roctxPop("MPI_Alltoallv yslab_from_full")
 
-      YSLAB_PADDED_RANGE(ipy, ny, y_first, y_last)
+      YSLAB_RANGE_FROM_CACHE(ipy, ny, 2_C_INT, 2_C_INT, .true., y_first, y_last)
       rows = y_last - y_first + 1
       call roctxPush("yslab_from_full unpack")
       !$omp target teams distribute parallel do collapse(3) default(none) &
       !$omp shared(field, recv, recv_displs, nlines_z, rows, y_first, y_last, nz, nx0, nlines, npy_grid) &
+      !$omp shared(yslab_first_line_by_rank, yslab_line_count_by_rank) &
       !$omp private(src, ilocal, iy, first_line, line_count, iline, ix, iz, p)
       do src = 0, npy_grid - 1
         do ilocal = 1, nlines
           do iy = y_first, y_last
-            YSLAB_LINE_RANGE(src, nlines_z, nlines, first_line, line_count)
+            first_line = yslab_first_line_by_rank(src)
+            line_count = yslab_line_count_by_rank(src)
             if (ilocal > line_count) cycle
             iline = first_line + ilocal - 1
             ix = (iline - 1)/nlines_z + nx0
@@ -643,6 +679,7 @@
       ! Calculate domain division
       nx0 = ipxz*(nxpp)/npxz; nxN = (ipxz + 1)*(nxpp)/npxz - 1; nxB = nxN - nx0 + 1; 
       nz0 = ipxz*nzd/npxz; nzN = (ipxz + 1)*nzd/npxz - 1; nzB = nzN - nz0 + 1; 
+      call setup_y_decomposition(ny, 2*nz + 1, nxB)
       has_average = (nx0 == 0)
       !$omp target update to(npy_grid, npxz, ipy, ipxz, nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN)
       fft_transpose_is_local = (nzB == nzd)

@@ -222,7 +222,6 @@ CONTAINS
     use y_line_solvers, only: ys_prepare_assembled_workspace
     IMPLICIT NONE
     INTEGER(C_INT) :: ix, iz
-    integer(C_INT) :: yslab_first_line, yslab_line_count
     logical, intent(IN) :: solveNS
     ALLOCATE (V(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3 + nPhi)); V = 0
     !$omp target enter data map(to: V)
@@ -272,8 +271,7 @@ CONTAINS
     allocate (fr(3 + 2*nPhi)); fr = 0.0
     call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, nxB*(2*nz + 1), .true.)
     if (solveNS .and. use_yslab_linsolve) then
-      call yslab_line_range(ipy, 2*nz + 1, (nxN - nx0 + 1)*(2*nz + 1), yslab_first_line, yslab_line_count)
-      call prepare_yslab_scratch(ny + 3, max(1_C_INT, yslab_line_count))
+      call prepare_yslab_scratch(ny + 3, max(1_C_INT, yslab_owned_line_count))
     end if
   END SUBROUTINE init_memory
 
@@ -853,7 +851,7 @@ CONTAINS
                                                      lbound(field_values, 3):ubound(field_values, 3))
     character(len=*), optional, intent(in) :: solve_label
     logical, optional, intent(in) :: symmetric_operator, transpose_derivative
-    integer(C_INT) :: nlines_z, total_line_count, owned_first_line, owned_line_count
+    integer(C_INT) :: nlines_z, total_line_count
     integer(C_INT) :: ix_first, ix_last, ix, iz, iy
     logical :: has_lower_boundary, has_upper_boundary, symmetric_operator_value, transpose_derivative_value
     complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :), owner_dst(:, :, :)
@@ -870,24 +868,23 @@ CONTAINS
       total_line_count = (nxN - nx0 + 1)*nlines_z
       if (total_line_count <= 0) return
 
-      call yslab_line_range(ipy, nlines_z, total_line_count, owned_first_line, owned_line_count)
-      call prepare_yslab_scratch(ny + 3, max(1_C_INT, owned_line_count))
+      call prepare_yslab_scratch(ny + 3, max(1_C_INT, yslab_owned_line_count))
 
       call roctxPush("yslab compact transpose_to_full")
       call yslab_transpose_to_full(source_values, yslab_workspace, ny, nz, total_line_count, nlines_z, transpose_derivative_value)
       call roctxPop("yslab compact transpose_to_full")
 
-      if (owned_line_count > 0) then
-        ix_first = nx0 + (owned_first_line - 1)/nlines_z
-        ix_last = ix_first + owned_line_count/nlines_z - 1
+      if (yslab_owned_line_count > 0) then
+        ix_first = nx0 + (yslab_owned_first_line - 1)/nlines_z
+        ix_last = ix_first + yslab_owned_line_count/nlines_z - 1
 
-        call ys_prepare_assembled_workspace(ny, nz, 1_C_INT, ny - 1, owned_first_line, owned_line_count, .false.)
+        call ys_prepare_assembled_workspace(ny, nz, 1_C_INT, ny - 1, yslab_owned_first_line, yslab_owned_line_count, .false.)
         owner_src(-1:ny + 1, -nz:nz, ix_first:ix_last) => yslab_workspace
         call assemble_system(owner_src, lambda_coeff, diffusion_coeff, 1_C_INT, ny - 1)
         call boundary_system(owner_src, 1_C_INT, ny - 1, .true., .true.)
         call eliminate_assembled_boundaries(1_C_INT, ny - 1, .true., .true.)
         owner_dst(-1:ny + 1, -nz:nz, ix_first:ix_last) => yslab_workspace
-        call ys_solve_packed_pentadiagonal(ny - 1, owned_line_count, trim(solve_label_value))
+        call ys_solve_packed_pentadiagonal(ny - 1, yslab_owned_line_count, trim(solve_label_value))
         call roctxPush("assembled_scatter_solution")
         !$omp target teams distribute parallel do default(none) &
         !$omp shared(owner_dst, ys_gpsv_owner_rhs, ny, ix_first, ix_last, nz) &

@@ -15,7 +15,8 @@ MODULE pressure_output
   USE mpi_transpose, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, npy_grid, ipy, ierr, &
                            sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, &
                            fft_transpose_is_local, repack_zTOx_local, repack_xTOz_local, &
-                           yslab_workspace, prepare_yslab_scratch, yslab_line_range, yslab_copy_to_full
+                           yslab_workspace, prepare_yslab_scratch, yslab_copy_to_full, &
+                           yslab_owned_first_line, yslab_owned_line_count
   USE roctx, ONLY: roctxPush, roctxPop
   USE y_line_solvers, ONLY: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, ys_lower_ghost_owner, ys_lower_boundary_owner, &
                             ys_upper_boundary_owner, ys_upper_ghost_owner, ys_eqm1_owner, ys_eq0_owner, &
@@ -492,23 +493,21 @@ CONTAINS
 
   subroutine transpose_pressure_velocity_to_yslab()
     implicit none
-    integer(C_INT) :: nlines_z, total_line_count, first_line, owned_line_count
+    integer(C_INT) :: nlines_z, total_line_count
     integer(C_INT) :: ix0_owner, ixN_owner, block_count
 
     nlines_z = 2*nz + 1
     total_line_count = (nxN - nx0 + 1)*nlines_z
     if (total_line_count <= 0) return
 
-    call yslab_line_range(ipy, nlines_z, total_line_count, first_line, owned_line_count)
-
     ! Column block 1 is reserved for solve_compact_component_current_layout().
     ! Pressure stores transposed u/v/w in blocks 2:4 and lets the common solve reuse block 1.
-    block_count = max(1_C_INT, owned_line_count)
+    block_count = max(1_C_INT, yslab_owned_line_count)
     call prepare_yslab_scratch(ny + 3, 4_C_INT*block_count)
 
     nullify (pressure_vslab_u, pressure_vslab_v, pressure_vslab_w)
 
-    if (owned_line_count <= 0) then
+    if (yslab_owned_line_count <= 0) then
 #ifdef HAVE_MPI
       ! Still participate in the collective y-slab transposes even when this rank owns no reduced-x columns.
       call yslab_transpose_to_full(V(:, :, :, 1), yslab_workspace(:, 1:1), ny, nz, total_line_count, nlines_z, .true.)
@@ -524,7 +523,7 @@ CONTAINS
                                  ny, nz, total_line_count, nlines_z, .true.)
 #else
     call yslab_copy_to_full(V(:, :, :, 1), yslab_workspace(:, block_count + 1:2*block_count), &
-                            ny, nz, first_line, owned_line_count, nlines_z)
+                            ny, nz, yslab_owned_first_line, yslab_owned_line_count, nlines_z)
 #endif
     call roctxPop("pressure transpose V_u to yslab")
 
@@ -534,7 +533,7 @@ CONTAINS
                                  ny, nz, total_line_count, nlines_z, .true.)
 #else
     call yslab_copy_to_full(V(:, :, :, 2), yslab_workspace(:, 2*block_count + 1:3*block_count), &
-                            ny, nz, first_line, owned_line_count, nlines_z)
+                            ny, nz, yslab_owned_first_line, yslab_owned_line_count, nlines_z)
 #endif
     call roctxPop("pressure transpose V_v to yslab")
 
@@ -544,12 +543,12 @@ CONTAINS
                                  ny, nz, total_line_count, nlines_z, .true.)
 #else
     call yslab_copy_to_full(V(:, :, :, 3), yslab_workspace(:, 3*block_count + 1:4*block_count), &
-                            ny, nz, first_line, owned_line_count, nlines_z)
+                            ny, nz, yslab_owned_first_line, yslab_owned_line_count, nlines_z)
 #endif
     call roctxPop("pressure transpose V_w to yslab")
 
-    ix0_owner = nx0 + (first_line - 1)/nlines_z
-    ixN_owner = ix0_owner + owned_line_count/nlines_z - 1
+    ix0_owner = nx0 + (yslab_owned_first_line - 1)/nlines_z
+    ixN_owner = ix0_owner + yslab_owned_line_count/nlines_z - 1
     pressure_vslab_u(-1:ny + 1, -nz:nz, ix0_owner:ixN_owner) => yslab_workspace(:, block_count + 1:2*block_count)
     pressure_vslab_v(-1:ny + 1, -nz:nz, ix0_owner:ixN_owner) => yslab_workspace(:, 2*block_count + 1:3*block_count)
     pressure_vslab_w(-1:ny + 1, -nz:nz, ix0_owner:ixN_owner) => yslab_workspace(:, 3*block_count + 1:4*block_count)
