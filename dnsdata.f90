@@ -1016,11 +1016,14 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX) :: zero_mode_u(-1:ny + 1), zero_mode_w(-1:ny + 1), zero_mode_ucor(-1:ny + 1)
 
     call roctxPush("linsolve solve_v")
+    call init_debug_compact_flow_flag()
+    call debug_print_complex_norm3("linsolve solve_v input_V2", V(:, :, :, 2))
     call select_compact_component_boundaries(v0bc, v0m1bc, vnbc, vnp1bc, bc0(:, :, 2), bc0(:, :, 4), bcn(:, :, 2), bcn(:, :, 4))
     call solve_compact_component_current_layout(V(:, :, :, 2), assemble_compact_biharmonic_system, assemble_selected_compact_component_boundaries, &
                                                 lambda, 1.0d0, V(:, :, :, 2))
     call roctxPop("linsolve solve_v")
     call roctxPush("linsolve solve_eta")
+    call debug_print_complex_norm3("linsolve solve_eta input_V1", V(:, :, :, 1))
     call select_compact_component_boundaries(eta0bc, eta0m1bc, etanbc, etanp1bc, bc0(:, :, 5), zero_bc, bcn(:, :, 5), zero_bc)
     call solve_compact_component_current_layout(V(:, :, :, 1), assemble_compact_helmholtz_system, assemble_selected_compact_component_boundaries, &
                                                 lambda, 1.0d0, V(:, :, :, 1))
