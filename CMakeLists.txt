@@ -79,6 +79,9 @@ target_link_libraries(test_y_pencil_transpose PRIVATE channel_core)
 add_executable(test_mean_correction test_mean_correction.f90)
 target_link_libraries(test_mean_correction PRIVATE channel_core)
 
+add_executable(test_hipsparse_gpsv_allocations test_hipsparse_gpsv_allocations.f90)
+target_link_libraries(test_hipsparse_gpsv_allocations PRIVATE channel_core)
+
 # Add a CTest target
 enable_testing()
 include(cmake/tests.cmake)
