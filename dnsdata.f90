@@ -290,6 +290,22 @@ CONTAINS
     if (iproc == 0) print *, "COMPACT_DEBUG ", trim(label), " l1=", l1_norm, " max=", max_abs
   end subroutine debug_print_real_norm3
 
+  subroutine debug_print_rhs_samples(label, arr)
+    implicit none
+    character(*), intent(in) :: label
+    complex(C_DOUBLE_COMPLEX), target, intent(inout) :: arr(ny0:nyN, -nz:nz, nx0:nxN)
+    integer(C_INT) :: sample_ix
+
+    if (.not. debug_compact_flow) return
+
+    sample_ix = merge(1_C_INT, nx0, nxN >= 1_C_INT)
+    !$omp target update from(arr(ny0:ny0, 0:1, 0:sample_ix))
+    if (iproc == 0) then
+      print *, "COMPACT_DEBUG ", trim(label), " sample_zero=", arr(ny0, 0, 0), &
+        " sample_nonzero=", arr(ny0, 1, sample_ix)
+    end if
+  end subroutine debug_print_rhs_samples
+
   function itoa(i) result(str)
     implicit none
     integer(C_INT), intent(in) :: i
@@ -1464,6 +1480,7 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
       END DO
     END DO
     call debug_print_complex_norm3("buildrhs_prepare after_init_d2v newrhs2", memrhs(ny0:nyN, -nz:nz, nx0:nxN, 2))
+    call debug_print_rhs_samples("buildrhs_prepare after_init_d2v newrhs2", memrhs(:, :, :, 2))
 
     !$omp target teams distribute parallel do collapse(3) default(none)  &
     !$omp private(iz, ix, iy, tmp, k, unkn) &
@@ -1489,6 +1506,7 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
       END DO
     END DO
     call debug_print_complex_norm3("buildrhs_prepare after_init_eta newrhs1", memrhs(ny0:nyN, -nz:nz, nx0:nxN, 1))
+    call debug_print_rhs_samples("buildrhs_prepare after_init_eta newrhs1", memrhs(:, :, :, 1))
 
     !$omp target teams distribute parallel do collapse(3) default(none)  &
     !$omp private(iz, ix, iy, tmp, k, unkn) &
@@ -1510,6 +1528,8 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
     end do
     call debug_print_complex_norm3("buildrhs_prepare after_meanforce newrhs1", memrhs(ny0:nyN, -nz:nz, nx0:nxN, 1))
     call debug_print_complex_norm3("buildrhs_prepare after_meanforce newrhs2", memrhs(ny0:nyN, -nz:nz, nx0:nxN, 2))
+    call debug_print_rhs_samples("buildrhs_prepare after_meanforce newrhs1", memrhs(:, :, :, 1))
+    call debug_print_rhs_samples("buildrhs_prepare after_meanforce newrhs2", memrhs(:, :, :, 2))
 
     !initialize phi
     DO iPhi = 1, nPhi
