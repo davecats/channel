@@ -43,6 +43,8 @@ MODULE dnsdata
   logical :: time_from_restart
   logical :: disable_restart_write = .false.
   logical :: use_yslab_linsolve = .false.
+  logical, save :: debug_compact_flow = .false.
+  logical, save :: debug_compact_flow_initialized = .false.
   !Grid
   real(C_DOUBLE), allocatable :: y(:), dy(:)
   real(C_DOUBLE) :: dx, dz, factor
@@ -213,6 +215,60 @@ CONTAINS
     end if
     if (npy == 1) use_yslab_linsolve = .true.
   END SUBROUTINE read_dnsin
+
+  subroutine init_debug_compact_flow_flag()
+    implicit none
+    character(len=16) :: env_value
+    integer :: status, length
+
+    if (debug_compact_flow_initialized) return
+    debug_compact_flow_initialized = .true.
+    debug_compact_flow = .false.
+
+    call get_environment_variable("CHANNEL_DEBUG_COMPACT_FLOW", env_value, length, status)
+    if (status /= 0 .or. length <= 0) return
+
+    select case (adjustl(trim(env_value(:length))))
+    case ("1", "true", "TRUE", "yes", "YES", "on", "ON")
+      debug_compact_flow = .true.
+    end select
+  end subroutine init_debug_compact_flow_flag
+
+  subroutine debug_print_complex_norm3(label, arr)
+    implicit none
+    character(*), intent(in) :: label
+    complex(C_DOUBLE_COMPLEX), target, intent(inout) :: arr(:, :, :)
+    complex(C_DOUBLE_COMPLEX), allocatable :: host_copy(:, :, :)
+    real(C_DOUBLE) :: l1_norm, max_abs
+
+    if (.not. debug_compact_flow) return
+
+    allocate (host_copy(lbound(arr, 1):ubound(arr, 1), lbound(arr, 2):ubound(arr, 2), lbound(arr, 3):ubound(arr, 3)))
+    !$omp target update from(arr)
+    host_copy = arr
+    l1_norm = sum(abs(host_copy))
+    max_abs = maxval(abs(host_copy))
+    if (iproc == 0) print *, "COMPACT_DEBUG ", trim(label), " l1=", l1_norm, " max=", max_abs
+    deallocate (host_copy)
+  end subroutine debug_print_complex_norm3
+
+  subroutine debug_print_complex_norm2(label, arr)
+    implicit none
+    character(*), intent(in) :: label
+    complex(C_DOUBLE_COMPLEX), target, intent(inout) :: arr(:, :)
+    complex(C_DOUBLE_COMPLEX), allocatable :: host_copy(:, :)
+    real(C_DOUBLE) :: l1_norm, max_abs
+
+    if (.not. debug_compact_flow) return
+
+    allocate (host_copy(lbound(arr, 1):ubound(arr, 1), lbound(arr, 2):ubound(arr, 2)))
+    !$omp target update from(arr)
+    host_copy = arr
+    l1_norm = sum(abs(host_copy))
+    max_abs = maxval(abs(host_copy))
+    if (iproc == 0) print *, "COMPACT_DEBUG ", trim(label), " l1=", l1_norm, " max=", max_abs
+    deallocate (host_copy)
+  end subroutine debug_print_complex_norm2
 
   !--------------------------------------------------------------!
   !---------------- Allocate memory for solution ----------------!
@@ -860,6 +916,7 @@ CONTAINS
     if (present(transpose_derivative)) transpose_derivative_value = transpose_derivative
     solve_label_value = "compact full-y gpsv"
     if (present(solve_label)) solve_label_value = solve_label
+    call init_debug_compact_flow_flag()
 
     if (use_yslab_linsolve) then
       nlines_z = 2*nz + 1
@@ -867,10 +924,12 @@ CONTAINS
       if (total_line_count <= 0) return
 
       call prepare_yslab_scratch(ny + 3, max(1_C_INT, yslab_owned_line_count))
+      call debug_print_complex_norm3(trim(solve_label_value)//" source_before_transpose_to_full", source_values)
 
       call roctxPush("yslab compact transpose_to_full")
       call yslab_transpose_to_full(source_values, yslab_workspace, ny, nz, total_line_count, nlines_z, transpose_derivative_value)
       call roctxPop("yslab compact transpose_to_full")
+      call debug_print_complex_norm2(trim(solve_label_value)//" yslab_after_transpose_to_full", yslab_workspace)
 
       if (yslab_owned_line_count > 0) then
         ix_first = nx0 + (yslab_owned_first_line - 1)/nlines_z
@@ -883,6 +942,7 @@ CONTAINS
         call eliminate_assembled_boundaries(1_C_INT, ny - 1, .true., .true.)
         owner_dst(-1:ny + 1, -nz:nz, ix_first:ix_last) => yslab_workspace
         call ys_solve_packed_pentadiagonal(ny - 1, yslab_owned_line_count, trim(solve_label_value))
+        call debug_print_complex_norm3(trim(solve_label_value)//" rhs_after_packed_solve", ys_gpsv_owner_rhs)
         call roctxPush("assembled_scatter_solution")
         !$omp target teams distribute parallel do default(none) &
         !$omp shared(owner_dst, ys_gpsv_owner_rhs, ny, ix_first, ix_last, nz) &
@@ -896,12 +956,15 @@ CONTAINS
         end do
         !$omp end target teams distribute parallel do
         call roctxPop("assembled_scatter_solution")
+        call debug_print_complex_norm2(trim(solve_label_value)//" yslab_after_scatter", yslab_workspace)
         call reconstruct_assembled_boundaries(owner_dst, 1_C_INT, ny - 1, .true., .true., ix_first, ix_last)
+        call debug_print_complex_norm2(trim(solve_label_value)//" yslab_after_reconstruct", yslab_workspace)
       end if
 
       call roctxPush("yslab compact transpose_from_full")
       call yslab_transpose_from_full(yslab_workspace, field_values, ny, nz, total_line_count, nlines_z)
       call roctxPop("yslab compact transpose_from_full")
+      call debug_print_complex_norm3(trim(solve_label_value)//" field_after_transpose_from_full", field_values)
       return
     end if
     call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, (nxN - nx0 + 1)*(2*nz + 1), .true.)
