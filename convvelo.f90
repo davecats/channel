@@ -10,16 +10,18 @@ module convvelo
   use pressure_output, only: compute_poisson, compute_dpdy
   use mpi_transpose, only: ny0, nyN, nx0, nxN, nxB, nzB, nx, has_average, ierr, sendbuf, recvbuf, &
                            pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, nzd, fft_transpose_is_local, &
-                           repack_zTOx_local, repack_xTOz_local
-  use roctx, only: roctxPush, roctxPop
+                           repack_zTOx_local, repack_xTOz_local, roctxPush, roctxPop, &
+                           MPI_Allreduce, MPI_IN_PLACE, MPI_DOUBLE_COMPLEX, MPI_SUM, MPI_COMM_WORLD, &
+                           MPI_Request, MPI_Status, MPI_Wait, MPI_File, MPI_Datatype, MPI_OFFSET_KIND, &
+                           MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, MPI_INTEGER8, MPI_MODE_WRONLY, MPI_MODE_CREATE, &
+                           MPI_INFO_NULL, MPI_Type_create_subarray, MPI_Type_commit, MPI_Type_free, &
+                           MPI_File_open, MPI_File_set_size, MPI_File_write_at, MPI_File_set_view, &
+                           MPI_File_write_all, MPI_File_close
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
   use ffts, only: IFT, RFT, HFT, FFT, VVdx, VVdz
 #else
   use dnsdata, only: VVdx, VVdz
   use ffts, only: IFT, RFT, HFT, FFT
-#endif
-#ifdef HAVE_MPI
-  use mpi_f08
 #endif
 
   implicit none

@@ -3,14 +3,13 @@
 program test_y_reduced_known_good_local_dst
   use, intrinsic :: iso_c_binding
   use dnsdata, only: eliminate_assembled_boundaries, nz
-  use mpi_transpose
+  use mpi_transpose, only: ierr, iproc, nproc, init_MPI, npy_grid, npxz, ipy, ny0, nyN, nx0, nxN, nxB, MPI_COMM_WORLD, &
+                           MPI_Init, MPI_Comm_rank, MPI_Comm_size, MPI_Abort, MPI_Barrier, MPI_Allreduce, MPI_Finalize, &
+                           MPI_DOUBLE_PRECISION, MPI_MAX
   use y_line_solvers, only: ys_prepare_assembled_workspace, ys_solve_endpoint_schur, &
                             ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, &
                             ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
                             ys_eqm1, ys_eq0, ys_eqn, ys_eqnp1
-#ifdef HAVE_MPI
-  use mpi_f08
-#endif
 
   implicit none
 

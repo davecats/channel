@@ -1,8 +1,9 @@
 program test_mean_correction
   use, intrinsic :: iso_c_binding
-  use dnsdata
-  use driver
-  use mpi_transpose, only: ipy, npy_grid, MPI_COMM_Y, ierr
+  use dnsdata, only: ny, der, ni, k2, eta0bc, eta0m1bc, etanbc, etanp1bc, free_memory
+  use driver, only: initialize
+  use mpi_transpose, only: ipy, npy_grid, MPI_COMM_Y, ierr, MPI_Bcast, MPI_Allreduce, MPI_Abort, MPI_Finalize, &
+                           MPI_DOUBLE_COMPLEX, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD
   use compact_line_solvers, only: solve_full_line_compact
   implicit none
 

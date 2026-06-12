@@ -164,7 +164,6 @@ CONTAINS
   SUBROUTINE timeloop()
     USE dnsdata
     USE convvelo, only: advance_convvelo_runtime
-    USE roctx, only: roctxPush, roctxPop
     IMPLICIT NONE
     integer:: iPhi, ix, iz, i, ic
 #ifdef chron
@@ -260,9 +259,16 @@ CONTAINS
   END SUBROUTINE timeloop
 
   SUBROUTINE finalize()
-    USE dnsdata
+    USE dnsdata, only: disable_restart_write, has_terminal, time, save_restart_file, V, &
+#ifdef HAVE_FFTW
+                       VVdz, VVdx, rVVdx, &
+#endif
+                       free_memory
     USE convvelo, only: finalize_convvelo_runtime
-    USE pressure_output
+    USE pressure_output, only: free_pressure_output
+#ifdef HAVE_FFTW
+    USE ffts, only: free_fft
+#endif
     IMPLICIT NONE
     if (disable_restart_write) then
       IF (has_terminal) WRITE (*, *) "End of time/iterations loop: restart write disabled for benchmark profiling at time ", time

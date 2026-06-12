@@ -1,10 +1,13 @@
 program test_convvelo_stats
   use, intrinsic :: iso_c_binding
-  use dnsdata
+  use dnsdata, only: nPhi, ny0, nyN, nz, nx0, nxN, V, read_restart_file, sync_velocity_to_device, free_memory
   use convvelo, only: init_convvelo, reset_convvelo_stats, acc_convvelo_stats, convvelo_stats, free_convvelo
-  use pressure_output
-  use driver
+  use pressure_output, only: free_pressure_output
+  use driver, only: initialize
   use test_convvelo_utils
+#ifdef HAVE_MPI
+  use mpi_f08
+#endif
   implicit none
 
   character(len=*), parameter :: config_file = "tests/convvelo/dns.in"

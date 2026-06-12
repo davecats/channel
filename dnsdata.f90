@@ -24,7 +24,6 @@ MODULE dnsdata
   USE config
   USE rbmat
   USE mpi_transpose
-  USE roctx, only: roctxPush, roctxPop
   USE ffts
 
   IMPLICIT NONE

@@ -15,16 +15,12 @@ MODULE pressure_output
   USE mpi_transpose, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, npy_grid, ipy, ierr, &
                            sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, &
                            fft_transpose_is_local, repack_zTOx_local, repack_xTOz_local, &
-                           yslab_workspace, prepare_yslab_scratch, yslab_copy_to_full, &
-                           yslab_owned_first_line, yslab_owned_line_count
-  USE roctx, ONLY: roctxPush, roctxPop
+                           yslab_workspace, prepare_yslab_scratch, yslab_copy_to_full, yslab_transpose_to_full, &
+                           yslab_owned_first_line, yslab_owned_line_count, roctxPush, roctxPop, &
+                           MPI_Request, MPI_Status, MPI_Wait
   USE y_line_solvers, ONLY: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, ys_lower_ghost_owner, ys_lower_boundary_owner, &
                             ys_upper_boundary_owner, ys_upper_ghost_owner, ys_eqm1_owner, ys_eq0_owner, &
                             ys_eqn_owner, ys_eqnp1_owner
-#ifdef HAVE_MPI
-  USE mpi_transpose, ONLY: yslab_transpose_to_full
-  USE mpi_f08
-#endif
 
   IMPLICIT NONE
 

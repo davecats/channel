@@ -1,7 +1,7 @@
 module test_convvelo_utils
   use, intrinsic :: iso_c_binding
   use, intrinsic :: ieee_arithmetic
-  use dnsdata
+  use dnsdata, only: iproc, ierr, ny, nz, nx, nPhi, ny0, nyN, nx0, nxN, V, read_restart_file
 #ifdef HAVE_MPI
   use mpi_f08
 #endif
