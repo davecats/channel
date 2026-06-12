@@ -76,8 +76,8 @@ CONTAINS
     character(len=*), intent(in) :: label
     complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, :)
     real(C_DOUBLE), intent(inout) :: rx(:, :, :)
-    integer(C_INT) :: nreal, ix, iz, iy, k
-    real(C_DOUBLE) :: theta, max_err, ref_val
+    integer(C_INT) :: nreal, ix, iz, iy, k, worst_iz, worst_iy
+    real(C_DOUBLE) :: theta, max_err, ref_val, err
     complex(C_DOUBLE_COMPLEX) :: phase
 
     call init_debug_fft_compare_flag()
@@ -90,22 +90,31 @@ CONTAINS
 
     !$omp target update from(x, rx)
 
-    iz = 1
-    iy = 1
     max_err = 0.0d0
-    do ix = 1, nreal
-      ref_val = real(x(1, iz, iy), C_DOUBLE) + (-1.0d0)**(ix - 1)*real(x(size(x, 1), iz, iy), C_DOUBLE)
-      do k = 2, size(x, 1) - 1
-        theta = 2.0d0*acos(-1.0d0)*real((ix - 1)*(k - 1), C_DOUBLE)/real(nreal, C_DOUBLE)
-        phase = cmplx(cos(theta), sin(theta), C_DOUBLE_COMPLEX)
-        ref_val = ref_val + 2.0d0*real(x(k, iz, iy)*phase, C_DOUBLE)
+    worst_iz = 1
+    worst_iy = 1
+    do iy = 1, size(x, 3)
+      do iz = 1, size(x, 2)
+        do ix = 1, nreal
+          ref_val = real(x(1, iz, iy), C_DOUBLE) + (-1.0d0)**(ix - 1)*real(x(size(x, 1), iz, iy), C_DOUBLE)
+          do k = 2, size(x, 1) - 1
+            theta = 2.0d0*acos(-1.0d0)*real((ix - 1)*(k - 1), C_DOUBLE)/real(nreal, C_DOUBLE)
+            phase = cmplx(cos(theta), sin(theta), C_DOUBLE_COMPLEX)
+            ref_val = ref_val + 2.0d0*real(x(k, iz, iy)*phase, C_DOUBLE)
+          end do
+          err = abs(rx(ix, iz, iy) - ref_val)
+          if (err > max_err) then
+            max_err = err
+            worst_iz = iz
+            worst_iy = iy
+          end if
+        end do
       end do
-      max_err = max(max_err, abs(rx(ix, iz, iy) - ref_val))
     end do
 
     debug_rft_prints = debug_rft_prints + 1
     print *, "FFT_DEBUG RFT ", trim(label), " n=", nreal, " max_err=", max_err, &
-      " sample_out=", rx(1, iz, iy)
+      " worst_batch=(z:", worst_iz, ",y:", worst_iy, ") sample_out=", rx(1, worst_iz, worst_iy)
   end subroutine debug_compare_rft
 
   subroutine debug_compare_hft(label, rx, x)
@@ -113,8 +122,8 @@ CONTAINS
     character(len=*), intent(in) :: label
     real(C_DOUBLE), intent(inout) :: rx(:, :, :)
     complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, :)
-    integer(C_INT) :: nreal, ix, iz, iy, k
-    real(C_DOUBLE) :: theta, max_err
+    integer(C_INT) :: nreal, ix, iz, iy, k, worst_iz, worst_iy, worst_k
+    real(C_DOUBLE) :: theta, max_err, err
     complex(C_DOUBLE_COMPLEX) :: ref_val, phase
 
     call init_debug_fft_compare_flag()
@@ -127,22 +136,33 @@ CONTAINS
 
     !$omp target update from(rx, x)
 
-    iz = 1
-    iy = 1
     max_err = 0.0d0
-    do k = 1, size(x, 1)
-      ref_val = cmplx(0.0d0, 0.0d0, C_DOUBLE_COMPLEX)
-      do ix = 1, nreal
-        theta = -2.0d0*acos(-1.0d0)*real((ix - 1)*(k - 1), C_DOUBLE)/real(nreal, C_DOUBLE)
-        phase = cmplx(cos(theta), sin(theta), C_DOUBLE_COMPLEX)
-        ref_val = ref_val + rx(ix, iz, iy)*phase
+    worst_iz = 1
+    worst_iy = 1
+    worst_k = 1
+    do iy = 1, size(x, 3)
+      do iz = 1, size(x, 2)
+        do k = 1, size(x, 1)
+          ref_val = cmplx(0.0d0, 0.0d0, C_DOUBLE_COMPLEX)
+          do ix = 1, nreal
+            theta = -2.0d0*acos(-1.0d0)*real((ix - 1)*(k - 1), C_DOUBLE)/real(nreal, C_DOUBLE)
+            phase = cmplx(cos(theta), sin(theta), C_DOUBLE_COMPLEX)
+            ref_val = ref_val + rx(ix, iz, iy)*phase
+          end do
+          err = abs(x(k, iz, iy) - ref_val)
+          if (err > max_err) then
+            max_err = err
+            worst_iz = iz
+            worst_iy = iy
+            worst_k = k
+          end if
+        end do
       end do
-      max_err = max(max_err, abs(x(k, iz, iy) - ref_val))
     end do
 
     debug_hft_prints = debug_hft_prints + 1
     print *, "FFT_DEBUG HFT ", trim(label), " n=", nreal, " max_err=", max_err, &
-      " sample_out=", x(1, iz, iy)
+      " worst_batch=(k:", worst_k, ",z:", worst_iz, ",y:", worst_iy, ") sample_out=", x(worst_k, worst_iz, worst_iy)
   end subroutine debug_compare_hft
 
   subroutine get_fft_memory_estimate(nxd, nxB, nzd, nzB, nPhi, overlapping, n_floats)
