@@ -45,7 +45,6 @@ MODULE dnsdata
   logical :: disable_restart_write = .false.
   logical :: use_yslab_linsolve = .false.
   !Grid
-  integer(C_INT), private :: iy
   real(C_DOUBLE), allocatable :: y(:), dy(:)
   real(C_DOUBLE) :: dx, dz, factor
   !Derivatives
@@ -221,7 +220,7 @@ CONTAINS
   SUBROUTINE init_memory(solveNS)
     use y_line_solvers, only: ys_prepare_assembled_workspace
     IMPLICIT NONE
-    INTEGER(C_INT) :: ix, iz
+    INTEGER(C_INT) :: ix, iy, iz
     logical, intent(IN) :: solveNS
     ALLOCATE (V(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3 + nPhi)); V = 0
     !$omp target enter data map(to: V)
@@ -264,7 +263,7 @@ CONTAINS
     izd = (/(merge(iz, nzd + iz, iz >= 0), iz=-nz, nz)/); ialfa = (/(dcmplx(0.0d0, ix*alfa0), ix=nx0, nxN)/); 
     ibeta = (/(dcmplx(0.0d0, iz*beta0), iz=-nz, nz)/); 
     FORALL (iz=-nz:nz, ix=nx0:nxN) k2(iz, ix) = (alfa0*ix)**2.0d0 + (beta0*iz)**2.0d0
-    !$omp target enter data map(to: izd, ialfa, ibeta, k2, y, iy, rk_rai, ucor, tcor)
+    !$omp target enter data map(to: izd, ialfa, ibeta, k2, y, rk_rai, ucor, tcor)
     IF (solveNS) OPEN (UNIT=195, FILE='Runtimedata.phi', ACTION='write')
     IF (solveNS .AND. has_terminal) OPEN (UNIT=121, FILE='Runtimedata', ACTION='write')
 
@@ -481,11 +480,10 @@ CONTAINS
 #define D1(f,g) D_MASTER(f,g,1)
 #define D2(f,g) D_MASTER(f,g,2)
 #define D4(f,g) D_MASTER(f,g,3)
-  SUBROUTINE apply_complex_derivative_current_layout(src, dst, update_device)
+  SUBROUTINE apply_complex_derivative_current_layout(src, dst)
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), target, intent(in) :: src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    logical, optional, intent(in) :: update_device
     call solve_compact_component_current_layout(dst, assemble_compact_derivative_interior, assemble_compact_derivative_boundary, 0.0d0, 0.0d0, src, &
                                        solve_label="yslab derivative gpsv", symmetric_operator=.false., transpose_derivative=.true.)
   END SUBROUTINE apply_complex_derivative_current_layout
@@ -514,13 +512,13 @@ CONTAINS
   end subroutine assemble_compact_derivative_interior
 
   subroutine assemble_compact_derivative_boundary(owner_src, row_start, row_end, has_lower_boundary, has_upper_boundary)
-    use y_line_solvers, only: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, ys_lower_ghost_owner, ys_lower_boundary_owner, ys_upper_boundary_owner, ys_upper_ghost_owner, &
-                              ys_eqm1_owner, ys_eq0_owner, ys_eqn_owner, ys_eqnp1_owner
+    use y_line_solvers, only: ys_lower_ghost_owner, ys_lower_boundary_owner, ys_upper_boundary_owner, ys_upper_ghost_owner, ys_eqm1_owner, ys_eq0_owner, &
+                              ys_eqn_owner, ys_eqnp1_owner
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
     integer(C_INT), intent(in) :: row_start, row_end
     logical, intent(in) :: has_lower_boundary, has_upper_boundary
-    integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner
+    integer(C_INT) :: ix, iz, ix0_owner, ixN_owner
     ix0_owner = lbound(owner_src, 3)
     ixN_owner = ubound(owner_src, 3)
 
@@ -577,8 +575,8 @@ CONTAINS
   end subroutine select_compact_component_boundaries
 
   subroutine assemble_selected_compact_component_boundaries(owner_src, row_start, row_end, has_lower_boundary, has_upper_boundary)
-    use y_line_solvers, only: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, ys_lower_ghost_owner, ys_lower_boundary_owner, ys_upper_boundary_owner, ys_upper_ghost_owner, &
-                              ys_eqm1_owner, ys_eq0_owner, ys_eqn_owner, ys_eqnp1_owner
+    use y_line_solvers, only: ys_lower_ghost_owner, ys_lower_boundary_owner, ys_upper_boundary_owner, ys_upper_ghost_owner, ys_eqm1_owner, ys_eq0_owner, &
+                              ys_eqn_owner, ys_eqnp1_owner
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
     integer(C_INT), intent(in) :: row_start, row_end
@@ -863,6 +861,7 @@ CONTAINS
     if (present(transpose_derivative)) transpose_derivative_value = transpose_derivative
     solve_label_value = "compact full-y gpsv"
     if (present(solve_label)) solve_label_value = solve_label
+
     if (use_yslab_linsolve) then
       nlines_z = 2*nz + 1
       total_line_count = (nxN - nx0 + 1)*nlines_z
@@ -958,7 +957,7 @@ CONTAINS
   SUBROUTINE linsolve(lambda)
     IMPLICIT NONE
     real(C_DOUBLE), intent(in) :: lambda
-    integer(C_INT) :: ix, iz, i, j, iPhi, y_first, y_last
+    integer(C_INT) :: ix, iz, j, y_first, y_last
     complex(C_DOUBLE_COMPLEX) :: temp
     complex(C_DOUBLE_COMPLEX) :: zero_mode_u(-1:ny + 1), zero_mode_w(-1:ny + 1), zero_mode_ucor(-1:ny + 1)
 
@@ -1026,8 +1025,6 @@ CONTAINS
     IMPLICIT NONE
     integer(C_INT), intent(in) :: iPhi
     real(C_DOUBLE), intent(in) :: lambda
-    integer(C_INT) :: ix, iz, i, j
-    complex(C_DOUBLE_COMPLEX) :: temp
     complex(C_DOUBLE_COMPLEX) :: zero_mode_scalar(-1:ny + 1), zero_mode_tcor(-1:ny + 1)
     call select_compact_component_boundaries(phi0bc, phi0m1bc, phinbc, phinp1bc, bc0(:, :, 5 + iPhi), zero_bc, bcn(:, :, 5 + iPhi), zero_bc)
     call solve_compact_component_current_layout(V(:, :, :, 3 + iPhi), assemble_compact_helmholtz_system, assemble_selected_compact_component_boundaries, &
@@ -1046,15 +1043,6 @@ CONTAINS
       call scatter_full_y_line(zero_mode_scalar, V(:, 0, 0, 3 + iPhi))
       !$omp target update to(V(:, 0, 0, 3 + iPhi))
     end if
-
-    !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(ny, ny0, nyN, nz, nx0, nxN, nPhi, V) &
-    !$omp private(ix, iz, temp)
-    DO ix = nx0, nxN
-      DO iz = -nz, nz
-        if (ix == 0 .and. iz == 0) cycle
-      END DO
-    END DO
   END SUBROUTINE linsolve_scalar
 
   !--------------------------------------------------------------!
@@ -1062,7 +1050,6 @@ CONTAINS
 
   SUBROUTINE assemble_vvdz(m, to)
     IMPLICIT NONE
-    integer(C_INT) :: iy
     integer(C_INT) :: i, j, k, y_first, y_last
     integer(C_INT), intent(in) :: m, to
     y_first = ny0
@@ -1096,7 +1083,6 @@ CONTAINS
 
   SUBROUTINE zero_vvdx_hft(to)
     IMPLICIT NONE
-    integer(C_INT) :: iy
     integer(C_INT) :: i, j, k, y_first, y_last
     integer(C_INT), intent(in) :: to
     y_first = ny0
@@ -1314,8 +1300,8 @@ CONTAINS
   SUBROUTINE buildrhs_prepare(ODE)
     IMPLICIT NONE
     real(C_DOUBLE), intent(in) :: ODE(1:3)
-    integer(C_INT) :: iy, iz, ix, i, im2, im1, i0, i1, i2, k, iPhi, y_first, y_last
-    complex(C_DOUBLE_COMPLEX) :: rhsu, rhsw, rhst, expl, tmp, unkn
+    integer(C_INT) :: iy, iz, ix, i, k, iPhi, y_first, y_last
+    complex(C_DOUBLE_COMPLEX) :: tmp, unkn
     y_first = ny0
     y_last = nyN
 #ifdef bodyforce
@@ -1383,7 +1369,7 @@ CONTAINS
     END DO
 
     !$omp target teams distribute parallel do collapse(3) default(none)  &
-    !$omp private(rhsu, rhsw, expl) private(iz, ix, iy, tmp, k, unkn) &
+    !$omp private(iz, ix, iy, tmp, k, unkn) &
     !$omp shared(nz, nx0, nxN, ny, y_first, y_last) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) &
     !$omp shared(meanpx, meanpz, ni, deltat, ode) shared(vvdz, v, pra)
     DO iz = -nz, nz
@@ -1441,8 +1427,8 @@ CONTAINS
     IMPLICIT NONE
     real(C_DOUBLE), intent(in) :: ODE(1:3)
     integer(C_INT), intent(in) :: component, from
-    integer(C_INT) :: iy, iz, ix, i, iPhi, y_first, y_last
-    complex(C_DOUBLE_COMPLEX) :: rhsu, rhsw, rhst, expl, tmp, unkn
+    integer(C_INT) :: iy, iz, ix, iPhi, y_first, y_last
+    complex(C_DOUBLE_COMPLEX) :: rhsu, rhsw, rhst, expl
     y_first = ny0
     y_last = nyN
 

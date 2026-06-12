@@ -46,9 +46,9 @@ MODULE ffts
 
 CONTAINS
 
-  subroutine get_fft_memory_estimate(nxd, nxB, ny, nzd, nzB, nPhi, overlapping, n_floats)
+  subroutine get_fft_memory_estimate(nxd, nxB, nzd, nzB, nPhi, overlapping, n_floats)
     implicit none
-    integer(C_INT), intent(in) :: nxd, nxB, ny, nzd, nzB, nPhi
+    integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, nPhi
     logical, intent(in) :: overlapping
     integer(C_INT64_T), intent(out) :: n_floats
     integer(C_INT64_T) :: nflds
@@ -65,8 +65,8 @@ CONTAINS
   end subroutine get_fft_memory_estimate
 
 #ifdef HAVE_FFTW
-  SUBROUTINE init_fft(VVdz, VVdx, rVVdx, nxd, nxB, ny, nzd, nzB, nPhi, overlapping, odd_n_real, s)
-    integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, ny, nPhi
+  SUBROUTINE init_fft(VVdz, VVdx, rVVdx, nxd, nxB, nzd, nzB, nPhi, overlapping, odd_n_real, s)
+    integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, nPhi
     complex(C_DOUBLE_COMPLEX), pointer, dimension(:, :, :, :), intent(out) :: VVdx, VVdz
     real(C_DOUBLE), pointer, dimension(:, :, :, :), intent(out) :: rVVdx
     logical, intent(in) :: overlapping
@@ -108,10 +108,10 @@ CONTAINS
                                   VVdx(:, :, fft_y0, 1), n_x + 1, 1, (nxd + 1), plan_type)
   END SUBROUTINE init_fft
 #elif defined HAVE_CUDA
-  SUBROUTINE init_cufft(nxd, nxB, ny, nzd, nzB, nPhi, overlapping)
+  SUBROUTINE init_cufft(nxd, nxB, nzd, nzB, nPhi, overlapping)
     use cufft
     IMPLICIT NONE
-    integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, ny, nPhi
+    integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, nPhi
     logical, intent(in) :: overlapping
     integer :: istat
     integer, dimension(1) :: n, inembed, onembed
@@ -159,11 +159,11 @@ CONTAINS
 
   END SUBROUTINE init_cufft
 #elif defined(HAVE_HIP)
-  SUBROUTINE init_hipfft(nxd, nxB, ny, nzd, nzB, nPhi, overlapping)
+  SUBROUTINE init_hipfft(nxd, nxB, nzd, nzB, nPhi, overlapping)
     use hipfort
     use hipfort_hipfft
     IMPLICIT NONE
-    integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, ny, nPhi
+    integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, nPhi
     logical, intent(in) :: overlapping
     integer :: istat
     integer, dimension(1), target :: n, inembed, onembed
@@ -228,7 +228,12 @@ CONTAINS
 #else
     complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, ny0 - 2:)
 #endif
-    integer :: i, istat, y0
+    integer :: y0
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    integer :: istat
+#elif defined(HAVE_FFTW)
+    integer :: i
+#endif
     y0 = lbound(x, 3)
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(x)
@@ -255,7 +260,12 @@ CONTAINS
 #else
     complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, ny0 - 2:)
 #endif
-    integer :: i, istat, y0
+    integer :: y0
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    integer :: istat
+#elif defined(HAVE_FFTW)
+    integer :: i
+#endif
     y0 = lbound(x, 3)
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(x)
@@ -285,7 +295,12 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX) :: x(:, :, ny0 - 2:)
     real(C_DOUBLE) :: rx(:, :, ny0 - 2:)
 #endif
-    integer :: i, istat, x_y0, rx_y0
+    integer :: x_y0, rx_y0
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    integer :: istat
+#elif defined(HAVE_FFTW)
+    integer :: i
+#endif
     x_y0 = lbound(x, 3)
     rx_y0 = lbound(rx, 3)
 #ifdef HAVE_CUDA
@@ -316,7 +331,12 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX) :: x(:, :, ny0 - 2:)
     real(C_DOUBLE) :: rx(:, :, ny0 - 2:)
 #endif
-    integer :: i, istat, x_y0, rx_y0
+    integer :: x_y0, rx_y0
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    integer :: istat
+#elif defined(HAVE_FFTW)
+    integer :: i
+#endif
     x_y0 = lbound(x, 3)
     rx_y0 = lbound(rx, 3)
 #ifdef HAVE_CUDA
@@ -348,6 +368,7 @@ CONTAINS
     if (allocated(fftw_rVVdx)) deallocate (fftw_rVVdx)
     if (allocated(fftw_VVdx)) deallocate (fftw_VVdx)
     if (allocated(fftw_VVdz)) deallocate (fftw_VVdz)
+    nullify (VVdz, VVdx, rVVdx)
   END SUBROUTINE free_fft
 #endif
 

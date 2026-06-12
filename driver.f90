@@ -74,9 +74,9 @@ CONTAINS
     CALL read_dnsin(cfg)
     call configure_convvelo(cfg)
     deltat_from_dnsin = deltat
-    CALL init_MPI(nx + 1, nz, ny, nxd + 1, nzd, nPhi, overlapping, npy)
+    CALL init_MPI(nx + 1, nz, ny, nzd, nPhi, overlapping, npy)
     call get_solver_memory_estimate(run_solver, solver_floats)
-    call get_fft_memory_estimate(nxd, nxB, ny, nzd, nzB, nPhi, overlapping, fft_floats)
+    call get_fft_memory_estimate(nxd, nxB, nzd, nzB, nPhi, overlapping, fft_floats)
     call get_pressure_memory_estimate(pressure_floats)
     call get_convvelo_memory_estimate(convvelo_floats)
     if (has_terminal) then
@@ -93,11 +93,11 @@ CONTAINS
 
     ! Init various subroutines
 #ifdef HAVE_CUDA
-    CALL init_cufft(nxd, nxB, ny, nzd, nzB, nPhi, overlapping)
+    CALL init_cufft(nxd, nxB, nzd, nzB, nPhi, overlapping)
 #elif defined(HAVE_HIP)
-    CALL init_hipfft(nxd, nxB, ny, nzd, nzB, nPhi, overlapping)
+    CALL init_hipfft(nxd, nxB, nzd, nzB, nPhi, overlapping)
 #elif defined(HAVE_FFTW)
-    CALL init_fft(VVdz, VVdx, rVVdx, nxd, nxB, ny, nzd, nzB, nPhi, overlapping)
+    CALL init_fft(VVdz, VVdx, rVVdx, nxd, nxB, nzd, nzB, nPhi, overlapping)
 #endif
     CALL setup_derivatives()
     CALL setup_boundary_conditions()

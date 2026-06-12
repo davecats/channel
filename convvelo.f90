@@ -686,7 +686,7 @@ contains
     complex(C_DOUBLE_COMPLEX), allocatable :: deriv(:, :, :)
 
     allocate (deriv(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
-    call apply_complex_derivative_current_layout(convvelo_work, deriv, update_device=.false.)
+    call apply_complex_derivative_current_layout(convvelo_work, deriv)
     convvelo_work = deriv
     !$omp target update to(convvelo_work)
     deallocate (deriv)

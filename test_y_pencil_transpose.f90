@@ -17,7 +17,6 @@ program test_y_reduced_known_good_local_dst
   integer(C_INT), parameter :: ny_test = 16
   integer(C_INT), parameter :: nz_test = 0
   integer(C_INT), parameter :: nxpp_test = 2
-  integer(C_INT), parameter :: nxd_test = 2
   integer(C_INT), parameter :: nzd_test = 1
   integer(C_INT), parameter :: npy_test = 2
 
@@ -41,7 +40,7 @@ program test_y_reduced_known_good_local_dst
     call MPI_Abort(MPI_COMM_WORLD, 1, ierr)
   end if
 
-  call init_MPI(nxpp_test, nz_test, ny_test, nxd_test, nzd_test, 0_C_INT, .false., npy_test)
+  call init_MPI(nxpp_test, nz_test, ny_test, nzd_test, 0_C_INT, .false., npy_test)
 
   if (npy_grid /= npy_test .or. npxz /= nproc/npy_test) then
     write (*, *) "Unexpected process-grid metadata on rank ", iproc, ": npy=", npy_grid, " npxz=", npxz

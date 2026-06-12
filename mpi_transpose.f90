@@ -215,7 +215,7 @@
 
       call roctxPush("MPI_Alltoallv yslab_to_full")
 #ifndef HAVE_HIP
-      !$omp target data use_device_ptr(send, recv)
+      !$omp target data use_device_addr(send, recv)
 #endif
       call MPI_Alltoallv(send, send_counts, send_displs, MPI_DOUBLE_COMPLEX, &
                          recv, recv_counts, recv_displs, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
@@ -313,7 +313,7 @@
 
       call roctxPush("MPI_Alltoallv yslab_from_full")
 #ifndef HAVE_HIP
-      !$omp target data use_device_ptr(send, recv)
+      !$omp target data use_device_addr(send, recv)
 #endif
       call MPI_Alltoallv(send, send_counts, send_displs, MPI_DOUBLE_COMPLEX, &
                          recv, recv_counts, recv_displs, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
@@ -546,7 +546,7 @@
       if (present(label)) range_name = "MPI_Ialltoall "//trim(label)
       call roctxPush(range_name)
 #ifndef HAVE_HIP
-      !$omp target data use_device_ptr(send, recv)
+      !$omp target data use_device_addr(send, recv)
 #endif
       call MPI_IALLTOALL(send, sendcount, MPI_DOUBLE_COMPLEX, &
                          recv, sendcount, MPI_DOUBLE_COMPLEX, MPI_COMM_X, request, ierr)
@@ -601,7 +601,7 @@
 #ifdef HAVE_MPI
       call roctxPush(marker)
 #ifndef HAVE_HIP
-      !$omp target data use_device_ptr(send_rows, recv_rows)
+      !$omp target data use_device_addr(send_rows, recv_rows)
 #endif
       call MPI_Allgather(send_rows, nrows*ncols, MPI_DOUBLE_COMPLEX, recv_rows, nrows*ncols, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr)
 #ifndef HAVE_HIP
@@ -622,14 +622,16 @@
 
     !------- Divide the problem in pencils ---------!
     !-----------------------------------------------!
-    SUBROUTINE init_MPI(nxpp, nz, ny, nxd, nzd, nPhi, overlapping, npy_requested)
-      integer(C_INT), intent(in)  :: nxpp, nz, ny, nxd, nzd, nPhi, npy_requested
+    SUBROUTINE init_MPI(nxpp, nz, ny, nzd, nPhi, overlapping, npy_requested)
+      integer(C_INT), intent(in)  :: nxpp, nz, ny, nzd, nPhi, npy_requested
       logical, intent(in) :: overlapping
       integer, parameter :: ndims = 4
       integer :: i, color, key
       integer :: array_of_sizes(ndims), array_of_subsizes(ndims), array_of_starts(ndims), ierror
       integer(C_INT) :: miny_local, maxy_local
+#if defined(HAVE_HIP)
       type(c_ptr) :: sendptr, recvptr
+#endif
       integer(c_size_t) :: sendsize, recvsize
       ! Define which process write on screen
       has_terminal = (iproc == 0)

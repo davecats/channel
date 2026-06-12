@@ -488,6 +488,7 @@ contains
 #endif
   end subroutine ys_release_gpsv_workspace
 
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
   subroutine ys_prepare_gpusparse_workspace(n, batch_count, ds, dl, d, du, dw, x)
     implicit none
     integer(C_INT), intent(in) :: n, batch_count
@@ -498,10 +499,6 @@ contains
     integer(C_SIZE_T) :: buffer_size
 #endif
 
-#if !defined(HAVE_CUDA) && !defined(HAVE_HIP)
-    ys_gpsv_n = n
-    ys_gpsv_batch = batch_count
-#else
     if (ys_gpsv_n == n .and. ys_gpsv_batch == batch_count .and. allocated(ys_gpsv_buffer)) return
 
     if (allocated(ys_gpsv_buffer)) then
@@ -518,8 +515,16 @@ contains
 
     ys_gpsv_n = n
     ys_gpsv_batch = batch_count
-#endif
   end subroutine ys_prepare_gpusparse_workspace
+#else
+  subroutine ys_prepare_gpusparse_workspace(n, batch_count)
+    implicit none
+    integer(C_INT), intent(in) :: n, batch_count
+
+    ys_gpsv_n = n
+    ys_gpsv_batch = batch_count
+  end subroutine ys_prepare_gpusparse_workspace
+#endif
 
   subroutine ys_prepare_batch_workspace(n, batch_count)
     implicit none
@@ -537,8 +542,12 @@ contains
       ys_batch_count = batch_count
     end if
 
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
     call ys_prepare_gpusparse_workspace(n, batch_count, ys_batch_ds, ys_batch_dl, ys_batch_d, &
                                         ys_batch_du, ys_batch_dw, ys_batch_x)
+#else
+    call ys_prepare_gpusparse_workspace(n, batch_count)
+#endif
   end subroutine ys_prepare_batch_workspace
 
   subroutine ys_solve_interleaved_pentadiagonal(ds, dl, d, du, dw, x, n, batch_count, label)
