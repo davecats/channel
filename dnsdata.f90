@@ -119,6 +119,7 @@ CONTAINS
     integer(C_INT) :: nstep_in
     integer(C_INT) :: npy_in
     integer :: status, length
+    integer :: io
     logical :: found
 
     call require_integer(cfg, "mesh", "nx", nx)
@@ -128,6 +129,15 @@ CONTAINS
     call get_integer(cfg, "parallel", "npy", npy_in, found)
     if (.not. found) call get_integer(cfg, "mesh", "npy", npy_in, found)
     npy = npy_in
+    call get_environment_variable("CHANNEL_NPY", env_value, length, status)
+    if (status == 0) then
+      read (env_value(:length), *, iostat=io) npy_in
+      if (io == 0 .and. npy_in >= 1) then
+        npy = npy_in
+      else
+        print *, "Warning: invalid value for CHANNEL_NPY:", trim(env_value(:length))
+      end if
+    end if
     call require_real(cfg, "mesh", "alfa0", alfa0)
     call require_real(cfg, "mesh", "beta0", beta0)
     nxd = 3*(nx + 1)/2

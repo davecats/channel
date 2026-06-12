@@ -1,7 +1,7 @@
 function(add_channel_mpi_test)
     set(options USE_YSLAB_MATRIX)
     set(one_value_args NAME TARGET NPROCS PROCESSORS)
-    set(multi_value_args ARGS)
+    set(multi_value_args ARGS ENVIRONMENT)
     cmake_parse_arguments(TEST "${options}" "${one_value_args}" "${multi_value_args}" ${ARGN})
 
     if(NOT TEST_NAME OR NOT TEST_TARGET OR NOT TEST_NPROCS OR NOT TEST_PROCESSORS)
@@ -19,11 +19,13 @@ function(add_channel_mpi_test)
 
     if(TEST_USE_YSLAB_MATRIX)
         foreach(env_value IN ITEMS 0 1)
+            set(test_env ${TEST_ENVIRONMENT})
             if(env_value EQUAL 0)
                 set(test_suffix schur)
             else()
                 set(test_suffix yslab)
             endif()
+            list(APPEND test_env "CHANNEL_USE_YSLAB_LINSOLVE=${env_value}")
             set(test_name "${TEST_NAME}_${test_suffix}")
             add_test(NAME ${test_name}
                 COMMAND ${test_command}
@@ -31,7 +33,7 @@ function(add_channel_mpi_test)
             )
             set_tests_properties(${test_name} PROPERTIES
                 PROCESSORS ${TEST_PROCESSORS}
-                ENVIRONMENT "CHANNEL_USE_YSLAB_LINSOLVE=${env_value}"
+                ENVIRONMENT "${test_env}"
             )
         endforeach()
         return()
@@ -41,7 +43,10 @@ function(add_channel_mpi_test)
         COMMAND ${test_command}
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     )
-    set_tests_properties(${TEST_NAME} PROPERTIES PROCESSORS ${TEST_PROCESSORS})
+    set_tests_properties(${TEST_NAME} PROPERTIES
+        PROCESSORS ${TEST_PROCESSORS}
+        ENVIRONMENT "${TEST_ENVIRONMENT}"
+    )
 endfunction()
 
 add_channel_mpi_test(
@@ -145,6 +150,33 @@ add_channel_mpi_test(
     PROCESSORS 8
     USE_YSLAB_MATRIX
     ARGS tests/data/dns_test_scalar_npy3.in
+)
+
+add_channel_mpi_test(
+    NAME regression_test_scalar_npy4_1rank
+    TARGET test_regression_scalar
+    NPROCS 1
+    PROCESSORS 1
+    ARGS tests/data/dns_test_scalar_npy4.in tests/data/start_field_scalar_npy4.out tests/data/end_field_scalar_npy4.out
+    ENVIRONMENT CHANNEL_NPY=1
+)
+
+add_channel_mpi_test(
+    NAME regression_test_scalar_npy4_4rank
+    TARGET test_regression_scalar
+    NPROCS 4
+    PROCESSORS 4
+    ARGS tests/data/dns_test_scalar_npy4.in tests/data/start_field_scalar_npy4.out tests/data/end_field_scalar_npy4.out
+    ENVIRONMENT CHANNEL_USE_YSLAB_LINSOLVE=0
+)
+
+add_channel_mpi_test(
+    NAME regression_test_scalar_npy4_8rank
+    TARGET test_regression_scalar
+    NPROCS 8
+    PROCESSORS 8
+    ARGS tests/data/dns_test_scalar_npy4.in tests/data/start_field_scalar_npy4.out tests/data/end_field_scalar_npy4.out
+    ENVIRONMENT CHANNEL_USE_YSLAB_LINSOLVE=0
 )
 
 set(POST_PRESSURE_NPROCS 1)

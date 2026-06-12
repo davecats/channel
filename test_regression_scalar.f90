@@ -15,6 +15,10 @@ PROGRAM regression_test
   restart_expected = "tests/data/end_field_scalar.out"
   call get_command_argument(1, arg)
   if (len_trim(arg) > 0) config_file = trim(arg)
+  call get_command_argument(2, arg)
+  if (len_trim(arg) > 0) restart_in = trim(arg)
+  call get_command_argument(3, arg)
+  if (len_trim(arg) > 0) restart_expected = trim(arg)
 
   ! Initialise with test input/restart
   CALL initialize(config_file, restart_in)

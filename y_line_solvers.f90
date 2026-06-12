@@ -622,7 +622,7 @@ contains
     call roctxPush(label)
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
     ! ROCSparse fails if the system size is 1: https://github.com/ROCm/rocSPARSE/blob/develop_deprecated/library/src/precond/rocsparse_gtsv.cpp
-    if (n <= 1) then
+    if (n < 3) then
       !$omp target teams distribute parallel do default(none) &
       !$omp shared(ds, dl, d, du, dw, x, n, batch_count) private(iline)
       do iline = 1, batch_count
