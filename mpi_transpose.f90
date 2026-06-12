@@ -50,7 +50,7 @@ MODULE mpi_transpose
 
 CONTAINS
 
-  !$omp begin declare target
+  !$omp declare target
   SUBROUTINE split_block(total, nparts, part, start, count)
     integer(C_INT), intent(in) :: total, nparts, part
     integer(C_INT), intent(out) :: start, count
@@ -109,7 +109,7 @@ CONTAINS
     yslab_scratch_lines = -1
   end subroutine release_yslab_scratch
 
-  !$omp begin declare target
+  !$omp declare target
   subroutine yslab_active_range(rank, ny, first_y, last_y)
     implicit none
     integer(C_INT), intent(in) :: rank, ny
