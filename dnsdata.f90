@@ -1463,6 +1463,7 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
         END DO
       END DO
     END DO
+    call debug_print_complex_norm3("buildrhs_prepare after_init_d2v newrhs2", memrhs(ny0:nyN, -nz:nz, nx0:nxN, 2))
 
     !$omp target teams distribute parallel do collapse(3) default(none)  &
     !$omp private(iz, ix, iy, tmp, k, unkn) &
@@ -1487,6 +1488,7 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
         END DO
       END DO
     END DO
+    call debug_print_complex_norm3("buildrhs_prepare after_init_eta newrhs1", memrhs(ny0:nyN, -nz:nz, nx0:nxN, 1))
 
     !$omp target teams distribute parallel do collapse(3) default(none)  &
     !$omp private(iz, ix, iy, tmp, k, unkn) &
@@ -1506,6 +1508,8 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
         end do
       end do
     end do
+    call debug_print_complex_norm3("buildrhs_prepare after_meanforce newrhs1", memrhs(ny0:nyN, -nz:nz, nx0:nxN, 1))
+    call debug_print_complex_norm3("buildrhs_prepare after_meanforce newrhs2", memrhs(ny0:nyN, -nz:nz, nx0:nxN, 2))
 
     !initialize phi
     DO iPhi = 1, nPhi
@@ -1526,6 +1530,7 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
         END DO
       END DO
     END DO
+    if (nPhi > 0) call debug_print_complex_norm3("buildrhs_prepare after_init_phi newrhsphi1", memrhs(ny0:nyN, -nz:nz, nx0:nxN, 3))
 
     !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp shared(memrhs, V) shared(nz, nx0, nxN, ny, y_first, y_last, nPhi) private(iy, ix, iz, iPhi)
