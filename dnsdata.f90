@@ -1454,6 +1454,7 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
     integer(C_INT) :: iy, iz, ix, i, k, iPhi, y_first, y_last
     integer(C_INT) :: sample_ix
     complex(C_DOUBLE_COMPLEX) :: tmp, unkn
+    real(C_DOUBLE) :: tmp_re, tmp_im
     complex(C_DOUBLE_COMPLEX) :: debug_d2v_terms(2, 3), debug_eta_terms(2, 3)
     y_first = ny0
     y_last = nyN
@@ -1482,7 +1483,7 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
 
     ! contribution known a-priori
     !$omp target teams distribute parallel do collapse(3) default(none)  &
-    !$omp private(iz, ix, iy, tmp, k, unkn) &
+    !$omp private(iz, ix, iy, tmp, tmp_re, tmp_im, k, unkn) &
     !$omp shared(nz, nx0, nxN, ny, y_first, y_last) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) &
     !$omp shared(meanpx, meanpz, ni, deltat, ode) shared(vvdz, v, pra) shared(sample_ix, debug_d2v_terms) &
     !$omp shared(debug_compact_flow, ny0)
@@ -1497,10 +1498,13 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
             end if
           end if
           unkn = D2(V, 2) - k2(iz, ix)*D0(V, 2)
-          tmp = 0.0
+          tmp_re = 0.0d0
+          tmp_im = 0.0d0
           DO k = -2, 2
-            tmp = tmp + OS(iy, k)*V(iy + k, iz, ix, 2)
+            tmp_re = tmp_re + OS(iy, k)*dble(V(iy + k, iz, ix, 2))
+            tmp_im = tmp_im + OS(iy, k)*dimag(V(iy + k, iz, ix, 2))
           END DO
+          tmp = dcmplx(tmp_re, tmp_im)
           if (debug_compact_flow) then
             if (iy == ny0 .and. iz == 0 .and. ix == 0) then
               debug_d2v_terms(1, 1) = unkn
@@ -1522,7 +1526,7 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
     call debug_print_rhs_term_samples("buildrhs_prepare after_init_d2v newrhs2", debug_d2v_terms)
 
     !$omp target teams distribute parallel do collapse(3) default(none)  &
-    !$omp private(iz, ix, iy, tmp, k, unkn) &
+    !$omp private(iz, ix, iy, tmp, tmp_re, tmp_im, k, unkn) &
     !$omp shared(nz, nx0, nxN, ny, y_first, y_last) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) &
     !$omp shared(meanpx, meanpz, ni, deltat, ode) shared(vvdz, v, pra) shared(sample_ix, debug_eta_terms) &
     !$omp shared(debug_compact_flow, ny0)
@@ -1538,14 +1542,18 @@ call debug_print_real_norm3("transform_to_physical after_RFT mm1="//trim(adjustl
           end if
           IF (ix == 0 .AND. iz == 0) THEN
             unkn = rD0(V, 1, 3)
-            tmp = ni*rD2(V, 1, 3)
+            tmp_re = ni*dble(rD2(V, 1, 3))
+            tmp_im = ni*dimag(rD2(V, 1, 3))
           ELSE
-            tmp = 0.0
+            tmp_re = 0.0d0
+            tmp_im = 0.0d0
             DO k = -2, 2
-              tmp = tmp + SQ(iy, k)*(ibeta(iz)*V(iy + k, iz, ix, 1) - ialfa(ix)*V(iy + k, iz, ix, 3))
+              tmp_re = tmp_re + dble(SQ(iy, k)*(ibeta(iz)*V(iy + k, iz, ix, 1) - ialfa(ix)*V(iy + k, iz, ix, 3)))
+              tmp_im = tmp_im + dimag(SQ(iy, k)*(ibeta(iz)*V(iy + k, iz, ix, 1) - ialfa(ix)*V(iy + k, iz, ix, 3)))
             END DO
             unkn = ibeta(iz)*D0(V, 1) - ialfa(ix)*D0(V, 3)
           END IF
+          tmp = dcmplx(tmp_re, tmp_im)
           if (debug_compact_flow) then
             if (iy == ny0 .and. iz == 0 .and. ix == 0) then
               debug_eta_terms(1, 1) = unkn
