@@ -21,7 +21,7 @@ program test_hipsparse_gpsv_allocations
   type(C_PTR) :: ds_dev, dl_dev, d_dev, du_dev, dw_dev, x_dev, buffer_dev
   integer(C_SIZE_T) :: buffer_size
   integer(C_INT) :: status
-  logical :: ok
+  logical :: ok, all_ok
 
   interface
     function hipsparseCreate(handle) bind(c, name="hipsparseCreate")
@@ -91,9 +91,10 @@ program test_hipsparse_gpsv_allocations
 
   call query_buffer_size(handle, M, BATCH_COUNT, buffer_size)
   write (*, '(A,I0)') "hipSPARSE gpsv buffer size bytes: ", int(buffer_size, kind=kind(0))
+  all_ok = .true.
 
   call run_hipmalloc_case(handle, ds_host, dl_host, d_host, du_host, dw_host, x_rhs_host, x_exact_host, buffer_size, ok)
-  if (.not. ok) error stop "hipMalloc case failed"
+  all_ok = all_ok .and. ok
 
   allocate (ds_map(M*BATCH_COUNT), dl_map(M*BATCH_COUNT), d_map(M*BATCH_COUNT), du_map(M*BATCH_COUNT), dw_map(M*BATCH_COUNT), x_map(M*BATCH_COUNT))
   ds_map = ds_host
@@ -111,7 +112,7 @@ program test_hipsparse_gpsv_allocations
                           c_loc(du_map(1)), c_loc(dw_map(1)), c_loc(x_map(1)), c_loc(buffer_map(1)), x_out_host, ok)
   !$omp end target data
   if (ok) ok = compare_solution("omp_map_arrays+omp_map_buffer", x_out_host, x_exact_host)
-  if (.not. ok) error stop "omp_map arrays+buffer case failed"
+  all_ok = all_ok .and. ok
 
 call copy_rhs_to_mapped_arrays(ds_map, dl_map, d_map, du_map, dw_map, x_map, ds_host, dl_host, d_host, du_host, dw_host, x_rhs_host)
   status = hipMalloc(buffer_dev, max(1_C_SIZE_T, buffer_size))
@@ -122,7 +123,7 @@ call copy_rhs_to_mapped_arrays(ds_map, dl_map, d_map, du_map, dw_map, x_map, ds_
   !$omp end target data
   call check_hip_status(hipFree(buffer_dev), "hipFree buffer_dev")
   if (ok) ok = compare_solution("omp_map_arrays+hipmalloc_buffer", x_out_host, x_exact_host)
-  if (.not. ok) error stop "omp_map arrays+hipMalloc buffer case failed"
+  all_ok = all_ok .and. ok
 
   status = hipMalloc(ds_dev, int(storage_size(ds_host(1))/8, kind=C_SIZE_T)*size(ds_host, kind=C_SIZE_T))
   call check_hip_status(status, "hipMalloc ds_dev")
@@ -149,7 +150,7 @@ call copy_rhs_to_mapped_arrays(ds_map, dl_map, d_map, du_map, dw_map, x_map, ds_
                           c_loc(buffer_map(1)), x_out_host, ok)
   !$omp end target data
   if (ok) ok = compare_solution("hipmalloc_arrays+omp_map_buffer", x_out_host, x_exact_host)
-  if (.not. ok) error stop "hipMalloc arrays+omp_map buffer case failed"
+  all_ok = all_ok .and. ok
 
   call check_hip_status(hipFree(ds_dev), "hipFree ds_dev")
   call check_hip_status(hipFree(dl_dev), "hipFree dl_dev")
@@ -163,6 +164,7 @@ call copy_rhs_to_mapped_arrays(ds_map, dl_map, d_map, du_map, dw_map, x_map, ds_
 
   status = hipsparseDestroy(handle)
   call check_status(status, "hipsparseDestroy")
+  if (.not. all_ok) error stop "One or more hipSPARSE allocation cases failed"
   write (*, '(A)') "All hipSPARSE allocation cases passed."
 
 #else
