@@ -23,6 +23,65 @@ program test_hipsparse_gpsv_allocations
   integer(C_INT) :: status
   logical :: ok
 
+  interface
+    function hipsparseCreate(handle) bind(c, name="hipsparseCreate")
+      use, intrinsic :: iso_c_binding
+      integer(C_INT) :: hipsparseCreate
+      type(C_PTR) :: handle
+    end function hipsparseCreate
+
+    function hipsparseDestroy(handle) bind(c, name="hipsparseDestroy")
+      use, intrinsic :: iso_c_binding
+      integer(C_INT) :: hipsparseDestroy
+      type(C_PTR), value :: handle
+    end function hipsparseDestroy
+
+    function hipsparseZgpsvInterleavedBatch_bufferSizeExt(handle, algo, m, ds, dl, d, du, dw, x, batch_count, pbuffer_size) &
+      bind(c, name="hipsparseZgpsvInterleavedBatch_bufferSizeExt")
+      use, intrinsic :: iso_c_binding
+      integer(C_INT) :: hipsparseZgpsvInterleavedBatch_bufferSizeExt
+      type(C_PTR), value :: handle
+      integer(C_INT), value :: algo, m, batch_count
+      type(C_PTR), value :: ds, dl, d, du, dw, x
+      integer(C_SIZE_T) :: pbuffer_size
+    end function hipsparseZgpsvInterleavedBatch_bufferSizeExt
+
+    function hipsparseZgpsvInterleavedBatch(handle, algo, m, ds, dl, d, du, dw, x, batch_count, pbuffer) &
+      bind(c, name="hipsparseZgpsvInterleavedBatch")
+      use, intrinsic :: iso_c_binding
+      integer(C_INT) :: hipsparseZgpsvInterleavedBatch
+      type(C_PTR), value :: handle
+      integer(C_INT), value :: algo, m, batch_count
+      type(C_PTR), value :: ds, dl, d, du, dw, x, pbuffer
+    end function hipsparseZgpsvInterleavedBatch
+
+    function hipMalloc(ptr, size_bytes) bind(c, name="hipMalloc")
+      use, intrinsic :: iso_c_binding
+      integer(C_INT) :: hipMalloc
+      type(C_PTR) :: ptr
+      integer(C_SIZE_T), value :: size_bytes
+    end function hipMalloc
+
+    function hipFree(ptr) bind(c, name="hipFree")
+      use, intrinsic :: iso_c_binding
+      integer(C_INT) :: hipFree
+      type(C_PTR), value :: ptr
+    end function hipFree
+
+    function hipMemcpy(dst, src, size_bytes, kind) bind(c, name="hipMemcpy")
+      use, intrinsic :: iso_c_binding
+      integer(C_INT) :: hipMemcpy
+      type(C_PTR), value :: dst, src
+      integer(C_SIZE_T), value :: size_bytes
+      integer(C_INT), value :: kind
+    end function hipMemcpy
+
+    function hipDeviceSynchronize() bind(c, name="hipDeviceSynchronize")
+      use, intrinsic :: iso_c_binding
+      integer(C_INT) :: hipDeviceSynchronize
+    end function hipDeviceSynchronize
+  end interface
+
   allocate (ds_host(M*BATCH_COUNT), dl_host(M*BATCH_COUNT), d_host(M*BATCH_COUNT), du_host(M*BATCH_COUNT), dw_host(M*BATCH_COUNT))
   allocate (x_rhs_host(M*BATCH_COUNT), x_exact_host(M*BATCH_COUNT), x_out_host(M*BATCH_COUNT))
   call fill_pentadiagonal_system(ds_host, dl_host, d_host, du_host, dw_host, x_rhs_host, x_exact_host)
@@ -291,64 +350,6 @@ contains
     end if
   end subroutine check_hip_status
 
-  interface
-    function hipsparseCreate(handle) bind(c, name="hipsparseCreate")
-      use, intrinsic :: iso_c_binding
-      integer(C_INT) :: hipsparseCreate
-      type(C_PTR) :: handle
-    end function hipsparseCreate
-
-    function hipsparseDestroy(handle) bind(c, name="hipsparseDestroy")
-      use, intrinsic :: iso_c_binding
-      integer(C_INT) :: hipsparseDestroy
-      type(C_PTR), value :: handle
-    end function hipsparseDestroy
-
-    function hipsparseZgpsvInterleavedBatch_bufferSizeExt(handle, algo, m, ds, dl, d, du, dw, x, batch_count, pbuffer_size) &
-      bind(c, name="hipsparseZgpsvInterleavedBatch_bufferSizeExt")
-      use, intrinsic :: iso_c_binding
-      integer(C_INT) :: hipsparseZgpsvInterleavedBatch_bufferSizeExt
-      type(C_PTR), value :: handle
-      integer(C_INT), value :: algo, m, batch_count
-      type(C_PTR), value :: ds, dl, d, du, dw, x
-      integer(C_SIZE_T) :: pbuffer_size
-    end function hipsparseZgpsvInterleavedBatch_bufferSizeExt
-
-    function hipsparseZgpsvInterleavedBatch(handle, algo, m, ds, dl, d, du, dw, x, batch_count, pbuffer) &
-      bind(c, name="hipsparseZgpsvInterleavedBatch")
-      use, intrinsic :: iso_c_binding
-      integer(C_INT) :: hipsparseZgpsvInterleavedBatch
-      type(C_PTR), value :: handle
-      integer(C_INT), value :: algo, m, batch_count
-      type(C_PTR), value :: ds, dl, d, du, dw, x, pbuffer
-    end function hipsparseZgpsvInterleavedBatch
-
-    function hipMalloc(ptr, size_bytes) bind(c, name="hipMalloc")
-      use, intrinsic :: iso_c_binding
-      integer(C_INT) :: hipMalloc
-      type(C_PTR) :: ptr
-      integer(C_SIZE_T), value :: size_bytes
-    end function hipMalloc
-
-    function hipFree(ptr) bind(c, name="hipFree")
-      use, intrinsic :: iso_c_binding
-      integer(C_INT) :: hipFree
-      type(C_PTR), value :: ptr
-    end function hipFree
-
-    function hipMemcpy(dst, src, size_bytes, kind) bind(c, name="hipMemcpy")
-      use, intrinsic :: iso_c_binding
-      integer(C_INT) :: hipMemcpy
-      type(C_PTR), value :: dst, src
-      integer(C_SIZE_T), value :: size_bytes
-      integer(C_INT), value :: kind
-    end function hipMemcpy
-
-    function hipDeviceSynchronize() bind(c, name="hipDeviceSynchronize")
-      use, intrinsic :: iso_c_binding
-      integer(C_INT) :: hipDeviceSynchronize
-    end function hipDeviceSynchronize
-  end interface
 #endif
 
 end program test_hipsparse_gpsv_allocations
