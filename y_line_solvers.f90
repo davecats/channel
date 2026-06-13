@@ -148,6 +148,11 @@ module y_line_solvers
   integer(C_INT), save :: ys_hier_global_send_elems = 0, ys_hier_global_recv_elems = 0
   integer(C_INT), save :: ys_hier_group_return_send_elems = 0, ys_hier_group_return_recv_elems = 0
   integer(C_INT), save :: ys_hier_leaf_return_send_elems = 0, ys_hier_leaf_return_recv_elems = 0
+  logical, save :: ys_hier_comm_stats_enabled = .false.
+#ifdef HAVE_MPI
+  type(MPI_Comm), save :: ys_hier_group_comm = MPI_COMM_NULL
+  logical, save :: ys_hier_group_comm_active = .false.
+#endif
 
 #ifdef HAVE_CUDA
   type(cusparseHandle), save :: ys_gpsv_handle
@@ -305,6 +310,9 @@ contains
 
   subroutine ys_release_reduced_workspace()
     implicit none
+#ifdef HAVE_MPI
+    integer :: ierr_local
+#endif
 
     if (allocated(ys_reduced_rows_send)) then
       !$omp target exit data map(delete: ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values, &
@@ -344,6 +352,14 @@ contains
     ys_hier_group_return_recv_elems = 0
     ys_hier_leaf_return_send_elems = 0
     ys_hier_leaf_return_recv_elems = 0
+#ifdef HAVE_MPI
+    if (ys_hier_group_comm_active) then
+      call MPI_Comm_free(ys_hier_group_comm, ierr_local)
+      if (ierr_local /= MPI_SUCCESS) error stop "MPI_Comm_free y-Schur group communicator failed"
+      ys_hier_group_comm = MPI_COMM_NULL
+      ys_hier_group_comm_active = .false.
+    end if
+#endif
 
   end subroutine ys_release_reduced_workspace
 
@@ -375,8 +391,16 @@ contains
     implicit none
     integer(C_INT), intent(in) :: nlines, npy_count
     integer(C_INT) :: comm_send_elems, comm_recv_elems, node_alloc_nlines
+#ifdef HAVE_MPI
+    integer :: ierr_local
+#endif
 
     call ys_configure_reduced_solver(npy_count)
+#ifdef HAVE_MPI
+    call MPI_Comm_split(MPI_COMM_Y, ys_hier_group_id, ys_hier_group_rank, ys_hier_group_comm, ierr_local)
+    if (ierr_local /= MPI_SUCCESS) error stop "MPI_Comm_split y-Schur group communicator failed"
+    ys_hier_group_comm_active = .true.
+#endif
     allocate (ys_reduced_rows_send(20, nlines), ys_left_interface_values(2, nlines), &
               ys_right_interface_values(2, nlines))
     allocate (ys_reduced_matrix_lu(4*npy_count, 2*YS_REDUCED_BW + 1, nlines), &
@@ -428,6 +452,7 @@ contains
     implicit none
     integer(C_INT), intent(in) :: npy_count
     character(len=32) :: env_value
+    character(len=32) :: env_switch
     integer :: env_length, env_status, ios, requested_node_size
 
     if (npy_count < 2) error stop "Hierarchical y-Schur requires at least two y ranks"
@@ -439,6 +464,20 @@ contains
       ys_hier_node_size = int(requested_node_size, C_INT)
     end if
     if (ys_hier_node_size < 2 .or. ys_hier_node_size > npy_count) error stop "Invalid CHANNEL_Y_SCHUR_NODE_SIZE"
+
+    ys_hier_comm_stats_enabled = .false.
+    call get_environment_variable("CHANNEL_Y_SCHUR_COMM_STATS", env_value, length=env_length, status=env_status)
+    if (env_status == 0 .and. env_length > 0) then
+      env_switch = trim(adjustl(env_value(:env_length)))
+      select case (env_switch)
+      case ("1", "true", "TRUE", "yes", "YES", "on", "ON")
+        ys_hier_comm_stats_enabled = .true.
+      case ("0", "false", "FALSE", "no", "NO", "off", "OFF")
+        ys_hier_comm_stats_enabled = .false.
+      case default
+        error stop "Invalid CHANNEL_Y_SCHUR_COMM_STATS"
+      end select
+    end if
 
     ys_hier_ngroups = (npy_count + ys_hier_node_size - 1_C_INT)/ys_hier_node_size
     ys_hier_group_id = ipy/ys_hier_node_size
@@ -1225,6 +1264,8 @@ contains
     implicit none
     integer :: ierr_local
     integer(C_INT) :: nlines, comm_send_elems, comm_recv_elems
+    real(C_DOUBLE) :: comm_t0 = 0.0_C_DOUBLE
+    real(C_DOUBLE) :: comm_elapsed = 0.0_C_DOUBLE
 
     nlines = size(ys_reduced_rows_send, 2)
     comm_send_elems = max(ys_hier_leaf_send_elems, ys_hier_global_send_elems)
@@ -1237,49 +1278,118 @@ contains
 
     call ys_hier_pack_leaf_rows(nlines)
     call roctxPush("MPI_Alltoallv hier_leaf_rows_to_group")
+    if (ys_hier_comm_stats_enabled) comm_t0 = MPI_Wtime()
     !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
-    call MPI_Alltoallv(ycomm_sendbuf(1:ys_hier_leaf_send_elems), ys_hier_leaf_send_counts, ys_hier_leaf_send_displs, &
-                       MPI_DOUBLE_COMPLEX, ycomm_recvbuf(1:ys_hier_leaf_recv_elems), ys_hier_leaf_recv_counts, &
-                       ys_hier_leaf_recv_displs, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr_local)
+    call MPI_Alltoallv(ycomm_sendbuf(1:ys_hier_leaf_send_elems), &
+                       ys_hier_leaf_send_counts(ys_hier_group_first + 1:ys_hier_group_first + ys_hier_group_count), &
+                       ys_hier_leaf_send_displs(ys_hier_group_first + 1:ys_hier_group_first + ys_hier_group_count), &
+                       MPI_DOUBLE_COMPLEX, ycomm_recvbuf(1:ys_hier_leaf_recv_elems), &
+                       ys_hier_leaf_recv_counts(ys_hier_group_first + 1:ys_hier_group_first + ys_hier_group_count), &
+                       ys_hier_leaf_recv_displs(ys_hier_group_first + 1:ys_hier_group_first + ys_hier_group_count), &
+                       MPI_DOUBLE_COMPLEX, ys_hier_group_comm, ierr_local)
     !$omp end target data
+    if (ys_hier_comm_stats_enabled) then
+      comm_elapsed = MPI_Wtime() - comm_t0
+      call ys_hier_report_comm_stats("hier_leaf_rows_to_group", ys_hier_group_comm, &
+                                     ys_hier_leaf_send_counts(ys_hier_group_first + 1:ys_hier_group_first + ys_hier_group_count), &
+                                     ys_hier_leaf_recv_counts(ys_hier_group_first + 1:ys_hier_group_first + ys_hier_group_count), &
+                                     comm_elapsed)
+    end if
     call roctxPop("MPI_Alltoallv hier_leaf_rows_to_group")
     if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoallv hier_leaf_rows_to_group failed"
 
     call ys_hier_compose_node_rows()
     call ys_hier_pack_node_rows_to_global(nlines)
     call roctxPush("MPI_Alltoallv hier_node_rows_to_global")
+    if (ys_hier_comm_stats_enabled) comm_t0 = MPI_Wtime()
     !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
     call MPI_Alltoallv(ycomm_sendbuf(1:ys_hier_global_send_elems), ys_hier_global_send_counts, ys_hier_global_send_displs, &
                        MPI_DOUBLE_COMPLEX, ycomm_recvbuf(1:ys_hier_global_recv_elems), ys_hier_global_recv_counts, &
                        ys_hier_global_recv_displs, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr_local)
     !$omp end target data
+    if (ys_hier_comm_stats_enabled) then
+      comm_elapsed = MPI_Wtime() - comm_t0
+      call ys_hier_report_comm_stats("hier_node_rows_to_global", MPI_COMM_Y, ys_hier_global_send_counts, &
+                                     ys_hier_global_recv_counts, comm_elapsed)
+    end if
     call roctxPop("MPI_Alltoallv hier_node_rows_to_global")
     if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoallv hier_node_rows_to_global failed"
 
     call ys_hier_solve_global_groups(nlines)
     call roctxPush("MPI_Alltoallv hier_group_values_from_global")
+    if (ys_hier_comm_stats_enabled) comm_t0 = MPI_Wtime()
     !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
     call MPI_Alltoallv(ycomm_sendbuf(1:ys_hier_group_return_send_elems), ys_hier_group_return_send_counts, &
                        ys_hier_group_return_send_displs, MPI_DOUBLE_COMPLEX, &
                        ycomm_recvbuf(1:ys_hier_group_return_recv_elems), ys_hier_group_return_recv_counts, &
                        ys_hier_group_return_recv_displs, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr_local)
     !$omp end target data
+    if (ys_hier_comm_stats_enabled) then
+      comm_elapsed = MPI_Wtime() - comm_t0
+      call ys_hier_report_comm_stats("hier_group_values_from_global", MPI_COMM_Y, ys_hier_group_return_send_counts, &
+                                     ys_hier_group_return_recv_counts, comm_elapsed)
+    end if
     call roctxPop("MPI_Alltoallv hier_group_values_from_global")
     if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoallv hier_group_values_from_global failed"
 
     call ys_hier_recover_leaf_returns()
     call roctxPush("MPI_Alltoallv hier_leaf_values_from_group")
+    if (ys_hier_comm_stats_enabled) comm_t0 = MPI_Wtime()
     !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
-    call MPI_Alltoallv(ycomm_sendbuf(1:ys_hier_leaf_return_send_elems), ys_hier_leaf_return_send_counts, &
-                       ys_hier_leaf_return_send_displs, MPI_DOUBLE_COMPLEX, &
-                       ycomm_recvbuf(1:ys_hier_leaf_return_recv_elems), ys_hier_leaf_return_recv_counts, &
-                       ys_hier_leaf_return_recv_displs, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr_local)
+    call MPI_Alltoallv(ycomm_sendbuf(1:ys_hier_leaf_return_send_elems), &
+                       ys_hier_leaf_return_send_counts(ys_hier_group_first + 1:ys_hier_group_first + ys_hier_group_count), &
+                       ys_hier_leaf_return_send_displs(ys_hier_group_first + 1:ys_hier_group_first + ys_hier_group_count), &
+                       MPI_DOUBLE_COMPLEX, ycomm_recvbuf(1:ys_hier_leaf_return_recv_elems), &
+                       ys_hier_leaf_return_recv_counts(ys_hier_group_first + 1:ys_hier_group_first + ys_hier_group_count), &
+                       ys_hier_leaf_return_recv_displs(ys_hier_group_first + 1:ys_hier_group_first + ys_hier_group_count), &
+                       MPI_DOUBLE_COMPLEX, ys_hier_group_comm, ierr_local)
     !$omp end target data
+    if (ys_hier_comm_stats_enabled) then
+      comm_elapsed = MPI_Wtime() - comm_t0
+      call ys_hier_report_comm_stats("hier_leaf_values_from_group", ys_hier_group_comm, &
+                                     ys_hier_leaf_return_send_counts(ys_hier_group_first + 1:ys_hier_group_first + &
+                                                                     ys_hier_group_count), &
+                                     ys_hier_leaf_return_recv_counts(ys_hier_group_first + 1:ys_hier_group_first + &
+                                                                     ys_hier_group_count), &
+                                     comm_elapsed)
+    end if
     call roctxPop("MPI_Alltoallv hier_leaf_values_from_group")
     if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoallv hier_leaf_values_from_group failed"
 
     call ys_hier_unpack_leaf_returns(nlines)
   end subroutine ys_solve_reduced_interfaces_hier
+
+  subroutine ys_hier_report_comm_stats(label, comm, send_counts, recv_counts, elapsed)
+    implicit none
+    character(*), intent(in) :: label
+    type(MPI_Comm), intent(in) :: comm
+    integer, intent(in) :: send_counts(:), recv_counts(:)
+    real(C_DOUBLE), intent(in) :: elapsed
+    integer :: comm_rank, comm_size, ierr_local
+    real(C_DOUBLE) :: local_send_bytes, local_recv_bytes
+    real(C_DOUBLE) :: send_bandwidth_gbs, recv_bandwidth_gbs
+
+    local_send_bytes = 16.0_C_DOUBLE*real(sum(send_counts), C_DOUBLE)
+    local_recv_bytes = 16.0_C_DOUBLE*real(sum(recv_counts), C_DOUBLE)
+    call MPI_Comm_rank(comm, comm_rank, ierr_local)
+    if (ierr_local /= MPI_SUCCESS) error stop "MPI_Comm_rank y-Schur comm stats failed"
+    call MPI_Comm_size(comm, comm_size, ierr_local)
+    if (ierr_local /= MPI_SUCCESS) error stop "MPI_Comm_size y-Schur comm stats failed"
+
+    if (elapsed > 0.0_C_DOUBLE) then
+      send_bandwidth_gbs = local_send_bytes/elapsed/1.0e9_C_DOUBLE
+      recv_bandwidth_gbs = local_recv_bytes/elapsed/1.0e9_C_DOUBLE
+    else
+      send_bandwidth_gbs = 0.0_C_DOUBLE
+      recv_bandwidth_gbs = 0.0_C_DOUBLE
+    end if
+
+    write (*, '("Y_SCHUR_COMM_STATS label=",a," ipy=",i0," comm_rank=",i0," comm_size=",i0,'// &
+           '" send_MB=",f12.6," recv_MB=",f12.6," time_ms=",f12.6,'// &
+           '" send_GBps=",f12.6," recv_GBps=",f12.6)') &
+      trim(label), ipy, comm_rank, comm_size, local_send_bytes/1.0e6_C_DOUBLE, local_recv_bytes/1.0e6_C_DOUBLE, &
+      elapsed*1.0e3_C_DOUBLE, send_bandwidth_gbs, recv_bandwidth_gbs
+  end subroutine ys_hier_report_comm_stats
 
   subroutine ys_hier_pack_leaf_rows(nlines)
     implicit none
@@ -1322,8 +1432,8 @@ contains
     !$omp& ys_hier_node_rows, ys_hier_node_owned_nlines, ys_hier_group_first, ys_hier_group_count, bw) &
     !$omp private(iline, child, child_rank, row0, row, k, rhs_col, ext_col, exposed_var, offset, col)
     do iline = 1, ys_hier_node_owned_nlines
-      ys_reduced_matrix_lu(:, :, iline) = (0.0d0, 0.0d0)
-      ys_hier_recover_basis(:, :, iline) = (0.0d0, 0.0d0)
+      ys_reduced_matrix_lu(1:4*ys_hier_group_count, :, iline) = (0.0d0, 0.0d0)
+      ys_hier_recover_basis(1:4*ys_hier_group_count, :, iline) = (0.0d0, 0.0d0)
       do child = 0, ys_hier_group_count - 1
         child_rank = ys_hier_group_first + child
         offset = ys_hier_leaf_recv_displs(child_rank + 1) + (iline - 1)*20
@@ -1425,8 +1535,8 @@ contains
     !$omp& intersection_first, offset, owner_rank, local_row0, base_count, remainder, split_line)
     do iline = 1, ys_hier_global_owned_nlines
       global_line = ys_hier_global_first_line + iline - 1
-      ys_reduced_matrix_lu(:, :, iline) = (0.0d0, 0.0d0)
-      ys_reduced_rhs(:, iline) = (0.0d0, 0.0d0)
+      ys_reduced_matrix_lu(1:4*ys_hier_ngroups, :, iline) = (0.0d0, 0.0d0)
+      ys_reduced_rhs(1:4*ys_hier_ngroups, iline) = (0.0d0, 0.0d0)
       do iblock = 0, ys_hier_ngroups - 1
         group_first = ys_hier_group_first_by_group(iblock + 1)
         group_count = ys_hier_group_count_by_group(iblock + 1)
