@@ -288,7 +288,7 @@ CONTAINS
     IF (solveNS .AND. has_terminal) OPEN (UNIT=121, FILE='Runtimedata', ACTION='write')
 
     allocate (fr(3 + 2*nPhi)); fr = 0.0
-    call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, nxB*(2*nz + 1), .true.)
+    call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, nxB*(2*nz + 1),.not. (solveNS .and. use_yslab_linsolve))
     if (solveNS .and. use_yslab_linsolve) then
       call prepare_yslab_scratch(ny + 3, max(1_C_INT, yslab_owned_line_count))
     end if
