@@ -3,8 +3,14 @@
 module y_line_solvers
 
   use, intrinsic :: iso_c_binding
-  use mpi_transpose, only: ny0, nyN, nx0, nxN, nxB, npy_grid, ipy, allgather_y_device_complex_rows
+  use mpi_transpose, only: ny0, nyN, nx0, nxN, nxB, npy_grid, ipy
+#ifdef HAVE_MPI
+  use mpi_transpose, only: MPI_COMM_Y, ensure_ycomm_buffers, ycomm_sendbuf, ycomm_recvbuf
+#endif
   use roctx, only: roctxPush, roctxPop
+#ifdef HAVE_MPI
+  use mpi_f08
+#endif
 #ifdef HAVE_CUDA
   use cusparse
 #elif defined(HAVE_HIP)
@@ -57,6 +63,7 @@ module y_line_solvers
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_CONST = 1_C_INT
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_EVEN_Z = 2_C_INT
   integer(C_INT), parameter :: YS_REDUCED_BW = 5_C_INT
+  integer(C_INT), parameter :: YS_REDUCED_RETURN_WIDTH = 8_C_INT
 
   public :: ys_prepare_assembled_workspace, ys_release_workspace
   public :: ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs
@@ -109,9 +116,14 @@ module y_line_solvers
 
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_reduced_rows_send(:, :)
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_left_interface_values(:, :), ys_right_interface_values(:, :)
-  complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_reduced_rows_recv(:, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_reduced_matrix_lu(:, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_reduced_rhs(:, :)
+  integer, allocatable, save :: ys_reduced_send_counts(:), ys_reduced_send_displs(:)
+  integer, allocatable, save :: ys_reduced_recv_counts(:), ys_reduced_recv_displs(:)
+  integer, allocatable, save :: ys_reduced_return_send_counts(:), ys_reduced_return_send_displs(:)
+  integer, allocatable, save :: ys_reduced_return_recv_counts(:), ys_reduced_return_recv_displs(:)
+  integer(C_INT), save :: ys_reduced_send_elems = 0, ys_reduced_recv_elems = 0
+  integer(C_INT), save :: ys_reduced_return_send_elems = 0, ys_reduced_return_recv_elems = 0
 
 #ifdef HAVE_CUDA
   type(cusparseHandle), save :: ys_gpsv_handle
@@ -271,10 +283,22 @@ contains
 
     if (allocated(ys_reduced_rows_send)) then
       !$omp target exit data map(delete: ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values, &
-      !$omp& ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs)
+      !$omp& ys_reduced_matrix_lu, ys_reduced_rhs)
       deallocate (ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values)
-      deallocate (ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs)
+      deallocate (ys_reduced_matrix_lu, ys_reduced_rhs)
     end if
+    if (allocated(ys_reduced_send_counts)) then
+      !$omp target exit data map(delete: ys_reduced_send_counts, ys_reduced_send_displs, &
+      !$omp& ys_reduced_recv_counts, ys_reduced_recv_displs, ys_reduced_return_send_counts, &
+      !$omp& ys_reduced_return_send_displs, ys_reduced_return_recv_counts, ys_reduced_return_recv_displs)
+      deallocate (ys_reduced_send_counts, ys_reduced_send_displs, ys_reduced_recv_counts, ys_reduced_recv_displs)
+      deallocate (ys_reduced_return_send_counts, ys_reduced_return_send_displs, &
+                  ys_reduced_return_recv_counts, ys_reduced_return_recv_displs)
+    end if
+    ys_reduced_send_elems = 0
+    ys_reduced_recv_elems = 0
+    ys_reduced_return_send_elems = 0
+    ys_reduced_return_recv_elems = 0
 
   end subroutine ys_release_reduced_workspace
 
@@ -308,13 +332,58 @@ contains
 
     allocate (ys_reduced_rows_send(20, nlines), ys_left_interface_values(2, nlines), &
               ys_right_interface_values(2, nlines))
-    allocate (ys_reduced_rows_recv(20, nlines, npy_count), &
-              ys_reduced_matrix_lu(4*npy_count, 2*YS_REDUCED_BW + 1, nlines), &
+    allocate (ys_reduced_matrix_lu(4*npy_count, 2*YS_REDUCED_BW + 1, nlines), &
               ys_reduced_rhs(4*npy_count, nlines))
+    allocate (ys_reduced_send_counts(npy_count), ys_reduced_send_displs(npy_count), &
+              ys_reduced_recv_counts(npy_count), ys_reduced_recv_displs(npy_count))
+    allocate (ys_reduced_return_send_counts(npy_count), ys_reduced_return_send_displs(npy_count), &
+              ys_reduced_return_recv_counts(npy_count), ys_reduced_return_recv_displs(npy_count))
+
+    call ys_prepare_reduced_comm_plan(nlines, npy_count)
 
     !$omp target enter data map(alloc: ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values, &
-    !$omp& ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs)
+    !$omp& ys_reduced_matrix_lu, ys_reduced_rhs)
+    !$omp target enter data map(to: ys_reduced_send_counts, ys_reduced_send_displs, ys_reduced_recv_counts, &
+    !$omp& ys_reduced_recv_displs, ys_reduced_return_send_counts, ys_reduced_return_send_displs, &
+    !$omp& ys_reduced_return_recv_counts, ys_reduced_return_recv_displs)
   end subroutine ys_allocate_reduced_workspace
+
+  subroutine ys_prepare_reduced_comm_plan(nlines, npy_count)
+    implicit none
+    integer(C_INT), intent(in) :: nlines, npy_count
+    integer(C_INT) :: owner_rank, local_row0, owned_count, owned_nlines
+    integer(C_INT) :: send_offset, recv_offset
+
+    call ys_owned_line_range(ipy, nlines, local_row0, owned_nlines)
+
+    send_offset = 0_C_INT
+    recv_offset = 0_C_INT
+    do owner_rank = 0, npy_count - 1
+      call ys_owned_line_range(owner_rank, nlines, local_row0, owned_count)
+      ys_reduced_send_counts(owner_rank + 1) = 20*owned_count
+      ys_reduced_send_displs(owner_rank + 1) = send_offset
+      ys_reduced_recv_counts(owner_rank + 1) = 20*owned_nlines
+      ys_reduced_recv_displs(owner_rank + 1) = recv_offset
+      send_offset = send_offset + ys_reduced_send_counts(owner_rank + 1)
+      recv_offset = recv_offset + ys_reduced_recv_counts(owner_rank + 1)
+    end do
+    ys_reduced_send_elems = send_offset
+    ys_reduced_recv_elems = recv_offset
+
+    send_offset = 0_C_INT
+    recv_offset = 0_C_INT
+    do owner_rank = 0, npy_count - 1
+      call ys_owned_line_range(owner_rank, nlines, local_row0, owned_count)
+      ys_reduced_return_send_counts(owner_rank + 1) = YS_REDUCED_RETURN_WIDTH*owned_nlines
+      ys_reduced_return_send_displs(owner_rank + 1) = send_offset
+      ys_reduced_return_recv_counts(owner_rank + 1) = YS_REDUCED_RETURN_WIDTH*owned_count
+      ys_reduced_return_recv_displs(owner_rank + 1) = recv_offset
+      send_offset = send_offset + ys_reduced_return_send_counts(owner_rank + 1)
+      recv_offset = recv_offset + ys_reduced_return_recv_counts(owner_rank + 1)
+    end do
+    ys_reduced_return_send_elems = send_offset
+    ys_reduced_return_recv_elems = recv_offset
+  end subroutine ys_prepare_reduced_comm_plan
 
   subroutine ys_prepare_assembled_workspace(ny, nz, row_start, row_end, line_start, nlines, use_reduced_backend)
     implicit none
@@ -617,17 +686,35 @@ contains
     complex(C_DOUBLE_COMPLEX), intent(inout), target :: ds(:), dl(:), d(:), du(:), dw(:), x(:)
     integer(C_INT), intent(in) :: n, batch_count
     character(*), intent(in) :: label
-    integer(C_INT) :: iline
+    integer(C_INT) :: iline, p, p1
+    complex(C_DOUBLE_COMPLEX) :: d0inv, d1inv, lfac, rhs0, rhs1
 
     call roctxPush(label)
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
     ! ROCSparse fails if the system size is 1: https://github.com/ROCm/rocSPARSE/blob/develop_deprecated/library/src/precond/rocsparse_gtsv.cpp
     if (n < 3) then
       !$omp target teams distribute parallel do default(none) &
-      !$omp shared(ds, dl, d, du, dw, x, n, batch_count) private(iline)
+      !$omp shared(ds, dl, d, du, dw, x, n, batch_count) private(iline, p, p1, d0inv, d1inv, lfac, rhs0, rhs1)
       do iline = 1, batch_count
-        call ys_factor_penta_interleaved(ds, dl, d, du, dw, batch_count, iline, n)
-        call ys_solve_factored_penta_interleaved(x, ds, dl, d, du, dw, batch_count, iline, n)
+        p = iline
+        if (n == 1) then
+          d0inv = 1.0d0/d(p)
+          d(p) = d0inv
+          x(p) = x(p)*d0inv
+        else
+          p1 = p + batch_count
+          d0inv = 1.0d0/d(p)
+          lfac = dl(p1)*d0inv
+          d1inv = 1.0d0/(d(p1) - lfac*du(p))
+          rhs1 = (x(p1) - lfac*x(p))*d1inv
+          rhs0 = (x(p) - du(p)*rhs1)*d0inv
+
+          d(p) = d0inv
+          dl(p1) = lfac
+          d(p1) = d1inv
+          x(p) = rhs0
+          x(p1) = rhs1
+        end if
       end do
       !$omp end target teams distribute parallel do
     else
@@ -934,68 +1021,161 @@ contains
   subroutine ys_solve_reduced_interfaces()
     implicit none
     integer(C_INT), parameter :: bw = YS_REDUCED_BW
-    complex(C_DOUBLE_COMPLEX) :: packed_remote(20)
-    integer(C_INT) :: nlines, iline, iblock, row0
+    integer :: ierr_local
+    integer(C_INT) :: nlines, iline, iblock, row0, owner_rank, first_line, src_rank
+    integer(C_INT) :: owned_nlines, local_row0
+    integer(C_INT) :: base_count, remainder, irow, offset, comm_send_elems, comm_recv_elems, split_line
 
     nlines = size(ys_reduced_rows_send, 2)
+    call ys_owned_line_range(ipy, nlines, first_line, owned_nlines)
+    base_count = nlines/npy_grid
+    remainder = mod(nlines, npy_grid)
+    split_line = (base_count + 1_C_INT)*remainder
+    comm_send_elems = max(ys_reduced_send_elems, ys_reduced_return_send_elems)
+    comm_recv_elems = max(ys_reduced_recv_elems, ys_reduced_return_recv_elems)
+    call ensure_ycomm_buffers(comm_send_elems, comm_recv_elems)
 
-    call allgather_y_device_complex_rows(ys_reduced_rows_send, ys_reduced_rows_recv, 20_C_INT, nlines, &
-                                         "MPI_Allgather reduced_y_interfaces")
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(ys_reduced_rows_send, ycomm_sendbuf, ys_reduced_send_displs, base_count, remainder, split_line, nlines) &
+    !$omp private(iline, irow, owner_rank, local_row0, offset)
+    do iline = 1, nlines
+      do irow = 1, 20
+        if (iline <= split_line) then
+          owner_rank = (iline - 1)/(base_count + 1_C_INT)
+          local_row0 = iline - owner_rank*(base_count + 1_C_INT)
+        else
+          owner_rank = remainder + (iline - split_line - 1_C_INT)/base_count
+          local_row0 = iline - split_line - (owner_rank - remainder)*base_count
+        end if
+        offset = ys_reduced_send_displs(owner_rank + 1) + (local_row0 - 1)*20 + irow
+        ycomm_sendbuf(offset) = ys_reduced_rows_send(irow, iline)
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+
+    call roctxPush("MPI_Alltoallv reduced_y_rows_to_owners")
+    !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
+    call MPI_Alltoallv(ycomm_sendbuf(1:ys_reduced_send_elems), ys_reduced_send_counts, ys_reduced_send_displs, MPI_DOUBLE_COMPLEX, &
+                       ycomm_recvbuf(1:ys_reduced_recv_elems), ys_reduced_recv_counts, ys_reduced_recv_displs, MPI_DOUBLE_COMPLEX, &
+                       MPI_COMM_Y, ierr_local)
+    !$omp end target data
+    call roctxPop("MPI_Alltoallv reduced_y_rows_to_owners")
+    if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoallv reduced_y_rows_to_owners failed"
 
     call roctxPush("ys_reduced_interfaces_solve")
     !$omp target teams distribute parallel do default(none) &
-    !$omp shared(ys_reduced_rows_recv, ys_reduced_matrix_lu, ys_reduced_rhs, ys_left_interface_values, &
-    !$omp& ys_right_interface_values, nlines, npy_grid, ipy) &
-    !$omp private(iline, iblock, row0, packed_remote)
-    do iline = 1, nlines
+    !$omp shared(ycomm_recvbuf, ys_reduced_recv_displs, ys_reduced_matrix_lu, ys_reduced_rhs, ycomm_sendbuf, &
+    !$omp& ys_reduced_return_send_displs, owned_nlines, npy_grid, bw) &
+    !$omp private(iline, iblock, row0, owner_rank, offset)
+    do iline = 1, owned_nlines
       ys_reduced_matrix_lu(:, :, iline) = (0.0d0, 0.0d0)
       ys_reduced_rhs(:, iline) = (0.0d0, 0.0d0)
       do iblock = 0, npy_grid - 1
         row0 = 4*iblock
-        packed_remote = ys_reduced_rows_recv(:, iline, iblock + 1)
+        offset = ys_reduced_recv_displs(iblock + 1) + (iline - 1)*20
         ys_reduced_matrix_lu(row0 + 1, bw + 1, iline) = (1.0d0, 0.0d0)
         ys_reduced_matrix_lu(row0 + 2, bw + 1, iline) = (1.0d0, 0.0d0)
         ys_reduced_matrix_lu(row0 + 3, bw + 1, iline) = (1.0d0, 0.0d0)
         ys_reduced_matrix_lu(row0 + 4, bw + 1, iline) = (1.0d0, 0.0d0)
-        ys_reduced_rhs(row0 + 1:row0 + 4, iline) = packed_remote(1:4)
+        ys_reduced_rhs(row0 + 1, iline) = ycomm_recvbuf(offset + 1)
+        ys_reduced_rhs(row0 + 2, iline) = ycomm_recvbuf(offset + 2)
+        ys_reduced_rhs(row0 + 3, iline) = ycomm_recvbuf(offset + 3)
+        ys_reduced_rhs(row0 + 4, iline) = ycomm_recvbuf(offset + 4)
         if (iblock > 0) then
-          ys_reduced_matrix_lu(row0 + 1, bw - 1, iline) = -packed_remote(5)
-          ys_reduced_matrix_lu(row0 + 2, bw - 2, iline) = -packed_remote(6)
-          ys_reduced_matrix_lu(row0 + 3, bw - 3, iline) = -packed_remote(7)
-          ys_reduced_matrix_lu(row0 + 4, bw - 4, iline) = -packed_remote(8)
-          ys_reduced_matrix_lu(row0 + 1, bw, iline) = -packed_remote(9)
-          ys_reduced_matrix_lu(row0 + 2, bw - 1, iline) = -packed_remote(10)
-          ys_reduced_matrix_lu(row0 + 3, bw - 2, iline) = -packed_remote(11)
-          ys_reduced_matrix_lu(row0 + 4, bw - 3, iline) = -packed_remote(12)
+          ys_reduced_matrix_lu(row0 + 1, bw - 1, iline) = -ycomm_recvbuf(offset + 5)
+          ys_reduced_matrix_lu(row0 + 2, bw - 2, iline) = -ycomm_recvbuf(offset + 6)
+          ys_reduced_matrix_lu(row0 + 3, bw - 3, iline) = -ycomm_recvbuf(offset + 7)
+          ys_reduced_matrix_lu(row0 + 4, bw - 4, iline) = -ycomm_recvbuf(offset + 8)
+          ys_reduced_matrix_lu(row0 + 1, bw, iline) = -ycomm_recvbuf(offset + 9)
+          ys_reduced_matrix_lu(row0 + 2, bw - 1, iline) = -ycomm_recvbuf(offset + 10)
+          ys_reduced_matrix_lu(row0 + 3, bw - 2, iline) = -ycomm_recvbuf(offset + 11)
+          ys_reduced_matrix_lu(row0 + 4, bw - 3, iline) = -ycomm_recvbuf(offset + 12)
         end if
         if (iblock < npy_grid - 1) then
-          ys_reduced_matrix_lu(row0 + 1, bw + 5, iline) = -packed_remote(13)
-          ys_reduced_matrix_lu(row0 + 2, bw + 4, iline) = -packed_remote(14)
-          ys_reduced_matrix_lu(row0 + 3, bw + 3, iline) = -packed_remote(15)
-          ys_reduced_matrix_lu(row0 + 4, bw + 2, iline) = -packed_remote(16)
-          ys_reduced_matrix_lu(row0 + 1, bw + 6, iline) = -packed_remote(17)
-          ys_reduced_matrix_lu(row0 + 2, bw + 5, iline) = -packed_remote(18)
-          ys_reduced_matrix_lu(row0 + 3, bw + 4, iline) = -packed_remote(19)
-          ys_reduced_matrix_lu(row0 + 4, bw + 3, iline) = -packed_remote(20)
+          ys_reduced_matrix_lu(row0 + 1, bw + 5, iline) = -ycomm_recvbuf(offset + 13)
+          ys_reduced_matrix_lu(row0 + 2, bw + 4, iline) = -ycomm_recvbuf(offset + 14)
+          ys_reduced_matrix_lu(row0 + 3, bw + 3, iline) = -ycomm_recvbuf(offset + 15)
+          ys_reduced_matrix_lu(row0 + 4, bw + 2, iline) = -ycomm_recvbuf(offset + 16)
+          ys_reduced_matrix_lu(row0 + 1, bw + 6, iline) = -ycomm_recvbuf(offset + 17)
+          ys_reduced_matrix_lu(row0 + 2, bw + 5, iline) = -ycomm_recvbuf(offset + 18)
+          ys_reduced_matrix_lu(row0 + 3, bw + 4, iline) = -ycomm_recvbuf(offset + 19)
+          ys_reduced_matrix_lu(row0 + 4, bw + 3, iline) = -ycomm_recvbuf(offset + 20)
         end if
       end do
 
       call ys_factor_banded_complex(ys_reduced_matrix_lu(:, :, iline))
       call ys_solve_factored_banded_complex(ys_reduced_rhs(:, iline), ys_reduced_matrix_lu(:, :, iline))
-
-      ys_left_interface_values(:, iline) = (0.0d0, 0.0d0)
-      ys_right_interface_values(:, iline) = (0.0d0, 0.0d0)
-      row0 = 4*ipy
-      if (ipy > 0) then
-        ys_left_interface_values(:, iline) = ys_reduced_rhs(row0 - 1:row0, iline)
-      end if
-      if (ipy < npy_grid - 1) then
-        ys_right_interface_values(:, iline) = ys_reduced_rhs(row0 + 5:row0 + 6, iline)
-      end if
+      do owner_rank = 0, npy_grid - 1
+        row0 = 4*owner_rank
+        offset = ys_reduced_return_send_displs(owner_rank + 1) + (iline - 1)*YS_REDUCED_RETURN_WIDTH
+        ycomm_sendbuf(offset + 1) = ys_reduced_rhs(row0 + 1, iline)
+        ycomm_sendbuf(offset + 2) = ys_reduced_rhs(row0 + 2, iline)
+        ycomm_sendbuf(offset + 3) = ys_reduced_rhs(row0 + 3, iline)
+        ycomm_sendbuf(offset + 4) = ys_reduced_rhs(row0 + 4, iline)
+        ycomm_sendbuf(offset + 5) = (0.0d0, 0.0d0)
+        ycomm_sendbuf(offset + 6) = (0.0d0, 0.0d0)
+        ycomm_sendbuf(offset + 7) = (0.0d0, 0.0d0)
+        ycomm_sendbuf(offset + 8) = (0.0d0, 0.0d0)
+        if (owner_rank > 0) then
+          ycomm_sendbuf(offset + 5) = ys_reduced_rhs(row0 - 1, iline)
+          ycomm_sendbuf(offset + 6) = ys_reduced_rhs(row0, iline)
+        end if
+        if (owner_rank < npy_grid - 1) then
+          ycomm_sendbuf(offset + 7) = ys_reduced_rhs(row0 + 5, iline)
+          ycomm_sendbuf(offset + 8) = ys_reduced_rhs(row0 + 6, iline)
+        end if
+      end do
     end do
     !$omp end target teams distribute parallel do
     call roctxPop("ys_reduced_interfaces_solve")
+
+    call roctxPush("MPI_Alltoallv reduced_y_rows_from_owners")
+    !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
+   call MPI_Alltoallv(ycomm_sendbuf(1:ys_reduced_return_send_elems), ys_reduced_return_send_counts, ys_reduced_return_send_displs, &
+                       MPI_DOUBLE_COMPLEX, ycomm_recvbuf(1:ys_reduced_return_recv_elems), ys_reduced_return_recv_counts, &
+                       ys_reduced_return_recv_displs, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr_local)
+    !$omp end target data
+    call roctxPop("MPI_Alltoallv reduced_y_rows_from_owners")
+    if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoallv reduced_y_rows_from_owners failed"
+
+    row0 = 4*ipy
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(ys_reduced_rhs, ys_left_interface_values, ys_right_interface_values, ycomm_recvbuf, ys_reduced_return_recv_displs, &
+    !$omp& base_count, remainder, split_line, row0, nlines) &
+    !$omp private(iline, src_rank, local_row0, offset)
+    do iline = 1, nlines
+      if (iline <= split_line) then
+        src_rank = (iline - 1)/(base_count + 1_C_INT)
+        local_row0 = iline - src_rank*(base_count + 1_C_INT)
+      else
+        src_rank = remainder + (iline - split_line - 1_C_INT)/base_count
+        local_row0 = iline - split_line - (src_rank - remainder)*base_count
+      end if
+      offset = ys_reduced_return_recv_displs(src_rank + 1) + (local_row0 - 1)*YS_REDUCED_RETURN_WIDTH
+      ys_reduced_rhs(row0 + 1, iline) = ycomm_recvbuf(offset + 1)
+      ys_reduced_rhs(row0 + 2, iline) = ycomm_recvbuf(offset + 2)
+      ys_reduced_rhs(row0 + 3, iline) = ycomm_recvbuf(offset + 3)
+      ys_reduced_rhs(row0 + 4, iline) = ycomm_recvbuf(offset + 4)
+      ys_left_interface_values(1, iline) = ycomm_recvbuf(offset + 5)
+      ys_left_interface_values(2, iline) = ycomm_recvbuf(offset + 6)
+      ys_right_interface_values(1, iline) = ycomm_recvbuf(offset + 7)
+      ys_right_interface_values(2, iline) = ycomm_recvbuf(offset + 8)
+    end do
+    !$omp end target teams distribute parallel do
   end subroutine ys_solve_reduced_interfaces
+
+  subroutine ys_owned_line_range(rank, nlines, first_line, owned_count)
+    implicit none
+    integer(C_INT), intent(in) :: rank, nlines
+    integer(C_INT), intent(out) :: first_line, owned_count
+    integer(C_INT) :: base_count, remainder
+
+    base_count = nlines/npy_grid
+    remainder = mod(nlines, npy_grid)
+    owned_count = base_count
+    if (rank < remainder) owned_count = owned_count + 1
+    first_line = rank*base_count + min(rank, remainder) + 1
+  end subroutine ys_owned_line_range
 
   subroutine ys_factor_banded_complex(a)
     implicit none
