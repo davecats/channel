@@ -64,6 +64,8 @@ module y_line_solvers
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_EVEN_Z = 2_C_INT
   integer(C_INT), parameter :: YS_REDUCED_BW = 5_C_INT
   integer(C_INT), parameter :: YS_REDUCED_RETURN_WIDTH = 8_C_INT
+  integer(C_INT), parameter :: YS_HIER_EXCHANGE_ALLGATHER = 1_C_INT
+  integer(C_INT), parameter :: YS_HIER_EXCHANGE_ALLTOALL = 2_C_INT
 
   public :: ys_prepare_assembled_workspace, ys_release_workspace
   public :: ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs
@@ -125,10 +127,22 @@ module y_line_solvers
   integer(C_INT), save :: ys_hier_group_first = 0
   integer(C_INT), save :: ys_hier_group_count = 1
   integer(C_INT), save :: ys_hier_group_rank = 0
+  integer(C_INT), save :: ys_hier_column_rank = 0
+  integer(C_INT), save :: ys_hier_column_count = 1
   integer(C_INT), save :: ys_hier_node_first_line = 1
   integer(C_INT), save :: ys_hier_node_owned_nlines = 0
   integer(C_INT), save :: ys_hier_global_first_line = 1
   integer(C_INT), save :: ys_hier_global_owned_nlines = 0
+  integer(C_INT), save :: ys_hier_column_solve_first_line = 1
+  integer(C_INT), save :: ys_hier_column_solve_nlines = 0
+  integer(C_INT), save :: ys_hier_column_send_elems = 0
+  integer(C_INT), save :: ys_hier_column_recv_elems = 0
+  integer(C_INT), save :: ys_hier_column_a2a_send_elems = 0
+  integer(C_INT), save :: ys_hier_column_a2a_recv_elems = 0
+  integer(C_INT), save :: ys_hier_column_return_send_elems = 0
+  integer(C_INT), save :: ys_hier_column_return_recv_elems = 0
+  integer(C_INT), save :: ys_hier_global_exchange = YS_HIER_EXCHANGE_ALLGATHER
+  logical, save :: ys_hier_use_column_global = .false.
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_hier_node_rows(:, :)
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_hier_recover_basis(:, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_hier_group_values(:, :)
@@ -140,6 +154,10 @@ module y_line_solvers
   integer, allocatable, save :: ys_hier_leaf_recv_counts(:), ys_hier_leaf_recv_displs(:)
   integer, allocatable, save :: ys_hier_global_send_counts(:), ys_hier_global_send_displs(:)
   integer, allocatable, save :: ys_hier_global_recv_counts(:), ys_hier_global_recv_displs(:)
+  integer, allocatable, save :: ys_hier_column_global_send_counts(:), ys_hier_column_global_send_displs(:)
+  integer, allocatable, save :: ys_hier_column_global_recv_counts(:), ys_hier_column_global_recv_displs(:)
+  integer, allocatable, save :: ys_hier_column_return_send_counts(:), ys_hier_column_return_send_displs(:)
+  integer, allocatable, save :: ys_hier_column_return_recv_counts(:), ys_hier_column_return_recv_displs(:)
   integer, allocatable, save :: ys_hier_group_return_send_counts(:), ys_hier_group_return_send_displs(:)
   integer, allocatable, save :: ys_hier_group_return_recv_counts(:), ys_hier_group_return_recv_displs(:)
   integer, allocatable, save :: ys_hier_leaf_return_send_counts(:), ys_hier_leaf_return_send_displs(:)
@@ -151,7 +169,9 @@ module y_line_solvers
   logical, save :: ys_hier_comm_stats_enabled = .false.
 #ifdef HAVE_MPI
   type(MPI_Comm), save :: ys_hier_group_comm = MPI_COMM_NULL
+  type(MPI_Comm), save :: ys_hier_column_comm = MPI_COMM_NULL
   logical, save :: ys_hier_group_comm_active = .false.
+  logical, save :: ys_hier_column_comm_active = .false.
 #endif
 
 #ifdef HAVE_CUDA
@@ -330,8 +350,13 @@ contains
       !$omp& ys_hier_global_line_first, ys_hier_global_line_count, ys_hier_leaf_send_counts, &
       !$omp& ys_hier_leaf_send_displs, ys_hier_leaf_recv_counts, ys_hier_leaf_recv_displs, &
       !$omp& ys_hier_global_send_counts, ys_hier_global_send_displs, ys_hier_global_recv_counts, &
-      !$omp& ys_hier_global_recv_displs, ys_hier_group_return_send_counts, ys_hier_group_return_send_displs, &
-      !$omp& ys_hier_group_return_recv_counts, ys_hier_group_return_recv_displs, ys_hier_leaf_return_send_counts, &
+      !$omp& ys_hier_global_recv_displs, ys_hier_column_global_send_counts, &
+      !$omp& ys_hier_column_global_send_displs, ys_hier_column_global_recv_counts, &
+      !$omp& ys_hier_column_global_recv_displs, ys_hier_column_return_send_counts, &
+      !$omp& ys_hier_column_return_send_displs, ys_hier_column_return_recv_counts, &
+      !$omp& ys_hier_column_return_recv_displs, ys_hier_group_return_send_counts, &
+      !$omp& ys_hier_group_return_send_displs, ys_hier_group_return_recv_counts, &
+      !$omp& ys_hier_group_return_recv_displs, ys_hier_leaf_return_send_counts, &
       !$omp& ys_hier_leaf_return_send_displs, ys_hier_leaf_return_recv_counts, ys_hier_leaf_return_recv_displs)
       deallocate (ys_hier_group_first_by_group, ys_hier_group_count_by_group, ys_hier_rank_group, &
                   ys_hier_rank_group_pos, ys_hier_rank_line_first, ys_hier_rank_line_count, &
@@ -339,6 +364,10 @@ contains
       deallocate (ys_hier_leaf_send_counts, ys_hier_leaf_send_displs, ys_hier_leaf_recv_counts, ys_hier_leaf_recv_displs)
       deallocate (ys_hier_global_send_counts, ys_hier_global_send_displs, &
                   ys_hier_global_recv_counts, ys_hier_global_recv_displs)
+      deallocate (ys_hier_column_global_send_counts, ys_hier_column_global_send_displs, &
+                  ys_hier_column_global_recv_counts, ys_hier_column_global_recv_displs)
+      deallocate (ys_hier_column_return_send_counts, ys_hier_column_return_send_displs, &
+                  ys_hier_column_return_recv_counts, ys_hier_column_return_recv_displs)
       deallocate (ys_hier_group_return_send_counts, ys_hier_group_return_send_displs, &
                   ys_hier_group_return_recv_counts, ys_hier_group_return_recv_displs)
       deallocate (ys_hier_leaf_return_send_counts, ys_hier_leaf_return_send_displs, &
@@ -352,12 +381,24 @@ contains
     ys_hier_group_return_recv_elems = 0
     ys_hier_leaf_return_send_elems = 0
     ys_hier_leaf_return_recv_elems = 0
+    ys_hier_column_send_elems = 0
+    ys_hier_column_recv_elems = 0
+    ys_hier_column_a2a_send_elems = 0
+    ys_hier_column_a2a_recv_elems = 0
+    ys_hier_column_return_send_elems = 0
+    ys_hier_column_return_recv_elems = 0
 #ifdef HAVE_MPI
     if (ys_hier_group_comm_active) then
       call MPI_Comm_free(ys_hier_group_comm, ierr_local)
       if (ierr_local /= MPI_SUCCESS) error stop "MPI_Comm_free y-Schur group communicator failed"
       ys_hier_group_comm = MPI_COMM_NULL
       ys_hier_group_comm_active = .false.
+    end if
+    if (ys_hier_column_comm_active) then
+      call MPI_Comm_free(ys_hier_column_comm, ierr_local)
+      if (ierr_local /= MPI_SUCCESS) error stop "MPI_Comm_free y-Schur column communicator failed"
+      ys_hier_column_comm = MPI_COMM_NULL
+      ys_hier_column_comm_active = .false.
     end if
 #endif
 
@@ -400,6 +441,13 @@ contains
     call MPI_Comm_split(MPI_COMM_Y, ys_hier_group_id, ys_hier_group_rank, ys_hier_group_comm, ierr_local)
     if (ierr_local /= MPI_SUCCESS) error stop "MPI_Comm_split y-Schur group communicator failed"
     ys_hier_group_comm_active = .true.
+    call MPI_Comm_split(MPI_COMM_Y, ys_hier_group_rank, ys_hier_group_id, ys_hier_column_comm, ierr_local)
+    if (ierr_local /= MPI_SUCCESS) error stop "MPI_Comm_split y-Schur column communicator failed"
+    ys_hier_column_comm_active = .true.
+    call MPI_Comm_rank(ys_hier_column_comm, ys_hier_column_rank, ierr_local)
+    if (ierr_local /= MPI_SUCCESS) error stop "MPI_Comm_rank y-Schur column communicator failed"
+    call MPI_Comm_size(ys_hier_column_comm, ys_hier_column_count, ierr_local)
+    if (ierr_local /= MPI_SUCCESS) error stop "MPI_Comm_size y-Schur column communicator failed"
 #endif
     allocate (ys_reduced_rows_send(20, nlines), ys_left_interface_values(2, nlines), &
               ys_right_interface_values(2, nlines))
@@ -408,6 +456,8 @@ contains
 
     call ys_split_line_range(ys_hier_group_rank, nlines, ys_hier_group_count, &
                              ys_hier_node_first_line, ys_hier_node_owned_nlines)
+    ys_hier_column_send_elems = 20*ys_hier_node_owned_nlines
+    ys_hier_column_recv_elems = ys_hier_column_send_elems*ys_hier_column_count
     node_alloc_nlines = max(1_C_INT, ys_hier_node_owned_nlines)
     allocate (ys_hier_node_rows(20, node_alloc_nlines), &
               ys_hier_recover_basis(4*ys_hier_node_size, 5, node_alloc_nlines), &
@@ -420,16 +470,31 @@ contains
               ys_hier_leaf_recv_counts(npy_count), ys_hier_leaf_recv_displs(npy_count))
     allocate (ys_hier_global_send_counts(npy_count), ys_hier_global_send_displs(npy_count), &
               ys_hier_global_recv_counts(npy_count), ys_hier_global_recv_displs(npy_count))
+    allocate (ys_hier_column_global_send_counts(ys_hier_column_count), &
+              ys_hier_column_global_send_displs(ys_hier_column_count), &
+              ys_hier_column_global_recv_counts(ys_hier_column_count), &
+              ys_hier_column_global_recv_displs(ys_hier_column_count))
+    allocate (ys_hier_column_return_send_counts(ys_hier_column_count), &
+              ys_hier_column_return_send_displs(ys_hier_column_count), &
+              ys_hier_column_return_recv_counts(ys_hier_column_count), &
+              ys_hier_column_return_recv_displs(ys_hier_column_count))
     allocate (ys_hier_group_return_send_counts(npy_count), ys_hier_group_return_send_displs(npy_count), &
               ys_hier_group_return_recv_counts(npy_count), ys_hier_group_return_recv_displs(npy_count))
     allocate (ys_hier_leaf_return_send_counts(npy_count), ys_hier_leaf_return_send_displs(npy_count), &
               ys_hier_leaf_return_recv_counts(npy_count), ys_hier_leaf_return_recv_displs(npy_count))
     call ys_prepare_hier_comm_plan(nlines, npy_count)
+    call ys_prepare_hier_column_comm_plan()
 
     comm_send_elems = max(ys_hier_leaf_send_elems, ys_hier_global_send_elems)
+    comm_send_elems = max(comm_send_elems, ys_hier_column_send_elems)
+    comm_send_elems = max(comm_send_elems, ys_hier_column_a2a_send_elems)
+    comm_send_elems = max(comm_send_elems, ys_hier_column_return_send_elems)
     comm_send_elems = max(comm_send_elems, ys_hier_group_return_send_elems)
     comm_send_elems = max(comm_send_elems, ys_hier_leaf_return_send_elems)
     comm_recv_elems = max(ys_hier_leaf_recv_elems, ys_hier_global_recv_elems)
+    comm_recv_elems = max(comm_recv_elems, ys_hier_column_recv_elems)
+    comm_recv_elems = max(comm_recv_elems, ys_hier_column_a2a_recv_elems)
+    comm_recv_elems = max(comm_recv_elems, ys_hier_column_return_recv_elems)
     comm_recv_elems = max(comm_recv_elems, ys_hier_group_return_recv_elems)
     comm_recv_elems = max(comm_recv_elems, ys_hier_leaf_return_recv_elems)
     call ensure_ycomm_buffers(comm_send_elems, comm_recv_elems)
@@ -442,8 +507,13 @@ contains
     !$omp& ys_hier_global_line_first, ys_hier_global_line_count, ys_hier_leaf_send_counts, &
     !$omp& ys_hier_leaf_send_displs, ys_hier_leaf_recv_counts, ys_hier_leaf_recv_displs, &
     !$omp& ys_hier_global_send_counts, ys_hier_global_send_displs, ys_hier_global_recv_counts, &
-    !$omp& ys_hier_global_recv_displs, ys_hier_group_return_send_counts, ys_hier_group_return_send_displs, &
-    !$omp& ys_hier_group_return_recv_counts, ys_hier_group_return_recv_displs, ys_hier_leaf_return_send_counts, &
+    !$omp& ys_hier_global_recv_displs, ys_hier_column_global_send_counts, &
+    !$omp& ys_hier_column_global_send_displs, ys_hier_column_global_recv_counts, &
+    !$omp& ys_hier_column_global_recv_displs, ys_hier_column_return_send_counts, &
+    !$omp& ys_hier_column_return_send_displs, ys_hier_column_return_recv_counts, &
+    !$omp& ys_hier_column_return_recv_displs, ys_hier_group_return_send_counts, &
+    !$omp& ys_hier_group_return_send_displs, ys_hier_group_return_recv_counts, &
+    !$omp& ys_hier_group_return_recv_displs, ys_hier_leaf_return_send_counts, &
     !$omp& ys_hier_leaf_return_send_displs, ys_hier_leaf_return_recv_counts, ys_hier_leaf_return_recv_displs)
     ys_workspace_reduced_node_size = ys_hier_node_size
   end subroutine ys_allocate_reduced_workspace
@@ -465,6 +535,20 @@ contains
     end if
     if (ys_hier_node_size < 2 .or. ys_hier_node_size > npy_count) error stop "Invalid CHANNEL_Y_SCHUR_NODE_SIZE"
 
+    ys_hier_global_exchange = YS_HIER_EXCHANGE_ALLGATHER
+    call get_environment_variable("CHANNEL_Y_SCHUR_GLOBAL_EXCHANGE", env_value, length=env_length, status=env_status)
+    if (env_status == 0 .and. env_length > 0) then
+      env_switch = trim(adjustl(env_value(:env_length)))
+      select case (env_switch)
+      case ("allgather", "ALLGATHER", "gather", "GATHER")
+        ys_hier_global_exchange = YS_HIER_EXCHANGE_ALLGATHER
+      case ("alltoall", "ALLTOALL", "a2a", "A2A")
+        ys_hier_global_exchange = YS_HIER_EXCHANGE_ALLTOALL
+      case default
+        error stop "Invalid CHANNEL_Y_SCHUR_GLOBAL_EXCHANGE"
+      end select
+    end if
+
     ys_hier_comm_stats_enabled = .false.
     call get_environment_variable("CHANNEL_Y_SCHUR_COMM_STATS", env_value, length=env_length, status=env_status)
     if (env_status == 0 .and. env_length > 0) then
@@ -484,6 +568,7 @@ contains
     ys_hier_group_first = ys_hier_group_id*ys_hier_node_size
     ys_hier_group_count = min(ys_hier_node_size, npy_count - ys_hier_group_first)
     ys_hier_group_rank = ipy - ys_hier_group_first
+    ys_hier_use_column_global = (ys_hier_ngroups*ys_hier_node_size == npy_count)
   end subroutine ys_configure_reduced_solver
 
   subroutine ys_split_line_range(rank, nitems, nranks, first_item, item_count)
@@ -616,6 +701,43 @@ contains
     ys_hier_group_return_send_elems = send_offset
     ys_hier_group_return_recv_elems = recv_offset
   end subroutine ys_prepare_hier_comm_plan
+
+  subroutine ys_prepare_hier_column_comm_plan()
+    implicit none
+    integer(C_INT) :: rank, first_line, line_count
+    integer(C_INT) :: send_offset, recv_offset
+
+    call ys_split_line_range(ys_hier_column_rank, ys_hier_node_owned_nlines, ys_hier_column_count, &
+                             ys_hier_column_solve_first_line, ys_hier_column_solve_nlines)
+
+    send_offset = 0_C_INT
+    recv_offset = 0_C_INT
+    do rank = 0, ys_hier_column_count - 1
+      call ys_split_line_range(rank, ys_hier_node_owned_nlines, ys_hier_column_count, first_line, line_count)
+      ys_hier_column_global_send_counts(rank + 1) = 20*line_count
+      ys_hier_column_global_recv_counts(rank + 1) = 20*ys_hier_column_solve_nlines
+      ys_hier_column_global_send_displs(rank + 1) = send_offset
+      ys_hier_column_global_recv_displs(rank + 1) = recv_offset
+      send_offset = send_offset + ys_hier_column_global_send_counts(rank + 1)
+      recv_offset = recv_offset + ys_hier_column_global_recv_counts(rank + 1)
+    end do
+    ys_hier_column_a2a_send_elems = send_offset
+    ys_hier_column_a2a_recv_elems = recv_offset
+
+    send_offset = 0_C_INT
+    recv_offset = 0_C_INT
+    do rank = 0, ys_hier_column_count - 1
+      call ys_split_line_range(rank, ys_hier_node_owned_nlines, ys_hier_column_count, first_line, line_count)
+      ys_hier_column_return_send_counts(rank + 1) = YS_REDUCED_RETURN_WIDTH*ys_hier_column_solve_nlines
+      ys_hier_column_return_recv_counts(rank + 1) = YS_REDUCED_RETURN_WIDTH*line_count
+      ys_hier_column_return_send_displs(rank + 1) = send_offset
+      ys_hier_column_return_recv_displs(rank + 1) = recv_offset
+      send_offset = send_offset + ys_hier_column_return_send_counts(rank + 1)
+      recv_offset = recv_offset + ys_hier_column_return_recv_counts(rank + 1)
+    end do
+    ys_hier_column_return_send_elems = send_offset
+    ys_hier_column_return_recv_elems = recv_offset
+  end subroutine ys_prepare_hier_column_comm_plan
 
   subroutine ys_prepare_assembled_workspace(ny, nz, row_start, row_end, line_start, nlines, use_reduced_backend)
     implicit none
@@ -1269,9 +1391,15 @@ contains
 
     nlines = size(ys_reduced_rows_send, 2)
     comm_send_elems = max(ys_hier_leaf_send_elems, ys_hier_global_send_elems)
+    comm_send_elems = max(comm_send_elems, ys_hier_column_send_elems)
+    comm_send_elems = max(comm_send_elems, ys_hier_column_a2a_send_elems)
+    comm_send_elems = max(comm_send_elems, ys_hier_column_return_send_elems)
     comm_send_elems = max(comm_send_elems, ys_hier_group_return_send_elems)
     comm_send_elems = max(comm_send_elems, ys_hier_leaf_return_send_elems)
     comm_recv_elems = max(ys_hier_leaf_recv_elems, ys_hier_global_recv_elems)
+    comm_recv_elems = max(comm_recv_elems, ys_hier_column_recv_elems)
+    comm_recv_elems = max(comm_recv_elems, ys_hier_column_a2a_recv_elems)
+    comm_recv_elems = max(comm_recv_elems, ys_hier_column_return_recv_elems)
     comm_recv_elems = max(comm_recv_elems, ys_hier_group_return_recv_elems)
     comm_recv_elems = max(comm_recv_elems, ys_hier_leaf_return_recv_elems)
     call ensure_ycomm_buffers(comm_send_elems, comm_recv_elems)
@@ -1299,40 +1427,102 @@ contains
     if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoallv hier_leaf_rows_to_group failed"
 
     call ys_hier_compose_node_rows()
-    call ys_hier_pack_node_rows_to_global(nlines)
-    call roctxPush("MPI_Alltoallv hier_node_rows_to_global")
-    if (ys_hier_comm_stats_enabled) comm_t0 = MPI_Wtime()
-    !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
-    call MPI_Alltoallv(ycomm_sendbuf(1:ys_hier_global_send_elems), ys_hier_global_send_counts, ys_hier_global_send_displs, &
-                       MPI_DOUBLE_COMPLEX, ycomm_recvbuf(1:ys_hier_global_recv_elems), ys_hier_global_recv_counts, &
-                       ys_hier_global_recv_displs, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr_local)
-    !$omp end target data
-    if (ys_hier_comm_stats_enabled) then
-      comm_elapsed = MPI_Wtime() - comm_t0
-      call ys_hier_report_comm_stats("hier_node_rows_to_global", MPI_COMM_Y, ys_hier_global_send_counts, &
-                                     ys_hier_global_recv_counts, comm_elapsed)
-    end if
-    call roctxPop("MPI_Alltoallv hier_node_rows_to_global")
-    if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoallv hier_node_rows_to_global failed"
+    if (ys_hier_use_column_global) then
+      select case (ys_hier_global_exchange)
+      case (YS_HIER_EXCHANGE_ALLGATHER)
+        call ys_hier_pack_node_rows_column()
+        call roctxPush("MPI_Allgather hier_node_rows_to_global")
+        if (ys_hier_comm_stats_enabled) comm_t0 = MPI_Wtime()
+        !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
+        call MPI_Allgather(ycomm_sendbuf(1:ys_hier_column_send_elems), ys_hier_column_send_elems, MPI_DOUBLE_COMPLEX, &
+                           ycomm_recvbuf(1:ys_hier_column_recv_elems), ys_hier_column_send_elems, MPI_DOUBLE_COMPLEX, &
+                           ys_hier_column_comm, ierr_local)
+        !$omp end target data
+        if (ys_hier_comm_stats_enabled) then
+          comm_elapsed = MPI_Wtime() - comm_t0
+          call ys_hier_report_comm_stats_elems("hier_node_rows_to_global", ys_hier_column_comm, &
+                                               ys_hier_column_send_elems, ys_hier_column_recv_elems, comm_elapsed)
+        end if
+        call roctxPop("MPI_Allgather hier_node_rows_to_global")
+        if (ierr_local /= MPI_SUCCESS) error stop "MPI_Allgather hier_node_rows_to_global failed"
 
-    call ys_hier_solve_global_groups(nlines)
-    call roctxPush("MPI_Alltoallv hier_group_values_from_global")
-    if (ys_hier_comm_stats_enabled) comm_t0 = MPI_Wtime()
-    !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
-    call MPI_Alltoallv(ycomm_sendbuf(1:ys_hier_group_return_send_elems), ys_hier_group_return_send_counts, &
-                       ys_hier_group_return_send_displs, MPI_DOUBLE_COMPLEX, &
-                       ycomm_recvbuf(1:ys_hier_group_return_recv_elems), ys_hier_group_return_recv_counts, &
-                       ys_hier_group_return_recv_displs, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr_local)
-    !$omp end target data
-    if (ys_hier_comm_stats_enabled) then
-      comm_elapsed = MPI_Wtime() - comm_t0
-      call ys_hier_report_comm_stats("hier_group_values_from_global", MPI_COMM_Y, ys_hier_group_return_send_counts, &
-                                     ys_hier_group_return_recv_counts, comm_elapsed)
-    end if
-    call roctxPop("MPI_Alltoallv hier_group_values_from_global")
-    if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoallv hier_group_values_from_global failed"
+        call ys_hier_solve_global_groups_column()
+        call ys_hier_recover_leaf_returns_column()
+      case (YS_HIER_EXCHANGE_ALLTOALL)
+        call ys_hier_pack_node_rows_to_column_global()
+        call roctxPush("MPI_Alltoallv hier_node_rows_to_global")
+        if (ys_hier_comm_stats_enabled) comm_t0 = MPI_Wtime()
+        !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
+        call MPI_Alltoallv(ycomm_sendbuf(1:ys_hier_column_a2a_send_elems), ys_hier_column_global_send_counts, &
+                           ys_hier_column_global_send_displs, MPI_DOUBLE_COMPLEX, &
+                           ycomm_recvbuf(1:ys_hier_column_a2a_recv_elems), ys_hier_column_global_recv_counts, &
+                           ys_hier_column_global_recv_displs, MPI_DOUBLE_COMPLEX, ys_hier_column_comm, ierr_local)
+        !$omp end target data
+        if (ys_hier_comm_stats_enabled) then
+          comm_elapsed = MPI_Wtime() - comm_t0
+          call ys_hier_report_comm_stats("hier_node_rows_to_global", ys_hier_column_comm, &
+                                         ys_hier_column_global_send_counts, ys_hier_column_global_recv_counts, &
+                                         comm_elapsed)
+        end if
+        call roctxPop("MPI_Alltoallv hier_node_rows_to_global")
+        if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoallv hier_node_rows_to_global failed"
 
-    call ys_hier_recover_leaf_returns()
+        call ys_hier_solve_global_groups_column_alltoall()
+        call roctxPush("MPI_Alltoallv hier_group_values_from_global")
+        if (ys_hier_comm_stats_enabled) comm_t0 = MPI_Wtime()
+        !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
+        call MPI_Alltoallv(ycomm_sendbuf(1:ys_hier_column_return_send_elems), ys_hier_column_return_send_counts, &
+                           ys_hier_column_return_send_displs, MPI_DOUBLE_COMPLEX, &
+                           ycomm_recvbuf(1:ys_hier_column_return_recv_elems), ys_hier_column_return_recv_counts, &
+                           ys_hier_column_return_recv_displs, MPI_DOUBLE_COMPLEX, ys_hier_column_comm, ierr_local)
+        !$omp end target data
+        if (ys_hier_comm_stats_enabled) then
+          comm_elapsed = MPI_Wtime() - comm_t0
+          call ys_hier_report_comm_stats("hier_group_values_from_global", ys_hier_column_comm, &
+                                         ys_hier_column_return_send_counts, ys_hier_column_return_recv_counts, &
+                                         comm_elapsed)
+        end if
+        call roctxPop("MPI_Alltoallv hier_group_values_from_global")
+        if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoallv hier_group_values_from_global failed"
+
+        call ys_hier_recover_leaf_returns_column_alltoall()
+      end select
+    else
+      call ys_hier_pack_node_rows_to_global(nlines)
+      call roctxPush("MPI_Alltoallv hier_node_rows_to_global")
+      if (ys_hier_comm_stats_enabled) comm_t0 = MPI_Wtime()
+      !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
+      call MPI_Alltoallv(ycomm_sendbuf(1:ys_hier_global_send_elems), ys_hier_global_send_counts, ys_hier_global_send_displs, &
+                         MPI_DOUBLE_COMPLEX, ycomm_recvbuf(1:ys_hier_global_recv_elems), ys_hier_global_recv_counts, &
+                         ys_hier_global_recv_displs, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr_local)
+      !$omp end target data
+      if (ys_hier_comm_stats_enabled) then
+        comm_elapsed = MPI_Wtime() - comm_t0
+        call ys_hier_report_comm_stats("hier_node_rows_to_global", MPI_COMM_Y, ys_hier_global_send_counts, &
+                                       ys_hier_global_recv_counts, comm_elapsed)
+      end if
+      call roctxPop("MPI_Alltoallv hier_node_rows_to_global")
+      if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoallv hier_node_rows_to_global failed"
+
+      call ys_hier_solve_global_groups(nlines)
+      call roctxPush("MPI_Alltoallv hier_group_values_from_global")
+      if (ys_hier_comm_stats_enabled) comm_t0 = MPI_Wtime()
+      !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
+      call MPI_Alltoallv(ycomm_sendbuf(1:ys_hier_group_return_send_elems), ys_hier_group_return_send_counts, &
+                         ys_hier_group_return_send_displs, MPI_DOUBLE_COMPLEX, &
+                         ycomm_recvbuf(1:ys_hier_group_return_recv_elems), ys_hier_group_return_recv_counts, &
+                         ys_hier_group_return_recv_displs, MPI_DOUBLE_COMPLEX, MPI_COMM_Y, ierr_local)
+      !$omp end target data
+      if (ys_hier_comm_stats_enabled) then
+        comm_elapsed = MPI_Wtime() - comm_t0
+        call ys_hier_report_comm_stats("hier_group_values_from_global", MPI_COMM_Y, ys_hier_group_return_send_counts, &
+                                       ys_hier_group_return_recv_counts, comm_elapsed)
+      end if
+      call roctxPop("MPI_Alltoallv hier_group_values_from_global")
+      if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoallv hier_group_values_from_global failed"
+
+      call ys_hier_recover_leaf_returns()
+    end if
     call roctxPush("MPI_Alltoallv hier_leaf_values_from_group")
     if (ys_hier_comm_stats_enabled) comm_t0 = MPI_Wtime()
     !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
@@ -1365,12 +1555,22 @@ contains
     type(MPI_Comm), intent(in) :: comm
     integer, intent(in) :: send_counts(:), recv_counts(:)
     real(C_DOUBLE), intent(in) :: elapsed
+
+    call ys_hier_report_comm_stats_elems(label, comm, sum(send_counts), sum(recv_counts), elapsed)
+  end subroutine ys_hier_report_comm_stats
+
+  subroutine ys_hier_report_comm_stats_elems(label, comm, send_elems, recv_elems, elapsed)
+    implicit none
+    character(*), intent(in) :: label
+    type(MPI_Comm), intent(in) :: comm
+    integer, intent(in) :: send_elems, recv_elems
+    real(C_DOUBLE), intent(in) :: elapsed
     integer :: comm_rank, comm_size, ierr_local
     real(C_DOUBLE) :: local_send_bytes, local_recv_bytes
     real(C_DOUBLE) :: send_bandwidth_gbs, recv_bandwidth_gbs
 
-    local_send_bytes = 16.0_C_DOUBLE*real(sum(send_counts), C_DOUBLE)
-    local_recv_bytes = 16.0_C_DOUBLE*real(sum(recv_counts), C_DOUBLE)
+    local_send_bytes = 16.0_C_DOUBLE*real(send_elems, C_DOUBLE)
+    local_recv_bytes = 16.0_C_DOUBLE*real(recv_elems, C_DOUBLE)
     call MPI_Comm_rank(comm, comm_rank, ierr_local)
     if (ierr_local /= MPI_SUCCESS) error stop "MPI_Comm_rank y-Schur comm stats failed"
     call MPI_Comm_size(comm, comm_size, ierr_local)
@@ -1389,7 +1589,7 @@ contains
            '" send_GBps=",f12.6," recv_GBps=",f12.6)') &
       trim(label), ipy, comm_rank, comm_size, local_send_bytes/1.0e6_C_DOUBLE, local_recv_bytes/1.0e6_C_DOUBLE, &
       elapsed*1.0e3_C_DOUBLE, send_bandwidth_gbs, recv_bandwidth_gbs
-  end subroutine ys_hier_report_comm_stats
+  end subroutine ys_hier_report_comm_stats_elems
 
   subroutine ys_hier_pack_leaf_rows(nlines)
     implicit none
@@ -1485,6 +1685,50 @@ contains
     call roctxPop("ys_hier_compose_node_rows")
   end subroutine ys_hier_compose_node_rows
 
+  subroutine ys_hier_pack_node_rows_column()
+    implicit none
+    integer(C_INT) :: iline, irow, offset
+
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(ys_hier_node_rows, ycomm_sendbuf, ys_hier_node_owned_nlines) &
+    !$omp private(iline, irow, offset)
+    do iline = 1, ys_hier_node_owned_nlines
+      do irow = 1, 20
+        offset = (iline - 1)*20 + irow
+        ycomm_sendbuf(offset) = ys_hier_node_rows(irow, iline)
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+  end subroutine ys_hier_pack_node_rows_column
+
+  subroutine ys_hier_pack_node_rows_to_column_global()
+    implicit none
+    integer(C_INT) :: iline, irow, owner_rank, local_row0, offset
+    integer(C_INT) :: base_count, remainder, split_line
+
+    base_count = ys_hier_node_owned_nlines/ys_hier_column_count
+    remainder = mod(ys_hier_node_owned_nlines, ys_hier_column_count)
+    split_line = (base_count + 1_C_INT)*remainder
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(ys_hier_node_rows, ycomm_sendbuf, ys_hier_column_global_send_displs, ys_hier_node_owned_nlines, &
+    !$omp& base_count, remainder, split_line) &
+    !$omp private(iline, irow, owner_rank, local_row0, offset)
+    do iline = 1, ys_hier_node_owned_nlines
+      do irow = 1, 20
+        if (iline <= split_line) then
+          owner_rank = (iline - 1)/(base_count + 1_C_INT)
+          local_row0 = iline - owner_rank*(base_count + 1_C_INT)
+        else
+          owner_rank = remainder + (iline - split_line - 1_C_INT)/base_count
+          local_row0 = iline - split_line - (owner_rank - remainder)*base_count
+        end if
+        offset = ys_hier_column_global_send_displs(owner_rank + 1) + (local_row0 - 1)*20 + irow
+        ycomm_sendbuf(offset) = ys_hier_node_rows(irow, iline)
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+  end subroutine ys_hier_pack_node_rows_to_column_global
+
   subroutine ys_hier_pack_node_rows_to_global(nlines)
     implicit none
     integer(C_INT), intent(in) :: nlines
@@ -1516,6 +1760,154 @@ contains
     end do
     !$omp end target teams distribute parallel do
   end subroutine ys_hier_pack_node_rows_to_global
+
+  subroutine ys_hier_solve_global_groups_column()
+    implicit none
+    integer(C_INT), parameter :: bw = YS_REDUCED_BW
+    integer(C_INT) :: iline, iblock, row0, offset
+
+    call roctxPush("ys_hier_global_group_solve")
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(ycomm_recvbuf, ys_hier_group_values, ys_hier_node_owned_nlines, ys_hier_ngroups, &
+    !$omp& ys_hier_group_id, ys_reduced_matrix_lu, ys_reduced_rhs, bw) &
+    !$omp private(iline, iblock, row0, offset)
+    do iline = 1, ys_hier_node_owned_nlines
+      ys_reduced_matrix_lu(1:4*ys_hier_ngroups, :, iline) = (0.0d0, 0.0d0)
+      ys_reduced_rhs(1:4*ys_hier_ngroups, iline) = (0.0d0, 0.0d0)
+      do iblock = 0, ys_hier_ngroups - 1
+        offset = iblock*(20*ys_hier_node_owned_nlines) + (iline - 1)*20
+        row0 = 4*iblock
+        ys_reduced_matrix_lu(row0 + 1, bw + 1, iline) = (1.0d0, 0.0d0)
+        ys_reduced_matrix_lu(row0 + 2, bw + 1, iline) = (1.0d0, 0.0d0)
+        ys_reduced_matrix_lu(row0 + 3, bw + 1, iline) = (1.0d0, 0.0d0)
+        ys_reduced_matrix_lu(row0 + 4, bw + 1, iline) = (1.0d0, 0.0d0)
+        ys_reduced_rhs(row0 + 1, iline) = ycomm_recvbuf(offset + 1)
+        ys_reduced_rhs(row0 + 2, iline) = ycomm_recvbuf(offset + 2)
+        ys_reduced_rhs(row0 + 3, iline) = ycomm_recvbuf(offset + 3)
+        ys_reduced_rhs(row0 + 4, iline) = ycomm_recvbuf(offset + 4)
+        if (iblock > 0) then
+          ys_reduced_matrix_lu(row0 + 1, bw - 1, iline) = -ycomm_recvbuf(offset + 5)
+          ys_reduced_matrix_lu(row0 + 2, bw - 2, iline) = -ycomm_recvbuf(offset + 6)
+          ys_reduced_matrix_lu(row0 + 3, bw - 3, iline) = -ycomm_recvbuf(offset + 7)
+          ys_reduced_matrix_lu(row0 + 4, bw - 4, iline) = -ycomm_recvbuf(offset + 8)
+          ys_reduced_matrix_lu(row0 + 1, bw, iline) = -ycomm_recvbuf(offset + 9)
+          ys_reduced_matrix_lu(row0 + 2, bw - 1, iline) = -ycomm_recvbuf(offset + 10)
+          ys_reduced_matrix_lu(row0 + 3, bw - 2, iline) = -ycomm_recvbuf(offset + 11)
+          ys_reduced_matrix_lu(row0 + 4, bw - 3, iline) = -ycomm_recvbuf(offset + 12)
+        end if
+        if (iblock < ys_hier_ngroups - 1) then
+          ys_reduced_matrix_lu(row0 + 1, bw + 5, iline) = -ycomm_recvbuf(offset + 13)
+          ys_reduced_matrix_lu(row0 + 2, bw + 4, iline) = -ycomm_recvbuf(offset + 14)
+          ys_reduced_matrix_lu(row0 + 3, bw + 3, iline) = -ycomm_recvbuf(offset + 15)
+          ys_reduced_matrix_lu(row0 + 4, bw + 2, iline) = -ycomm_recvbuf(offset + 16)
+          ys_reduced_matrix_lu(row0 + 1, bw + 6, iline) = -ycomm_recvbuf(offset + 17)
+          ys_reduced_matrix_lu(row0 + 2, bw + 5, iline) = -ycomm_recvbuf(offset + 18)
+          ys_reduced_matrix_lu(row0 + 3, bw + 4, iline) = -ycomm_recvbuf(offset + 19)
+          ys_reduced_matrix_lu(row0 + 4, bw + 3, iline) = -ycomm_recvbuf(offset + 20)
+        end if
+      end do
+
+      call ys_factor_banded_complex(ys_reduced_matrix_lu(1:4*ys_hier_ngroups, :, iline))
+      call ys_solve_factored_banded_complex(ys_reduced_rhs(1:4*ys_hier_ngroups, iline), &
+                                            ys_reduced_matrix_lu(1:4*ys_hier_ngroups, :, iline))
+
+      row0 = 4*ys_hier_group_id
+      ys_hier_group_values(1, iline) = ys_reduced_rhs(row0 + 1, iline)
+      ys_hier_group_values(2, iline) = ys_reduced_rhs(row0 + 2, iline)
+      ys_hier_group_values(3, iline) = ys_reduced_rhs(row0 + 3, iline)
+      ys_hier_group_values(4, iline) = ys_reduced_rhs(row0 + 4, iline)
+      ys_hier_group_values(5, iline) = (0.0d0, 0.0d0)
+      ys_hier_group_values(6, iline) = (0.0d0, 0.0d0)
+      ys_hier_group_values(7, iline) = (0.0d0, 0.0d0)
+      ys_hier_group_values(8, iline) = (0.0d0, 0.0d0)
+      if (ys_hier_group_id > 0) then
+        ys_hier_group_values(5, iline) = ys_reduced_rhs(row0 - 1, iline)
+        ys_hier_group_values(6, iline) = ys_reduced_rhs(row0, iline)
+      end if
+      if (ys_hier_group_id < ys_hier_ngroups - 1) then
+        ys_hier_group_values(7, iline) = ys_reduced_rhs(row0 + 5, iline)
+        ys_hier_group_values(8, iline) = ys_reduced_rhs(row0 + 6, iline)
+      end if
+    end do
+    !$omp end target teams distribute parallel do
+    call roctxPop("ys_hier_global_group_solve")
+  end subroutine ys_hier_solve_global_groups_column
+
+  subroutine ys_hier_solve_global_groups_column_alltoall()
+    implicit none
+    integer(C_INT), parameter :: bw = YS_REDUCED_BW
+    integer(C_INT) :: iline, iblock, row0, offset
+
+    call roctxPush("ys_hier_global_group_solve")
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(ycomm_recvbuf, ycomm_sendbuf, ys_hier_column_global_recv_displs, &
+    !$omp& ys_hier_column_return_send_displs, ys_hier_column_solve_nlines, ys_hier_ngroups, &
+    !$omp& ys_reduced_matrix_lu, ys_reduced_rhs, bw) &
+    !$omp private(iline, iblock, row0, offset)
+    do iline = 1, ys_hier_column_solve_nlines
+      ys_reduced_matrix_lu(1:4*ys_hier_ngroups, :, iline) = (0.0d0, 0.0d0)
+      ys_reduced_rhs(1:4*ys_hier_ngroups, iline) = (0.0d0, 0.0d0)
+      do iblock = 0, ys_hier_ngroups - 1
+        offset = ys_hier_column_global_recv_displs(iblock + 1) + (iline - 1)*20
+        row0 = 4*iblock
+        ys_reduced_matrix_lu(row0 + 1, bw + 1, iline) = (1.0d0, 0.0d0)
+        ys_reduced_matrix_lu(row0 + 2, bw + 1, iline) = (1.0d0, 0.0d0)
+        ys_reduced_matrix_lu(row0 + 3, bw + 1, iline) = (1.0d0, 0.0d0)
+        ys_reduced_matrix_lu(row0 + 4, bw + 1, iline) = (1.0d0, 0.0d0)
+        ys_reduced_rhs(row0 + 1, iline) = ycomm_recvbuf(offset + 1)
+        ys_reduced_rhs(row0 + 2, iline) = ycomm_recvbuf(offset + 2)
+        ys_reduced_rhs(row0 + 3, iline) = ycomm_recvbuf(offset + 3)
+        ys_reduced_rhs(row0 + 4, iline) = ycomm_recvbuf(offset + 4)
+        if (iblock > 0) then
+          ys_reduced_matrix_lu(row0 + 1, bw - 1, iline) = -ycomm_recvbuf(offset + 5)
+          ys_reduced_matrix_lu(row0 + 2, bw - 2, iline) = -ycomm_recvbuf(offset + 6)
+          ys_reduced_matrix_lu(row0 + 3, bw - 3, iline) = -ycomm_recvbuf(offset + 7)
+          ys_reduced_matrix_lu(row0 + 4, bw - 4, iline) = -ycomm_recvbuf(offset + 8)
+          ys_reduced_matrix_lu(row0 + 1, bw, iline) = -ycomm_recvbuf(offset + 9)
+          ys_reduced_matrix_lu(row0 + 2, bw - 1, iline) = -ycomm_recvbuf(offset + 10)
+          ys_reduced_matrix_lu(row0 + 3, bw - 2, iline) = -ycomm_recvbuf(offset + 11)
+          ys_reduced_matrix_lu(row0 + 4, bw - 3, iline) = -ycomm_recvbuf(offset + 12)
+        end if
+        if (iblock < ys_hier_ngroups - 1) then
+          ys_reduced_matrix_lu(row0 + 1, bw + 5, iline) = -ycomm_recvbuf(offset + 13)
+          ys_reduced_matrix_lu(row0 + 2, bw + 4, iline) = -ycomm_recvbuf(offset + 14)
+          ys_reduced_matrix_lu(row0 + 3, bw + 3, iline) = -ycomm_recvbuf(offset + 15)
+          ys_reduced_matrix_lu(row0 + 4, bw + 2, iline) = -ycomm_recvbuf(offset + 16)
+          ys_reduced_matrix_lu(row0 + 1, bw + 6, iline) = -ycomm_recvbuf(offset + 17)
+          ys_reduced_matrix_lu(row0 + 2, bw + 5, iline) = -ycomm_recvbuf(offset + 18)
+          ys_reduced_matrix_lu(row0 + 3, bw + 4, iline) = -ycomm_recvbuf(offset + 19)
+          ys_reduced_matrix_lu(row0 + 4, bw + 3, iline) = -ycomm_recvbuf(offset + 20)
+        end if
+      end do
+
+      call ys_factor_banded_complex(ys_reduced_matrix_lu(1:4*ys_hier_ngroups, :, iline))
+      call ys_solve_factored_banded_complex(ys_reduced_rhs(1:4*ys_hier_ngroups, iline), &
+                                            ys_reduced_matrix_lu(1:4*ys_hier_ngroups, :, iline))
+
+      do iblock = 0, ys_hier_ngroups - 1
+        offset = ys_hier_column_return_send_displs(iblock + 1) + (iline - 1)*YS_REDUCED_RETURN_WIDTH
+        row0 = 4*iblock
+        ycomm_sendbuf(offset + 1) = ys_reduced_rhs(row0 + 1, iline)
+        ycomm_sendbuf(offset + 2) = ys_reduced_rhs(row0 + 2, iline)
+        ycomm_sendbuf(offset + 3) = ys_reduced_rhs(row0 + 3, iline)
+        ycomm_sendbuf(offset + 4) = ys_reduced_rhs(row0 + 4, iline)
+        ycomm_sendbuf(offset + 5) = (0.0d0, 0.0d0)
+        ycomm_sendbuf(offset + 6) = (0.0d0, 0.0d0)
+        ycomm_sendbuf(offset + 7) = (0.0d0, 0.0d0)
+        ycomm_sendbuf(offset + 8) = (0.0d0, 0.0d0)
+        if (iblock > 0) then
+          ycomm_sendbuf(offset + 5) = ys_reduced_rhs(row0 - 1, iline)
+          ycomm_sendbuf(offset + 6) = ys_reduced_rhs(row0, iline)
+        end if
+        if (iblock < ys_hier_ngroups - 1) then
+          ycomm_sendbuf(offset + 7) = ys_reduced_rhs(row0 + 5, iline)
+          ycomm_sendbuf(offset + 8) = ys_reduced_rhs(row0 + 6, iline)
+        end if
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+    call roctxPop("ys_hier_global_group_solve")
+  end subroutine ys_hier_solve_global_groups_column_alltoall
 
   subroutine ys_hier_solve_global_groups(nlines)
     implicit none
@@ -1626,6 +2018,130 @@ contains
     !$omp end target teams distribute parallel do
     call roctxPop("ys_hier_global_group_solve")
   end subroutine ys_hier_solve_global_groups
+
+  subroutine ys_hier_recover_leaf_returns_column()
+    implicit none
+    integer(C_INT) :: iline, child, child_rank, row0, k, offset
+    complex(C_DOUBLE_COMPLEX) :: prev1, prev2, next1, next2
+
+    call roctxPush("ys_hier_recover_leaf_returns")
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(ycomm_sendbuf, ys_hier_leaf_return_send_displs, ys_hier_node_owned_nlines, ys_hier_group_first, &
+    !$omp& ys_hier_group_count, ys_hier_recover_basis, ys_hier_group_values, ys_reduced_rhs) &
+    !$omp private(iline, child, child_rank, row0, k, offset, prev1, prev2, next1, next2)
+    do iline = 1, ys_hier_node_owned_nlines
+      prev1 = ys_hier_group_values(5, iline)
+      prev2 = ys_hier_group_values(6, iline)
+      next1 = ys_hier_group_values(7, iline)
+      next2 = ys_hier_group_values(8, iline)
+      do child = 0, ys_hier_group_count - 1
+        row0 = 4*child
+        do k = 1, 4
+          ys_reduced_rhs(row0 + k, iline) = ys_hier_recover_basis(row0 + k, 1, iline) + &
+                                            ys_hier_recover_basis(row0 + k, 2, iline)*prev1 + &
+                                            ys_hier_recover_basis(row0 + k, 3, iline)*prev2 + &
+                                            ys_hier_recover_basis(row0 + k, 4, iline)*next1 + &
+                                            ys_hier_recover_basis(row0 + k, 5, iline)*next2
+        end do
+      end do
+      do child = 0, ys_hier_group_count - 1
+        child_rank = ys_hier_group_first + child
+        row0 = 4*child
+        offset = ys_hier_leaf_return_send_displs(child_rank + 1) + (iline - 1)*YS_REDUCED_RETURN_WIDTH
+        ycomm_sendbuf(offset + 1) = ys_reduced_rhs(row0 + 1, iline)
+        ycomm_sendbuf(offset + 2) = ys_reduced_rhs(row0 + 2, iline)
+        ycomm_sendbuf(offset + 3) = ys_reduced_rhs(row0 + 3, iline)
+        ycomm_sendbuf(offset + 4) = ys_reduced_rhs(row0 + 4, iline)
+        if (child > 0) then
+          ycomm_sendbuf(offset + 5) = ys_reduced_rhs(row0 - 1, iline)
+          ycomm_sendbuf(offset + 6) = ys_reduced_rhs(row0, iline)
+        else
+          ycomm_sendbuf(offset + 5) = ys_hier_group_values(5, iline)
+          ycomm_sendbuf(offset + 6) = ys_hier_group_values(6, iline)
+        end if
+        if (child < ys_hier_group_count - 1) then
+          ycomm_sendbuf(offset + 7) = ys_reduced_rhs(row0 + 5, iline)
+          ycomm_sendbuf(offset + 8) = ys_reduced_rhs(row0 + 6, iline)
+        else
+          ycomm_sendbuf(offset + 7) = ys_hier_group_values(7, iline)
+          ycomm_sendbuf(offset + 8) = ys_hier_group_values(8, iline)
+        end if
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+    call roctxPop("ys_hier_recover_leaf_returns")
+  end subroutine ys_hier_recover_leaf_returns_column
+
+  subroutine ys_hier_recover_leaf_returns_column_alltoall()
+    implicit none
+    integer(C_INT) :: iline, child, child_rank, row0, k, offset
+    integer(C_INT) :: src_rank, src_first, base_count, remainder, split_line
+    complex(C_DOUBLE_COMPLEX) :: prev1, prev2, next1, next2
+
+    call roctxPush("ys_hier_recover_leaf_returns")
+    base_count = ys_hier_node_owned_nlines/ys_hier_column_count
+    remainder = mod(ys_hier_node_owned_nlines, ys_hier_column_count)
+    split_line = (base_count + 1_C_INT)*remainder
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(ycomm_recvbuf, ycomm_sendbuf, ys_hier_column_return_recv_displs, &
+    !$omp& ys_hier_leaf_return_send_displs, ys_hier_node_owned_nlines, ys_hier_group_first, &
+    !$omp& ys_hier_group_count, ys_hier_recover_basis, ys_hier_group_values, ys_reduced_rhs, &
+    !$omp& base_count, remainder, split_line) &
+    !$omp private(iline, child, child_rank, row0, k, offset, src_rank, src_first, prev1, prev2, next1, next2)
+    do iline = 1, ys_hier_node_owned_nlines
+      if (iline <= split_line) then
+        src_rank = (iline - 1)/(base_count + 1_C_INT)
+        src_first = src_rank*(base_count + 1_C_INT) + 1
+      else
+        src_rank = remainder + (iline - split_line - 1_C_INT)/base_count
+        src_first = split_line + (src_rank - remainder)*base_count + 1
+      end if
+      offset = ys_hier_column_return_recv_displs(src_rank + 1) + &
+               (iline - src_first)*YS_REDUCED_RETURN_WIDTH
+      do k = 1, YS_REDUCED_RETURN_WIDTH
+        ys_hier_group_values(k, iline) = ycomm_recvbuf(offset + k)
+      end do
+      prev1 = ys_hier_group_values(5, iline)
+      prev2 = ys_hier_group_values(6, iline)
+      next1 = ys_hier_group_values(7, iline)
+      next2 = ys_hier_group_values(8, iline)
+      do child = 0, ys_hier_group_count - 1
+        row0 = 4*child
+        do k = 1, 4
+          ys_reduced_rhs(row0 + k, iline) = ys_hier_recover_basis(row0 + k, 1, iline) + &
+                                            ys_hier_recover_basis(row0 + k, 2, iline)*prev1 + &
+                                            ys_hier_recover_basis(row0 + k, 3, iline)*prev2 + &
+                                            ys_hier_recover_basis(row0 + k, 4, iline)*next1 + &
+                                            ys_hier_recover_basis(row0 + k, 5, iline)*next2
+        end do
+      end do
+      do child = 0, ys_hier_group_count - 1
+        child_rank = ys_hier_group_first + child
+        row0 = 4*child
+        offset = ys_hier_leaf_return_send_displs(child_rank + 1) + (iline - 1)*YS_REDUCED_RETURN_WIDTH
+        ycomm_sendbuf(offset + 1) = ys_reduced_rhs(row0 + 1, iline)
+        ycomm_sendbuf(offset + 2) = ys_reduced_rhs(row0 + 2, iline)
+        ycomm_sendbuf(offset + 3) = ys_reduced_rhs(row0 + 3, iline)
+        ycomm_sendbuf(offset + 4) = ys_reduced_rhs(row0 + 4, iline)
+        if (child > 0) then
+          ycomm_sendbuf(offset + 5) = ys_reduced_rhs(row0 - 1, iline)
+          ycomm_sendbuf(offset + 6) = ys_reduced_rhs(row0, iline)
+        else
+          ycomm_sendbuf(offset + 5) = ys_hier_group_values(5, iline)
+          ycomm_sendbuf(offset + 6) = ys_hier_group_values(6, iline)
+        end if
+        if (child < ys_hier_group_count - 1) then
+          ycomm_sendbuf(offset + 7) = ys_reduced_rhs(row0 + 5, iline)
+          ycomm_sendbuf(offset + 8) = ys_reduced_rhs(row0 + 6, iline)
+        else
+          ycomm_sendbuf(offset + 7) = ys_hier_group_values(7, iline)
+          ycomm_sendbuf(offset + 8) = ys_hier_group_values(8, iline)
+        end if
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+    call roctxPop("ys_hier_recover_leaf_returns")
+  end subroutine ys_hier_recover_leaf_returns_column_alltoall
 
   subroutine ys_hier_recover_leaf_returns()
     implicit none
