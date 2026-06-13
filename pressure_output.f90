@@ -577,7 +577,8 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(out) :: p(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     call assemble_pressure_rhs(src0, src1, p)
     call solve_compact_component_current_layout(p, assemble_pressure_operator, assemble_pressure_boundaries, 0.0d0, 0.0d0, p, &
-                                 solve_label="pressure current-layout gpsv", symmetric_operator=.true., transpose_derivative=.true.)
+                               solve_label="pressure current-layout gpsv", symmetric_operator=.true., transpose_derivative=.true., &
+                                                node_leaf_allowed=.false.)
   END SUBROUTINE solve_pressure_field
 
   SUBROUTINE solve_dpdy_field(src0, src1, dpdy)
@@ -587,7 +588,8 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(out) :: dpdy(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     call assemble_dpdy_rhs(src0, src1, dpdy)
     call solve_compact_component_current_layout(dpdy, assemble_dpdy_operator, assemble_dpdy_boundaries, 0.0d0, 0.0d0, dpdy, &
-                                                solve_label="pressure current-layout gpsv", symmetric_operator=.true.)
+                                                solve_label="pressure current-layout gpsv", symmetric_operator=.true., &
+                                                node_leaf_allowed=.false.)
   END SUBROUTINE solve_dpdy_field
 
   subroutine assemble_pressure_rhs(src0, src1, rhs)

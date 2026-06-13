@@ -66,8 +66,12 @@ module y_line_solvers
   integer(C_INT), parameter :: YS_REDUCED_RETURN_WIDTH = 8_C_INT
   integer(C_INT), parameter :: YS_HIER_EXCHANGE_ALLGATHER = 1_C_INT
   integer(C_INT), parameter :: YS_HIER_EXCHANGE_ALLTOALL = 2_C_INT
+  integer(C_INT), parameter :: YS_LEAF_MODE_COMPOSE = 1_C_INT
+  integer(C_INT), parameter :: YS_LEAF_MODE_NODE_SOURCE = 2_C_INT
 
   public :: ys_prepare_assembled_workspace, ys_release_workspace
+  public :: ys_set_node_leaf_source_mode, ys_get_node_leaf_layout
+  public :: ys_node_leaf_transpose_source_to_group, ys_node_leaf_transpose_solution_from_group
   public :: ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs
   public :: ys_eqm1, ys_eq0, ys_eqn, ys_eqnp1
   public :: ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, ys_boundary_lower_eq, ys_boundary_upper_eq
@@ -88,6 +92,7 @@ module y_line_solvers
   integer(C_INT), save :: ys_workspace_line_start = 1
   integer(C_INT), save :: ys_workspace_line_end = 0
   integer(C_INT), save :: ys_workspace_reduced_node_size = -1
+  integer(C_INT), save :: ys_workspace_reduced_leaf_mode = YS_LEAF_MODE_COMPOSE
   integer(C_INT), save :: ys_owner_nz = 0
   integer(C_INT), save :: ys_owner_nx = 0
   integer(C_INT), save :: ys_owner_ix0 = 1
@@ -142,6 +147,7 @@ module y_line_solvers
   integer(C_INT), save :: ys_hier_column_return_send_elems = 0
   integer(C_INT), save :: ys_hier_column_return_recv_elems = 0
   integer(C_INT), save :: ys_hier_global_exchange = YS_HIER_EXCHANGE_ALLGATHER
+  integer(C_INT), save :: ys_reduced_leaf_mode = YS_LEAF_MODE_COMPOSE
   logical, save :: ys_hier_use_column_global = .false.
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_hier_node_rows(:, :)
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_hier_recover_basis(:, :, :)
@@ -195,6 +201,7 @@ module y_line_solvers
   character(c_char), allocatable, target, save :: ys_gpsv_buffer(:)
   !$omp declare target(ys_factor_banded_complex)
   !$omp declare target(ys_solve_factored_banded_complex)
+  !$omp declare target(ys_solve_factored_banded_complex_multi)
   !$omp declare target(ys_factor_penta_interleaved)
   !$omp declare target(ys_solve_factored_penta_interleaved)
 #endif
@@ -213,6 +220,7 @@ contains
     ys_workspace_line_start = 1
     ys_workspace_line_end = 0
     ys_workspace_reduced_node_size = -1
+    ys_workspace_reduced_leaf_mode = YS_LEAF_MODE_COMPOSE
     ys_owner_nz = 0
     ys_owner_nx = 0
     ys_owner_ix0 = 1
@@ -226,8 +234,37 @@ contains
     matches = allocated(ys_gpsv_rhs_store) .and. &
               ys_workspace_ny == ny .and. ys_workspace_nz == nz .and. &
               ys_workspace_nlines == nlines .and. ys_workspace_active_n == active_n .and. &
-              ys_workspace_npy == wanted_npy .and. ys_workspace_line_start == line_start
+              ys_workspace_npy == wanted_npy .and. ys_workspace_line_start == line_start .and. &
+              ys_workspace_reduced_leaf_mode == ys_reduced_leaf_mode
   end function ys_core_shape_matches
+
+  subroutine ys_set_node_leaf_source_mode(enabled)
+    implicit none
+    logical, intent(in) :: enabled
+
+    ys_reduced_leaf_mode = merge(YS_LEAF_MODE_NODE_SOURCE, YS_LEAF_MODE_COMPOSE, enabled)
+  end subroutine ys_set_node_leaf_source_mode
+
+  subroutine ys_get_node_leaf_layout(ny, nlines, nlines_z, node_row_start, node_row_end, node_first_line, node_line_count)
+    implicit none
+    integer(C_INT), intent(in) :: ny, nlines, nlines_z
+    integer(C_INT), intent(out) :: node_row_start, node_row_end, node_first_line, node_line_count
+    integer(C_INT) :: group_last, first_x, x_count, nx_lines
+
+    call ys_configure_reduced_solver(npy_grid)
+    group_last = ys_hier_group_first + ys_hier_group_count - 1_C_INT
+    node_row_start = 1_C_INT + ys_hier_group_first*(ny - 1_C_INT)/npy_grid
+    node_row_end = (group_last + 1_C_INT)*(ny - 1_C_INT)/npy_grid
+    nx_lines = nlines/nlines_z
+    if (.not. ys_hier_use_column_global .or. nx_lines < ys_hier_group_count) then
+      node_first_line = 1_C_INT
+      node_line_count = -1_C_INT
+      return
+    end if
+    call ys_split_line_range(ys_hier_group_rank, nx_lines, ys_hier_group_count, first_x, x_count)
+    node_first_line = (first_x - 1_C_INT)*nlines_z + 1_C_INT
+    node_line_count = x_count*nlines_z
+  end subroutine ys_get_node_leaf_layout
 
   subroutine ys_nullify_core_views()
     implicit none
@@ -387,6 +424,8 @@ contains
     ys_hier_column_a2a_recv_elems = 0
     ys_hier_column_return_send_elems = 0
     ys_hier_column_return_recv_elems = 0
+    ys_workspace_reduced_node_size = -1
+    ys_workspace_reduced_leaf_mode = YS_LEAF_MODE_COMPOSE
 #ifdef HAVE_MPI
     if (ys_hier_group_comm_active) then
       call MPI_Comm_free(ys_hier_group_comm, ierr_local)
@@ -454,8 +493,13 @@ contains
     allocate (ys_reduced_matrix_lu(4*npy_count, 2*YS_REDUCED_BW + 1, nlines), &
               ys_reduced_rhs(4*npy_count, nlines))
 
-    call ys_split_line_range(ys_hier_group_rank, nlines, ys_hier_group_count, &
-                             ys_hier_node_first_line, ys_hier_node_owned_nlines)
+    if (ys_reduced_leaf_mode == YS_LEAF_MODE_NODE_SOURCE) then
+      ys_hier_node_first_line = ys_workspace_line_start
+      ys_hier_node_owned_nlines = nlines
+    else
+      call ys_split_line_range(ys_hier_group_rank, nlines, ys_hier_group_count, &
+                               ys_hier_node_first_line, ys_hier_node_owned_nlines)
+    end if
     ys_hier_column_send_elems = 20*ys_hier_node_owned_nlines
     ys_hier_column_recv_elems = ys_hier_column_send_elems*ys_hier_column_count
     node_alloc_nlines = max(1_C_INT, ys_hier_node_owned_nlines)
@@ -516,6 +560,7 @@ contains
     !$omp& ys_hier_group_return_recv_displs, ys_hier_leaf_return_send_counts, &
     !$omp& ys_hier_leaf_return_send_displs, ys_hier_leaf_return_recv_counts, ys_hier_leaf_return_recv_displs)
     ys_workspace_reduced_node_size = ys_hier_node_size
+    ys_workspace_reduced_leaf_mode = ys_reduced_leaf_mode
   end subroutine ys_allocate_reduced_workspace
 
   subroutine ys_configure_reduced_solver(npy_count)
@@ -788,7 +833,8 @@ contains
 
     if (use_reduced_backend .and. npy_grid > 1) then
       if (allocated(ys_reduced_rows_send)) then
-        if (ys_workspace_reduced_node_size /= ys_hier_node_size) call ys_release_reduced_workspace()
+        if (ys_workspace_reduced_node_size /= ys_hier_node_size .or. &
+            ys_workspace_reduced_leaf_mode /= ys_reduced_leaf_mode) call ys_release_reduced_workspace()
       end if
       if (.not. allocated(ys_reduced_rows_send)) call ys_allocate_reduced_workspace(nlines, npy_grid)
     else if (allocated(ys_reduced_rows_send)) then
@@ -1107,6 +1153,7 @@ contains
     complex(C_DOUBLE_COMPLEX) :: rhs_value, coeff, row_coeffs(-2:2), s4(4, 4), rhs4(4, 5)
     complex(C_DOUBLE_COMPLEX) :: pivot4, factor4, iface_value(4)
     integer(C_INT) :: row_start, active_n, nlines, nlines_z, nz, nx_count, dst_row_base, response_mode
+    integer(C_INT) :: reduced_leaf_id, reduced_leaf_count, reduced_row0
     integer(C_INT) :: nI, nresp, batch_count, exposed_n, left_count, interior_base
     integer(C_INT) :: sys, iline, ref_iline, resp, local_i, local_idx, col, coupled_row
     integer(C_INT) :: p, j, offset, actual_p, response_slot, exposed_slot, ghost_col
@@ -1123,8 +1170,17 @@ contains
     dst_row_base = merge(3_C_INT, 1_C_INT, has_padded_dst)
     response_mode = merge(YS_ENDPOINT_RESPONSE_EVEN_Z, YS_ENDPOINT_RESPONSE_CONST, symmetric_operator)
 
-    has_left_interface = (ipy > 0)
-    has_right_interface = (ipy < npy_grid - 1)
+    if (ys_reduced_leaf_mode == YS_LEAF_MODE_NODE_SOURCE) then
+      reduced_leaf_id = ys_hier_group_id
+      reduced_leaf_count = ys_hier_ngroups
+    else
+      reduced_leaf_id = ipy
+      reduced_leaf_count = npy_grid
+    end if
+    reduced_row0 = 4*reduced_leaf_id
+
+    has_left_interface = (reduced_leaf_id > 0)
+    has_right_interface = (reduced_leaf_id < reduced_leaf_count - 1)
     left_count = merge(2_C_INT, 0_C_INT, has_left_interface)
     exposed_n = left_count + merge(2_C_INT, 0_C_INT, has_right_interface)
     interior_base = left_count
@@ -1331,7 +1387,7 @@ contains
     !$omp target teams distribute parallel do default(none) &
     !$omp shared(dst, ys_batch_x, ys_reduced_rhs, ys_left_interface_values, ys_right_interface_values, active_n, nI, nlines, &
     !$omp& nlines_z, nz, nresp, batch_count, response_mode, dst_row_base, has_padded_dst, &
-    !$omp& has_left_interface, has_right_interface, left_count, exposed_n, interior_base, ipy) &
+    !$omp& has_left_interface, has_right_interface, left_count, exposed_n, interior_base, reduced_row0) &
     !$omp private(iline, ix_local, iz_index, iz, abs_iz, resp_index, iface_value, local_i, local_idx, p, exposed_slot)
     do iline = 1, nlines
       ix_local = (iline - 1)/nlines_z
@@ -1347,15 +1403,15 @@ contains
 
       iface_value(:) = (0.0d0, 0.0d0)
       if (has_left_interface) then
-        iface_value(1) = ys_reduced_rhs(4*ipy + 1, iline)
-        iface_value(2) = ys_reduced_rhs(4*ipy + 2, iline)
+        iface_value(1) = ys_reduced_rhs(reduced_row0 + 1, iline)
+        iface_value(2) = ys_reduced_rhs(reduced_row0 + 2, iline)
         dst(dst_row_base, iz_index, ix_local + 1) = iface_value(1)
         dst(dst_row_base + 1, iz_index, ix_local + 1) = iface_value(2)
         if (has_padded_dst) dst(1:2, iz_index, ix_local + 1) = ys_left_interface_values(:, iline)
       end if
       if (has_right_interface) then
-        iface_value(left_count + 1) = ys_reduced_rhs(4*ipy + 3, iline)
-        iface_value(left_count + 2) = ys_reduced_rhs(4*ipy + 4, iline)
+        iface_value(left_count + 1) = ys_reduced_rhs(reduced_row0 + 3, iline)
+        iface_value(left_count + 2) = ys_reduced_rhs(reduced_row0 + 4, iline)
         dst(active_n - 2 + dst_row_base, iz_index, ix_local + 1) = iface_value(left_count + 1)
         dst(active_n - 1 + dst_row_base, iz_index, ix_local + 1) = iface_value(left_count + 2)
         if (has_padded_dst) dst(active_n + 3:active_n + 4, iz_index, ix_local + 1) = ys_right_interface_values(:, iline)
@@ -1379,8 +1435,86 @@ contains
   subroutine ys_solve_reduced_interfaces()
     implicit none
 
-    call ys_solve_reduced_interfaces_hier()
+    if (ys_reduced_leaf_mode == YS_LEAF_MODE_NODE_SOURCE) then
+      call ys_solve_reduced_interfaces_node_leaf()
+    else
+      call ys_solve_reduced_interfaces_hier()
+    end if
   end subroutine ys_solve_reduced_interfaces
+
+  subroutine ys_solve_reduced_interfaces_node_leaf()
+    implicit none
+    integer :: ierr_local
+    integer(C_INT) :: nlines, comm_send_elems, comm_recv_elems
+    real(C_DOUBLE) :: comm_t0 = 0.0_C_DOUBLE
+    real(C_DOUBLE) :: comm_elapsed = 0.0_C_DOUBLE
+
+    if (.not. ys_hier_use_column_global) error stop "node-source y-Schur requires even node groups"
+
+    nlines = size(ys_reduced_rows_send, 2)
+    comm_send_elems = max(ys_hier_column_send_elems, ys_hier_column_a2a_send_elems)
+    comm_send_elems = max(comm_send_elems, ys_hier_column_return_send_elems)
+    comm_recv_elems = max(ys_hier_column_recv_elems, ys_hier_column_a2a_recv_elems)
+    comm_recv_elems = max(comm_recv_elems, ys_hier_column_return_recv_elems)
+    call ensure_ycomm_buffers(comm_send_elems, comm_recv_elems)
+
+    select case (ys_hier_global_exchange)
+    case (YS_HIER_EXCHANGE_ALLGATHER)
+      call ys_node_leaf_pack_rows_column(nlines)
+      call roctxPush("MPI_Allgather node_leaf_rows_to_global")
+      if (ys_hier_comm_stats_enabled) comm_t0 = MPI_Wtime()
+      !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
+      call MPI_Allgather(ycomm_sendbuf(1:ys_hier_column_send_elems), ys_hier_column_send_elems, MPI_DOUBLE_COMPLEX, &
+                         ycomm_recvbuf(1:ys_hier_column_recv_elems), ys_hier_column_send_elems, MPI_DOUBLE_COMPLEX, &
+                         ys_hier_column_comm, ierr_local)
+      !$omp end target data
+      if (ys_hier_comm_stats_enabled) then
+        comm_elapsed = MPI_Wtime() - comm_t0
+        call ys_hier_report_comm_stats_elems("node_leaf_rows_to_global", ys_hier_column_comm, &
+                                             ys_hier_column_send_elems, ys_hier_column_recv_elems, comm_elapsed)
+      end if
+      call roctxPop("MPI_Allgather node_leaf_rows_to_global")
+      if (ierr_local /= MPI_SUCCESS) error stop "MPI_Allgather node_leaf_rows_to_global failed"
+
+      call ys_node_leaf_solve_global_groups_column(nlines)
+
+    case (YS_HIER_EXCHANGE_ALLTOALL)
+      call ys_node_leaf_pack_rows_to_column_global(nlines)
+      call roctxPush("MPI_Alltoallv node_leaf_rows_to_global")
+      if (ys_hier_comm_stats_enabled) comm_t0 = MPI_Wtime()
+      !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
+      call MPI_Alltoallv(ycomm_sendbuf(1:ys_hier_column_a2a_send_elems), ys_hier_column_global_send_counts, &
+                         ys_hier_column_global_send_displs, MPI_DOUBLE_COMPLEX, &
+                         ycomm_recvbuf(1:ys_hier_column_a2a_recv_elems), ys_hier_column_global_recv_counts, &
+                         ys_hier_column_global_recv_displs, MPI_DOUBLE_COMPLEX, ys_hier_column_comm, ierr_local)
+      !$omp end target data
+      if (ys_hier_comm_stats_enabled) then
+        comm_elapsed = MPI_Wtime() - comm_t0
+        call ys_hier_report_comm_stats("node_leaf_rows_to_global", ys_hier_column_comm, &
+                                       ys_hier_column_global_send_counts, ys_hier_column_global_recv_counts, comm_elapsed)
+      end if
+      call roctxPop("MPI_Alltoallv node_leaf_rows_to_global")
+      if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoallv node_leaf_rows_to_global failed"
+
+      call ys_node_leaf_solve_global_groups_column_alltoall()
+      call roctxPush("MPI_Alltoallv node_leaf_values_from_global")
+      if (ys_hier_comm_stats_enabled) comm_t0 = MPI_Wtime()
+      !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
+      call MPI_Alltoallv(ycomm_sendbuf(1:ys_hier_column_return_send_elems), ys_hier_column_return_send_counts, &
+                         ys_hier_column_return_send_displs, MPI_DOUBLE_COMPLEX, &
+                         ycomm_recvbuf(1:ys_hier_column_return_recv_elems), ys_hier_column_return_recv_counts, &
+                         ys_hier_column_return_recv_displs, MPI_DOUBLE_COMPLEX, ys_hier_column_comm, ierr_local)
+      !$omp end target data
+      if (ys_hier_comm_stats_enabled) then
+        comm_elapsed = MPI_Wtime() - comm_t0
+        call ys_hier_report_comm_stats("node_leaf_values_from_global", ys_hier_column_comm, &
+                                       ys_hier_column_return_send_counts, ys_hier_column_return_recv_counts, comm_elapsed)
+      end if
+      call roctxPop("MPI_Alltoallv node_leaf_values_from_global")
+      if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoallv node_leaf_values_from_global failed"
+      call ys_node_leaf_unpack_column_returns(nlines)
+    end select
+  end subroutine ys_solve_reduced_interfaces_node_leaf
 
   subroutine ys_solve_reduced_interfaces_hier()
     implicit none
@@ -1591,6 +1725,460 @@ contains
       elapsed*1.0e3_C_DOUBLE, send_bandwidth_gbs, recv_bandwidth_gbs
   end subroutine ys_hier_report_comm_stats_elems
 
+  subroutine ys_node_leaf_pack_rows_column(nlines)
+    implicit none
+    integer(C_INT), intent(in) :: nlines
+    integer(C_INT) :: iline, irow, offset
+
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(ys_reduced_rows_send, ycomm_sendbuf, nlines) &
+    !$omp private(iline, irow, offset)
+    do iline = 1, nlines
+      do irow = 1, 20
+        offset = (iline - 1)*20 + irow
+        ycomm_sendbuf(offset) = ys_reduced_rows_send(irow, iline)
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+  end subroutine ys_node_leaf_pack_rows_column
+
+  subroutine ys_node_leaf_pack_rows_to_column_global(nlines)
+    implicit none
+    integer(C_INT), intent(in) :: nlines
+    integer(C_INT) :: iline, irow, owner_rank, local_row0, offset
+    integer(C_INT) :: base_count, remainder, split_line
+
+    base_count = nlines/ys_hier_column_count
+    remainder = mod(nlines, ys_hier_column_count)
+    split_line = (base_count + 1_C_INT)*remainder
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(ys_reduced_rows_send, ycomm_sendbuf, ys_hier_column_global_send_displs, nlines, &
+    !$omp& base_count, remainder, split_line) &
+    !$omp private(iline, irow, owner_rank, local_row0, offset)
+    do iline = 1, nlines
+      do irow = 1, 20
+        if (iline <= split_line) then
+          owner_rank = (iline - 1)/(base_count + 1_C_INT)
+          local_row0 = iline - owner_rank*(base_count + 1_C_INT)
+        else
+          owner_rank = remainder + (iline - split_line - 1_C_INT)/base_count
+          local_row0 = iline - split_line - (owner_rank - remainder)*base_count
+        end if
+        offset = ys_hier_column_global_send_displs(owner_rank + 1) + (local_row0 - 1)*20 + irow
+        ycomm_sendbuf(offset) = ys_reduced_rows_send(irow, iline)
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+  end subroutine ys_node_leaf_pack_rows_to_column_global
+
+  subroutine ys_node_leaf_solve_global_groups_column(nlines)
+    implicit none
+    integer(C_INT), intent(in) :: nlines
+    integer(C_INT), parameter :: bw = YS_REDUCED_BW
+    integer(C_INT) :: iline, iblock, row0, offset
+
+    call roctxPush("ys_node_leaf_global_group_solve")
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(ycomm_recvbuf, ys_reduced_matrix_lu, ys_reduced_rhs, ys_left_interface_values, &
+    !$omp& ys_right_interface_values, nlines, ys_hier_ngroups, ys_hier_group_id, bw) &
+    !$omp private(iline, iblock, row0, offset)
+    do iline = 1, nlines
+      ys_reduced_matrix_lu(1:4*ys_hier_ngroups, :, iline) = (0.0d0, 0.0d0)
+      ys_reduced_rhs(1:4*ys_hier_ngroups, iline) = (0.0d0, 0.0d0)
+      do iblock = 0, ys_hier_ngroups - 1
+        offset = iblock*(20*nlines) + (iline - 1)*20
+        row0 = 4*iblock
+        ys_reduced_matrix_lu(row0 + 1, bw + 1, iline) = (1.0d0, 0.0d0)
+        ys_reduced_matrix_lu(row0 + 2, bw + 1, iline) = (1.0d0, 0.0d0)
+        ys_reduced_matrix_lu(row0 + 3, bw + 1, iline) = (1.0d0, 0.0d0)
+        ys_reduced_matrix_lu(row0 + 4, bw + 1, iline) = (1.0d0, 0.0d0)
+        ys_reduced_rhs(row0 + 1, iline) = ycomm_recvbuf(offset + 1)
+        ys_reduced_rhs(row0 + 2, iline) = ycomm_recvbuf(offset + 2)
+        ys_reduced_rhs(row0 + 3, iline) = ycomm_recvbuf(offset + 3)
+        ys_reduced_rhs(row0 + 4, iline) = ycomm_recvbuf(offset + 4)
+        if (iblock > 0) then
+          ys_reduced_matrix_lu(row0 + 1, bw - 1, iline) = -ycomm_recvbuf(offset + 5)
+          ys_reduced_matrix_lu(row0 + 2, bw - 2, iline) = -ycomm_recvbuf(offset + 6)
+          ys_reduced_matrix_lu(row0 + 3, bw - 3, iline) = -ycomm_recvbuf(offset + 7)
+          ys_reduced_matrix_lu(row0 + 4, bw - 4, iline) = -ycomm_recvbuf(offset + 8)
+          ys_reduced_matrix_lu(row0 + 1, bw, iline) = -ycomm_recvbuf(offset + 9)
+          ys_reduced_matrix_lu(row0 + 2, bw - 1, iline) = -ycomm_recvbuf(offset + 10)
+          ys_reduced_matrix_lu(row0 + 3, bw - 2, iline) = -ycomm_recvbuf(offset + 11)
+          ys_reduced_matrix_lu(row0 + 4, bw - 3, iline) = -ycomm_recvbuf(offset + 12)
+        end if
+        if (iblock < ys_hier_ngroups - 1) then
+          ys_reduced_matrix_lu(row0 + 1, bw + 5, iline) = -ycomm_recvbuf(offset + 13)
+          ys_reduced_matrix_lu(row0 + 2, bw + 4, iline) = -ycomm_recvbuf(offset + 14)
+          ys_reduced_matrix_lu(row0 + 3, bw + 3, iline) = -ycomm_recvbuf(offset + 15)
+          ys_reduced_matrix_lu(row0 + 4, bw + 2, iline) = -ycomm_recvbuf(offset + 16)
+          ys_reduced_matrix_lu(row0 + 1, bw + 6, iline) = -ycomm_recvbuf(offset + 17)
+          ys_reduced_matrix_lu(row0 + 2, bw + 5, iline) = -ycomm_recvbuf(offset + 18)
+          ys_reduced_matrix_lu(row0 + 3, bw + 4, iline) = -ycomm_recvbuf(offset + 19)
+          ys_reduced_matrix_lu(row0 + 4, bw + 3, iline) = -ycomm_recvbuf(offset + 20)
+        end if
+      end do
+
+      call ys_factor_banded_complex(ys_reduced_matrix_lu(1:4*ys_hier_ngroups, :, iline))
+      call ys_solve_factored_banded_complex(ys_reduced_rhs(1:4*ys_hier_ngroups, iline), &
+                                            ys_reduced_matrix_lu(1:4*ys_hier_ngroups, :, iline))
+
+      row0 = 4*ys_hier_group_id
+      ys_left_interface_values(:, iline) = (0.0d0, 0.0d0)
+      ys_right_interface_values(:, iline) = (0.0d0, 0.0d0)
+      if (ys_hier_group_id > 0) then
+        ys_left_interface_values(1, iline) = ys_reduced_rhs(row0 - 1, iline)
+        ys_left_interface_values(2, iline) = ys_reduced_rhs(row0, iline)
+      end if
+      if (ys_hier_group_id < ys_hier_ngroups - 1) then
+        ys_right_interface_values(1, iline) = ys_reduced_rhs(row0 + 5, iline)
+        ys_right_interface_values(2, iline) = ys_reduced_rhs(row0 + 6, iline)
+      end if
+    end do
+    !$omp end target teams distribute parallel do
+    call roctxPop("ys_node_leaf_global_group_solve")
+  end subroutine ys_node_leaf_solve_global_groups_column
+
+  subroutine ys_node_leaf_solve_global_groups_column_alltoall()
+    implicit none
+    integer(C_INT), parameter :: bw = YS_REDUCED_BW
+    integer(C_INT) :: iline, iblock, row0, offset
+
+    call roctxPush("ys_node_leaf_global_group_solve")
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(ycomm_recvbuf, ycomm_sendbuf, ys_hier_column_global_recv_displs, &
+    !$omp& ys_hier_column_return_send_displs, ys_hier_column_solve_nlines, ys_hier_ngroups, &
+    !$omp& ys_reduced_matrix_lu, ys_reduced_rhs, bw) &
+    !$omp private(iline, iblock, row0, offset)
+    do iline = 1, ys_hier_column_solve_nlines
+      ys_reduced_matrix_lu(1:4*ys_hier_ngroups, :, iline) = (0.0d0, 0.0d0)
+      ys_reduced_rhs(1:4*ys_hier_ngroups, iline) = (0.0d0, 0.0d0)
+      do iblock = 0, ys_hier_ngroups - 1
+        offset = ys_hier_column_global_recv_displs(iblock + 1) + (iline - 1)*20
+        row0 = 4*iblock
+        ys_reduced_matrix_lu(row0 + 1, bw + 1, iline) = (1.0d0, 0.0d0)
+        ys_reduced_matrix_lu(row0 + 2, bw + 1, iline) = (1.0d0, 0.0d0)
+        ys_reduced_matrix_lu(row0 + 3, bw + 1, iline) = (1.0d0, 0.0d0)
+        ys_reduced_matrix_lu(row0 + 4, bw + 1, iline) = (1.0d0, 0.0d0)
+        ys_reduced_rhs(row0 + 1, iline) = ycomm_recvbuf(offset + 1)
+        ys_reduced_rhs(row0 + 2, iline) = ycomm_recvbuf(offset + 2)
+        ys_reduced_rhs(row0 + 3, iline) = ycomm_recvbuf(offset + 3)
+        ys_reduced_rhs(row0 + 4, iline) = ycomm_recvbuf(offset + 4)
+        if (iblock > 0) then
+          ys_reduced_matrix_lu(row0 + 1, bw - 1, iline) = -ycomm_recvbuf(offset + 5)
+          ys_reduced_matrix_lu(row0 + 2, bw - 2, iline) = -ycomm_recvbuf(offset + 6)
+          ys_reduced_matrix_lu(row0 + 3, bw - 3, iline) = -ycomm_recvbuf(offset + 7)
+          ys_reduced_matrix_lu(row0 + 4, bw - 4, iline) = -ycomm_recvbuf(offset + 8)
+          ys_reduced_matrix_lu(row0 + 1, bw, iline) = -ycomm_recvbuf(offset + 9)
+          ys_reduced_matrix_lu(row0 + 2, bw - 1, iline) = -ycomm_recvbuf(offset + 10)
+          ys_reduced_matrix_lu(row0 + 3, bw - 2, iline) = -ycomm_recvbuf(offset + 11)
+          ys_reduced_matrix_lu(row0 + 4, bw - 3, iline) = -ycomm_recvbuf(offset + 12)
+        end if
+        if (iblock < ys_hier_ngroups - 1) then
+          ys_reduced_matrix_lu(row0 + 1, bw + 5, iline) = -ycomm_recvbuf(offset + 13)
+          ys_reduced_matrix_lu(row0 + 2, bw + 4, iline) = -ycomm_recvbuf(offset + 14)
+          ys_reduced_matrix_lu(row0 + 3, bw + 3, iline) = -ycomm_recvbuf(offset + 15)
+          ys_reduced_matrix_lu(row0 + 4, bw + 2, iline) = -ycomm_recvbuf(offset + 16)
+          ys_reduced_matrix_lu(row0 + 1, bw + 6, iline) = -ycomm_recvbuf(offset + 17)
+          ys_reduced_matrix_lu(row0 + 2, bw + 5, iline) = -ycomm_recvbuf(offset + 18)
+          ys_reduced_matrix_lu(row0 + 3, bw + 4, iline) = -ycomm_recvbuf(offset + 19)
+          ys_reduced_matrix_lu(row0 + 4, bw + 3, iline) = -ycomm_recvbuf(offset + 20)
+        end if
+      end do
+
+      call ys_factor_banded_complex(ys_reduced_matrix_lu(1:4*ys_hier_ngroups, :, iline))
+      call ys_solve_factored_banded_complex(ys_reduced_rhs(1:4*ys_hier_ngroups, iline), &
+                                            ys_reduced_matrix_lu(1:4*ys_hier_ngroups, :, iline))
+      do iblock = 0, ys_hier_ngroups - 1
+        offset = ys_hier_column_return_send_displs(iblock + 1) + (iline - 1)*YS_REDUCED_RETURN_WIDTH
+        row0 = 4*iblock
+        ycomm_sendbuf(offset + 1) = ys_reduced_rhs(row0 + 1, iline)
+        ycomm_sendbuf(offset + 2) = ys_reduced_rhs(row0 + 2, iline)
+        ycomm_sendbuf(offset + 3) = ys_reduced_rhs(row0 + 3, iline)
+        ycomm_sendbuf(offset + 4) = ys_reduced_rhs(row0 + 4, iline)
+        ycomm_sendbuf(offset + 5) = (0.0d0, 0.0d0)
+        ycomm_sendbuf(offset + 6) = (0.0d0, 0.0d0)
+        ycomm_sendbuf(offset + 7) = (0.0d0, 0.0d0)
+        ycomm_sendbuf(offset + 8) = (0.0d0, 0.0d0)
+        if (iblock > 0) then
+          ycomm_sendbuf(offset + 5) = ys_reduced_rhs(row0 - 1, iline)
+          ycomm_sendbuf(offset + 6) = ys_reduced_rhs(row0, iline)
+        end if
+        if (iblock < ys_hier_ngroups - 1) then
+          ycomm_sendbuf(offset + 7) = ys_reduced_rhs(row0 + 5, iline)
+          ycomm_sendbuf(offset + 8) = ys_reduced_rhs(row0 + 6, iline)
+        end if
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+    call roctxPop("ys_node_leaf_global_group_solve")
+  end subroutine ys_node_leaf_solve_global_groups_column_alltoall
+
+  subroutine ys_node_leaf_unpack_column_returns(nlines)
+    implicit none
+    integer(C_INT), intent(in) :: nlines
+    integer(C_INT) :: iline, k, src_rank, src_first, offset, row0
+    integer(C_INT) :: base_count, remainder, split_line
+
+    row0 = 4*ys_hier_group_id
+    base_count = nlines/ys_hier_column_count
+    remainder = mod(nlines, ys_hier_column_count)
+    split_line = (base_count + 1_C_INT)*remainder
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(ycomm_recvbuf, ys_reduced_rhs, ys_left_interface_values, ys_right_interface_values, &
+    !$omp& ys_hier_column_return_recv_displs, nlines, base_count, remainder, split_line, row0) &
+    !$omp private(iline, k, src_rank, src_first, offset)
+    do iline = 1, nlines
+      if (iline <= split_line) then
+        src_rank = (iline - 1)/(base_count + 1_C_INT)
+        src_first = src_rank*(base_count + 1_C_INT) + 1
+      else
+        src_rank = remainder + (iline - split_line - 1_C_INT)/base_count
+        src_first = split_line + (src_rank - remainder)*base_count + 1
+      end if
+      offset = ys_hier_column_return_recv_displs(src_rank + 1) + &
+               (iline - src_first)*YS_REDUCED_RETURN_WIDTH
+      do k = 1, 4
+        ys_reduced_rhs(row0 + k, iline) = ycomm_recvbuf(offset + k)
+      end do
+      ys_left_interface_values(1, iline) = ycomm_recvbuf(offset + 5)
+      ys_left_interface_values(2, iline) = ycomm_recvbuf(offset + 6)
+      ys_right_interface_values(1, iline) = ycomm_recvbuf(offset + 7)
+      ys_right_interface_values(2, iline) = ycomm_recvbuf(offset + 8)
+    end do
+    !$omp end target teams distribute parallel do
+  end subroutine ys_node_leaf_unpack_column_returns
+
+  subroutine ys_node_leaf_transpose_source_to_group(field, slab, ny, nz, total_lines, nlines_z)
+    implicit none
+    integer(C_INT), intent(in) :: ny, nz, total_lines, nlines_z
+    complex(C_DOUBLE_COMPLEX), intent(in) :: field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: slab(:, :)
+    integer :: ierr_local
+    integer(C_INT) :: rank, local_rank, y_first, y_last, rows, first_line, line_count
+    integer(C_INT) :: send_offset, recv_offset, send_elems, recv_elems
+    integer(C_INT) :: node_y0, node_yN, send_y_first, send_y_last, send_rows
+    integer(C_INT) :: nx_lines, base_count, remainder, split_line, max_group_lines
+    integer(C_INT) :: dest_local, src_local, ilocal, iline, ix, iz, iy, p, slab_y
+
+    node_y0 = 1_C_INT + ys_hier_group_first*(ny - 1_C_INT)/npy_grid
+    node_yN = (ys_hier_group_first + ys_hier_group_count)*(ny - 1_C_INT)/npy_grid
+    send_y_first = ny0
+    send_y_last = nyN
+    if (ys_hier_group_rank == 0) send_y_first = ny0 - 2_C_INT
+    if (ys_hier_group_rank == ys_hier_group_count - 1) send_y_last = nyN + 2_C_INT
+    send_rows = send_y_last - send_y_first + 1_C_INT
+
+    send_offset = 0_C_INT
+    recv_offset = 0_C_INT
+    do local_rank = 0, ys_hier_group_count - 1
+      rank = ys_hier_group_first + local_rank
+      nx_lines = total_lines/nlines_z
+      call ys_split_line_range(local_rank, nx_lines, ys_hier_group_count, first_line, line_count)
+      first_line = (first_line - 1_C_INT)*nlines_z + 1_C_INT
+      line_count = line_count*nlines_z
+      ys_hier_leaf_send_counts(rank + 1) = line_count*send_rows
+      ys_hier_leaf_send_displs(rank + 1) = send_offset
+      send_offset = send_offset + ys_hier_leaf_send_counts(rank + 1)
+
+      y_first = 1_C_INT + rank*(ny - 1_C_INT)/npy_grid
+      y_last = (rank + 1_C_INT)*(ny - 1_C_INT)/npy_grid
+      if (local_rank == 0) y_first = y_first - 2_C_INT
+      if (local_rank == ys_hier_group_count - 1) y_last = y_last + 2_C_INT
+      rows = y_last - y_first + 1_C_INT
+      ys_hier_leaf_recv_counts(rank + 1) = ys_workspace_nlines*rows
+      ys_hier_leaf_recv_displs(rank + 1) = recv_offset
+      recv_offset = recv_offset + ys_hier_leaf_recv_counts(rank + 1)
+    end do
+    send_elems = send_offset
+    recv_elems = recv_offset
+    call ensure_ycomm_buffers(send_elems, recv_elems)
+    !$omp target update to(ys_hier_leaf_send_counts, ys_hier_leaf_send_displs, &
+    !$omp& ys_hier_leaf_recv_counts, ys_hier_leaf_recv_displs)
+
+    nx_lines = total_lines/nlines_z
+    base_count = nx_lines/ys_hier_group_count
+    remainder = mod(nx_lines, ys_hier_group_count)
+    split_line = (base_count + 1_C_INT)*remainder*nlines_z
+    max_group_lines = (base_count + merge(1_C_INT, 0_C_INT, remainder > 0))*nlines_z
+    call roctxPush("node_leaf_source_to_group pack")
+    !$omp target teams distribute parallel do collapse(3) default(none) &
+    !$omp shared(field, ycomm_sendbuf, ys_hier_leaf_send_displs, total_lines, nlines_z, nz, nx0, &
+    !$omp& ys_hier_group_first, ys_hier_group_count, base_count, remainder, split_line, &
+    !$omp& max_group_lines, send_y_first, send_y_last, send_rows) &
+    !$omp private(dest_local, ilocal, iy, first_line, line_count, iline, ix, iz, p)
+    do dest_local = 0, ys_hier_group_count - 1
+      do ilocal = 1, max_group_lines
+        do iy = send_y_first, send_y_last
+          if (dest_local < remainder) then
+            line_count = (base_count + 1_C_INT)*nlines_z
+            first_line = dest_local*(base_count + 1_C_INT)*nlines_z + 1_C_INT
+          else
+            line_count = base_count*nlines_z
+            first_line = split_line + (dest_local - remainder)*base_count*nlines_z + 1_C_INT
+          end if
+          if (ilocal > line_count) cycle
+          iline = first_line + ilocal - 1_C_INT
+          ix = (iline - 1_C_INT)/nlines_z + nx0
+          iz = mod(iline - 1_C_INT, nlines_z) - nz
+          p = ys_hier_leaf_send_displs(ys_hier_group_first + dest_local + 1) + &
+              (ilocal - 1_C_INT)*send_rows + (iy - send_y_first + 1_C_INT)
+          ycomm_sendbuf(p) = field(iy, iz, ix)
+        end do
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+    call roctxPop("node_leaf_source_to_group pack")
+
+    call roctxPush("MPI_Alltoallv node_leaf_source_to_group")
+    !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
+    call MPI_Alltoallv(ycomm_sendbuf(1:send_elems), &
+                       ys_hier_leaf_send_counts(ys_hier_group_first + 1:ys_hier_group_first + ys_hier_group_count), &
+                       ys_hier_leaf_send_displs(ys_hier_group_first + 1:ys_hier_group_first + ys_hier_group_count), &
+                       MPI_DOUBLE_COMPLEX, ycomm_recvbuf(1:recv_elems), &
+                       ys_hier_leaf_recv_counts(ys_hier_group_first + 1:ys_hier_group_first + ys_hier_group_count), &
+                       ys_hier_leaf_recv_displs(ys_hier_group_first + 1:ys_hier_group_first + ys_hier_group_count), &
+                       MPI_DOUBLE_COMPLEX, ys_hier_group_comm, ierr_local)
+    !$omp end target data
+    call roctxPop("MPI_Alltoallv node_leaf_source_to_group")
+    if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoallv node_leaf_source_to_group failed"
+
+    call roctxPush("node_leaf_source_to_group unpack")
+    !$omp target teams distribute parallel do collapse(3) default(none) &
+    !$omp shared(slab, ycomm_recvbuf, ys_hier_leaf_recv_displs, ny, npy_grid, ys_hier_group_first, &
+    !$omp& ys_hier_group_count, ys_workspace_nlines, node_y0, node_yN) &
+    !$omp private(src_local, ilocal, iy, rank, y_first, y_last, rows, p, slab_y)
+    do src_local = 0, ys_hier_group_count - 1
+      do ilocal = 1, ys_workspace_nlines
+        do iy = node_y0 - 2_C_INT, node_yN + 2_C_INT
+          rank = ys_hier_group_first + src_local
+          y_first = 1_C_INT + rank*(ny - 1_C_INT)/npy_grid
+          y_last = (rank + 1_C_INT)*(ny - 1_C_INT)/npy_grid
+          if (src_local == 0) y_first = y_first - 2_C_INT
+          if (src_local == ys_hier_group_count - 1) y_last = y_last + 2_C_INT
+          if (iy < y_first .or. iy > y_last) cycle
+          rows = y_last - y_first + 1_C_INT
+          p = ys_hier_leaf_recv_displs(rank + 1) + (ilocal - 1_C_INT)*rows + (iy - y_first + 1_C_INT)
+          slab_y = iy - node_y0 + 3_C_INT
+          slab(slab_y, ilocal) = ycomm_recvbuf(p)
+        end do
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+    call roctxPop("node_leaf_source_to_group unpack")
+  end subroutine ys_node_leaf_transpose_source_to_group
+
+  subroutine ys_node_leaf_transpose_solution_from_group(slab, field, ny, nz, total_lines, nlines_z)
+    implicit none
+    integer(C_INT), intent(in) :: ny, nz, total_lines, nlines_z
+    complex(C_DOUBLE_COMPLEX), intent(in) :: slab(:, :)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    integer :: ierr_local
+    integer(C_INT) :: rank, local_rank, y_first, y_last, rows, first_line, line_count
+    integer(C_INT) :: local_y_first, local_y_last, local_rows, send_offset, recv_offset, send_elems, recv_elems
+    integer(C_INT) :: node_y0, node_yN, nx_lines, base_count, remainder, split_line, max_group_lines
+    integer(C_INT) :: dest_local, src_local, ilocal, iline, ix, iz, iy, p, slab_y
+
+    node_y0 = 1_C_INT + ys_hier_group_first*(ny - 1_C_INT)/npy_grid
+    node_yN = (ys_hier_group_first + ys_hier_group_count)*(ny - 1_C_INT)/npy_grid
+    local_y_first = ny0 - 2_C_INT
+    local_y_last = nyN + 2_C_INT
+    local_rows = local_y_last - local_y_first + 1_C_INT
+
+    send_offset = 0_C_INT
+    recv_offset = 0_C_INT
+    do local_rank = 0, ys_hier_group_count - 1
+      rank = ys_hier_group_first + local_rank
+      y_first = 1_C_INT + rank*(ny - 1_C_INT)/npy_grid - 2_C_INT
+      y_last = (rank + 1_C_INT)*(ny - 1_C_INT)/npy_grid + 2_C_INT
+      rows = y_last - y_first + 1_C_INT
+      ys_hier_leaf_send_counts(rank + 1) = ys_workspace_nlines*rows
+      ys_hier_leaf_send_displs(rank + 1) = send_offset
+      send_offset = send_offset + ys_hier_leaf_send_counts(rank + 1)
+
+      nx_lines = total_lines/nlines_z
+      call ys_split_line_range(local_rank, nx_lines, ys_hier_group_count, first_line, line_count)
+      first_line = (first_line - 1_C_INT)*nlines_z + 1_C_INT
+      line_count = line_count*nlines_z
+      ys_hier_leaf_recv_counts(rank + 1) = line_count*local_rows
+      ys_hier_leaf_recv_displs(rank + 1) = recv_offset
+      recv_offset = recv_offset + ys_hier_leaf_recv_counts(rank + 1)
+    end do
+    send_elems = send_offset
+    recv_elems = recv_offset
+    call ensure_ycomm_buffers(send_elems, recv_elems)
+    !$omp target update to(ys_hier_leaf_send_counts, ys_hier_leaf_send_displs, &
+    !$omp& ys_hier_leaf_recv_counts, ys_hier_leaf_recv_displs)
+
+    call roctxPush("node_leaf_solution_from_group pack")
+    !$omp target teams distribute parallel do collapse(3) default(none) &
+    !$omp shared(slab, ycomm_sendbuf, ys_hier_leaf_send_displs, ny, npy_grid, ys_hier_group_first, &
+    !$omp& ys_hier_group_count, ys_workspace_nlines, node_y0, node_yN) &
+    !$omp private(dest_local, ilocal, iy, rank, y_first, y_last, rows, p, slab_y)
+    do dest_local = 0, ys_hier_group_count - 1
+      do ilocal = 1, ys_workspace_nlines
+        do iy = node_y0 - 2_C_INT, node_yN + 2_C_INT
+          rank = ys_hier_group_first + dest_local
+          y_first = 1_C_INT + rank*(ny - 1_C_INT)/npy_grid - 2_C_INT
+          y_last = (rank + 1_C_INT)*(ny - 1_C_INT)/npy_grid + 2_C_INT
+          if (iy < y_first .or. iy > y_last) cycle
+          rows = y_last - y_first + 1_C_INT
+          slab_y = iy - node_y0 + 3_C_INT
+          p = ys_hier_leaf_send_displs(rank + 1) + (ilocal - 1_C_INT)*rows + (iy - y_first + 1_C_INT)
+          ycomm_sendbuf(p) = slab(slab_y, ilocal)
+        end do
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+    call roctxPop("node_leaf_solution_from_group pack")
+
+    call roctxPush("MPI_Alltoallv node_leaf_solution_from_group")
+    !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
+    call MPI_Alltoallv(ycomm_sendbuf(1:send_elems), &
+                       ys_hier_leaf_send_counts(ys_hier_group_first + 1:ys_hier_group_first + ys_hier_group_count), &
+                       ys_hier_leaf_send_displs(ys_hier_group_first + 1:ys_hier_group_first + ys_hier_group_count), &
+                       MPI_DOUBLE_COMPLEX, ycomm_recvbuf(1:recv_elems), &
+                       ys_hier_leaf_recv_counts(ys_hier_group_first + 1:ys_hier_group_first + ys_hier_group_count), &
+                       ys_hier_leaf_recv_displs(ys_hier_group_first + 1:ys_hier_group_first + ys_hier_group_count), &
+                       MPI_DOUBLE_COMPLEX, ys_hier_group_comm, ierr_local)
+    !$omp end target data
+    call roctxPop("MPI_Alltoallv node_leaf_solution_from_group")
+    if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoallv node_leaf_solution_from_group failed"
+
+    nx_lines = total_lines/nlines_z
+    base_count = nx_lines/ys_hier_group_count
+    remainder = mod(nx_lines, ys_hier_group_count)
+    split_line = (base_count + 1_C_INT)*remainder*nlines_z
+    max_group_lines = (base_count + merge(1_C_INT, 0_C_INT, remainder > 0))*nlines_z
+    call roctxPush("node_leaf_solution_from_group unpack")
+    !$omp target teams distribute parallel do collapse(3) default(none) &
+    !$omp shared(field, ycomm_recvbuf, ys_hier_leaf_recv_displs, total_lines, nlines_z, nz, nx0, &
+    !$omp& ys_hier_group_first, ys_hier_group_count, base_count, remainder, split_line, &
+    !$omp& max_group_lines, local_y_first, local_y_last, local_rows) &
+    !$omp private(src_local, ilocal, iy, first_line, line_count, iline, ix, iz, p)
+    do src_local = 0, ys_hier_group_count - 1
+      do ilocal = 1, max_group_lines
+        do iy = local_y_first, local_y_last
+          if (src_local < remainder) then
+            line_count = (base_count + 1_C_INT)*nlines_z
+            first_line = src_local*(base_count + 1_C_INT)*nlines_z + 1_C_INT
+          else
+            line_count = base_count*nlines_z
+            first_line = split_line + (src_local - remainder)*base_count*nlines_z + 1_C_INT
+          end if
+          if (ilocal > line_count) cycle
+          iline = first_line + ilocal - 1_C_INT
+          ix = (iline - 1_C_INT)/nlines_z + nx0
+          iz = mod(iline - 1_C_INT, nlines_z) - nz
+          p = ys_hier_leaf_recv_displs(ys_hier_group_first + src_local + 1) + &
+              (ilocal - 1_C_INT)*local_rows + (iy - local_y_first + 1_C_INT)
+          field(iy, iz, ix) = ycomm_recvbuf(p)
+        end do
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+    call roctxPop("node_leaf_solution_from_group unpack")
+  end subroutine ys_node_leaf_transpose_solution_from_group
+
   subroutine ys_hier_pack_leaf_rows(nlines)
     implicit none
     integer(C_INT), intent(in) :: nlines
@@ -1624,13 +2212,13 @@ contains
   subroutine ys_hier_compose_node_rows()
     implicit none
     integer(C_INT), parameter :: bw = YS_REDUCED_BW
-    integer(C_INT) :: iline, child, child_rank, row0, row, k, rhs_col, ext_col, exposed_var, offset, col
+    integer(C_INT) :: iline, child, child_rank, row0, row, k, ext_col, exposed_var, offset, col
 
     call roctxPush("ys_hier_compose_node_rows")
     !$omp target teams distribute parallel do default(none) &
     !$omp shared(ycomm_recvbuf, ys_hier_leaf_recv_displs, ys_reduced_matrix_lu, ys_hier_recover_basis, &
     !$omp& ys_hier_node_rows, ys_hier_node_owned_nlines, ys_hier_group_first, ys_hier_group_count, bw) &
-    !$omp private(iline, child, child_rank, row0, row, k, rhs_col, ext_col, exposed_var, offset, col)
+    !$omp private(iline, child, child_rank, row0, row, k, ext_col, exposed_var, offset, col)
     do iline = 1, ys_hier_node_owned_nlines
       ys_reduced_matrix_lu(1:4*ys_hier_group_count, :, iline) = (0.0d0, 0.0d0)
       ys_hier_recover_basis(1:4*ys_hier_group_count, :, iline) = (0.0d0, 0.0d0)
@@ -1664,10 +2252,8 @@ contains
       end do
 
       call ys_factor_banded_complex(ys_reduced_matrix_lu(1:4*ys_hier_group_count, :, iline))
-      do rhs_col = 1, 5
-        call ys_solve_factored_banded_complex(ys_hier_recover_basis(1:4*ys_hier_group_count, rhs_col, iline), &
-                                              ys_reduced_matrix_lu(1:4*ys_hier_group_count, :, iline))
-      end do
+      call ys_solve_factored_banded_complex_multi(ys_hier_recover_basis(1:4*ys_hier_group_count, 1:5, iline), &
+                                                  ys_reduced_matrix_lu(1:4*ys_hier_group_count, :, iline))
 
       do k = 1, 4
         if (k <= 2) then
@@ -2294,6 +2880,39 @@ contains
       rhs(i) = rhs(i)/a(i, bw + 1)
     end do
   end subroutine ys_solve_factored_banded_complex
+
+  subroutine ys_solve_factored_banded_complex_multi(rhs, a)
+    implicit none
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs(:, :)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: a(:, :)
+    integer(C_INT), parameter :: bw = YS_REDUCED_BW
+    integer(C_INT) :: n, nrhs, i, j, irhs
+    complex(C_DOUBLE_COMPLEX) :: factor, piv
+
+    n = size(a, 1)
+    nrhs = size(rhs, 2)
+    do i = 1, n
+      do j = max(1_C_INT, i - bw), i - 1
+        factor = a(i, bw + 1 + j - i)
+        do irhs = 1, nrhs
+          rhs(i, irhs) = rhs(i, irhs) - factor*rhs(j, irhs)
+        end do
+      end do
+    end do
+
+    do i = n, 1, -1
+      do j = i + 1, min(n, i + bw)
+        factor = a(i, bw + 1 + j - i)
+        do irhs = 1, nrhs
+          rhs(i, irhs) = rhs(i, irhs) - factor*rhs(j, irhs)
+        end do
+      end do
+      piv = a(i, bw + 1)
+      do irhs = 1, nrhs
+        rhs(i, irhs) = rhs(i, irhs)/piv
+      end do
+    end do
+  end subroutine ys_solve_factored_banded_complex_multi
 
   subroutine ys_factor_penta_interleaved(ds, dl, d, du, dw, stride, first, n)
     implicit none
