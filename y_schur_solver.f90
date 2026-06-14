@@ -20,7 +20,6 @@ module y_schur_solver
   integer(C_INT), parameter, public :: YS_SCHUR_EXCHANGE_AUTO = 0_C_INT
   integer(C_INT), parameter, public :: YS_SCHUR_EXCHANGE_ALLTOALL = 1_C_INT
   integer(C_INT), parameter, public :: YS_SCHUR_EXCHANGE_ALLGATHER = 2_C_INT
-  integer(C_INT), parameter, public :: YS_SCHUR_EXCHANGE_ALLGATHER_ALL = 3_C_INT
   integer, parameter :: YS_SCHUR_MAX_PASSES = 16
 
   type, public :: ys_schur_config
@@ -88,8 +87,7 @@ contains
     cfg%exchange_mode = YS_SCHUR_EXCHANGE_AUTO
     if (present(exchange_mode)) cfg%exchange_mode = exchange_mode
     select case (cfg%exchange_mode)
-    case (YS_SCHUR_EXCHANGE_AUTO, YS_SCHUR_EXCHANGE_ALLTOALL, &
-          YS_SCHUR_EXCHANGE_ALLGATHER, YS_SCHUR_EXCHANGE_ALLGATHER_ALL)
+    case (YS_SCHUR_EXCHANGE_AUTO, YS_SCHUR_EXCHANGE_ALLTOALL, YS_SCHUR_EXCHANGE_ALLGATHER)
     case default
       error stop "unknown y-Schur exchange mode"
     end select
@@ -223,8 +221,7 @@ contains
     if (pass_product /= npy_count) error stop "y-Schur pass config product must equal the y communicator size"
 
     select case (cfg%exchange_mode)
-    case (YS_SCHUR_EXCHANGE_AUTO, YS_SCHUR_EXCHANGE_ALLTOALL, &
-          YS_SCHUR_EXCHANGE_ALLGATHER, YS_SCHUR_EXCHANGE_ALLGATHER_ALL)
+    case (YS_SCHUR_EXCHANGE_AUTO, YS_SCHUR_EXCHANGE_ALLTOALL, YS_SCHUR_EXCHANGE_ALLGATHER)
     case default
       error stop "unknown y-Schur exchange mode"
     end select
@@ -280,16 +277,20 @@ contains
       parent_group = ipy/span
       s_level_child_id(ilevel) = child_id
       select case (cfg%exchange_mode)
-      case (YS_SCHUR_EXCHANGE_AUTO, YS_SCHUR_EXCHANGE_ALLGATHER)
-        if (s_level_arity(ilevel) == 2_C_INT) then
+      case (YS_SCHUR_EXCHANGE_AUTO)
+        if (ilevel == ws%pass_count .and. s_level_arity(ilevel) == 2_C_INT) then
           s_level_exchange_mode(ilevel) = YS_SCHUR_EXCHANGE_ALLGATHER
         else
           s_level_exchange_mode(ilevel) = YS_SCHUR_EXCHANGE_ALLTOALL
         end if
       case (YS_SCHUR_EXCHANGE_ALLTOALL)
         s_level_exchange_mode(ilevel) = cfg%exchange_mode
-      case (YS_SCHUR_EXCHANGE_ALLGATHER_ALL)
-        s_level_exchange_mode(ilevel) = YS_SCHUR_EXCHANGE_ALLGATHER
+      case (YS_SCHUR_EXCHANGE_ALLGATHER)
+        if (ilevel == ws%pass_count) then
+          s_level_exchange_mode(ilevel) = YS_SCHUR_EXCHANGE_ALLGATHER
+        else
+          s_level_exchange_mode(ilevel) = YS_SCHUR_EXCHANGE_ALLTOALL
+        end if
       end select
 
       if (prev_count < s_level_arity(ilevel)) &
@@ -400,8 +401,6 @@ contains
         call ys_schur_exchange_values(ilevel)
         if (ilevel > 1) then
           call ys_schur_unpack_parent_values(ilevel)
-        else if (s_level_exchange_mode(ilevel) == YS_SCHUR_EXCHANGE_ALLGATHER) then
-          call ys_schur_compact_leaf_values(ilevel)
         end if
       end if
     end do
@@ -488,62 +487,31 @@ contains
 #ifdef HAVE_MPI
     integer :: ierr_local
     real(C_DOUBLE) :: comm_t0, elapsed
-    logical :: equal_counts
 
     comm_t0 = 0.0_C_DOUBLE
     elapsed = 0.0_C_DOUBLE
     if (s_level_exchange_mode(ilevel) == YS_SCHUR_EXCHANGE_ALLGATHER) then
-      equal_counts = all(s_value_recv_counts(1:s_level_arity(ilevel), ilevel) == s_value_send_elems(ilevel))
-      if (equal_counts) then
-        call roctxPush("MPI_Allgather ys_schur_values")
-      else
-        call roctxPush("MPI_Allgatherv ys_schur_values")
-      end if
-      if (s_comm_stats_enabled) comm_t0 = MPI_Wtime()
-      !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
-      if (equal_counts) then
-        call MPI_Allgather(ycomm_sendbuf(1:s_value_send_elems(ilevel)), s_value_send_elems(ilevel), MPI_DOUBLE_COMPLEX, &
-                           ycomm_recvbuf(1:s_value_recv_elems(ilevel)), s_value_send_elems(ilevel), MPI_DOUBLE_COMPLEX, &
-                           s_level_comm(ilevel), ierr_local)
-      else
-        call MPI_Allgatherv(ycomm_sendbuf(1:s_value_send_elems(ilevel)), s_value_send_elems(ilevel), &
-                            MPI_DOUBLE_COMPLEX, ycomm_recvbuf(1:s_value_recv_elems(ilevel)), &
-                            s_value_recv_counts(1:s_level_arity(ilevel), ilevel), &
-                            s_value_recv_displs(1:s_level_arity(ilevel), ilevel), MPI_DOUBLE_COMPLEX, &
-                            s_level_comm(ilevel), ierr_local)
-      end if
-      !$omp end target data
-      if (ierr_local /= MPI_SUCCESS) error stop "MPI_Allgather y-Schur values failed"
-      if (s_comm_stats_enabled) then
-        elapsed = MPI_Wtime() - comm_t0
-        call ys_schur_report_comm_stats("ys_schur_values_allgather", s_level_comm(ilevel), &
-                                        s_value_send_elems(ilevel), s_value_recv_elems(ilevel), elapsed)
-      end if
-      if (equal_counts) then
-        call roctxPop("MPI_Allgather ys_schur_values")
-      else
-        call roctxPop("MPI_Allgatherv ys_schur_values")
-      end if
-    else
-      call roctxPush("MPI_Alltoallv ys_schur_values")
-      if (s_comm_stats_enabled) comm_t0 = MPI_Wtime()
-      !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
-      call MPI_Alltoallv(ycomm_sendbuf(1:s_value_send_elems(ilevel)), &
-                         s_value_send_counts(1:s_level_arity(ilevel), ilevel), &
-                         s_value_send_displs(1:s_level_arity(ilevel), ilevel), MPI_DOUBLE_COMPLEX, &
-                         ycomm_recvbuf(1:s_value_recv_elems(ilevel)), &
-                         s_value_recv_counts(1:s_level_arity(ilevel), ilevel), &
-                         s_value_recv_displs(1:s_level_arity(ilevel), ilevel), MPI_DOUBLE_COMPLEX, &
-                         s_level_comm(ilevel), ierr_local)
-      !$omp end target data
-      if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoallv y-Schur values failed"
-      if (s_comm_stats_enabled) then
-        elapsed = MPI_Wtime() - comm_t0
-        call ys_schur_report_comm_stats("ys_schur_values_alltoall", s_level_comm(ilevel), &
-                                        s_value_send_elems(ilevel), s_value_recv_elems(ilevel), elapsed)
-      end if
-      call roctxPop("MPI_Alltoallv ys_schur_values")
+      error stop "root allgather Schur levels should recover values locally"
     end if
+
+    call roctxPush("MPI_Alltoallv ys_schur_values")
+    if (s_comm_stats_enabled) comm_t0 = MPI_Wtime()
+    !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
+    call MPI_Alltoallv(ycomm_sendbuf(1:s_value_send_elems(ilevel)), &
+                       s_value_send_counts(1:s_level_arity(ilevel), ilevel), &
+                       s_value_send_displs(1:s_level_arity(ilevel), ilevel), MPI_DOUBLE_COMPLEX, &
+                       ycomm_recvbuf(1:s_value_recv_elems(ilevel)), &
+                       s_value_recv_counts(1:s_level_arity(ilevel), ilevel), &
+                       s_value_recv_displs(1:s_level_arity(ilevel), ilevel), MPI_DOUBLE_COMPLEX, &
+                       s_level_comm(ilevel), ierr_local)
+    !$omp end target data
+    if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoallv y-Schur values failed"
+    if (s_comm_stats_enabled) then
+      elapsed = MPI_Wtime() - comm_t0
+      call ys_schur_report_comm_stats("ys_schur_values_alltoall", s_level_comm(ilevel), &
+                                      s_value_send_elems(ilevel), s_value_recv_elems(ilevel), elapsed)
+    end if
+    call roctxPop("MPI_Alltoallv ys_schur_values")
 #else
     error stop "ys_schur_exchange_values requires MPI"
 #endif
@@ -815,27 +783,20 @@ contains
   subroutine ys_schur_unpack_parent_values(ilevel)
     implicit none
     integer, intent(in) :: ilevel
-    integer(C_INT) :: src, local_line, k, line_first, line_count, global_line, dst_line, offset, child_id
+    integer(C_INT) :: src, local_line, k, line_first, global_line, dst_line, offset
 
     call roctxPush("ys_schur_unpack_parent_values")
     !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp shared(ilevel, ycomm_recvbuf, s_values, s_level_arity, s_level_line_first, s_level_line_count, &
-    !$omp& s_value_recv_displs, s_level_prev_first, s_level_child_id, s_level_exchange_mode) &
-    !$omp private(src, local_line, k, line_first, line_count, global_line, dst_line, offset, child_id)
+    !$omp& s_value_recv_displs, s_level_prev_first) &
+    !$omp private(src, local_line, k, line_first, global_line, dst_line, offset)
     do src = 0, s_level_arity(ilevel) - 1
       do local_line = 1, s_level_line_count(src + 1, ilevel)
         do k = 1, YS_SCHUR_VALUE_WIDTH
           line_first = s_level_line_first(src + 1, ilevel)
-          line_count = s_level_line_count(src + 1, ilevel)
           global_line = line_first + local_line - 1
           dst_line = global_line - s_level_prev_first(ilevel) + 1
-          if (s_level_exchange_mode(ilevel) == YS_SCHUR_EXCHANGE_ALLGATHER) then
-            child_id = s_level_child_id(ilevel)
-            offset = s_value_recv_displs(src + 1, ilevel) + &
-                     child_id*line_count*YS_SCHUR_VALUE_WIDTH + (local_line - 1)*YS_SCHUR_VALUE_WIDTH
-          else
-            offset = s_value_recv_displs(src + 1, ilevel) + (local_line - 1)*YS_SCHUR_VALUE_WIDTH
-          end if
+          offset = s_value_recv_displs(src + 1, ilevel) + (local_line - 1)*YS_SCHUR_VALUE_WIDTH
           s_values(k, dst_line, ilevel - 1) = ycomm_recvbuf(offset + k)
         end do
       end do
@@ -843,41 +804,6 @@ contains
     !$omp end target teams distribute parallel do
     call roctxPop("ys_schur_unpack_parent_values")
   end subroutine ys_schur_unpack_parent_values
-
-  subroutine ys_schur_compact_leaf_values(ilevel)
-    implicit none
-    integer, intent(in) :: ilevel
-    integer(C_INT) :: src, local_line, k, line_first, line_count, global_line, child_id, src_offset, dst_offset, nelems
-
-    call roctxPush("ys_schur_compact_leaf_values")
-    !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(ilevel, ycomm_recvbuf, ycomm_sendbuf, s_level_arity, s_level_line_first, s_level_line_count, &
-    !$omp& s_value_recv_displs, s_level_prev_first, s_level_child_id) &
-    !$omp private(src, local_line, k, line_first, line_count, global_line, child_id, src_offset, dst_offset)
-    do src = 0, s_level_arity(ilevel) - 1
-      do local_line = 1, s_level_line_count(src + 1, ilevel)
-        do k = 1, YS_SCHUR_VALUE_WIDTH
-          line_first = s_level_line_first(src + 1, ilevel)
-          line_count = s_level_line_count(src + 1, ilevel)
-          global_line = line_first + local_line - 1
-          child_id = s_level_child_id(ilevel)
-          src_offset = s_value_recv_displs(src + 1, ilevel) + &
-                       child_id*line_count*YS_SCHUR_VALUE_WIDTH + (local_line - 1)*YS_SCHUR_VALUE_WIDTH
-          dst_offset = (global_line - s_level_prev_first(ilevel))*YS_SCHUR_VALUE_WIDTH
-          ycomm_sendbuf(dst_offset + k) = ycomm_recvbuf(src_offset + k)
-        end do
-      end do
-    end do
-    !$omp end target teams distribute parallel do
-
-    nelems = s_level_prev_count(ilevel)*YS_SCHUR_VALUE_WIDTH
-    !$omp target teams distribute parallel do default(none) shared(nelems, ycomm_recvbuf, ycomm_sendbuf) private(k)
-    do k = 1, nelems
-      ycomm_recvbuf(k) = ycomm_sendbuf(k)
-    end do
-    !$omp end target teams distribute parallel do
-    call roctxPop("ys_schur_compact_leaf_values")
-  end subroutine ys_schur_compact_leaf_values
 
   subroutine ys_schur_split_range(rank, nitems, nranks, first_item, item_count)
     implicit none

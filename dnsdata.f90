@@ -26,8 +26,8 @@ MODULE dnsdata
   USE mpi_transpose
   USE ffts
   USE y_schur_solver, ONLY: ys_schur_default_pass_counts, &
-                            YS_SCHUR_EXCHANGE_ALLGATHER, YS_SCHUR_EXCHANGE_ALLGATHER_ALL, &
-                            YS_SCHUR_EXCHANGE_ALLTOALL, YS_SCHUR_EXCHANGE_AUTO
+                            YS_SCHUR_EXCHANGE_ALLGATHER, YS_SCHUR_EXCHANGE_ALLTOALL, &
+                            YS_SCHUR_EXCHANGE_AUTO
 
   IMPLICIT NONE
 
@@ -156,9 +156,6 @@ CONTAINS
         schur_exchange_mode = YS_SCHUR_EXCHANGE_ALLTOALL
       case ("allgather", "ALLGATHER", "allgatherv", "ALLGATHERV")
         schur_exchange_mode = YS_SCHUR_EXCHANGE_ALLGATHER
-      case ("allgather-all", "ALLGATHER-ALL", "allgather_all", "ALLGATHER_ALL", &
-            "allgatherall", "ALLGATHERALL")
-        schur_exchange_mode = YS_SCHUR_EXCHANGE_ALLGATHER_ALL
       case default
         print *, "Warning: invalid value for CHANNEL_Y_SCHUR_GLOBAL_EXCHANGE:", trim(env_value(:length))
       end select
@@ -314,13 +311,11 @@ CONTAINS
     end if
     select case (schur_exchange_mode)
     case (YS_SCHUR_EXCHANGE_AUTO)
-      print *, "y-Schur exchange mode: auto (arity-2 levels use allgather; root is redundant)"
+      print *, "y-Schur exchange mode: auto (arity-2 root uses redundant allgather)"
     case (YS_SCHUR_EXCHANGE_ALLTOALL)
       print *, "y-Schur exchange mode: alltoallv"
     case (YS_SCHUR_EXCHANGE_ALLGATHER)
-      print *, "y-Schur exchange mode: allgather (arity-2 levels; root is redundant)"
-    case (YS_SCHUR_EXCHANGE_ALLGATHER_ALL)
-      print *, "y-Schur exchange mode: allgather-all (root is redundant)"
+      print *, "y-Schur exchange mode: allgather (root only; redundant)"
     end select
   end subroutine print_schur_configuration
 
