@@ -5,7 +5,8 @@ module y_line_solvers
   use, intrinsic :: iso_c_binding
   use mpi_transpose, only: ny0, nyN, nx0, nxN, nxB, npy_grid, ipy
   use y_schur_solver, only: ys_schur_config, ys_schur_workspace, ys_schur_configure, &
-                            ys_schur_prepare, ys_schur_release, ys_schur_solve_from_packed
+                            ys_schur_prepare, ys_schur_release, ys_schur_solve_from_packed, &
+                            YS_SCHUR_EXCHANGE_AUTO
 #ifdef HAVE_MPI
   use mpi_transpose, only: MPI_COMM_Y, ensure_ycomm_buffers, ycomm_sendbuf, ycomm_recvbuf
 #endif
@@ -119,6 +120,7 @@ module y_line_solvers
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_left_interface_values(:, :), ys_right_interface_values(:, :)
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_reduced_rhs(:, :)
   integer(C_INT), allocatable, save :: ys_reduced_pass_counts(:)
+  integer(C_INT), save :: ys_reduced_exchange_mode = YS_SCHUR_EXCHANGE_AUTO
   type(ys_schur_workspace), save :: ys_reduced_schur_ws
 
 #ifdef HAVE_CUDA
@@ -174,12 +176,14 @@ contains
               ys_workspace_npy == wanted_npy .and. ys_workspace_line_start == line_start
   end function ys_core_shape_matches
 
-  logical function ys_reduced_config_matches(pass_counts) result(matches)
+  logical function ys_reduced_config_matches(pass_counts, exchange_mode) result(matches)
     implicit none
     integer(C_INT), intent(in) :: pass_counts(:)
+    integer(C_INT), intent(in) :: exchange_mode
 
     matches = allocated(ys_reduced_rows_send) .and. allocated(ys_reduced_pass_counts) .and. &
-              size(ys_reduced_pass_counts) == size(pass_counts)
+              size(ys_reduced_pass_counts) == size(pass_counts) .and. &
+              ys_reduced_exchange_mode == exchange_mode
     if (matches .and. size(pass_counts) > 0) matches = all(ys_reduced_pass_counts == pass_counts)
   end function ys_reduced_config_matches
 
@@ -295,6 +299,7 @@ contains
     if (allocated(ys_reduced_pass_counts)) then
       deallocate (ys_reduced_pass_counts)
     end if
+    ys_reduced_exchange_mode = YS_SCHUR_EXCHANGE_AUTO
     ys_workspace_reduced_node_size = -1
 
   end subroutine ys_release_reduced_workspace
@@ -323,10 +328,11 @@ contains
     !$omp& ys_boundary_lower_eq_store, ys_boundary_upper_eq_store)
   end subroutine ys_allocate_core_workspace
 
-  subroutine ys_allocate_reduced_workspace(nlines, npy_count, schur_pass_counts)
+  subroutine ys_allocate_reduced_workspace(nlines, npy_count, schur_pass_counts, schur_exchange_mode)
     implicit none
     integer(C_INT), intent(in) :: nlines, npy_count
     integer(C_INT), intent(in) :: schur_pass_counts(:)
+    integer(C_INT), intent(in) :: schur_exchange_mode
     type(ys_schur_config) :: cfg
 
     allocate (ys_reduced_rows_send(20, nlines), ys_left_interface_values(2, nlines), &
@@ -334,8 +340,9 @@ contains
     allocate (ys_reduced_rhs(4*npy_count, nlines))
     allocate (ys_reduced_pass_counts(size(schur_pass_counts)))
     ys_reduced_pass_counts = schur_pass_counts
+    ys_reduced_exchange_mode = schur_exchange_mode
 
-    call ys_schur_configure(cfg, schur_pass_counts)
+    call ys_schur_configure(cfg, schur_pass_counts, exchange_mode=schur_exchange_mode)
     call ys_schur_prepare(ys_reduced_schur_ws, cfg, nlines, npy_count)
 
     !$omp target enter data map(alloc: ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values, &
@@ -344,17 +351,20 @@ contains
   end subroutine ys_allocate_reduced_workspace
 
   subroutine ys_prepare_assembled_workspace(ny, nz, row_start, row_end, line_start, nlines, use_reduced_backend, &
-                                            schur_pass_counts)
+                                            schur_pass_counts, schur_exchange_mode)
     implicit none
     integer(C_INT), intent(in) :: ny, nz, row_start, row_end, line_start, nlines
     logical, intent(in) :: use_reduced_backend
     integer(C_INT), optional, intent(in) :: schur_pass_counts(:)
-    integer(C_INT) :: active_n, line_end, nlines_z, wanted_npy
+    integer(C_INT), optional, intent(in) :: schur_exchange_mode
+    integer(C_INT) :: active_n, line_end, nlines_z, wanted_npy, wanted_exchange_mode
 
     active_n = row_end - row_start + 1
     line_end = line_start + nlines - 1
     nlines_z = 2*nz + 1
     wanted_npy = merge(npy_grid, -1_C_INT, use_reduced_backend)
+    wanted_exchange_mode = YS_SCHUR_EXCHANGE_AUTO
+    if (present(schur_exchange_mode)) wanted_exchange_mode = schur_exchange_mode
 
     if (active_n < 1) error stop "ys_prepare_assembled_workspace requires at least one row"
     if (mod(line_start - 1, nlines_z) /= 0) error stop "ys_prepare_assembled_workspace requires ix-aligned line_start"
@@ -394,9 +404,10 @@ contains
 
     if (use_reduced_backend .and. npy_grid > 1) then
       if (allocated(ys_reduced_rows_send)) then
-        if (.not. ys_reduced_config_matches(schur_pass_counts)) call ys_release_reduced_workspace()
+        if (.not. ys_reduced_config_matches(schur_pass_counts, wanted_exchange_mode)) call ys_release_reduced_workspace()
       end if
-      if (.not. allocated(ys_reduced_rows_send)) call ys_allocate_reduced_workspace(nlines, npy_grid, schur_pass_counts)
+      if (.not. allocated(ys_reduced_rows_send)) &
+        call ys_allocate_reduced_workspace(nlines, npy_grid, schur_pass_counts, wanted_exchange_mode)
     else if (allocated(ys_reduced_rows_send)) then
       call ys_release_reduced_workspace()
     end if

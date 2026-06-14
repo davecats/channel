@@ -25,7 +25,8 @@ MODULE dnsdata
   USE rbmat
   USE mpi_transpose
   USE ffts
-  USE y_schur_solver, ONLY: ys_schur_default_pass_counts
+  USE y_schur_solver, ONLY: ys_schur_default_pass_counts, &
+                            YS_SCHUR_EXCHANGE_ALLGATHER, YS_SCHUR_EXCHANGE_ALLTOALL, YS_SCHUR_EXCHANGE_AUTO
 
   IMPLICIT NONE
 
@@ -43,6 +44,7 @@ MODULE dnsdata
   real(C_DOUBLE), allocatable :: k2(:, :)
   integer(C_INT) :: npy = 1
   integer(C_INT), allocatable :: schur_pass_counts(:)
+  integer(C_INT) :: schur_exchange_mode = YS_SCHUR_EXCHANGE_AUTO
   logical :: time_from_restart
   logical :: disable_restart_write = .false.
   !Grid
@@ -142,6 +144,36 @@ CONTAINS
     end if
     if (allocated(schur_pass_counts)) deallocate (schur_pass_counts)
     call ys_schur_default_pass_counts(int(npy, C_INT), schur_pass_counts)
+    schur_exchange_mode = YS_SCHUR_EXCHANGE_AUTO
+    call get_environment_variable("CHANNEL_Y_SCHUR_GLOBAL_EXCHANGE", env_value, length, status)
+    if (status /= 0) call get_environment_variable("CHANNEL_Y_SCHUR_EXCHANGE", env_value, length, status)
+    if (status == 0) then
+      select case (adjustl(trim(env_value(:length))))
+      case ("auto", "AUTO", "default", "DEFAULT")
+        schur_exchange_mode = YS_SCHUR_EXCHANGE_AUTO
+      case ("alltoall", "ALLTOALL", "alltoallv", "ALLTOALLV")
+        schur_exchange_mode = YS_SCHUR_EXCHANGE_ALLTOALL
+      case ("allgather", "ALLGATHER", "allgatherv", "ALLGATHERV")
+        schur_exchange_mode = YS_SCHUR_EXCHANGE_ALLGATHER
+      case default
+        print *, "Warning: invalid value for CHANNEL_Y_SCHUR_GLOBAL_EXCHANGE:", trim(env_value(:length))
+      end select
+    end if
+    if (has_terminal) then
+      if (size(schur_pass_counts) == 0) then
+        print *, "y-Schur pass counts: none"
+      else
+        print *, "y-Schur pass counts:", schur_pass_counts
+      end if
+      select case (schur_exchange_mode)
+      case (YS_SCHUR_EXCHANGE_AUTO)
+        print *, "y-Schur exchange mode: auto (arity-2 uses allgatherv)"
+      case (YS_SCHUR_EXCHANGE_ALLTOALL)
+        print *, "y-Schur exchange mode: alltoallv"
+      case (YS_SCHUR_EXCHANGE_ALLGATHER)
+        print *, "y-Schur exchange mode: allgatherv"
+      end select
+    end if
     call require_real(cfg, "mesh", "alfa0", alfa0)
     call require_real(cfg, "mesh", "beta0", beta0)
     nxd = 3*(nx + 1)/2
@@ -278,7 +310,8 @@ CONTAINS
     IF (solveNS .AND. has_terminal) OPEN (UNIT=121, FILE='Runtimedata', ACTION='write')
 
     allocate (fr(3 + 2*nPhi)); fr = 0.0
-    call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, nxB*(2*nz + 1), .true., schur_pass_counts)
+    call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, nxB*(2*nz + 1), .true., &
+                                        schur_pass_counts, schur_exchange_mode)
   END SUBROUTINE init_memory
 
   SUBROUTINE get_solver_memory_estimate(solveNS, n_floats)
@@ -864,7 +897,7 @@ CONTAINS
     if (present(transpose_derivative)) continue
 
     call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, (nxN - nx0 + 1)*(2*nz + 1), .true., &
-                                        schur_pass_counts)
+                                        schur_pass_counts, schur_exchange_mode)
     owner_src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => source_values
     owner_dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => field_values
     has_lower_boundary = (ny0 == 1)
