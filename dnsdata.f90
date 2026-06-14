@@ -26,7 +26,8 @@ MODULE dnsdata
   USE mpi_transpose
   USE ffts
   USE y_schur_solver, ONLY: ys_schur_default_pass_counts, &
-                            YS_SCHUR_EXCHANGE_ALLGATHER, YS_SCHUR_EXCHANGE_ALLTOALL, YS_SCHUR_EXCHANGE_AUTO
+                            YS_SCHUR_EXCHANGE_ALLGATHER, YS_SCHUR_EXCHANGE_ALLGATHER_ALL, &
+                            YS_SCHUR_EXCHANGE_ALLTOALL, YS_SCHUR_EXCHANGE_AUTO
 
   IMPLICIT NONE
 
@@ -155,23 +156,11 @@ CONTAINS
         schur_exchange_mode = YS_SCHUR_EXCHANGE_ALLTOALL
       case ("allgather", "ALLGATHER", "allgatherv", "ALLGATHERV")
         schur_exchange_mode = YS_SCHUR_EXCHANGE_ALLGATHER
+      case ("allgather-all", "ALLGATHER-ALL", "allgather_all", "ALLGATHER_ALL", &
+            "allgatherall", "ALLGATHERALL")
+        schur_exchange_mode = YS_SCHUR_EXCHANGE_ALLGATHER_ALL
       case default
         print *, "Warning: invalid value for CHANNEL_Y_SCHUR_GLOBAL_EXCHANGE:", trim(env_value(:length))
-      end select
-    end if
-    if (has_terminal) then
-      if (size(schur_pass_counts) == 0) then
-        print *, "y-Schur pass counts: none"
-      else
-        print *, "y-Schur pass counts:", schur_pass_counts
-      end if
-      select case (schur_exchange_mode)
-      case (YS_SCHUR_EXCHANGE_AUTO)
-        print *, "y-Schur exchange mode: auto (arity-2 uses allgatherv)"
-      case (YS_SCHUR_EXCHANGE_ALLTOALL)
-        print *, "y-Schur exchange mode: alltoallv"
-      case (YS_SCHUR_EXCHANGE_ALLGATHER)
-        print *, "y-Schur exchange mode: allgatherv"
       end select
     end if
     call require_real(cfg, "mesh", "alfa0", alfa0)
@@ -310,9 +299,30 @@ CONTAINS
     IF (solveNS .AND. has_terminal) OPEN (UNIT=121, FILE='Runtimedata', ACTION='write')
 
     allocate (fr(3 + 2*nPhi)); fr = 0.0
+    if (has_terminal) call print_schur_configuration()
     call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, nxB*(2*nz + 1), .true., &
                                         schur_pass_counts, schur_exchange_mode)
   END SUBROUTINE init_memory
+
+  subroutine print_schur_configuration()
+    implicit none
+
+    if (size(schur_pass_counts) == 0) then
+      print *, "y-Schur pass counts: none"
+    else
+      print *, "y-Schur pass counts:", schur_pass_counts
+    end if
+    select case (schur_exchange_mode)
+    case (YS_SCHUR_EXCHANGE_AUTO)
+      print *, "y-Schur exchange mode: auto (arity-2 levels use allgather; root is redundant)"
+    case (YS_SCHUR_EXCHANGE_ALLTOALL)
+      print *, "y-Schur exchange mode: alltoallv"
+    case (YS_SCHUR_EXCHANGE_ALLGATHER)
+      print *, "y-Schur exchange mode: allgather (arity-2 levels; root is redundant)"
+    case (YS_SCHUR_EXCHANGE_ALLGATHER_ALL)
+      print *, "y-Schur exchange mode: allgather-all (root is redundant)"
+    end select
+  end subroutine print_schur_configuration
 
   SUBROUTINE get_solver_memory_estimate(solveNS, n_floats)
     IMPLICIT NONE
