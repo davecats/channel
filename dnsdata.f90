@@ -25,6 +25,7 @@ MODULE dnsdata
   USE rbmat
   USE mpi_transpose
   USE ffts
+  USE y_schur_solver, ONLY: ys_schur_default_pass_counts
 
   IMPLICIT NONE
 
@@ -41,10 +42,9 @@ MODULE dnsdata
   complex(C_DOUBLE_COMPLEX), allocatable :: ialfa(:), ibeta(:)
   real(C_DOUBLE), allocatable :: k2(:, :)
   integer(C_INT) :: npy = 1
+  integer(C_INT), allocatable :: schur_pass_counts(:)
   logical :: time_from_restart
   logical :: disable_restart_write = .false.
-  logical :: use_yslab_linsolve = .false.
-  logical :: use_node_leaf_schur = .false.
   !Grid
   real(C_DOUBLE), allocatable :: y(:), dy(:)
   real(C_DOUBLE) :: dx, dz, factor
@@ -140,6 +140,8 @@ CONTAINS
         print *, "Warning: invalid value for CHANNEL_NPY:", trim(env_value(:length))
       end if
     end if
+    if (allocated(schur_pass_counts)) deallocate (schur_pass_counts)
+    call ys_schur_default_pass_counts(int(npy, C_INT), schur_pass_counts)
     call require_real(cfg, "mesh", "alfa0", alfa0)
     call require_real(cfg, "mesh", "beta0", beta0)
     nxd = 3*(nx + 1)/2
@@ -213,31 +215,6 @@ CONTAINS
         print *, "Warning: invalid value for CHANNEL_DISABLE_RESTART_WRITE:", trim(env_value(:length))
       end select
     end if
-    call get_environment_variable("CHANNEL_USE_YSLAB_LINSOLVE", env_value, length, status)
-    use_yslab_linsolve = .false.
-    if (status == 0) then
-      select case (adjustl(trim(env_value(:length))))
-      case ("1", "true", "TRUE", "yes", "YES", "on", "ON")
-        use_yslab_linsolve = .true.
-      case ("0", "false", "FALSE", "no", "NO", "off", "OFF")
-        use_yslab_linsolve = .false.
-      case default
-        print *, "Warning: invalid value for CHANNEL_USE_YSLAB_LINSOLVE:", trim(env_value(:length))
-      end select
-    end if
-    call get_environment_variable("CHANNEL_Y_SCHUR_NODE_LEAF", env_value, length, status)
-    use_node_leaf_schur = .false.
-    if (status == 0) then
-      select case (adjustl(trim(env_value(:length))))
-      case ("source", "SOURCE", "transpose", "TRANSPOSE", "1", "true", "TRUE", "yes", "YES", "on", "ON")
-        use_node_leaf_schur = .true.
-      case ("compose", "COMPOSE", "0", "false", "FALSE", "no", "NO", "off", "OFF")
-        use_node_leaf_schur = .false.
-      case default
-        print *, "Warning: invalid value for CHANNEL_Y_SCHUR_NODE_LEAF:", trim(env_value(:length))
-      end select
-    end if
-    if (npy == 1) use_yslab_linsolve = .true.
   END SUBROUTINE read_dnsin
 
   function itoa(i) result(str)
@@ -301,11 +278,7 @@ CONTAINS
     IF (solveNS .AND. has_terminal) OPEN (UNIT=121, FILE='Runtimedata', ACTION='write')
 
     allocate (fr(3 + 2*nPhi)); fr = 0.0
-    call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, nxB*(2*nz + 1), &
-                                        .not. (solveNS .and. (use_yslab_linsolve .or. use_node_leaf_schur)))
-    if (solveNS .and. use_yslab_linsolve) then
-      call prepare_yslab_scratch(ny + 3, max(1_C_INT, yslab_owned_line_count))
-    end if
+    call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, nxB*(2*nz + 1), .true., schur_pass_counts)
   END SUBROUTINE init_memory
 
   SUBROUTINE get_solver_memory_estimate(solveNS, n_floats)
@@ -360,7 +333,6 @@ CONTAINS
       CLOSE (UNIT=195)
       IF (has_terminal) CLOSE (UNIT=121)
     END IF
-    call release_yslab_scratch()
     call ys_release_workspace()
   END SUBROUTINE free_memory
 
@@ -519,7 +491,7 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), target, intent(in) :: src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     call solve_compact_component_current_layout(dst, assemble_compact_derivative_interior, assemble_compact_derivative_boundary, 0.0d0, 0.0d0, src, &
-                                       solve_label="yslab derivative gpsv", symmetric_operator=.false., transpose_derivative=.true.)
+                                     solve_label="compact derivative gpsv", symmetric_operator=.false., transpose_derivative=.true.)
   END SUBROUTINE apply_complex_derivative_current_layout
 
   subroutine assemble_compact_derivative_interior(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end)
@@ -870,10 +842,8 @@ CONTAINS
   end subroutine reconstruct_assembled_boundaries
 
   SUBROUTINE solve_compact_component_current_layout(field_values, assemble_system, boundary_system, lambda_coeff, diffusion_coeff, source_values, &
-                                                    solve_label, symmetric_operator, transpose_derivative, node_leaf_allowed)
-    use y_line_solvers, only: ys_prepare_assembled_workspace, ys_solve_endpoint_schur, ys_solve_packed_pentadiagonal, &
-                              ys_gpsv_owner_rhs, ys_set_node_leaf_source_mode, ys_get_node_leaf_layout, &
-                              ys_node_leaf_transpose_source_to_group, ys_node_leaf_transpose_solution_from_group
+                                                    solve_label, symmetric_operator, transpose_derivative)
+    use y_line_solvers, only: ys_prepare_assembled_workspace, ys_solve_endpoint_schur
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), target, intent(inout) :: field_values(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     procedure(compact_component_assembly) :: assemble_system
@@ -884,101 +854,17 @@ CONTAINS
                                                      lbound(field_values, 2):ubound(field_values, 2), &
                                                      lbound(field_values, 3):ubound(field_values, 3))
     character(len=*), optional, intent(in) :: solve_label
-    logical, optional, intent(in) :: symmetric_operator, transpose_derivative, node_leaf_allowed
-    integer(C_INT) :: nlines_z, total_line_count
-    integer(C_INT) :: ix_first, ix_last, ix, iz, iy
-    integer(C_INT) :: node_row_start, node_row_end, node_first_line, node_line_count, node_rows
-    logical :: has_lower_boundary, has_upper_boundary, symmetric_operator_value, transpose_derivative_value, node_leaf_allowed_value
+    logical, optional, intent(in) :: symmetric_operator, transpose_derivative
+    logical :: has_lower_boundary, has_upper_boundary, symmetric_operator_value
     complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :), owner_dst(:, :, :)
-    character(len=64) :: solve_label_value
 
     symmetric_operator_value = .true.
     if (present(symmetric_operator)) symmetric_operator_value = symmetric_operator
-    transpose_derivative_value = .false.
-    if (present(transpose_derivative)) transpose_derivative_value = transpose_derivative
-    node_leaf_allowed_value = .true.
-    if (present(node_leaf_allowed)) node_leaf_allowed_value = node_leaf_allowed
-    solve_label_value = "compact full-y gpsv"
-    if (present(solve_label)) solve_label_value = solve_label
-    if (use_yslab_linsolve) then
-      nlines_z = 2*nz + 1
-      total_line_count = (nxN - nx0 + 1)*nlines_z
-      if (total_line_count <= 0) return
+    if (present(solve_label)) continue
+    if (present(transpose_derivative)) continue
 
-      call prepare_yslab_scratch(ny + 3, max(1_C_INT, yslab_owned_line_count))
-      call roctxPush("yslab compact transpose_to_full")
-      call yslab_transpose_to_full(source_values, yslab_workspace, ny, nz, total_line_count, nlines_z, transpose_derivative_value)
-      call roctxPop("yslab compact transpose_to_full")
-
-      if (yslab_owned_line_count > 0) then
-        ix_first = nx0 + (yslab_owned_first_line - 1)/nlines_z
-        ix_last = ix_first + yslab_owned_line_count/nlines_z - 1
-
-        call ys_prepare_assembled_workspace(ny, nz, 1_C_INT, ny - 1, yslab_owned_first_line, yslab_owned_line_count, .false.)
-        owner_src(-1:ny + 1, -nz:nz, ix_first:ix_last) => yslab_workspace
-        call assemble_system(owner_src, lambda_coeff, diffusion_coeff, 1_C_INT, ny - 1)
-        call boundary_system(owner_src, 1_C_INT, ny - 1, .true., .true.)
-        call eliminate_assembled_boundaries(1_C_INT, ny - 1, .true., .true.)
-        owner_dst(-1:ny + 1, -nz:nz, ix_first:ix_last) => yslab_workspace
-        call ys_solve_packed_pentadiagonal(ny - 1, yslab_owned_line_count, trim(solve_label_value))
-        call roctxPush("assembled_scatter_solution")
-        !$omp target teams distribute parallel do default(none) &
-        !$omp shared(owner_dst, ys_gpsv_owner_rhs, ny, ix_first, ix_last, nz) &
-        !$omp private(ix, iz, iy) collapse(2)
-        do ix = ix_first, ix_last
-          do iz = -nz, nz
-            do iy = 1, ny - 1
-              owner_dst(iy, iz, ix) = ys_gpsv_owner_rhs(iz, ix, iy)
-            end do
-          end do
-        end do
-        !$omp end target teams distribute parallel do
-        call roctxPop("assembled_scatter_solution")
-        call reconstruct_assembled_boundaries(owner_dst, 1_C_INT, ny - 1, .true., .true., ix_first, ix_last)
-      end if
-
-      call roctxPush("yslab compact transpose_from_full")
-      call yslab_transpose_from_full(yslab_workspace, field_values, ny, nz, total_line_count, nlines_z)
-      call roctxPop("yslab compact transpose_from_full")
-      return
-    end if
-
-    if (node_leaf_allowed_value .and. use_node_leaf_schur .and. npy_grid > 1) then
-      nlines_z = 2*nz + 1
-      total_line_count = (nxN - nx0 + 1)*nlines_z
-      if (total_line_count <= 0) return
-
-      call ys_set_node_leaf_source_mode(.true.)
-      call ys_get_node_leaf_layout(ny, total_line_count, nlines_z, &
-                                   node_row_start, node_row_end, node_first_line, node_line_count)
-      if (node_line_count > 0) then
-        node_rows = node_row_end - node_row_start + 5_C_INT
-        call prepare_yslab_scratch(node_rows, node_line_count)
-        call ys_prepare_assembled_workspace(ny, nz, node_row_start, node_row_end, node_first_line, node_line_count, .true.)
-
-        call ys_node_leaf_transpose_source_to_group(source_values, yslab_workspace, ny, nz, total_line_count, nlines_z)
-
-        ix_first = nx0 + (node_first_line - 1)/nlines_z
-        ix_last = ix_first + node_line_count/nlines_z - 1
-        owner_src(node_row_start - 2:node_row_end + 2, -nz:nz, ix_first:ix_last) => yslab_workspace
-        owner_dst(node_row_start - 2:node_row_end + 2, -nz:nz, ix_first:ix_last) => yslab_workspace
-        has_lower_boundary = (node_row_start == 1)
-        has_upper_boundary = (node_row_end == ny - 1)
-
-        call assemble_system(owner_src, lambda_coeff, diffusion_coeff, node_row_start, node_row_end)
-        call boundary_system(owner_src, node_row_start, node_row_end, has_lower_boundary, has_upper_boundary)
-        call eliminate_assembled_boundaries(node_row_start, node_row_end, has_lower_boundary, has_upper_boundary)
-        call ys_solve_endpoint_schur(owner_dst, symmetric_operator_value)
-        call reconstruct_assembled_boundaries(owner_dst, node_row_start, node_row_end, has_lower_boundary, has_upper_boundary, ix_first, ix_last)
-
-        call ys_node_leaf_transpose_solution_from_group(yslab_workspace, field_values, ny, nz, total_line_count, nlines_z)
-        call ys_set_node_leaf_source_mode(.false.)
-        return
-      end if
-    end if
-
-    call ys_set_node_leaf_source_mode(.false.)
-    call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, (nxN - nx0 + 1)*(2*nz + 1), .true.)
+    call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, (nxN - nx0 + 1)*(2*nz + 1), .true., &
+                                        schur_pass_counts)
     owner_src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => source_values
     owner_dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => field_values
     has_lower_boundary = (ny0 == 1)

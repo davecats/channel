@@ -5,18 +5,17 @@ MODULE pressure_output
   USE, intrinsic :: iso_c_binding
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
   USE dnsdata, ONLY: V, der, k2, ialfa, ibeta, d140, d240, d24n, ni, alfa0, beta0, factor, &
-                     ny, nz, nxd, izd, d040, zero_bc, use_yslab_linsolve, solve_compact_component_current_layout
+                     ny, nz, nxd, izd, d040, zero_bc, solve_compact_component_current_layout
   USE ffts, ONLY: FFT, IFT, RFT, HFT, VVdz, VVdx
 #else
   USE dnsdata, ONLY: V, der, k2, ialfa, ibeta, d140, d240, d24n, ni, alfa0, beta0, factor, &
-                     ny, nz, nxd, izd, VVdz, VVdx, d040, zero_bc, use_yslab_linsolve, solve_compact_component_current_layout
+                     ny, nz, nxd, izd, VVdz, VVdx, d040, zero_bc, solve_compact_component_current_layout
   USE ffts, ONLY: FFT, IFT, RFT, HFT
 #endif
   USE mpi_transpose, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, npy_grid, ipy, ierr, &
                            sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, &
                            fft_transpose_is_local, repack_zTOx_local, repack_xTOz_local, &
-                           yslab_workspace, prepare_yslab_scratch, yslab_copy_to_full, yslab_transpose_to_full, &
-                           yslab_owned_first_line, yslab_owned_line_count, roctxPush, roctxPop, &
+                           roctxPush, roctxPop, &
                            MPI_Request, MPI_Status, MPI_Wait
   USE y_line_solvers, ONLY: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, ys_lower_ghost_owner, ys_lower_boundary_owner, &
                             ys_upper_boundary_owner, ys_upper_ghost_owner, ys_eqm1_owner, ys_eq0_owner, &
@@ -39,12 +38,6 @@ MODULE pressure_output
   real(C_DOUBLE), allocatable, save :: pressure_real1(:, :, :)
   real(C_DOUBLE), allocatable, save :: pressure_h0(:, :, :)
   real(C_DOUBLE), allocatable, save :: pressure_h1(:, :, :)
-
-  ! Views into spare column blocks of mpi_transpose:yslab_workspace.
-  ! They are valid only between transpose_pressure_velocity_to_yslab() and the end of the current pressure solve.
-  complex(C_DOUBLE_COMPLEX), pointer, save :: pressure_vslab_u(:, :, :) => null()
-  complex(C_DOUBLE_COMPLEX), pointer, save :: pressure_vslab_v(:, :, :) => null()
-  complex(C_DOUBLE_COMPLEX), pointer, save :: pressure_vslab_w(:, :, :) => null()
 
   public :: init_pressure_output, free_pressure_output
   public :: compute_pressure_output, compute_poisson, compute_dpdy
@@ -95,8 +88,6 @@ CONTAINS
 
     !$omp target exit data map(delete: pressure_src0, pressure_src1, pressure_real0, pressure_real1, pressure_h0, pressure_h1)
     deallocate (pressure_src0, pressure_src1, pressure_real0, pressure_real1, pressure_h0, pressure_h1)
-    nullify (pressure_vslab_u, pressure_vslab_v, pressure_vslab_w)
-
     pressure_initialized = .false.
   END SUBROUTINE free_pressure_output
 
@@ -123,10 +114,6 @@ CONTAINS
 
     ! Pressure is only needed on output steps, so we rebuild its source terms from the current spectral state.
     call assemble_pressure_sources()
-
-    ! For the y-slab solve, the RHS is transposed inside solve_compact_component_current_layout().
-    ! The pressure BC callbacks also need wall values from V, so transpose V once here into spare yslab_workspace blocks.
-    if (use_yslab_linsolve) call transpose_pressure_velocity_to_yslab()
 
     if (present(p_out)) then
       call solve_pressure_field(pressure_src0, pressure_src1, p_out)
@@ -487,69 +474,6 @@ CONTAINS
     end do
   END SUBROUTINE real_x_to_spectral_field
 
-  subroutine transpose_pressure_velocity_to_yslab()
-    implicit none
-    integer(C_INT) :: nlines_z, total_line_count
-    integer(C_INT) :: ix0_owner, ixN_owner, block_count
-
-    nlines_z = 2*nz + 1
-    total_line_count = (nxN - nx0 + 1)*nlines_z
-    if (total_line_count <= 0) return
-
-    ! Column block 1 is reserved for solve_compact_component_current_layout().
-    ! Pressure stores transposed u/v/w in blocks 2:4 and lets the common solve reuse block 1.
-    block_count = max(1_C_INT, yslab_owned_line_count)
-    call prepare_yslab_scratch(ny + 3, 4_C_INT*block_count)
-
-    nullify (pressure_vslab_u, pressure_vslab_v, pressure_vslab_w)
-
-    if (yslab_owned_line_count <= 0) then
-#ifdef HAVE_MPI
-      ! Still participate in the collective y-slab transposes even when this rank owns no reduced-x columns.
-      call yslab_transpose_to_full(V(:, :, :, 1), yslab_workspace(:, 1:1), ny, nz, total_line_count, nlines_z, .true.)
-      call yslab_transpose_to_full(V(:, :, :, 2), yslab_workspace(:, 1:1), ny, nz, total_line_count, nlines_z, .true.)
-      call yslab_transpose_to_full(V(:, :, :, 3), yslab_workspace(:, 1:1), ny, nz, total_line_count, nlines_z, .true.)
-#endif
-      return
-    end if
-
-    call roctxPush("pressure transpose V_u to yslab")
-#ifdef HAVE_MPI
-    call yslab_transpose_to_full(V(:, :, :, 1), yslab_workspace(:, block_count + 1:2*block_count), &
-                                 ny, nz, total_line_count, nlines_z, .true.)
-#else
-    call yslab_copy_to_full(V(:, :, :, 1), yslab_workspace(:, block_count + 1:2*block_count), &
-                            ny, nz, yslab_owned_first_line, yslab_owned_line_count, nlines_z)
-#endif
-    call roctxPop("pressure transpose V_u to yslab")
-
-    call roctxPush("pressure transpose V_v to yslab")
-#ifdef HAVE_MPI
-    call yslab_transpose_to_full(V(:, :, :, 2), yslab_workspace(:, 2*block_count + 1:3*block_count), &
-                                 ny, nz, total_line_count, nlines_z, .true.)
-#else
-    call yslab_copy_to_full(V(:, :, :, 2), yslab_workspace(:, 2*block_count + 1:3*block_count), &
-                            ny, nz, yslab_owned_first_line, yslab_owned_line_count, nlines_z)
-#endif
-    call roctxPop("pressure transpose V_v to yslab")
-
-    call roctxPush("pressure transpose V_w to yslab")
-#ifdef HAVE_MPI
-    call yslab_transpose_to_full(V(:, :, :, 3), yslab_workspace(:, 3*block_count + 1:4*block_count), &
-                                 ny, nz, total_line_count, nlines_z, .true.)
-#else
-    call yslab_copy_to_full(V(:, :, :, 3), yslab_workspace(:, 3*block_count + 1:4*block_count), &
-                            ny, nz, yslab_owned_first_line, yslab_owned_line_count, nlines_z)
-#endif
-    call roctxPop("pressure transpose V_w to yslab")
-
-    ix0_owner = nx0 + (yslab_owned_first_line - 1)/nlines_z
-    ixN_owner = ix0_owner + yslab_owned_line_count/nlines_z - 1
-    pressure_vslab_u(-1:ny + 1, -nz:nz, ix0_owner:ixN_owner) => yslab_workspace(:, block_count + 1:2*block_count)
-    pressure_vslab_v(-1:ny + 1, -nz:nz, ix0_owner:ixN_owner) => yslab_workspace(:, 2*block_count + 1:3*block_count)
-    pressure_vslab_w(-1:ny + 1, -nz:nz, ix0_owner:ixN_owner) => yslab_workspace(:, 3*block_count + 1:4*block_count)
-  end subroutine transpose_pressure_velocity_to_yslab
-
   subroutine pressure_velocity_view(owner_src, u_owner, v_owner, w_owner, ix0_owner, ixN_owner)
     implicit none
     complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
@@ -559,15 +483,9 @@ CONTAINS
     ix0_owner = lbound(owner_src, 3)
     ixN_owner = ubound(owner_src, 3)
 
-    if (use_yslab_linsolve) then
-      u_owner => pressure_vslab_u
-      v_owner => pressure_vslab_v
-      w_owner => pressure_vslab_w
-    else
-      u_owner(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => V(:, :, :, 1)
-      v_owner(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => V(:, :, :, 2)
-      w_owner(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => V(:, :, :, 3)
-    end if
+    u_owner(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => V(:, :, :, 1)
+    v_owner(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => V(:, :, :, 2)
+    w_owner(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => V(:, :, :, 3)
   end subroutine pressure_velocity_view
 
   SUBROUTINE solve_pressure_field(src0, src1, p)
@@ -577,8 +495,7 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(out) :: p(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     call assemble_pressure_rhs(src0, src1, p)
     call solve_compact_component_current_layout(p, assemble_pressure_operator, assemble_pressure_boundaries, 0.0d0, 0.0d0, p, &
-                               solve_label="pressure current-layout gpsv", symmetric_operator=.true., transpose_derivative=.true., &
-                                                node_leaf_allowed=.false.)
+                                 solve_label="pressure current-layout gpsv", symmetric_operator=.true., transpose_derivative=.true.)
   END SUBROUTINE solve_pressure_field
 
   SUBROUTINE solve_dpdy_field(src0, src1, dpdy)
@@ -588,8 +505,7 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(out) :: dpdy(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     call assemble_dpdy_rhs(src0, src1, dpdy)
     call solve_compact_component_current_layout(dpdy, assemble_dpdy_operator, assemble_dpdy_boundaries, 0.0d0, 0.0d0, dpdy, &
-                                                solve_label="pressure current-layout gpsv", symmetric_operator=.true., &
-                                                node_leaf_allowed=.false.)
+                                                solve_label="pressure current-layout gpsv", symmetric_operator=.true.)
   END SUBROUTINE solve_dpdy_field
 
   subroutine assemble_pressure_rhs(src0, src1, rhs)

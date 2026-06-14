@@ -69,9 +69,6 @@ mode_env() {
   case "${mode}" in
     default)
       ;;
-    yslab)
-      echo "CHANNEL_USE_YSLAB_LINSOLVE=1"
-      ;;
     *)
       echo "Unknown mode: ${mode}" >&2
       exit 1

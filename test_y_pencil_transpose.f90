@@ -18,6 +18,7 @@ program test_y_reduced_known_good_local_dst
   integer(C_INT), parameter :: nxpp_test = 2
   integer(C_INT), parameter :: nzd_test = 1
   integer(C_INT), parameter :: npy_test = 2
+  integer(C_INT), parameter :: schur_pass_counts(1) = (/2_C_INT/)
 
   complex(C_DOUBLE_COMPLEX), allocatable :: reduced_local(:, :, :)
   complex(C_DOUBLE_COMPLEX) :: exact(-1:ny_test + 1)
@@ -75,7 +76,8 @@ program test_y_reduced_known_good_local_dst
   allocate (reduced_local(ny0:nyN, 1:2*nz_test + 1, 1:nxB))
   reduced_local = cmplx(-999.0d0, -999.0d0, kind=C_DOUBLE)
 
-  call ys_prepare_assembled_workspace(ny_test, nz_test, ny0, nyN, 1_C_INT, nxB*(2*nz_test + 1), .true.)
+  call ys_prepare_assembled_workspace(ny_test, nz_test, ny0, nyN, 1_C_INT, nxB*(2*nz_test + 1), .true., &
+                                      schur_pass_counts)
   nz = nz_test
 
   do ix = 1, nxB

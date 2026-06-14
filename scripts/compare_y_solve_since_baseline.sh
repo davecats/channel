@@ -8,9 +8,9 @@ OUT_ROOT="${2:-${ROOT_DIR}/bench_runs_$(date +%Y%m%d_%H%M%S)_compare_since_basel
 
 NP="${NP:-2}"
 NPY_LIST="${NPY_LIST:-1 2}"
-MODE_LIST="${MODE_LIST:-default yslab}"
+MODE_LIST="${MODE_LIST:-default}"
 PROFILE="${PROFILE:-plain}"
-NSYS_TRACE="${NSYS_TRACE:-nvtx}"
+NSYS_TRACE="${NSYS_TRACE:-nvtx,cuda}"
 MAX_REGRESSION_PCT="${MAX_REGRESSION_PCT:-}"
 
 CURRENT_BUILD_DIR="${CURRENT_BUILD_DIR:-${ROOT_DIR}/build-nvhpc}"
@@ -99,9 +99,6 @@ mode_env() {
   case "${mode}" in
     default)
       ;;
-    yslab)
-      echo "CHANNEL_USE_YSLAB_LINSOLVE=1"
-      ;;
     *)
       echo "Unknown mode: ${mode}" >&2
       exit 1
@@ -127,9 +124,10 @@ run_case() {
   (
     cd "${run_dir}"
     if [[ "${PROFILE}" == "nsys" || "${PROFILE}" == "nvtx" ]]; then
+      echo "Running with NSYS profiling (trace=${NSYS_TRACE})..."
       env CHANNEL_DISABLE_RESTART_WRITE=1 "${env_args[@]}" \
         nsys profile --trace="${NSYS_TRACE}" --sample=none --cpuctxsw=none \
-          --stats=false --force-overwrite=true --export=sqlite \
+          --stats=true --force-overwrite=true --export=sqlite \
           -o "${label}" mpirun -np "${NP}" "${exe}" \
           > stdout.log 2> nsys.log
     else
