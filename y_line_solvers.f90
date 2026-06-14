@@ -64,6 +64,8 @@ module y_line_solvers
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_EVEN_Z = 2_C_INT
   integer(C_INT), parameter :: YS_REDUCED_BW = 5_C_INT
   integer(C_INT), parameter :: YS_REDUCED_RETURN_WIDTH = 8_C_INT
+  integer(C_INT), parameter :: YS_HIER_COMPOSE_MAX_GROUPS = 4_C_INT
+  integer(C_INT), parameter :: YS_HIER_COMPOSE_MAX_ROWS = 4_C_INT*YS_HIER_COMPOSE_MAX_GROUPS
   integer(C_INT), parameter :: YS_HIER_EXCHANGE_ALLGATHER = 1_C_INT
   integer(C_INT), parameter :: YS_HIER_EXCHANGE_ALLTOALL = 2_C_INT
   integer(C_INT), parameter :: YS_LEAF_MODE_COMPOSE = 1_C_INT
@@ -146,7 +148,7 @@ module y_line_solvers
   integer(C_INT), save :: ys_hier_column_a2a_recv_elems = 0
   integer(C_INT), save :: ys_hier_column_return_send_elems = 0
   integer(C_INT), save :: ys_hier_column_return_recv_elems = 0
-  integer(C_INT), save :: ys_hier_global_exchange = YS_HIER_EXCHANGE_ALLGATHER
+  integer(C_INT), save :: ys_hier_global_exchange = YS_HIER_EXCHANGE_ALLTOALL
   integer(C_INT), save :: ys_reduced_leaf_mode = YS_LEAF_MODE_COMPOSE
   logical, save :: ys_hier_use_column_global = .false.
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_hier_node_rows(:, :)
@@ -201,7 +203,8 @@ module y_line_solvers
   character(c_char), allocatable, target, save :: ys_gpsv_buffer(:)
   !$omp declare target(ys_factor_banded_complex)
   !$omp declare target(ys_solve_factored_banded_complex)
-  !$omp declare target(ys_solve_factored_banded_complex_multi)
+  !$omp declare target(ys_factor_banded_complex_fixed)
+  !$omp declare target(ys_solve_factored_banded_complex_multi_fixed)
   !$omp declare target(ys_factor_penta_interleaved)
   !$omp declare target(ys_solve_factored_penta_interleaved)
 #endif
@@ -579,8 +582,10 @@ contains
       ys_hier_node_size = int(requested_node_size, C_INT)
     end if
     if (ys_hier_node_size < 2 .or. ys_hier_node_size > npy_count) error stop "Invalid CHANNEL_Y_SCHUR_NODE_SIZE"
+    if (ys_hier_node_size > YS_HIER_COMPOSE_MAX_GROUPS) &
+      error stop "CHANNEL_Y_SCHUR_NODE_SIZE exceeds supported hierarchical compose size"
 
-    ys_hier_global_exchange = YS_HIER_EXCHANGE_ALLGATHER
+    ys_hier_global_exchange = YS_HIER_EXCHANGE_ALLTOALL
     call get_environment_variable("CHANNEL_Y_SCHUR_GLOBAL_EXCHANGE", env_value, length=env_length, status=env_status)
     if (env_status == 0 .and. env_length > 0) then
       env_switch = trim(adjustl(env_value(:env_length)))
@@ -2212,48 +2217,67 @@ contains
   subroutine ys_hier_compose_node_rows()
     implicit none
     integer(C_INT), parameter :: bw = YS_REDUCED_BW
+    integer(C_INT), parameter :: nmax = YS_HIER_COMPOSE_MAX_ROWS
     integer(C_INT) :: iline, child, child_rank, row0, row, k, ext_col, exposed_var, offset, col
+    integer(C_INT) :: n, i, j, irhs
+    complex(C_DOUBLE_COMPLEX) :: a(nmax, 2*YS_REDUCED_BW + 1), rhs(nmax, 5)
 
     call roctxPush("ys_hier_compose_node_rows")
     !$omp target teams distribute parallel do default(none) &
-    !$omp shared(ycomm_recvbuf, ys_hier_leaf_recv_displs, ys_reduced_matrix_lu, ys_hier_recover_basis, &
-    !$omp& ys_hier_node_rows, ys_hier_node_owned_nlines, ys_hier_group_first, ys_hier_group_count, bw) &
-    !$omp private(iline, child, child_rank, row0, row, k, ext_col, exposed_var, offset, col)
+    !$omp shared(ycomm_recvbuf, ys_hier_leaf_recv_displs, ys_hier_recover_basis, ys_hier_node_rows, &
+    !$omp& ys_hier_node_owned_nlines, ys_hier_group_first, ys_hier_group_count, bw, nmax) &
+    !$omp private(iline, child, child_rank, row0, row, k, ext_col, exposed_var, offset, col, &
+    !$omp& n, i, j, irhs, a, rhs)
     do iline = 1, ys_hier_node_owned_nlines
-      ys_reduced_matrix_lu(1:4*ys_hier_group_count, :, iline) = (0.0d0, 0.0d0)
-      ys_hier_recover_basis(1:4*ys_hier_group_count, :, iline) = (0.0d0, 0.0d0)
+      n = 4*ys_hier_group_count
+      do j = 1, 2*bw + 1
+        do i = 1, nmax
+          a(i, j) = (0.0d0, 0.0d0)
+        end do
+      end do
+      do irhs = 1, 5
+        do i = 1, nmax
+          rhs(i, irhs) = (0.0d0, 0.0d0)
+        end do
+      end do
+
       do child = 0, ys_hier_group_count - 1
         child_rank = ys_hier_group_first + child
         offset = ys_hier_leaf_recv_displs(child_rank + 1) + (iline - 1)*20
         row0 = 4*child
         do k = 1, 4
           row = row0 + k
-          ys_reduced_matrix_lu(row, bw + 1, iline) = (1.0d0, 0.0d0)
-          ys_hier_recover_basis(row, 1, iline) = ycomm_recvbuf(offset + k)
+          a(row, bw + 1) = (1.0d0, 0.0d0)
+          rhs(row, 1) = ycomm_recvbuf(offset + k)
           if (child > 0) then
             col = row0 - 1
-            ys_reduced_matrix_lu(row, bw + 1 + col - row, iline) = -ycomm_recvbuf(offset + 4 + k)
+            a(row, bw + 1 + col - row) = -ycomm_recvbuf(offset + 4 + k)
             col = row0
-            ys_reduced_matrix_lu(row, bw + 1 + col - row, iline) = -ycomm_recvbuf(offset + 8 + k)
+            a(row, bw + 1 + col - row) = -ycomm_recvbuf(offset + 8 + k)
           else
-            ys_hier_recover_basis(row, 2, iline) = ycomm_recvbuf(offset + 4 + k)
-            ys_hier_recover_basis(row, 3, iline) = ycomm_recvbuf(offset + 8 + k)
+            rhs(row, 2) = ycomm_recvbuf(offset + 4 + k)
+            rhs(row, 3) = ycomm_recvbuf(offset + 8 + k)
           end if
           if (child < ys_hier_group_count - 1) then
             col = row0 + 5
-            ys_reduced_matrix_lu(row, bw + 1 + col - row, iline) = -ycomm_recvbuf(offset + 12 + k)
+            a(row, bw + 1 + col - row) = -ycomm_recvbuf(offset + 12 + k)
             col = row0 + 6
-            ys_reduced_matrix_lu(row, bw + 1 + col - row, iline) = -ycomm_recvbuf(offset + 16 + k)
+            a(row, bw + 1 + col - row) = -ycomm_recvbuf(offset + 16 + k)
           else
-            ys_hier_recover_basis(row, 4, iline) = ycomm_recvbuf(offset + 12 + k)
-            ys_hier_recover_basis(row, 5, iline) = ycomm_recvbuf(offset + 16 + k)
+            rhs(row, 4) = ycomm_recvbuf(offset + 12 + k)
+            rhs(row, 5) = ycomm_recvbuf(offset + 16 + k)
           end if
         end do
       end do
 
-      call ys_factor_banded_complex(ys_reduced_matrix_lu(1:4*ys_hier_group_count, :, iline))
-      call ys_solve_factored_banded_complex_multi(ys_hier_recover_basis(1:4*ys_hier_group_count, 1:5, iline), &
-                                                  ys_reduced_matrix_lu(1:4*ys_hier_group_count, :, iline))
+      call ys_factor_banded_complex_fixed(a, n)
+      call ys_solve_factored_banded_complex_multi_fixed(rhs, a, n, 5_C_INT)
+
+      do irhs = 1, 5
+        do row = 1, n
+          ys_hier_recover_basis(row, irhs, iline) = rhs(row, irhs)
+        end do
+      end do
 
       do k = 1, 4
         if (k <= 2) then
@@ -2261,9 +2285,9 @@ contains
         else
           exposed_var = 4*(ys_hier_group_count - 1) + k
         end if
-        ys_hier_node_rows(k, iline) = ys_hier_recover_basis(exposed_var, 1, iline)
+        ys_hier_node_rows(k, iline) = rhs(exposed_var, 1)
         do ext_col = 1, 4
-          ys_hier_node_rows(4*ext_col + k, iline) = ys_hier_recover_basis(exposed_var, ext_col + 1, iline)
+          ys_hier_node_rows(4*ext_col + k, iline) = rhs(exposed_var, ext_col + 1)
         end do
       end do
     end do
@@ -2881,16 +2905,36 @@ contains
     end do
   end subroutine ys_solve_factored_banded_complex
 
-  subroutine ys_solve_factored_banded_complex_multi(rhs, a)
+  subroutine ys_factor_banded_complex_fixed(a, n)
     implicit none
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs(:, :)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: a(:, :)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: a(YS_HIER_COMPOSE_MAX_ROWS, 2*YS_REDUCED_BW + 1)
+    integer(C_INT), intent(in) :: n
     integer(C_INT), parameter :: bw = YS_REDUCED_BW
-    integer(C_INT) :: n, nrhs, i, j, irhs
+    integer(C_INT) :: i, j, t, last
+    complex(C_DOUBLE_COMPLEX) :: piv, factor
+
+    do i = 1, n
+      piv = a(i, bw + 1)
+      last = min(bw, n - i)
+      do j = 1, last
+        factor = a(i + j, bw + 1 - j)/piv
+        a(i + j, bw + 1 - j) = factor
+        do t = 1, last
+          a(i + j, bw + 1 + t - j) = a(i + j, bw + 1 + t - j) - factor*a(i, bw + 1 + t)
+        end do
+      end do
+    end do
+  end subroutine ys_factor_banded_complex_fixed
+
+  subroutine ys_solve_factored_banded_complex_multi_fixed(rhs, a, n, nrhs)
+    implicit none
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs(YS_HIER_COMPOSE_MAX_ROWS, 5)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: a(YS_HIER_COMPOSE_MAX_ROWS, 2*YS_REDUCED_BW + 1)
+    integer(C_INT), intent(in) :: n, nrhs
+    integer(C_INT), parameter :: bw = YS_REDUCED_BW
+    integer(C_INT) :: i, j, irhs
     complex(C_DOUBLE_COMPLEX) :: factor, piv
 
-    n = size(a, 1)
-    nrhs = size(rhs, 2)
     do i = 1, n
       do j = max(1_C_INT, i - bw), i - 1
         factor = a(i, bw + 1 + j - i)
@@ -2912,7 +2956,7 @@ contains
         rhs(i, irhs) = rhs(i, irhs)/piv
       end do
     end do
-  end subroutine ys_solve_factored_banded_complex_multi
+  end subroutine ys_solve_factored_banded_complex_multi_fixed
 
   subroutine ys_factor_penta_interleaved(ds, dl, d, du, dw, stride, first, n)
     implicit none
