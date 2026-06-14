@@ -116,3 +116,4 @@ bench*
 nsys_*
 ncu_runs*
 plain_runs*
+crosscheck_*
