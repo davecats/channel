@@ -47,10 +47,7 @@ module y_schur_solver
   integer(C_INT), allocatable, save :: s_level_prev_first(:), s_level_prev_count(:)
   integer(C_INT), allocatable, save :: s_level_owned_first(:), s_level_owned_count(:)
   integer(C_INT), allocatable, save :: s_level_line_first(:, :), s_level_line_count(:, :)
-  integer, allocatable, save :: s_row_send_counts(:, :), s_row_send_displs(:, :)
-  integer, allocatable, save :: s_row_recv_counts(:, :), s_row_recv_displs(:, :)
-  integer, allocatable, save :: s_value_send_counts(:, :), s_value_send_displs(:, :)
-  integer, allocatable, save :: s_value_recv_counts(:, :), s_value_recv_displs(:, :)
+  logical, allocatable, save :: s_level_use_alltoall(:)
   integer(C_INT), allocatable, save :: s_row_send_elems(:), s_row_recv_elems(:)
   integer(C_INT), allocatable, save :: s_value_send_elems(:), s_value_recv_elems(:)
   complex(C_DOUBLE_COMPLEX), allocatable, save :: s_rows(:, :, :)
@@ -159,14 +156,11 @@ contains
       !$omp target exit data map(delete: s_pass_counts, s_level_arity, s_level_exchange_mode, s_level_child_id, &
       !$omp& s_level_prev_first, s_level_prev_count, &
       !$omp& s_level_owned_first, s_level_owned_count, s_level_line_first, s_level_line_count, &
-      !$omp& s_row_send_counts, s_row_send_displs, s_row_recv_counts, s_row_recv_displs, &
-      !$omp& s_value_send_counts, s_value_send_displs, s_value_recv_counts, s_value_recv_displs, &
       !$omp& s_row_send_elems, s_row_recv_elems, s_value_send_elems, s_value_recv_elems)
       deallocate (s_pass_counts, s_level_arity, s_level_exchange_mode, s_level_child_id, &
                   s_level_prev_first, s_level_prev_count, &
                   s_level_owned_first, s_level_owned_count, s_level_line_first, s_level_line_count)
-      deallocate (s_row_send_counts, s_row_send_displs, s_row_recv_counts, s_row_recv_displs)
-      deallocate (s_value_send_counts, s_value_send_displs, s_value_recv_counts, s_value_recv_displs)
+      deallocate (s_level_use_alltoall)
       deallocate (s_row_send_elems, s_row_recv_elems, s_value_send_elems, s_value_recv_elems)
     end if
 
@@ -185,7 +179,7 @@ contains
     integer(C_INT) :: pass_product, prev_first, prev_count, owned_rel_first, owned_count
     integer(C_INT) :: span, child_span, rank_in_parent, child_id, child_pos, parent_group
     integer(C_INT) :: max_owned, max_arity, max_send_elems, max_recv_elems
-    integer(C_INT) :: rel_first, line_count, offset_send, offset_recv
+    integer(C_INT) :: rel_first, line_count
     integer :: ilevel, irank, ierr_local, comm_size
 
     call ys_schur_release(ws)
@@ -230,23 +224,13 @@ contains
     allocate (s_level_prev_first(ws%pass_count), s_level_prev_count(ws%pass_count))
     allocate (s_level_owned_first(ws%pass_count), s_level_owned_count(ws%pass_count))
     allocate (s_level_line_first(max_arity, ws%pass_count), s_level_line_count(max_arity, ws%pass_count))
-    allocate (s_row_send_counts(max_arity, ws%pass_count), s_row_send_displs(max_arity, ws%pass_count))
-    allocate (s_row_recv_counts(max_arity, ws%pass_count), s_row_recv_displs(max_arity, ws%pass_count))
-    allocate (s_value_send_counts(max_arity, ws%pass_count), s_value_send_displs(max_arity, ws%pass_count))
-    allocate (s_value_recv_counts(max_arity, ws%pass_count), s_value_recv_displs(max_arity, ws%pass_count))
+    allocate (s_level_use_alltoall(ws%pass_count))
     allocate (s_row_send_elems(ws%pass_count), s_row_recv_elems(ws%pass_count))
     allocate (s_value_send_elems(ws%pass_count), s_value_recv_elems(ws%pass_count))
 
     s_level_line_first = 1_C_INT
     s_level_line_count = 0_C_INT
-    s_row_send_counts = 0
-    s_row_send_displs = 0
-    s_row_recv_counts = 0
-    s_row_recv_displs = 0
-    s_value_send_counts = 0
-    s_value_send_displs = 0
-    s_value_recv_counts = 0
-    s_value_recv_displs = 0
+    s_level_use_alltoall = .false.
     s_row_send_elems = 0_C_INT
     s_row_recv_elems = 0_C_INT
     s_value_send_elems = 0_C_INT
@@ -295,6 +279,8 @@ contains
 
       if (prev_count < s_level_arity(ilevel)) &
         error stop "dense y-Schur level requires at least one line per participating rank"
+      if (mod(prev_count, s_level_arity(ilevel)) /= 0_C_INT) &
+        error stop "y-Schur exchanges require uniform line counts"
       call ys_schur_split_range(child_id, prev_count, s_level_arity(ilevel), owned_rel_first, owned_count)
 
       s_level_prev_first(ilevel) = prev_first
@@ -304,41 +290,23 @@ contains
       max_owned = max(max_owned, prev_count)
       max_owned = max(max_owned, owned_count)
 
-      offset_send = 0_C_INT
-      offset_recv = 0_C_INT
       do irank = 0, int(s_level_arity(ilevel)) - 1
         call ys_schur_split_range(int(irank, C_INT), prev_count, s_level_arity(ilevel), rel_first, line_count)
         s_level_line_first(irank + 1, ilevel) = prev_first + rel_first - 1_C_INT
         s_level_line_count(irank + 1, ilevel) = line_count
-        s_row_send_counts(irank + 1, ilevel) = int(YS_SCHUR_ROW_WIDTH*line_count)
-        if (s_level_exchange_mode(ilevel) == YS_SCHUR_EXCHANGE_ALLGATHER) then
-          s_row_recv_counts(irank + 1, ilevel) = int(YS_SCHUR_ROW_WIDTH*prev_count)
-        else
-          s_row_recv_counts(irank + 1, ilevel) = int(YS_SCHUR_ROW_WIDTH*owned_count)
-        end if
-        s_value_send_counts(irank + 1, ilevel) = int(YS_SCHUR_VALUE_WIDTH*owned_count)
-        s_row_send_displs(irank + 1, ilevel) = int(offset_send)
-        s_row_recv_displs(irank + 1, ilevel) = int(offset_recv)
-        s_value_send_displs(irank + 1, ilevel) = int(YS_SCHUR_VALUE_WIDTH*owned_count*irank)
-        offset_send = offset_send + YS_SCHUR_ROW_WIDTH*line_count
-        offset_recv = offset_recv + s_row_recv_counts(irank + 1, ilevel)
       end do
-      s_row_send_elems(ilevel) = offset_send
-      s_row_recv_elems(ilevel) = offset_recv
-
-      offset_recv = 0_C_INT
-      do irank = 0, int(s_level_arity(ilevel)) - 1
-        line_count = s_level_line_count(irank + 1, ilevel)
-        if (s_level_exchange_mode(ilevel) == YS_SCHUR_EXCHANGE_ALLGATHER) then
-          s_value_recv_counts(irank + 1, ilevel) = int(YS_SCHUR_VALUE_WIDTH*s_level_arity(ilevel)*line_count)
-        else
-          s_value_recv_counts(irank + 1, ilevel) = int(YS_SCHUR_VALUE_WIDTH*line_count)
-        end if
-        s_value_recv_displs(irank + 1, ilevel) = int(offset_recv)
-        offset_recv = offset_recv + s_value_recv_counts(irank + 1, ilevel)
-      end do
+      s_row_send_elems(ilevel) = YS_SCHUR_ROW_WIDTH*prev_count
+      if (s_level_exchange_mode(ilevel) == YS_SCHUR_EXCHANGE_ALLGATHER) then
+        s_row_recv_elems(ilevel) = YS_SCHUR_ROW_WIDTH*s_level_arity(ilevel)*prev_count
+        s_value_recv_elems(ilevel) = YS_SCHUR_VALUE_WIDTH*s_level_arity(ilevel)*owned_count
+      else
+        s_row_recv_elems(ilevel) = YS_SCHUR_ROW_WIDTH*s_level_arity(ilevel)*owned_count
+        s_value_recv_elems(ilevel) = YS_SCHUR_VALUE_WIDTH*s_level_arity(ilevel)*owned_count
+      end if
       s_value_send_elems(ilevel) = YS_SCHUR_VALUE_WIDTH*s_level_arity(ilevel)*owned_count
-      s_value_recv_elems(ilevel) = offset_recv
+      if (s_level_exchange_mode(ilevel) /= YS_SCHUR_EXCHANGE_ALLGATHER) then
+        s_level_use_alltoall(ilevel) = .true.
+      end if
       max_send_elems = max(max_send_elems, s_row_send_elems(ilevel), s_value_send_elems(ilevel))
       max_recv_elems = max(max_recv_elems, s_row_recv_elems(ilevel), s_value_recv_elems(ilevel))
 
@@ -367,8 +335,6 @@ contains
     !$omp target enter data map(to: s_pass_counts, s_level_arity, s_level_exchange_mode, s_level_child_id, &
     !$omp& s_level_prev_first, s_level_prev_count, &
     !$omp& s_level_owned_first, s_level_owned_count, s_level_line_first, s_level_line_count, &
-    !$omp& s_row_send_counts, s_row_send_displs, s_row_recv_counts, s_row_recv_displs, &
-    !$omp& s_value_send_counts, s_value_send_displs, s_value_recv_counts, s_value_recv_displs, &
     !$omp& s_row_send_elems, s_row_recv_elems, s_value_send_elems, s_value_recv_elems)
   end subroutine ys_schur_prepare
 
@@ -414,7 +380,7 @@ contains
     call roctxPush("ys_schur_pack_rows")
     !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp shared(ilevel, ycomm_sendbuf, s_rows, s_level_arity, s_level_line_first, &
-    !$omp& s_level_line_count, s_level_prev_first, s_row_send_displs) &
+    !$omp& s_level_line_count, s_level_prev_first) &
     !$omp private(dest, local_line, irow, first_line, line_count, global_line, src_line, offset)
     do dest = 0, s_level_arity(ilevel) - 1
       do local_line = 1, s_level_line_count(dest + 1, ilevel)
@@ -422,7 +388,7 @@ contains
           first_line = s_level_line_first(dest + 1, ilevel)
           line_count = s_level_line_count(dest + 1, ilevel)
           global_line = first_line + local_line - 1
-          offset = s_row_send_displs(dest + 1, ilevel) + (local_line - 1)*YS_SCHUR_ROW_WIDTH + irow
+          offset = (global_line - s_level_prev_first(ilevel))*YS_SCHUR_ROW_WIDTH + irow
           src_line = global_line - s_level_prev_first(ilevel) + 1
           ycomm_sendbuf(offset) = s_rows(irow, src_line, ilevel - 1)
         end do
@@ -460,29 +426,29 @@ contains
                                         s_row_send_elems(ilevel), s_row_recv_elems(ilevel), elapsed)
       end if
       call roctxPop("MPI_Allgather ys_schur_rows")
-    else
-      call roctxPush("MPI_Alltoallv ys_schur_rows")
+    else if (s_level_use_alltoall(ilevel)) then
+      call roctxPush("MPI_Alltoall ys_schur_rows")
       if (s_comm_stats_enabled) comm_t0 = MPI_Wtime()
 #ifndef HAVE_HIP
       !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
 #endif
-      call MPI_Alltoallv(ycomm_sendbuf(1:s_row_send_elems(ilevel)), &
-                         s_row_send_counts(1:s_level_arity(ilevel), ilevel), &
-                         s_row_send_displs(1:s_level_arity(ilevel), ilevel), MPI_DOUBLE_COMPLEX, &
-                         ycomm_recvbuf(1:s_row_recv_elems(ilevel)), &
-                         s_row_recv_counts(1:s_level_arity(ilevel), ilevel), &
-                         s_row_recv_displs(1:s_level_arity(ilevel), ilevel), MPI_DOUBLE_COMPLEX, &
-                         s_level_comm(ilevel), ierr_local)
+      call MPI_Alltoall(ycomm_sendbuf(1:s_row_send_elems(ilevel)), &
+                        YS_SCHUR_ROW_WIDTH*s_level_owned_count(ilevel), MPI_DOUBLE_COMPLEX, &
+                        ycomm_recvbuf(1:s_row_recv_elems(ilevel)), &
+                        YS_SCHUR_ROW_WIDTH*s_level_owned_count(ilevel), MPI_DOUBLE_COMPLEX, &
+                        s_level_comm(ilevel), ierr_local)
 #ifndef HAVE_HIP
       !$omp end target data
 #endif
-      if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoallv y-Schur rows failed"
+      if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoall y-Schur rows failed"
       if (s_comm_stats_enabled) then
         elapsed = MPI_Wtime() - comm_t0
         call ys_schur_report_comm_stats("ys_schur_rows_alltoall", s_level_comm(ilevel), &
                                         s_row_send_elems(ilevel), s_row_recv_elems(ilevel), elapsed)
       end if
-      call roctxPop("MPI_Alltoallv ys_schur_rows")
+      call roctxPop("MPI_Alltoall ys_schur_rows")
+    else
+      error stop "internal error: nonuniform y-Schur Alltoallv path disabled"
     end if
 #else
     error stop "ys_schur_exchange_rows requires MPI"
@@ -502,28 +468,29 @@ contains
       error stop "root allgather Schur levels should recover values locally"
     end if
 
-    call roctxPush("MPI_Alltoallv ys_schur_values")
+    if (.not. s_level_use_alltoall(ilevel)) &
+      error stop "internal error: nonuniform y-Schur value Alltoallv path disabled"
+
+    call roctxPush("MPI_Alltoall ys_schur_values")
     if (s_comm_stats_enabled) comm_t0 = MPI_Wtime()
 #ifndef HAVE_HIP
     !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
 #endif
-    call MPI_Alltoallv(ycomm_sendbuf(1:s_value_send_elems(ilevel)), &
-                       s_value_send_counts(1:s_level_arity(ilevel), ilevel), &
-                       s_value_send_displs(1:s_level_arity(ilevel), ilevel), MPI_DOUBLE_COMPLEX, &
-                       ycomm_recvbuf(1:s_value_recv_elems(ilevel)), &
-                       s_value_recv_counts(1:s_level_arity(ilevel), ilevel), &
-                       s_value_recv_displs(1:s_level_arity(ilevel), ilevel), MPI_DOUBLE_COMPLEX, &
-                       s_level_comm(ilevel), ierr_local)
+    call MPI_Alltoall(ycomm_sendbuf(1:s_value_send_elems(ilevel)), &
+                      YS_SCHUR_VALUE_WIDTH*s_level_owned_count(ilevel), MPI_DOUBLE_COMPLEX, &
+                      ycomm_recvbuf(1:s_value_recv_elems(ilevel)), &
+                      YS_SCHUR_VALUE_WIDTH*s_level_owned_count(ilevel), MPI_DOUBLE_COMPLEX, &
+                      s_level_comm(ilevel), ierr_local)
 #ifndef HAVE_HIP
     !$omp end target data
 #endif
-    if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoallv y-Schur values failed"
+    if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoall y-Schur values failed"
     if (s_comm_stats_enabled) then
       elapsed = MPI_Wtime() - comm_t0
       call ys_schur_report_comm_stats("ys_schur_values_alltoall", s_level_comm(ilevel), &
                                       s_value_send_elems(ilevel), s_value_recv_elems(ilevel), elapsed)
     end if
-    call roctxPop("MPI_Alltoallv ys_schur_values")
+    call roctxPop("MPI_Alltoall ys_schur_values")
 #else
     error stop "ys_schur_exchange_values requires MPI"
 #endif
@@ -542,7 +509,7 @@ contains
 
     call roctxPush("ys_schur_compose_level")
     !$omp target teams distribute parallel do default(none) &
-    !$omp shared(ilevel, ycomm_recvbuf, s_row_recv_displs, s_recover_basis, s_rows, &
+    !$omp shared(ilevel, ycomm_recvbuf, s_recover_basis, s_rows, &
     !$omp& s_level_owned_count, s_level_owned_first, s_level_prev_first, s_level_prev_count, &
     !$omp& s_level_arity, s_level_exchange_mode, solve_redundant, solve_count) &
     !$omp private(iline, child, row0, row, k, ext_col, exposed_var, offset, col, &
@@ -567,9 +534,9 @@ contains
           else
             rel_line = s_level_owned_first(ilevel) - s_level_prev_first(ilevel) + iline
           end if
-          offset = s_row_recv_displs(child + 1, ilevel) + (rel_line - 1)*YS_SCHUR_ROW_WIDTH
+          offset = child*YS_SCHUR_ROW_WIDTH*s_level_prev_count(ilevel) + (rel_line - 1)*YS_SCHUR_ROW_WIDTH
         else
-          offset = s_row_recv_displs(child + 1, ilevel) + (iline - 1)*YS_SCHUR_ROW_WIDTH
+          offset = child*YS_SCHUR_ROW_WIDTH*s_level_owned_count(ilevel) + (iline - 1)*YS_SCHUR_ROW_WIDTH
         end if
         row0 = 4*child
         do k = 1, 4
@@ -749,7 +716,7 @@ contains
 
     call roctxPush("ys_schur_pack_recovered_values")
     !$omp target teams distribute parallel do default(none) &
-    !$omp shared(ilevel, ycomm_sendbuf, s_value_send_displs, s_level_owned_count, s_level_arity, &
+    !$omp shared(ilevel, ycomm_sendbuf, s_level_owned_count, s_level_arity, &
     !$omp& s_recover_basis, s_values) &
     !$omp private(iline, child, row0, k, offset, prev1, prev2, next1, next2, recovered)
     do iline = 1, s_level_owned_count(ilevel)
@@ -767,7 +734,7 @@ contains
 
       do child = 0, s_level_arity(ilevel) - 1
         row0 = 4*child
-        offset = s_value_send_displs(child + 1, ilevel) + (iline - 1)*YS_SCHUR_VALUE_WIDTH
+        offset = child*YS_SCHUR_VALUE_WIDTH*s_level_owned_count(ilevel) + (iline - 1)*YS_SCHUR_VALUE_WIDTH
         ycomm_sendbuf(offset + 1) = recovered(row0 + 1)
         ycomm_sendbuf(offset + 2) = recovered(row0 + 2)
         ycomm_sendbuf(offset + 3) = recovered(row0 + 3)
@@ -800,7 +767,7 @@ contains
     call roctxPush("ys_schur_unpack_parent_values")
     !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp shared(ilevel, ycomm_recvbuf, s_values, s_level_arity, s_level_line_first, s_level_line_count, &
-    !$omp& s_value_recv_displs, s_level_prev_first) &
+    !$omp& s_level_owned_count, s_level_prev_first) &
     !$omp private(src, local_line, k, line_first, global_line, dst_line, offset)
     do src = 0, s_level_arity(ilevel) - 1
       do local_line = 1, s_level_line_count(src + 1, ilevel)
@@ -808,7 +775,7 @@ contains
           line_first = s_level_line_first(src + 1, ilevel)
           global_line = line_first + local_line - 1
           dst_line = global_line - s_level_prev_first(ilevel) + 1
-          offset = s_value_recv_displs(src + 1, ilevel) + (local_line - 1)*YS_SCHUR_VALUE_WIDTH
+          offset = src*YS_SCHUR_VALUE_WIDTH*s_level_owned_count(ilevel) + (local_line - 1)*YS_SCHUR_VALUE_WIDTH
           s_values(k, dst_line, ilevel - 1) = ycomm_recvbuf(offset + k)
         end do
       end do
