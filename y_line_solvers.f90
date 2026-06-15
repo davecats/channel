@@ -83,9 +83,6 @@ module y_line_solvers
   integer(C_INT), save :: ys_workspace_nx = -1
   integer(C_INT), save :: ys_workspace_nlines = 0
   integer(C_INT), save :: ys_workspace_active_n = 0
-  integer(C_INT), save :: ys_workspace_npy = -1
-  integer(C_INT), save :: ys_workspace_line_start = 1
-  integer(C_INT), save :: ys_workspace_line_end = 0
   integer(C_INT), save :: ys_workspace_reduced_node_size = -1
   integer(C_INT), save :: ys_owner_nz = 0
   integer(C_INT), save :: ys_owner_nx = 0
@@ -132,7 +129,7 @@ module y_line_solvers
   logical, save :: ys_gpsv_handle_created = .false.
 #endif
   integer(C_INT), save :: ys_gpsv_n = -1, ys_gpsv_batch = -1
-  integer(C_INT), save :: ys_batch_n = -1, ys_batch_count = -1
+  integer(C_INT64_T), save :: ys_batch_capacity = 0_C_INT64_T
 #if defined(HAVE_CUDA)
   integer(8), save :: ys_gpsv_buffer_size = 0_8
 #elif defined(HAVE_HIP)
@@ -156,36 +153,12 @@ contains
     ys_workspace_nx = -1
     ys_workspace_nlines = 0
     ys_workspace_active_n = 0
-    ys_workspace_npy = -1
-    ys_workspace_line_start = 1
-    ys_workspace_line_end = 0
     ys_workspace_reduced_node_size = -1
     ys_owner_nz = 0
     ys_owner_nx = 0
     ys_owner_ix0 = 1
     ys_owner_ixN = 0
   end subroutine ys_reset_workspace_state
-
-  logical function ys_core_shape_matches(ny, nz, active_n, nlines, line_start, wanted_npy) result(matches)
-    implicit none
-    integer(C_INT), intent(in) :: ny, nz, active_n, nlines, line_start, wanted_npy
-
-    matches = allocated(ys_gpsv_rhs_store) .and. &
-              ys_workspace_ny == ny .and. ys_workspace_nz == nz .and. &
-              ys_workspace_nlines == nlines .and. ys_workspace_active_n == active_n .and. &
-              ys_workspace_npy == wanted_npy .and. ys_workspace_line_start == line_start
-  end function ys_core_shape_matches
-
-  logical function ys_reduced_config_matches(pass_counts, exchange_mode) result(matches)
-    implicit none
-    integer(C_INT), intent(in) :: pass_counts(:)
-    integer(C_INT), intent(in) :: exchange_mode
-
-    matches = allocated(ys_reduced_rows_send) .and. allocated(ys_reduced_pass_counts) .and. &
-              size(ys_reduced_pass_counts) == size(pass_counts) .and. &
-              ys_reduced_exchange_mode == exchange_mode
-    if (matches .and. size(pass_counts) > 0) matches = all(ys_reduced_pass_counts == pass_counts)
-  end function ys_reduced_config_matches
 
   subroutine ys_nullify_core_views()
     implicit none
@@ -266,50 +239,20 @@ contains
     end if
   end subroutine ys_bind_core_views
 
-  subroutine ys_release_core_workspace()
+  subroutine ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pass_counts, schur_exchange_mode)
     implicit none
-
-    if (.not. allocated(ys_gpsv_rhs_store)) return
-
-    !$omp target exit data map(delete: ys_gpsv_matrix_store, ys_gpsv_rhs_store, &
-    !$omp& ys_lower_ghost_store, ys_lower_boundary_store, ys_upper_boundary_store, ys_upper_ghost_store, &
-    !$omp& ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store, &
-    !$omp& ys_boundary_lower_rhs0_store, ys_boundary_upper_rhsn_store, &
-    !$omp& ys_boundary_lower_eq_store, ys_boundary_upper_eq_store)
-
-    call ys_nullify_core_views()
-
-    deallocate (ys_gpsv_matrix_store, ys_gpsv_rhs_store)
-    deallocate (ys_lower_ghost_store, ys_lower_boundary_store, ys_upper_boundary_store, ys_upper_ghost_store)
-    deallocate (ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
-    deallocate (ys_boundary_lower_rhs0_store, ys_boundary_upper_rhsn_store, &
-                ys_boundary_lower_eq_store, ys_boundary_upper_eq_store)
-  end subroutine ys_release_core_workspace
-
-  subroutine ys_release_reduced_workspace()
-    implicit none
-
-    call ys_schur_release(ys_reduced_schur_ws)
-    if (allocated(ys_reduced_rows_send)) then
-      !$omp target exit data map(delete: ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values, &
-      !$omp& ys_reduced_rhs)
-      deallocate (ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values)
-      deallocate (ys_reduced_rhs)
-    end if
-    if (allocated(ys_reduced_pass_counts)) then
-      deallocate (ys_reduced_pass_counts)
-    end if
-    ys_reduced_exchange_mode = YS_SCHUR_EXCHANGE_AUTO
-    ys_workspace_reduced_node_size = -1
-
-  end subroutine ys_release_reduced_workspace
-
-  subroutine ys_allocate_core_workspace(row_start, row_end, line_start, nlines)
-    implicit none
-    integer(C_INT), intent(in) :: row_start, row_end, line_start, nlines
+    integer(C_INT), intent(in) :: row_start, row_end, line_start, nlines, nz
+    integer(C_INT), optional, intent(in) :: schur_pass_counts(:)
+    integer(C_INT), intent(in) :: schur_exchange_mode
     integer(C_INT) :: active_n
+    integer(C_INT64_T) :: nx_count
+    type(ys_schur_config) :: cfg
 
     active_n = row_end - row_start + 1
+
+    if (allocated(ys_gpsv_rhs_store)) error stop "ys_allocate_workspace called with core workspace already allocated"
+    if (allocated(ys_batch_ds)) error stop "ys_allocate_workspace called with batch workspace already allocated"
+    if (allocated(ys_reduced_rows_send)) error stop "ys_allocate_workspace called with reduced workspace already allocated"
 
     allocate (ys_gpsv_matrix_store(5*nlines*active_n), ys_gpsv_rhs_store(nlines*active_n))
     allocate (ys_lower_ghost_store(nlines), ys_lower_boundary_store(nlines), &
@@ -326,50 +269,47 @@ contains
     !$omp& ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store, &
     !$omp& ys_boundary_lower_rhs0_store, ys_boundary_upper_rhsn_store, &
     !$omp& ys_boundary_lower_eq_store, ys_boundary_upper_eq_store)
-  end subroutine ys_allocate_core_workspace
 
-  subroutine ys_allocate_reduced_workspace(nlines, npy_count, schur_pass_counts, schur_exchange_mode)
-    implicit none
-    integer(C_INT), intent(in) :: nlines, npy_count
-    integer(C_INT), intent(in) :: schur_pass_counts(:)
-    integer(C_INT), intent(in) :: schur_exchange_mode
-    type(ys_schur_config) :: cfg
+    nx_count = int(nlines/(2*nz + 1), C_INT64_T)
+    ys_batch_capacity = int(active_n, C_INT64_T)* &
+                        (int(nlines, C_INT64_T) + 4_C_INT64_T*nx_count*int(nz + 1, C_INT64_T))
+    allocate (ys_batch_ds(ys_batch_capacity), ys_batch_dl(ys_batch_capacity), ys_batch_d(ys_batch_capacity), &
+              ys_batch_du(ys_batch_capacity), ys_batch_dw(ys_batch_capacity), ys_batch_x(ys_batch_capacity))
+    !$omp target enter data map(alloc: ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
 
-    allocate (ys_reduced_rows_send(20, nlines), ys_left_interface_values(2, nlines), &
-              ys_right_interface_values(2, nlines))
-    allocate (ys_reduced_rhs(4*npy_count, nlines))
-    allocate (ys_reduced_pass_counts(size(schur_pass_counts)))
-    ys_reduced_pass_counts = schur_pass_counts
-    ys_reduced_exchange_mode = schur_exchange_mode
+    if (npy_grid > 1) then
+      allocate (ys_reduced_rows_send(20, nlines), ys_left_interface_values(2, nlines), &
+                ys_right_interface_values(2, nlines))
+      allocate (ys_reduced_rhs(4*npy_grid, nlines))
+      allocate (ys_reduced_pass_counts(size(schur_pass_counts)))
+      ys_reduced_pass_counts = schur_pass_counts
+      ys_reduced_exchange_mode = schur_exchange_mode
 
-    call ys_schur_configure(cfg, schur_pass_counts, exchange_mode=schur_exchange_mode)
-    call ys_schur_prepare(ys_reduced_schur_ws, cfg, nlines, npy_count)
+      call ys_schur_configure(cfg, schur_pass_counts, exchange_mode=schur_exchange_mode)
+      call ys_schur_prepare(ys_reduced_schur_ws, cfg, nlines, npy_grid)
 
-    !$omp target enter data map(alloc: ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values, &
-    !$omp& ys_reduced_rhs)
-    ys_workspace_reduced_node_size = 0_C_INT
-  end subroutine ys_allocate_reduced_workspace
+      !$omp target enter data map(alloc: ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values, &
+      !$omp& ys_reduced_rhs)
+      ys_workspace_reduced_node_size = 0_C_INT
+    end if
+  end subroutine ys_allocate_workspace
 
-  subroutine ys_prepare_assembled_workspace(ny, nz, row_start, row_end, line_start, nlines, use_reduced_backend, &
-                                            schur_pass_counts, schur_exchange_mode)
+  subroutine ys_prepare_assembled_workspace(ny, nz, row_start, row_end, line_start, nlines, schur_pass_counts, schur_exchange_mode)
     implicit none
     integer(C_INT), intent(in) :: ny, nz, row_start, row_end, line_start, nlines
-    logical, intent(in) :: use_reduced_backend
     integer(C_INT), optional, intent(in) :: schur_pass_counts(:)
     integer(C_INT), optional, intent(in) :: schur_exchange_mode
-    integer(C_INT) :: active_n, line_end, nlines_z, wanted_npy, wanted_exchange_mode
+    integer(C_INT) :: active_n, nlines_z, wanted_exchange_mode
 
     active_n = row_end - row_start + 1
-    line_end = line_start + nlines - 1
     nlines_z = 2*nz + 1
-    wanted_npy = merge(npy_grid, -1_C_INT, use_reduced_backend)
     wanted_exchange_mode = YS_SCHUR_EXCHANGE_AUTO
     if (present(schur_exchange_mode)) wanted_exchange_mode = schur_exchange_mode
 
     if (active_n < 1) error stop "ys_prepare_assembled_workspace requires at least one row"
     if (mod(line_start - 1, nlines_z) /= 0) error stop "ys_prepare_assembled_workspace requires ix-aligned line_start"
     if (mod(nlines, nlines_z) /= 0) error stop "ys_prepare_assembled_workspace requires full ix columns"
-    if (use_reduced_backend .and. npy_grid > 1) then
+    if (npy_grid > 1) then
       if (npy_grid > 1 .and. active_n < 4) error stop "ys_solve_ghost_field requires at least four y rows per rank"
       if (active_n < 4) error stop "ys_solve_ghost_field requires at least four active y rows"
       if (.not. present(schur_pass_counts)) error stop "distributed y-Schur requires explicit pass config"
@@ -380,45 +320,78 @@ contains
     ys_owner_ix0 = nx0 + (line_start - 1)/nlines_z
     ys_owner_ixN = ys_owner_ix0 + ys_owner_nx - 1
 
-    if (allocated(ys_gpsv_rhs_store)) then
-      if (.not. ys_core_shape_matches(ny, nz, active_n, nlines, line_start, wanted_npy)) then
-        call ys_release_core_workspace()
-        call ys_release_reduced_workspace()
-      end if
-    end if
-
     ys_workspace_ny = ny
     ys_workspace_nz = nz
     ys_workspace_nx = nlines/nlines_z
     ys_workspace_nlines = nlines
     ys_workspace_active_n = active_n
-    ys_workspace_npy = wanted_npy
-    ys_workspace_line_start = line_start
-    ys_workspace_line_end = line_end
 
-    if (.not. allocated(ys_gpsv_rhs_store)) then
-      call ys_allocate_core_workspace(row_start, row_end, line_start, nlines)
-    else
-      call ys_bind_core_views(row_start, row_end, line_start, nlines)
+    if (allocated(ys_gpsv_rhs_store) .or. allocated(ys_reduced_rows_send)) then
+      error stop "ys_prepare_assembled_workspace should only be called once after ys_release_workspace"
     end if
 
-    if (use_reduced_backend .and. npy_grid > 1) then
-      if (allocated(ys_reduced_rows_send)) then
-        if (.not. ys_reduced_config_matches(schur_pass_counts, wanted_exchange_mode)) call ys_release_reduced_workspace()
-      end if
-      if (.not. allocated(ys_reduced_rows_send)) &
-        call ys_allocate_reduced_workspace(nlines, npy_grid, schur_pass_counts, wanted_exchange_mode)
-    else if (allocated(ys_reduced_rows_send)) then
-      call ys_release_reduced_workspace()
-    end if
+    call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pass_counts, wanted_exchange_mode)
   end subroutine ys_prepare_assembled_workspace
 
   subroutine ys_release_workspace()
     implicit none
 
-    call ys_release_core_workspace()
-    call ys_release_reduced_workspace()
-    call ys_release_gpsv_workspace()
+    if (allocated(ys_gpsv_rhs_store)) then
+      !$omp target exit data map(delete: ys_gpsv_matrix_store, ys_gpsv_rhs_store, &
+      !$omp& ys_lower_ghost_store, ys_lower_boundary_store, ys_upper_boundary_store, ys_upper_ghost_store, &
+      !$omp& ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store, &
+      !$omp& ys_boundary_lower_rhs0_store, ys_boundary_upper_rhsn_store, &
+      !$omp& ys_boundary_lower_eq_store, ys_boundary_upper_eq_store)
+
+      call ys_nullify_core_views()
+
+      deallocate (ys_gpsv_matrix_store, ys_gpsv_rhs_store)
+      deallocate (ys_lower_ghost_store, ys_lower_boundary_store, ys_upper_boundary_store, ys_upper_ghost_store)
+      deallocate (ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
+      deallocate (ys_boundary_lower_rhs0_store, ys_boundary_upper_rhsn_store, &
+                  ys_boundary_lower_eq_store, ys_boundary_upper_eq_store)
+    end if
+
+    call ys_schur_release(ys_reduced_schur_ws)
+    if (allocated(ys_reduced_rows_send)) then
+      !$omp target exit data map(delete: ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values, &
+      !$omp& ys_reduced_rhs)
+      deallocate (ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values)
+      deallocate (ys_reduced_rhs)
+    end if
+    if (allocated(ys_reduced_pass_counts)) then
+      deallocate (ys_reduced_pass_counts)
+    end if
+    ys_reduced_exchange_mode = YS_SCHUR_EXCHANGE_AUTO
+    ys_workspace_reduced_node_size = -1
+
+    if (allocated(ys_batch_ds)) then
+      !$omp target exit data map(delete: ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
+      deallocate (ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
+    end if
+#ifdef HAVE_CUDA
+    if (allocated(ys_gpsv_buffer)) then
+      !$omp target exit data map(delete: ys_gpsv_buffer)
+      deallocate (ys_gpsv_buffer)
+    end if
+#elif defined(HAVE_HIP)
+    if (c_associated(ys_gpsv_buffer)) then
+      call omp_target_free(ys_gpsv_buffer, omp_get_default_device())
+      ys_gpsv_buffer = c_null_ptr
+    end if
+#endif
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    call ys_destroy_gpusparse_handle()
+#endif
+    ys_gpsv_n = -1
+    ys_gpsv_batch = -1
+    ys_batch_capacity = 0_C_INT64_T
+#ifdef HAVE_CUDA
+    ys_gpsv_buffer_size = 0_8
+#elif defined(HAVE_HIP)
+    ys_gpsv_buffer_size = 0_C_SIZE_T
+    ys_gpsv_buffer = c_null_ptr
+#endif
     call ys_reset_workspace_state()
   end subroutine ys_release_workspace
 
@@ -536,39 +509,6 @@ contains
   end subroutine ys_call_gpsv_interleaved
 #endif
 
-  subroutine ys_release_gpsv_workspace()
-    implicit none
-
-    if (allocated(ys_batch_ds)) then
-      !$omp target exit data map(delete: ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
-      deallocate (ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
-    end if
-#ifdef HAVE_CUDA
-    if (allocated(ys_gpsv_buffer)) then
-      !$omp target exit data map(delete: ys_gpsv_buffer)
-      deallocate (ys_gpsv_buffer)
-    end if
-#elif defined(HAVE_HIP)
-    if (c_associated(ys_gpsv_buffer)) then
-      call omp_target_free(ys_gpsv_buffer, omp_get_default_device())
-      ys_gpsv_buffer = c_null_ptr
-    end if
-#endif
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
-    call ys_destroy_gpusparse_handle()
-#endif
-    ys_gpsv_n = -1
-    ys_gpsv_batch = -1
-    ys_batch_n = -1
-    ys_batch_count = -1
-#ifdef HAVE_CUDA
-    ys_gpsv_buffer_size = 0_8
-#elif defined(HAVE_HIP)
-    ys_gpsv_buffer_size = 0_C_SIZE_T
-    ys_gpsv_buffer = c_null_ptr
-#endif
-  end subroutine ys_release_gpsv_workspace
-
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
   subroutine ys_prepare_gpusparse_workspace(n, batch_count, ds, dl, d, du, dw, x)
     implicit none
@@ -639,30 +579,6 @@ contains
     ys_gpsv_batch = batch_count
   end subroutine ys_prepare_gpusparse_workspace
 #endif
-
-  subroutine ys_prepare_batch_workspace(n, batch_count)
-    implicit none
-    integer(C_INT), intent(in) :: n, batch_count
-
-    if (ys_batch_n /= n .or. ys_batch_count /= batch_count) then
-      if (allocated(ys_batch_ds)) then
-        !$omp target exit data map(delete: ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
-        deallocate (ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
-      end if
-      allocate (ys_batch_ds(n*batch_count), ys_batch_dl(n*batch_count), ys_batch_d(n*batch_count), &
-                ys_batch_du(n*batch_count), ys_batch_dw(n*batch_count), ys_batch_x(n*batch_count))
-      !$omp target enter data map(alloc: ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
-      ys_batch_n = n
-      ys_batch_count = batch_count
-    end if
-
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
-    call ys_prepare_gpusparse_workspace(n, batch_count, ys_batch_ds, ys_batch_dl, ys_batch_d, &
-                                        ys_batch_du, ys_batch_dw, ys_batch_x)
-#else
-    call ys_prepare_gpusparse_workspace(n, batch_count)
-#endif
-  end subroutine ys_prepare_batch_workspace
 
   subroutine ys_solve_interleaved_pentadiagonal(ds, dl, d, du, dw, x, n, batch_count, label)
     implicit none
@@ -772,7 +688,15 @@ contains
     end select
     batch_count = nlines + exposed_n*nresp
 
-    call ys_prepare_batch_workspace(nI, batch_count)
+    if (int(nI, C_INT64_T)*int(batch_count, C_INT64_T) > ys_batch_capacity) then
+      error stop "batch workspace capacity too small"
+    end if
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    call ys_prepare_gpusparse_workspace(nI, batch_count, ys_batch_ds, ys_batch_dl, ys_batch_d, &
+                                        ys_batch_du, ys_batch_dw, ys_batch_x)
+#else
+    call ys_prepare_gpusparse_workspace(nI, batch_count)
+#endif
 
     call roctxPush("ys_endpoint_pack_plus_response")
     !$omp target teams distribute parallel do collapse(2) default(none) &

@@ -297,7 +297,7 @@ CONTAINS
 
     allocate (fr(3 + 2*nPhi)); fr = 0.0
     if (has_terminal) call print_schur_configuration()
-    call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, nxB*(2*nz + 1), .true., &
+    call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, nxB*(2*nz + 1), &
                                         schur_pass_counts, schur_exchange_mode)
   END SUBROUTINE init_memory
 
@@ -901,8 +901,6 @@ CONTAINS
     if (present(solve_label)) continue
     if (present(transpose_derivative)) continue
 
-    call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, (nxN - nx0 + 1)*(2*nz + 1), .true., &
-                                        schur_pass_counts, schur_exchange_mode)
     owner_src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => source_values
     owner_dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => field_values
     has_lower_boundary = (ny0 == 1)

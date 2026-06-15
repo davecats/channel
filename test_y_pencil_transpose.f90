@@ -76,7 +76,7 @@ program test_y_reduced_known_good_local_dst
   allocate (reduced_local(ny0:nyN, 1:2*nz_test + 1, 1:nxB))
   reduced_local = cmplx(-999.0d0, -999.0d0, kind=C_DOUBLE)
 
-  call ys_prepare_assembled_workspace(ny_test, nz_test, ny0, nyN, 1_C_INT, nxB*(2*nz_test + 1), .true., &
+  call ys_prepare_assembled_workspace(ny_test, nz_test, ny0, nyN, 1_C_INT, nxB*(2*nz_test + 1), &
                                       schur_pass_counts)
   nz = nz_test
 
