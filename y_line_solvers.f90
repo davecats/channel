@@ -580,6 +580,14 @@ contains
     integer(C_SIZE_T) :: buffer_size
 #endif
 
+    ! Small systems are solved inline in ys_solve_interleaved_pentadiagonal, and
+    ! ROCm rejects gpsv workspace queries for n < 3.
+    if (n < 3) then
+      ys_gpsv_n = n
+      ys_gpsv_batch = batch_count
+      return
+    end if
+
     if (ys_gpsv_n == n .and. ys_gpsv_batch == batch_count &
 #ifdef HAVE_CUDA
         .and. allocated(ys_gpsv_buffer) &
