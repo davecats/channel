@@ -444,11 +444,15 @@ contains
     if (s_level_exchange_mode(ilevel) == YS_SCHUR_EXCHANGE_ALLGATHER) then
       call roctxPush("MPI_Allgather ys_schur_rows")
       if (s_comm_stats_enabled) comm_t0 = MPI_Wtime()
+#ifndef HAVE_HIP
       !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
+#endif
       call MPI_Allgather(ycomm_sendbuf(1:s_row_send_elems(ilevel)), s_row_send_elems(ilevel), MPI_DOUBLE_COMPLEX, &
                          ycomm_recvbuf(1:s_row_recv_elems(ilevel)), s_row_send_elems(ilevel), MPI_DOUBLE_COMPLEX, &
                          s_level_comm(ilevel), ierr_local)
+#ifndef HAVE_HIP
       !$omp end target data
+#endif
       if (ierr_local /= MPI_SUCCESS) error stop "MPI_Allgather y-Schur rows failed"
       if (s_comm_stats_enabled) then
         elapsed = MPI_Wtime() - comm_t0
@@ -459,7 +463,9 @@ contains
     else
       call roctxPush("MPI_Alltoallv ys_schur_rows")
       if (s_comm_stats_enabled) comm_t0 = MPI_Wtime()
+#ifndef HAVE_HIP
       !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
+#endif
       call MPI_Alltoallv(ycomm_sendbuf(1:s_row_send_elems(ilevel)), &
                          s_row_send_counts(1:s_level_arity(ilevel), ilevel), &
                          s_row_send_displs(1:s_level_arity(ilevel), ilevel), MPI_DOUBLE_COMPLEX, &
@@ -467,7 +473,9 @@ contains
                          s_row_recv_counts(1:s_level_arity(ilevel), ilevel), &
                          s_row_recv_displs(1:s_level_arity(ilevel), ilevel), MPI_DOUBLE_COMPLEX, &
                          s_level_comm(ilevel), ierr_local)
+#ifndef HAVE_HIP
       !$omp end target data
+#endif
       if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoallv y-Schur rows failed"
       if (s_comm_stats_enabled) then
         elapsed = MPI_Wtime() - comm_t0
@@ -496,7 +504,9 @@ contains
 
     call roctxPush("MPI_Alltoallv ys_schur_values")
     if (s_comm_stats_enabled) comm_t0 = MPI_Wtime()
+#ifndef HAVE_HIP
     !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
+#endif
     call MPI_Alltoallv(ycomm_sendbuf(1:s_value_send_elems(ilevel)), &
                        s_value_send_counts(1:s_level_arity(ilevel), ilevel), &
                        s_value_send_displs(1:s_level_arity(ilevel), ilevel), MPI_DOUBLE_COMPLEX, &
@@ -504,7 +514,9 @@ contains
                        s_value_recv_counts(1:s_level_arity(ilevel), ilevel), &
                        s_value_recv_displs(1:s_level_arity(ilevel), ilevel), MPI_DOUBLE_COMPLEX, &
                        s_level_comm(ilevel), ierr_local)
+#ifndef HAVE_HIP
     !$omp end target data
+#endif
     if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoallv y-Schur values failed"
     if (s_comm_stats_enabled) then
       elapsed = MPI_Wtime() - comm_t0
