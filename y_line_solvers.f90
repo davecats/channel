@@ -553,7 +553,7 @@ contains
 
     ys_gpsv_buffer_size = buffer_size
 #ifdef HAVE_CUDA
-    allocate (ys_gpsv_buffer(max(1, int(buffer_size))))
+    allocate (ys_gpsv_buffer(max(1_8, buffer_size)))
     !$omp target enter data map(alloc: ys_gpsv_buffer)
 #elif defined(HAVE_HIP)
     ! On MI300A, hipSPARSE gpsv rejects a workspace buffer created by mapping a
