@@ -2,6 +2,7 @@
 
 module mpi_autotune
   use, intrinsic :: iso_c_binding
+  use, intrinsic :: ieee_arithmetic
   use mpi_transpose, only: init_MPI, free_MPI, nxB, nzB, ny0, nyN, fft_transpose_is_local, &
                            repack_zTOx_local, pack_zTOx, alltoall, unpack_zTOx, &
                            repack_xTOz_local, pack_xTOz, unpack_xTOz, sendbuf, recvbuf
@@ -24,6 +25,10 @@ module mpi_autotune
   integer(C_INT), parameter :: MAXP = 16_C_INT
   integer(C_INT), parameter :: ARITY(5) = [2_C_INT, 3_C_INT, 4_C_INT, 6_C_INT, 8_C_INT]
   real(C_DOUBLE), parameter :: RK_SUBSTEPS = 3.0_C_DOUBLE
+  real(C_DOUBLE), parameter :: Y_SOLVE_CHECK_TOL = 1.0e-6_C_DOUBLE
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+  !$omp declare target(autotune_exact_value)
+#endif
   public :: configure_mpi_decomposition, mpi_autotune_has_pass_sequence
 
 contains
@@ -190,10 +195,18 @@ contains
     logical, intent(inout) :: found
     integer :: ierr, rank
     real(C_DOUBLE) :: xz_forward_cost, xz_back_cost, y_cost, score
+    real(C_DOUBLE) :: y_error
+    logical :: y_ok
     if (.not. valid(nranks, npxz, nxpp, nzd, nz, node, path, npass)) return
     call MPI_Comm_rank(MPI_COMM_WORLD, rank, ierr)
     call time_xz_sweep(nxpp, nxd, nzd, nz, ny, nphi, overlapping, nranks/npxz, xz_forward_cost, xz_back_cost)
-    y_cost = time_y(nxpp, nzd, nz, ny, nphi, overlapping, nranks/npxz, path, npass, exchange)
+    y_cost = time_y(nxpp, nzd, nz, ny, nphi, overlapping, nranks/npxz, path, npass, exchange, y_ok, y_error)
+    if (.not. y_ok) then
+      if (rank == 0) write (*, '(*(g0,1x))') "MPI autotune rejected: npxz=", npxz, &
+        "npy=", nranks/npxz, "passes=", trim(pass_string(path, npass)), &
+        "exchange=", trim(exchange_string(exchange)), "y_correctness_error=", y_error
+      return
+    end if
     score = RK_SUBSTEPS*(xz_forward_cost*real(3_C_INT + nphi, C_DOUBLE) + &
                          xz_back_cost*real(6_C_INT + 3_C_INT*nphi, C_DOUBLE) + &
                          y_cost*real(3_C_INT + nphi, C_DOUBLE))
@@ -201,7 +214,7 @@ contains
       "npy=", nranks/npxz, "passes=", trim(pass_string(path, npass)), &
       "exchange=", trim(exchange_string(exchange)), "xz_forward_ms=", 1d3*xz_forward_cost, &
       "xz_back_ms=", 1d3*xz_back_cost, &
-      "y_schur_ms=", 1d3*y_cost, "score_timestep_ms=", 1d3*score
+      "y_schur_ms=", 1d3*y_cost, "y_correctness_error=", y_error, "score_timestep_ms=", 1d3*score
     if (.not. found .or. score < best_score) then
       found = .true.; best_score = score; best_npxz = npxz; best_npy = nranks/npxz
       best_pass = path; best_npass = npass; best_exchange = exchange
@@ -340,9 +353,11 @@ contains
     call free_MPI()
   end subroutine time_xz_sweep
 
-  real(C_DOUBLE) function time_y(nxpp, nzd, nz, ny, nphi, overlapping, npy, path, npass, exchange)
+  real(C_DOUBLE) function time_y(nxpp, nzd, nz, ny, nphi, overlapping, npy, path, npass, exchange, ok, max_error)
     integer(C_INT), intent(in) :: nxpp, nzd, nz, ny, nphi, npy, path(MAXP), npass, exchange
     logical, intent(in) :: overlapping
+    logical, intent(out) :: ok
+    real(C_DOUBLE), intent(out) :: max_error
     integer(C_INT), allocatable :: passes(:)
     integer(C_INT) :: nlines
 
@@ -351,22 +366,24 @@ contains
     if (npass > 0_C_INT) passes = path(1:npass)
     nlines = nxB*(2_C_INT*nz + 1_C_INT)
     call time_y_endpoint_solve(ny, nz, ny0, nyN, 1_C_INT, nlines, passes, exchange, &
-                               tune_repeats(), time_y)
+                               tune_repeats(), time_y, ok, max_error)
     deallocate (passes)
     call free_MPI()
   end function time_y
 
   subroutine time_y_endpoint_solve(ny, nz, row_start, row_end, line_start, nlines, &
-                                   passes, exchange, repeats, elapsed)
+                                   passes, exchange, repeats, elapsed, ok, max_error)
     integer(C_INT), intent(in) :: ny, nz, row_start, row_end, line_start, nlines
     integer(C_INT), intent(in) :: passes(:), exchange
     integer, intent(in) :: repeats
     real(C_DOUBLE), intent(out) :: elapsed
+    logical, intent(out) :: ok
+    real(C_DOUBLE), intent(out) :: max_error
     complex(C_DOUBLE_COMPLEX), allocatable :: dst(:, :, :)
     integer(C_INT) :: active_n, nx_count
     integer(C_INT64_T) :: t0, t1, rate
-    integer :: ierr, iter
-    real(C_DOUBLE) :: local_elapsed
+    integer :: ierr, iter, bad_local, bad_global
+    real(C_DOUBLE) :: local_elapsed, local_error, global_error
 
     call ys_prepare_assembled_workspace(ny, nz, row_start, row_end, line_start, nlines, passes, exchange)
     active_n = row_end - row_start + 1_C_INT
@@ -376,49 +393,122 @@ contains
 
     call system_clock(count_rate=rate)
     local_elapsed = 0.0_C_DOUBLE
+    max_error = 0.0_C_DOUBLE
+    ok = .true.
     do iter = 0, repeats
-      call seed_y_endpoint_system(active_n, nlines)
+      call seed_y_endpoint_system(ny, row_start, active_n, nlines)
       call MPI_Barrier(MPI_COMM_WORLD, ierr)
       call system_clock(t0)
       call ys_solve_endpoint_schur(dst, .true.)
       call MPI_Barrier(MPI_COMM_WORLD, ierr)
       call system_clock(t1)
+      !$omp target update from(dst)
+      call check_y_endpoint_solution(dst, row_start, row_end, nlines, local_error, bad_local)
+      call MPI_Allreduce(local_error, global_error, 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, ierr)
+      call MPI_Allreduce(bad_local, bad_global, 1, MPI_INTEGER, MPI_MAX, MPI_COMM_WORLD, ierr)
+      max_error = max(max_error, global_error)
+      if (bad_global /= 0 .or. global_error > Y_SOLVE_CHECK_TOL) then
+        ok = .false.
+        exit
+      end if
       if (iter > 0) local_elapsed = local_elapsed + real(t1 - t0, C_DOUBLE)/real(rate, C_DOUBLE)
     end do
 
-    local_elapsed = local_elapsed/real(max(1, repeats), C_DOUBLE)
-    call MPI_Allreduce(local_elapsed, elapsed, 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, ierr)
+    if (ok) then
+      local_elapsed = local_elapsed/real(max(1, repeats), C_DOUBLE)
+      call MPI_Allreduce(local_elapsed, elapsed, 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, ierr)
+    else
+      elapsed = huge(0.0_C_DOUBLE)
+    end if
 
     !$omp target exit data map(delete: dst)
     deallocate (dst)
     call ys_release_workspace(.true.)
   end subroutine time_y_endpoint_solve
 
-  subroutine seed_y_endpoint_system(active_n, nlines)
-    integer(C_INT), intent(in) :: active_n, nlines
-    integer(C_INT) :: irow, iline, p
+  subroutine seed_y_endpoint_system(ny, row_start, active_n, nlines)
+    integer(C_INT), intent(in) :: ny, row_start, active_n, nlines
+    complex(C_DOUBLE_COMPLEX) :: coeff(-2:2), rhs
+    integer(C_INT) :: irow, iline, p, iy, col
 
     !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, active_n, nlines) &
-    !$omp private(irow, iline, p)
+    !$omp shared(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, ny, row_start, active_n, nlines) &
+    !$omp private(irow, iline, p, iy, col, coeff, rhs)
     do irow = 1_C_INT, active_n
       do iline = 1_C_INT, nlines
+        iy = row_start + irow - 1_C_INT
         p = (irow - 1_C_INT)*nlines + iline
-        ys_gpsv_ds(p) = (0.0d0, 0.0d0)
-        ys_gpsv_dl(p) = (0.0d0, 0.0d0)
-        ys_gpsv_d(p) = (1.25d0, 0.0d0)
-        ys_gpsv_du(p) = (0.0d0, 0.0d0)
-        ys_gpsv_dw(p) = (0.0d0, 0.0d0)
-        if (irow > 2_C_INT) ys_gpsv_ds(p) = (-0.015d0, 0.0d0)
-        if (irow > 1_C_INT) ys_gpsv_dl(p) = (-0.08d0, 0.0d0)
-        if (irow < active_n) ys_gpsv_du(p) = (-0.08d0, 0.0d0)
-        if (irow < active_n - 1_C_INT) ys_gpsv_dw(p) = (-0.015d0, 0.0d0)
-        ys_gpsv_x(p) = cmplx(1.0_C_DOUBLE + 0.001_C_DOUBLE*real(mod(iline, 17_C_INT), C_DOUBLE), &
-                             0.002_C_DOUBLE*real(mod(irow, 13_C_INT), C_DOUBLE), kind=C_DOUBLE)
+        coeff(:) = (0.0d0, 0.0d0)
+        coeff(0) = (1.25d0, 0.0d0)
+        if (iy > 2_C_INT) coeff(-2) = (-0.015d0, 0.0d0)
+        if (iy > 1_C_INT) coeff(-1) = (-0.08d0, 0.0d0)
+        if (iy < ny - 1_C_INT) coeff(1) = (-0.08d0, 0.0d0)
+        if (iy < ny - 2_C_INT) coeff(2) = (-0.015d0, 0.0d0)
+
+        rhs = (0.0d0, 0.0d0)
+        do col = -2_C_INT, 2_C_INT
+          rhs = rhs + coeff(col)*autotune_exact_value(iy + col, iline)
+        end do
+
+        ys_gpsv_ds(p) = coeff(-2)
+        ys_gpsv_dl(p) = coeff(-1)
+        ys_gpsv_d(p) = coeff(0)
+        ys_gpsv_du(p) = coeff(1)
+        ys_gpsv_dw(p) = coeff(2)
+        ys_gpsv_x(p) = rhs
       end do
     end do
     !$omp end target teams distribute parallel do
   end subroutine seed_y_endpoint_system
+
+  subroutine check_y_endpoint_solution(dst, row_start, row_end, nlines, local_error, bad)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: dst(:, :, :)
+    integer(C_INT), intent(in) :: row_start, row_end, nlines
+    real(C_DOUBLE), intent(out) :: local_error
+    integer, intent(out) :: bad
+    complex(C_DOUBLE_COMPLEX) :: expected, got
+    integer(C_INT) :: active_n, nlines_z, nx_count, ix, iz_index, irow, iline, iy
+
+    active_n = row_end - row_start + 1_C_INT
+    nlines_z = size(dst, 2, kind=C_INT)
+    nx_count = nlines/nlines_z
+    local_error = 0.0_C_DOUBLE
+    bad = 0
+    do ix = 1_C_INT, nx_count
+      do iz_index = 1_C_INT, nlines_z
+        iline = (ix - 1_C_INT)*nlines_z + iz_index
+        do irow = 1_C_INT, active_n
+          iy = row_start + irow - 1_C_INT
+          got = dst(irow + 2_C_INT, iz_index, ix)
+          if (.not. finite_complex(got)) then
+            bad = 1
+            local_error = huge(0.0_C_DOUBLE)
+            return
+          end if
+          expected = autotune_exact_value(iy, iline)
+          local_error = max(local_error, abs(got - expected))
+        end do
+      end do
+    end do
+  end subroutine check_y_endpoint_solution
+
+  pure logical function finite_complex(value)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: value
+    finite_complex = ieee_is_finite(real(value, C_DOUBLE)) .and. ieee_is_finite(aimag(value))
+  end function finite_complex
+
+  pure complex(C_DOUBLE_COMPLEX) function autotune_exact_value(iy, iline)
+    integer(C_INT), intent(in) :: iy, iline
+    real(C_DOUBLE) :: yv, lr, li
+
+    yv = real(iy, C_DOUBLE)
+    lr = real(mod(iline, 17_C_INT), C_DOUBLE)
+    li = real(mod(iline, 13_C_INT), C_DOUBLE)
+    autotune_exact_value = cmplx(1.0_C_DOUBLE + 0.031_C_DOUBLE*yv - 0.00021_C_DOUBLE*yv*yv + &
+                                 0.000003_C_DOUBLE*yv*yv*yv + 0.0017_C_DOUBLE*lr, &
+                                 -0.25_C_DOUBLE + 0.017_C_DOUBLE*yv + 0.00013_C_DOUBLE*yv*yv + &
+                                 0.0023_C_DOUBLE*li, kind=C_DOUBLE)
+  end function autotune_exact_value
 
   subroutine node_ids(node)
     integer(C_INT), allocatable, intent(out) :: node(:)
