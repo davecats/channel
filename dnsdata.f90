@@ -25,8 +25,7 @@ MODULE dnsdata
   USE rbmat
   USE mpi_transpose
   USE ffts
-  USE y_schur_solver, ONLY: ys_schur_default_pass_counts, &
-                            YS_SCHUR_EXCHANGE_ALLGATHER, YS_SCHUR_EXCHANGE_ALLTOALL, &
+  USE y_schur_solver, ONLY: YS_SCHUR_EXCHANGE_ALLGATHER, YS_SCHUR_EXCHANGE_ALLTOALL, &
                             YS_SCHUR_EXCHANGE_AUTO
 
   IMPLICIT NONE
@@ -116,6 +115,7 @@ CONTAINS
   !--------------------------------------------------------------!
   !---------------------- Read input files ----------------------!
   SUBROUTINE read_dnsin(cfg)
+    USE mpi_autotune, ONLY: configure_mpi_decomposition
     IMPLICIT NONE
     logical :: i
     integer :: iPhi
@@ -123,8 +123,8 @@ CONTAINS
     character(len=16) :: env_value
     integer(C_INT) :: nstep_in
     integer(C_INT) :: npy_in
+    integer(C_INT) :: npxz_tuned
     integer :: status, length
-    integer :: io
     logical :: found
 
     call require_integer(cfg, "mesh", "nx", nx)
@@ -134,32 +134,6 @@ CONTAINS
     call get_integer(cfg, "parallel", "npy", npy_in, found)
     if (.not. found) call get_integer(cfg, "mesh", "npy", npy_in, found)
     npy = npy_in
-    call get_environment_variable("CHANNEL_NPY", env_value, length, status)
-    if (status == 0) then
-      read (env_value(:length), *, iostat=io) npy_in
-      if (io == 0 .and. npy_in >= 1) then
-        npy = npy_in
-      else
-        print *, "Warning: invalid value for CHANNEL_NPY:", trim(env_value(:length))
-      end if
-    end if
-    if (allocated(schur_pass_counts)) deallocate (schur_pass_counts)
-    call ys_schur_default_pass_counts(int(npy, C_INT), schur_pass_counts)
-    schur_exchange_mode = YS_SCHUR_EXCHANGE_AUTO
-    call get_environment_variable("CHANNEL_Y_SCHUR_GLOBAL_EXCHANGE", env_value, length, status)
-    if (status /= 0) call get_environment_variable("CHANNEL_Y_SCHUR_EXCHANGE", env_value, length, status)
-    if (status == 0) then
-      select case (adjustl(trim(env_value(:length))))
-      case ("auto", "AUTO", "default", "DEFAULT")
-        schur_exchange_mode = YS_SCHUR_EXCHANGE_AUTO
-      case ("alltoall", "ALLTOALL", "alltoallv", "ALLTOALLV")
-        schur_exchange_mode = YS_SCHUR_EXCHANGE_ALLTOALL
-      case ("allgather", "ALLGATHER", "allgatherv", "ALLGATHERV")
-        schur_exchange_mode = YS_SCHUR_EXCHANGE_ALLGATHER
-      case default
-        print *, "Warning: invalid value for CHANNEL_Y_SCHUR_GLOBAL_EXCHANGE:", trim(env_value(:length))
-      end select
-    end if
     call require_real(cfg, "mesh", "alfa0", alfa0)
     call require_real(cfg, "mesh", "beta0", beta0)
     nxd = 3*(nx + 1)/2
@@ -198,17 +172,6 @@ CONTAINS
     end if
     !$omp target enter data map(to: pra)
 
-    call require_real(cfg, "timestepping", "deltat", deltat)
-    call require_real(cfg, "timestepping", "cflmax", cflmax)
-    call require_real(cfg, "timestepping", "time", time)
-    call require_real(cfg, "timestepping", "dt_field", dt_field)
-    call require_real(cfg, "timestepping", "dt_save", dt_save)
-    call require_real(cfg, "timestepping", "t_max", t_max)
-    call require_logical(cfg, "timestepping", "time_from_restart", time_from_restart)
-    call require_integer(cfg, "timestepping", "nstep", nstep_in)
-    nstep = int(nstep_in, C_SIZE_T)
-
-    dx = PI/(alfa0*nxd); dz = 2.0d0*PI/(beta0*nzd); factor = 1.0d0/(2.0d0*nxd*nzd)
     call get_environment_variable("CHANNEL_OVERLAPPING", env_value, length, status)
     overlapping = .false.
     if (status == 0) then
@@ -221,6 +184,23 @@ CONTAINS
         print *, "Warning: invalid value for CHANNEL_OVERLAPPING:", trim(env_value(:length))
       end select
     end if
+
+    if (allocated(schur_pass_counts)) deallocate (schur_pass_counts)
+    npy_in = npy
+    call configure_mpi_decomposition(nx + 1, nxd, nzd, nz, ny, nPhi, overlapping, npy_in, &
+                                     npy, npxz_tuned, schur_pass_counts, schur_exchange_mode)
+
+    call require_real(cfg, "timestepping", "deltat", deltat)
+    call require_real(cfg, "timestepping", "cflmax", cflmax)
+    call require_real(cfg, "timestepping", "time", time)
+    call require_real(cfg, "timestepping", "dt_field", dt_field)
+    call require_real(cfg, "timestepping", "dt_save", dt_save)
+    call require_real(cfg, "timestepping", "t_max", t_max)
+    call require_logical(cfg, "timestepping", "time_from_restart", time_from_restart)
+    call require_integer(cfg, "timestepping", "nstep", nstep_in)
+    nstep = int(nstep_in, C_SIZE_T)
+
+    dx = PI/(alfa0*nxd); dz = 2.0d0*PI/(beta0*nzd); factor = 1.0d0/(2.0d0*nxd*nzd)
     call get_environment_variable("CHANNEL_DISABLE_RESTART_WRITE", env_value, length, status)
     disable_restart_write = .false.
     if (status == 0) then

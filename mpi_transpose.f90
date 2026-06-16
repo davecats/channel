@@ -53,6 +53,7 @@
     complex(C_DOUBLE_COMPLEX), allocatable, target :: ycomm_sendbuf(:), ycomm_recvbuf(:)
 #endif
 #if defined(HAVE_HIP)
+    type(c_ptr), save :: xcomm_sendptr = c_null_ptr, xcomm_recvptr = c_null_ptr
     type(c_ptr), save :: ycomm_sendptr = c_null_ptr, ycomm_recvptr = c_null_ptr
 #endif
     integer(C_INT), save :: ycomm_send_capacity = 0, ycomm_recv_capacity = 0
@@ -71,6 +72,7 @@
     !$omp declare target(npy_grid, npxz, ipy, ipxz, nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN, sendcount)
 
     logical, save :: has_terminal, has_average, fft_transpose_is_local
+    logical, save :: mpi_transpose_initialized = .false.
 #ifdef HAVE_MPI
     TYPE(MPI_Datatype), save :: writeview_type, owned2write_type, vel_read_type, vel_field_type
 #endif
@@ -667,17 +669,19 @@
 
     !------- Divide the problem in pencils ---------!
     !-----------------------------------------------!
-    SUBROUTINE init_MPI(nxpp, nz, ny, nzd, nPhi, overlapping, npy_requested)
+    SUBROUTINE init_MPI(nxpp, nz, ny, nzd, nPhi, overlapping, npy_requested, suppress_verbose)
       integer(C_INT), intent(in)  :: nxpp, nz, ny, nzd, nPhi, npy_requested
       logical, intent(in) :: overlapping
+      logical, optional, intent(in) :: suppress_verbose
       integer, parameter :: ndims = 4
       integer :: i, color, key
       integer :: array_of_sizes(ndims), array_of_subsizes(ndims), array_of_starts(ndims), ierror
       integer(C_INT) :: miny_local, maxy_local
-#if defined(HAVE_HIP)
-      type(c_ptr) :: sendptr, recvptr
-#endif
       integer(c_size_t) :: sendsize, recvsize
+      logical :: quiet_verbose
+      if (mpi_transpose_initialized) call free_MPI()
+      quiet_verbose = .false.
+      if (present(suppress_verbose)) quiet_verbose = suppress_verbose
       ! Define which process write on screen
       has_terminal = (iproc == 0)
       npy_grid = npy_requested
@@ -732,11 +736,13 @@
       fft_transpose_is_local = (nzB == nzd)
 #ifdef HAVE_MPI
 #ifdef mpiverbose
-      DO i = 0, nproc - 1
-       IF (iproc==i) WRITE(*,*) "iproc=",iproc," ipxz=",ipxz," ipy=",ipy," nx0=",nx0," nxN=",nxN," nxB=",nxB, "nz0=",nz0," nzN=",nzN," nzB=",nzB, "ny0=", ny0, "nyN=", nyN
-        CALL MPI_Barrier(MPI_COMM_WORLD)
-      END DO
-      FLUSH (output_unit)
+      if (.not. quiet_verbose) then
+        DO i = 0, nproc - 1
+         IF (iproc==i) WRITE(*,*) "iproc=",iproc," ipxz=",ipxz," ipy=",ipy," nx0=",nx0," nxN=",nxN," nxB=",nxB, "nz0=",nz0," nzN=",nzN," nzB=",nzB, "ny0=", ny0, "nyN=", nyN
+          CALL MPI_Barrier(MPI_COMM_WORLD)
+        END DO
+        FLUSH (output_unit)
+      end if
 #endif
       ! The pairwise all-to-all transpose uses one shared sendcount for every rank,
       ! so both decomposed dimensions must divide evenly across MPI ranks.
@@ -764,10 +770,10 @@
 #if defined(HAVE_HIP)
       ! On HIP with HSA_XNACK=1, the use_device_ptr statements around the MPI calls are ignored.
       ! Hence, MPI does a CPU mpi copy! So we need to allocate it explicity on the device.
-      sendptr = omp_target_alloc(sendsize*int(16*merge(2, 1, overlapping), c_size_t), omp_get_default_device())
-      recvptr = omp_target_alloc(recvsize*int(16*merge(2, 1, overlapping), c_size_t), omp_get_default_device())
-      call c_f_pointer(sendptr, sendbuf, [sendsize, int(merge(2, 1, overlapping), c_size_t)])
-      call c_f_pointer(recvptr, recvbuf, [recvsize, int(merge(2, 1, overlapping), c_size_t)])
+      xcomm_sendptr = omp_target_alloc(sendsize*int(16*merge(2, 1, overlapping), c_size_t), omp_get_default_device())
+      xcomm_recvptr = omp_target_alloc(recvsize*int(16*merge(2, 1, overlapping), c_size_t), omp_get_default_device())
+      call c_f_pointer(xcomm_sendptr, sendbuf, [sendsize, int(merge(2, 1, overlapping), c_size_t)])
+      call c_f_pointer(xcomm_recvptr, recvbuf, [recvsize, int(merge(2, 1, overlapping), c_size_t)])
 #else
       ALLOCATE (sendbuf(sendsize, merge(2, 1, overlapping))); sendbuf = 0
       ALLOCATE (recvbuf(recvsize, merge(2, 1, overlapping))); recvbuf = 0
@@ -793,6 +799,62 @@
     CALL MPI_Type_create_subarray(ndims, array_of_sizes, array_of_subsizes, array_of_starts, MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, owned2write_type, ierror)
       CALL MPI_Type_commit(owned2write_type, ierror)
 #endif
+      mpi_transpose_initialized = .true.
     END SUBROUTINE init_MPI
+
+    subroutine free_MPI()
+      implicit none
+#ifdef HAVE_MPI
+      integer :: ierror
+#endif
+
+      if (.not. mpi_transpose_initialized) return
+
+#if defined(HAVE_HIP)
+      if (c_associated(xcomm_sendptr)) call omp_target_free(xcomm_sendptr, omp_get_default_device())
+      if (c_associated(xcomm_recvptr)) call omp_target_free(xcomm_recvptr, omp_get_default_device())
+      xcomm_sendptr = c_null_ptr
+      xcomm_recvptr = c_null_ptr
+#else
+      if (allocated(sendbuf)) then
+        !$omp target exit data map(delete: sendbuf, recvbuf)
+        deallocate (sendbuf, recvbuf)
+      end if
+#endif
+
+      if (allocated(yslab_workspace)) call release_yslab_scratch()
+      if (allocated(yslab_first_line_by_rank)) then
+        !$omp target exit data map(delete: yslab_first_line_by_rank, yslab_line_count_by_rank, &
+        !$omp& yslab_active_first_y_by_rank, yslab_send_counts, yslab_recv_counts, &
+        !$omp& yslab_send_displs, yslab_recv_displs)
+        deallocate (yslab_first_line_by_rank, yslab_line_count_by_rank, yslab_active_first_y_by_rank, &
+                    yslab_send_counts, yslab_recv_counts, yslab_send_displs, yslab_recv_displs)
+      end if
+#if defined(HAVE_HIP)
+      if (c_associated(ycomm_sendptr)) call omp_target_free(ycomm_sendptr, omp_get_default_device())
+      if (c_associated(ycomm_recvptr)) call omp_target_free(ycomm_recvptr, omp_get_default_device())
+      ycomm_sendptr = c_null_ptr
+      ycomm_recvptr = c_null_ptr
+#else
+      if (allocated(ycomm_sendbuf)) then
+        !$omp target exit data map(delete: ycomm_sendbuf, ycomm_recvbuf)
+        deallocate (ycomm_sendbuf, ycomm_recvbuf)
+      end if
+#endif
+      ycomm_send_capacity = 0
+      ycomm_recv_capacity = 0
+
+#ifdef HAVE_MPI
+      call MPI_Type_free(writeview_type, ierror)
+      call MPI_Type_free(owned2write_type, ierror)
+      call MPI_Type_free(vel_read_type, ierror)
+      call MPI_Type_free(vel_field_type, ierror)
+      call MPI_Comm_free(MPI_COMM_X, ierror)
+      call MPI_Comm_free(MPI_COMM_Y, ierror)
+      MPI_COMM_X = MPI_COMM_NULL
+      MPI_COMM_Y = MPI_COMM_NULL
+#endif
+      mpi_transpose_initialized = .false.
+    end subroutine free_MPI
 
   END MODULE mpi_transpose

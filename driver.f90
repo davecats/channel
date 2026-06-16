@@ -14,18 +14,20 @@
 #include "header.h"
 
 MODULE driver
+  USE roctx, ONLY: roctxPush, roctxPop
 
 CONTAINS
   !==========================================================
   SUBROUTINE initialize(config_file, restart_file, solveNS)
     use config, only: ini_config, read_ini_file
     USE dnsdata
+    USE mpi_transpose, only: init_MPI
     USE convvelo, only: init_convvelo_runtime, get_convvelo_memory_estimate, configure_convvelo
     USE ffts, only: get_fft_memory_estimate
 #ifdef HAVE_CUDA
-    USE ffts, only: init_cufft
+    USE ffts, only: init_cufft, free_fft
 #elif defined(HAVE_HIP)
-    USE ffts, only: init_hipfft
+    USE ffts, only: init_hipfft, free_fft
 #else
     USE ffts, only: init_fft, free_fft
 #endif
@@ -266,9 +268,12 @@ CONTAINS
                        free_memory
     USE convvelo, only: finalize_convvelo_runtime
     USE pressure_output, only: free_pressure_output
-#ifdef HAVE_FFTW
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    USE ffts, only: free_fft
+#elif defined(HAVE_FFTW)
     USE ffts, only: free_fft
 #endif
+    USE mpi_transpose, only: free_MPI
     IMPLICIT NONE
     if (disable_restart_write) then
       IF (has_terminal) WRITE (*, *) "End of time/iterations loop: restart write disabled for benchmark profiling at time ", time
@@ -281,9 +286,12 @@ CONTAINS
     call finalize_convvelo_runtime()
     CALL free_pressure_output()
     ! Realease memory
-#ifdef HAVE_FFTW
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    CALL free_fft()
+#elif defined(HAVE_FFTW)
     CALL free_fft(VVdz, VVdx, rVVdx)
 #endif
+    CALL free_MPI()
     CALL free_memory(.TRUE.)
 #ifdef HAVE_MPI
     CALL MPI_Finalize()

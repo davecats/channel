@@ -50,6 +50,33 @@ add_channel_mpi_test(
 )
 
 add_channel_mpi_test(
+    NAME regression_test_autotune_default_2rank
+    TARGET test_regression
+    NPROCS 2
+    PROCESSORS 2
+    ARGS tests/data/dns_test_npy2.in
+    ENVIRONMENT CHANNEL_MPI_AUTOTUNE_REPEATS=1
+)
+
+add_channel_mpi_test(
+    NAME regression_test_autotune_report_2rank
+    TARGET test_regression
+    NPROCS 2
+    PROCESSORS 2
+    ARGS tests/data/dns_test_npy2.in
+    ENVIRONMENT CHANNEL_MPI_AUTOTUNE=report CHANNEL_MPI_AUTOTUNE_REPEATS=1
+)
+
+add_channel_mpi_test(
+    NAME regression_test_manual_decomp_2rank
+    TARGET test_regression
+    NPROCS 2
+    PROCESSORS 2
+    ARGS tests/data/dns_test_npy2.in
+    ENVIRONMENT CHANNEL_NPXZ=1 CHANNEL_NPY=2 CHANNEL_Y_SCHUR_PASSES=2 CHANNEL_Y_SCHUR_EXCHANGE=allgather CHANNEL_MPI_AUTOTUNE_REPEATS=1
+)
+
+add_channel_mpi_test(
     NAME pressure_dpdy_1rank
     TARGET test_pressure_dpdy
     NPROCS 1
@@ -216,11 +243,19 @@ add_channel_mpi_test(
     TARGET test_mean_correction
     NPROCS 2
     PROCESSORS 2
+    ENVIRONMENT CHANNEL_NPY=2
 )
+
+add_test(NAME mpi_autotune_candidate_generation
+    COMMAND $<TARGET_FILE:test_mpi_autotune_candidates>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(mpi_autotune_candidate_generation PROPERTIES PROCESSORS 1)
 
 add_channel_mpi_test(
     NAME mean_correction_npy2_2rank_schur
     TARGET test_mean_correction
     NPROCS 2
     PROCESSORS 2
+    ENVIRONMENT CHANNEL_NPY=2
 )

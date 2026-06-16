@@ -15,7 +15,7 @@ module y_schur_solver
   integer(C_INT), parameter :: YS_SCHUR_ROW_WIDTH = 20_C_INT
   integer(C_INT), parameter :: YS_SCHUR_VALUE_WIDTH = 8_C_INT
   integer(C_INT), parameter :: YS_SCHUR_BW = 5_C_INT
-  integer(C_INT), parameter :: YS_SCHUR_MAX_ARITY = 16_C_INT
+  integer(C_INT), parameter :: YS_SCHUR_MAX_ARITY = 8_C_INT
   integer(C_INT), parameter :: YS_SCHUR_MAX_ROWS = 4_C_INT*YS_SCHUR_MAX_ARITY
   integer(C_INT), parameter, public :: YS_SCHUR_EXCHANGE_AUTO = 0_C_INT
   integer(C_INT), parameter, public :: YS_SCHUR_EXCHANGE_ALLTOALL = 1_C_INT

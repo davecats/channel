@@ -367,11 +367,41 @@ CONTAINS
     real(C_DOUBLE), pointer, dimension(:, :, :, :), intent(out) :: rVVdx
 
     !$omp target exit data map(from: VVdz)
+    call fftw_destroy_plan(pFFT)
+    call fftw_destroy_plan(pIFT)
+    call fftw_destroy_plan(pRFT)
+    call fftw_destroy_plan(pHFT)
     if (associated(products)) deallocate (products)
     if (allocated(fftw_rVVdx)) deallocate (fftw_rVVdx)
     if (allocated(fftw_VVdx)) deallocate (fftw_VVdx)
     if (allocated(fftw_VVdz)) deallocate (fftw_VVdz)
     nullify (VVdz, VVdx, rVVdx)
+  END SUBROUTINE free_fft
+#elif defined(HAVE_CUDA)
+  SUBROUTINE free_fft()
+    integer :: istat
+    istat = cufftDestroy(cu_pFFT)
+    istat = cufftDestroy(cu_pIFT)
+    istat = cufftDestroy(cu_pRFT)
+    istat = cufftDestroy(cu_pHFT)
+    !$omp target exit data map(delete: VVdz, VVdx, rVVdx, products)
+    if (allocated(products)) deallocate (products)
+    if (allocated(rVVdx)) deallocate (rVVdx)
+    if (allocated(VVdx)) deallocate (VVdx)
+    if (allocated(VVdz)) deallocate (VVdz)
+  END SUBROUTINE free_fft
+#elif defined(HAVE_HIP)
+  SUBROUTINE free_fft()
+    integer :: istat
+    istat = hipfftDestroy(hip_pFFT)
+    istat = hipfftDestroy(hip_pIFT)
+    istat = hipfftDestroy(hip_pRFT)
+    istat = hipfftDestroy(hip_pHFT)
+    !$omp target exit data map(delete: VVdz, VVdx, rVVdx, products)
+    if (allocated(products)) deallocate (products)
+    if (allocated(rVVdx)) deallocate (rVVdx)
+    if (allocated(VVdx)) deallocate (VVdx)
+    if (allocated(VVdz)) deallocate (VVdz)
   END SUBROUTINE free_fft
 #endif
 

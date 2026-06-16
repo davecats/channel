@@ -21,6 +21,7 @@ add_library(channel_core
     compact_line_solvers.f90
     mpi_transpose.f90
     ffts.f90
+    mpi_autotune.f90
     dnsdata.f90
     convvelo.f90
     pressure_output.f90
@@ -79,6 +80,9 @@ target_link_libraries(test_y_pencil_transpose PRIVATE channel_core)
 
 add_executable(test_mean_correction test_mean_correction.f90)
 target_link_libraries(test_mean_correction PRIVATE channel_core)
+
+add_executable(test_mpi_autotune_candidates test_mpi_autotune_candidates.f90)
+target_link_libraries(test_mpi_autotune_candidates PRIVATE channel_core)
 
 # Add a CTest target
 enable_testing()
