@@ -6,7 +6,7 @@ module convvelo
   use config, only: ini_config, has_section, get_string, get_real, lower
   use dnsdata, only: V, nPhi, nz, ny, der, nxd, izd, factor, iproc, D0mat, d240, d24m1, d24n, d24np1, &
                      apply_complex_derivative_current_layout, has_terminal, &
-                     time, deltat
+                     time, deltat, overlapping
   use pressure_output, only: compute_poisson, compute_dpdy
   use mpi_transpose, only: ny0, nyN, nx0, nxN, nxB, nzB, nx, has_average, ierr, sendbuf, recvbuf, &
                            pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, nzd, fft_transpose_is_local, &
@@ -18,11 +18,13 @@ module convvelo
                            MPI_File_open, MPI_File_set_size, MPI_File_write_at, MPI_File_set_view, &
                            MPI_File_write_all, MPI_File_close
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
-  use ffts, only: IFT, RFT, HFT, FFT, VVdx, VVdz
+  use ffts, only: IFT, RFT, HFT, FFT, VVdx, VVdz, get_fft_workspace_bytes, get_fft_workspace_bytes_for_dims, &
+                  bind_fft_workspace, unbind_fft_workspace
 #else
   use dnsdata, only: VVdx, VVdz
   use ffts, only: IFT, RFT, HFT, FFT
 #endif
+  use byte_workspace, only: workspace_request, workspace_release, workspace_slice, workspace_align_offset
 
   implicit none
 
@@ -82,16 +84,16 @@ module convvelo
   complex(C_DOUBLE_COMPLEX), allocatable, save, public :: convvelo_stats(:, :, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable, save, public :: convvelo_work(:, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable, save, public :: component_means(:, :)
-  real(C_DOUBLE), allocatable, save :: convvelo_real0(:, :, :)
-  real(C_DOUBLE), allocatable, save :: convvelo_real1(:, :, :)
-  real(C_DOUBLE), allocatable, save :: convvelo_real_prod(:, :, :)
+  real(C_DOUBLE), pointer, contiguous, save :: convvelo_real0(:, :, :)
+  real(C_DOUBLE), pointer, contiguous, save :: convvelo_real1(:, :, :)
+  real(C_DOUBLE), pointer, contiguous, save :: convvelo_real_prod(:, :, :)
   integer(C_INT64_T), allocatable, save :: n_field_samples(:)
 
   public :: init_convvelo, reset_convvelo_stats, update_convvelo_component_means, free_convvelo
   public :: finish_convvelo_field
   public :: acc_convvelo_stats, convvelo_has_pending_output
   public :: init_convvelo_runtime, advance_convvelo_runtime, finalize_convvelo_runtime
-  public :: get_convvelo_memory_estimate, write_convvelo_raw_stats, write_convvelo_runtime_snapshot
+  public :: get_convvelo_memory_estimate, get_convvelo_workspace_estimate, write_convvelo_raw_stats, write_convvelo_runtime_snapshot
   public :: configure_convvelo
 
 contains
@@ -141,7 +143,7 @@ contains
   subroutine get_convvelo_memory_estimate(n_floats)
     implicit none
     integer(C_INT64_T), intent(out) :: n_floats
-    integer(C_INT64_T) :: local_y, spectral_planes, real_planes, n_fields
+    integer(C_INT64_T) :: local_y, spectral_planes, component_planes, n_fields
 
     if (.not. convvelo_enabled) then
       n_floats = 0_C_INT64_T
@@ -150,7 +152,7 @@ contains
 
     local_y = int(nyN - ny0 + 5, C_INT64_T)
     spectral_planes = local_y*int(2*nz + 1, C_INT64_T)*int(nxN - nx0 + 1, C_INT64_T)
-    real_planes = int(2*(nxd + 1), C_INT64_T)*int(nzB, C_INT64_T)*int(nyN - ny0 + 5, C_INT64_T)
+    component_planes = local_y*int(3 + nPhi, C_INT64_T)
     if (convvelo_write_full_fields) then
       n_fields = int(n_convvelo_velocity_fields_total + nPhi*n_convvelo_scalar_fields_total, C_INT64_T)
     else
@@ -160,8 +162,28 @@ contains
     n_floats = 0_C_INT64_T
     n_floats = n_floats + 2_C_INT64_T*spectral_planes*n_fields
     n_floats = n_floats + 2_C_INT64_T*spectral_planes
-    n_floats = n_floats + 3_C_INT64_T*real_planes
+    n_floats = n_floats + 2_C_INT64_T*component_planes
   end subroutine get_convvelo_memory_estimate
+
+  subroutine get_convvelo_workspace_estimate(nbytes)
+    implicit none
+    integer(C_SIZE_T), intent(out) :: nbytes
+    integer(C_SIZE_T) :: real_bytes, fft_offset, fft_bytes
+
+    if (.not. convvelo_enabled) then
+      nbytes = 0_C_SIZE_T
+      return
+    end if
+
+    call get_convvelo_local_real_workspace_bytes(real_bytes)
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    call get_fft_workspace_bytes_for_dims(nxd, nxB, nzd, nzB, nPhi, overlapping, fft_bytes)
+    fft_offset = workspace_align_offset(real_bytes)
+    nbytes = workspace_align_offset(fft_offset + fft_bytes)
+#else
+    nbytes = real_bytes
+#endif
+  end subroutine get_convvelo_workspace_estimate
 
   subroutine init_convvelo()
     implicit none
@@ -173,20 +195,15 @@ contains
     allocate (convvelo_stats(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, n_convvelo_fields))
     allocate (convvelo_work(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
     allocate (component_means(ny0 - 2:nyN + 2, 1:3 + nPhi))
-    allocate (convvelo_real0(2*(nxd + 1), nzB, ny0 - 2:nyN + 2))
-    allocate (convvelo_real1(2*(nxd + 1), nzB, ny0 - 2:nyN + 2))
-    allocate (convvelo_real_prod(2*(nxd + 1), nzB, ny0 - 2:nyN + 2))
+    nullify (convvelo_real0, convvelo_real1, convvelo_real_prod)
     allocate (n_field_samples(n_convvelo_fields))
 
     convvelo_stats = (0.0d0, 0.0d0)
     convvelo_work = (0.0d0, 0.0d0)
     component_means = (0.0d0, 0.0d0)
-    convvelo_real0 = 0.0d0
-    convvelo_real1 = 0.0d0
-    convvelo_real_prod = 0.0d0
     n_field_samples = 0_C_INT64_T
 
-    !$omp target enter data map(to: convvelo_stats, convvelo_work, component_means, convvelo_real0, convvelo_real1, convvelo_real_prod)
+    !$omp target enter data map(to: convvelo_stats, convvelo_work, component_means)
 
     n_mean_samples = 0_C_INT64_T
     convvelo_last_write_index = -1_C_INT64_T
@@ -667,6 +684,7 @@ contains
     integer(C_INT), intent(in) :: rhs0, rhs1
     integer(C_INT) :: iy, iz, ix
 
+    call acquire_convvelo_real_workspace("convvelo_real")
     call load_convvelo_field_to_zbuf(rhs0)
     call spectral_field_to_real_x(convvelo_real0)
     call load_convvelo_field_to_zbuf(rhs1)
@@ -681,7 +699,99 @@ contains
       end do
     end do
     call real_x_to_spectral_field(convvelo_real_prod, convvelo_work)
+    call release_convvelo_real_workspace("convvelo_real")
   end subroutine build_cross_product_work
+
+  subroutine get_convvelo_real_workspace_bytes(real_bytes, fft_offset, total_bytes)
+    implicit none
+    integer(C_SIZE_T), intent(out) :: real_bytes, fft_offset, total_bytes
+    integer(C_SIZE_T) :: fft_bytes
+
+    call get_convvelo_local_real_workspace_bytes(real_bytes)
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    call get_fft_workspace_bytes(fft_bytes)
+    fft_offset = workspace_align_offset(real_bytes)
+    total_bytes = workspace_align_offset(fft_offset + fft_bytes)
+#else
+    fft_offset = 0_C_SIZE_T
+    total_bytes = real_bytes
+#endif
+  end subroutine get_convvelo_real_workspace_bytes
+
+  subroutine get_convvelo_local_real_workspace_bytes(nbytes)
+    implicit none
+    integer(C_SIZE_T), intent(out) :: nbytes
+    integer(C_SIZE_T) :: real_count, offset
+
+    real_count = int(2*(nxd + 1), C_SIZE_T)*int(nzB, C_SIZE_T)*int(nyN - ny0 + 5, C_SIZE_T)
+    offset = 0_C_SIZE_T
+    offset = workspace_align_offset(offset + real_count*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
+    offset = workspace_align_offset(offset + real_count*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
+    nbytes = workspace_align_offset(offset + real_count*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
+  end subroutine get_convvelo_local_real_workspace_bytes
+
+  subroutine acquire_convvelo_real_workspace(owner)
+    implicit none
+    character(len=*), intent(in) :: owner
+    type(C_PTR) :: base
+    integer(C_SIZE_T) :: real_bytes, fft_offset, total_bytes
+
+    call get_convvelo_real_workspace_bytes(real_bytes, fft_offset, total_bytes)
+    call workspace_request(total_bytes, owner, base)
+    call bind_convvelo_real_workspace()
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    call bind_fft_workspace(fft_offset)
+#endif
+  end subroutine acquire_convvelo_real_workspace
+
+  subroutine release_convvelo_real_workspace(owner)
+    implicit none
+    character(len=*), intent(in) :: owner
+
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    call unbind_fft_workspace()
+#endif
+    call unbind_convvelo_real_workspace()
+    call workspace_release(owner)
+  end subroutine release_convvelo_real_workspace
+
+  subroutine bind_convvelo_real_workspace()
+    implicit none
+    type(C_PTR) :: ptr
+    real(C_DOUBLE), pointer :: rbuf(:)
+    integer(C_SIZE_T) :: offset, real_count
+
+    real_count = int(2*(nxd + 1), C_SIZE_T)*int(nzB, C_SIZE_T)*int(nyN - ny0 + 5, C_SIZE_T)
+    offset = 0_C_SIZE_T
+    call bind_real_3d(offset, convvelo_real0)
+    call bind_real_3d(offset, convvelo_real1)
+    call bind_real_3d(offset, convvelo_real_prod)
+
+    !$omp target enter data map(to: convvelo_real0, convvelo_real1, convvelo_real_prod)
+    !$omp target
+    convvelo_real0(1, 1, ny0 - 2) = 0.0_C_DOUBLE
+    convvelo_real1(1, 1, ny0 - 2) = 0.0_C_DOUBLE
+    convvelo_real_prod(1, 1, ny0 - 2) = 0.0_C_DOUBLE
+    !$omp end target
+
+  contains
+    subroutine bind_real_3d(offset_bytes, target)
+      integer(C_SIZE_T), intent(inout) :: offset_bytes
+      real(C_DOUBLE), pointer, contiguous, intent(out) :: target(:, :, :)
+
+      call workspace_slice(offset_bytes, ptr)
+      call c_f_pointer(ptr, rbuf, [int(real_count)])
+      target(1:2*(nxd + 1), 1:nzB, ny0 - 2:nyN + 2) => rbuf
+      offset_bytes = workspace_align_offset(offset_bytes + real_count*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
+    end subroutine bind_real_3d
+  end subroutine bind_convvelo_real_workspace
+
+  subroutine unbind_convvelo_real_workspace()
+    implicit none
+
+    !$omp target exit data map(release: convvelo_real0, convvelo_real1, convvelo_real_prod)
+    nullify (convvelo_real0, convvelo_real1, convvelo_real_prod)
+  end subroutine unbind_convvelo_real_workspace
 
   subroutine apply_dy_to_existing_work()
     implicit none
@@ -699,8 +809,8 @@ contains
 
     if (.not. convvelo_initialized) return
 
-    !$omp target exit data map(delete: convvelo_stats, convvelo_work, component_means, convvelo_real0, convvelo_real1, convvelo_real_prod)
-    deallocate (convvelo_stats, convvelo_work, component_means, convvelo_real0, convvelo_real1, convvelo_real_prod, n_field_samples)
+    !$omp target exit data map(delete: convvelo_stats, convvelo_work, component_means)
+    deallocate (convvelo_stats, convvelo_work, component_means, n_field_samples)
     if (allocated(convvelo_velocity_field_ids)) deallocate (convvelo_velocity_field_ids)
     if (allocated(convvelo_scalar_field_ids)) deallocate (convvelo_scalar_field_ids)
     if (allocated(convvelo_field_map)) deallocate (convvelo_field_map)

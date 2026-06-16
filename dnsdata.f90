@@ -56,7 +56,6 @@ MODULE dnsdata
   !$omp declare target(d14np1, d14n, d14m1, d140)
   real(C_DOUBLE), allocatable :: D0mat(:, :), eta00mat(:, :)
   real(C_DOUBLE), target, allocatable ::  ws(:)
-  real(C_DOUBLE), pointer :: linsolve_mat(:, :, :, :)
   complex(C_DOUBLE_COMPLEX), pointer :: memrhs(:, :, :, :)
 #if !(defined(HAVE_CUDA) || defined(HAVE_HIP))
   !Fourier-transformable arrays (allocated in ffts.f90)
@@ -90,7 +89,8 @@ MODULE dnsdata
   character(len=40) :: fname
   logical :: overlapping
 
-  public :: get_solver_memory_estimate, sync_velocity_to_device, apply_complex_derivative_current_layout
+  public :: get_solver_memory_estimate, get_solver_workspace_estimate, get_mpi_buffer_memory_estimate
+  public :: sync_velocity_to_device, apply_complex_derivative_current_layout
   public :: eliminate_assembled_boundaries, reconstruct_assembled_boundaries
   abstract interface
     subroutine compact_component_assembly(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end)
@@ -226,7 +226,6 @@ CONTAINS
   !--------------------------------------------------------------!
   !---------------- Allocate memory for solution ----------------!
   SUBROUTINE init_memory(solveNS)
-    use y_line_solvers, only: ys_prepare_assembled_workspace
     IMPLICIT NONE
     INTEGER(C_INT) :: ix, iy, iz
     logical, intent(IN) :: solveNS
@@ -245,12 +244,10 @@ CONTAINS
     !$omp target enter data map(to: bc0, bcn, zero_bc)
     IF (solveNS) then
       ALLOCATE (memrhs(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:2 + nPhi), &
-                oldrhs(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:2 + nPhi), &
-                linsolve_mat(ny0:nyN + 2, -2:2, -nz:nz, nx0:nxN))
+                oldrhs(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:2 + nPhi))
       memrhs = 0.0
       oldrhs = 0.0
-      linsolve_mat = 0.0
-      !$omp target enter data map(to: memrhs, linsolve_mat, oldrhs)
+      !$omp target enter data map(to: memrhs, oldrhs)
     END IF
 #define newrhs(iy,iz,ix,i) memrhs(iy,iz,ix,i)
 #define imod(iy) MOD(iy+1000,5)
@@ -277,8 +274,6 @@ CONTAINS
 
     allocate (fr(3 + 2*nPhi)); fr = 0.0
     if (has_terminal) call print_schur_configuration()
-    call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, nxB*(2*nz + 1), &
-                                        schur_pass_counts, schur_exchange_mode)
   END SUBROUTINE init_memory
 
   subroutine print_schur_configuration()
@@ -304,13 +299,10 @@ CONTAINS
     logical, intent(in) :: solveNS
     integer(C_INT64_T), intent(out) :: n_floats
     integer(C_INT64_T) :: spectral_planes, bc_planes, linear_planes
-    integer(C_INT64_T) :: sendcount64, nbufs
 
     spectral_planes = int(nyN - ny0 + 5, C_INT64_T)*int(2*nz + 1, C_INT64_T)*int(nxN - nx0 + 1, C_INT64_T)
     bc_planes = int(2*nz + 1, C_INT64_T)*int(nxN - nx0 + 1, C_INT64_T)*int(5 + nPhi, C_INT64_T)
     linear_planes = int(ny - 1, C_INT64_T)*int(2*nz + 1, C_INT64_T)*int(nxN - nx0 + 1, C_INT64_T)*int(2 + nPhi, C_INT64_T)
-    sendcount64 = int(nxB, C_INT64_T)*int(nzB, C_INT64_T)*int(nyN - ny0 + 5, C_INT64_T)
-    nbufs = int(merge(2, 1, overlapping), C_INT64_T)
 
     n_floats = 0_C_INT64_T
     n_floats = n_floats + 2_C_INT64_T*spectral_planes*int(3 + nPhi, C_INT64_T)
@@ -320,11 +312,31 @@ CONTAINS
     n_floats = n_floats + 4_C_INT64_T*bc_planes
     if (solveNS) then
       n_floats = n_floats + 4_C_INT64_T*linear_planes
-      n_floats = n_floats + 2_C_INT64_T*5_C_INT64_T*int(nyN - ny0 + 3, C_INT64_T)* &
-                 int(2*nz + 1, C_INT64_T)*int(nxN - nx0 + 1, C_INT64_T)
     end if
-    n_floats = n_floats + 4_C_INT64_T*sendcount64*int(nproc, C_INT64_T)*nbufs
   END SUBROUTINE get_solver_memory_estimate
+
+  SUBROUTINE get_solver_workspace_estimate(solveNS, nbytes)
+    use y_line_solvers, only: ys_get_workspace_bytes
+    IMPLICIT NONE
+    logical, intent(in) :: solveNS
+    integer(C_SIZE_T), intent(out) :: nbytes
+
+    if (solveNS) then
+      call ys_get_workspace_bytes(ny, nz, ny0, nyN, 1_C_INT, nxB*(2*nz + 1), nbytes)
+    else
+      nbytes = 0_C_SIZE_T
+    end if
+  END SUBROUTINE get_solver_workspace_estimate
+
+  SUBROUTINE get_mpi_buffer_memory_estimate(n_floats)
+    IMPLICIT NONE
+    integer(C_INT64_T), intent(out) :: n_floats
+    integer(C_INT64_T) :: sendcount64, nbufs
+
+    sendcount64 = int(nxB, C_INT64_T)*int(nzB, C_INT64_T)*int(nyN - ny0 + 5, C_INT64_T)
+    nbufs = int(merge(2, 1, overlapping), C_INT64_T)
+    n_floats = 4_C_INT64_T*sendcount64*int(nproc, C_INT64_T)*nbufs
+  END SUBROUTINE get_mpi_buffer_memory_estimate
 
   !--------------------------------------------------------------!
   !--------------- Deallocate memory for solution ---------------!
@@ -342,16 +354,15 @@ CONTAINS
     !$omp target exit data map(delete: bc0, bcn, zero_bc)
     DEALLOCATE (bc0, bcn, zero_bc)
     IF (solveNS) THEN
-      if (associated(memrhs) .or. associated(linsolve_mat) .or. allocated(oldrhs)) then
-        !$omp target exit data map(delete: memrhs, oldrhs, linsolve_mat)
+      if (associated(memrhs) .or. allocated(oldrhs)) then
+        !$omp target exit data map(delete: memrhs, oldrhs)
       end if
       if (associated(memrhs)) deallocate (memrhs)
       if (allocated(oldrhs)) deallocate (oldrhs)
-      if (associated(linsolve_mat)) deallocate (linsolve_mat)
       CLOSE (UNIT=195)
       IF (has_terminal) CLOSE (UNIT=121)
     END IF
-    call ys_release_workspace()
+    call ys_release_workspace(.true.)
   END SUBROUTINE free_memory
 
   SUBROUTINE sync_velocity_to_device()
@@ -861,7 +872,7 @@ CONTAINS
 
   SUBROUTINE solve_compact_component_current_layout(field_values, assemble_system, boundary_system, lambda_coeff, diffusion_coeff, source_values, &
                                                     solve_label, symmetric_operator, transpose_derivative)
-    use y_line_solvers, only: ys_prepare_assembled_workspace, ys_solve_endpoint_schur
+    use y_line_solvers, only: ys_prepare_assembled_workspace, ys_release_workspace, ys_solve_endpoint_schur
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), target, intent(inout) :: field_values(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     procedure(compact_component_assembly) :: assemble_system
@@ -885,11 +896,14 @@ CONTAINS
     owner_dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => field_values
     has_lower_boundary = (ny0 == 1)
     has_upper_boundary = (nyN == ny - 1)
+    call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, nxB*(2*nz + 1), &
+                                        schur_pass_counts, schur_exchange_mode)
     call assemble_system(owner_src, lambda_coeff, diffusion_coeff, ny0, nyN)
     call boundary_system(owner_src, ny0, nyN, has_lower_boundary, has_upper_boundary)
     call eliminate_assembled_boundaries(ny0, nyN, has_lower_boundary, has_upper_boundary)
     call ys_solve_endpoint_schur(field_values, symmetric_operator_value)
     call reconstruct_assembled_boundaries(owner_dst, ny0, nyN, has_lower_boundary, has_upper_boundary)
+    call ys_release_workspace()
   END SUBROUTINE solve_compact_component_current_layout
 
   SUBROUTINE scatter_full_y_line(full_line, local_line)
@@ -1063,7 +1077,7 @@ CONTAINS
     y_first = ny0
     y_last = nyN
     !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(VVdx) shared(nx, nxd, nzB, y_first, y_last, to) private(i,j,k)
+    !$omp shared(VVdx, nx, nxd, nzB, y_first, y_last, to) private(i,j,k)
     DO i = y_first - 2, y_last + 2
       DO j = 1, nzB
         DO k = nx + 2, nxd + 1
@@ -1105,7 +1119,7 @@ CONTAINS
       iPhi = (m - 4)/3
       component = mod(m - 4, 3) + 1
       !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(rVVdx, products) shared(nxd, nzB, y_first, y_last, factor, iPhi, component, to)
+      !$omp shared(rVVdx, products, nxd, nzB, y_first, y_last, factor, iPhi, component, to)
       DO i = y_first - 2, y_last + 2
         DO j = 1, nzB
           DO k = 1, 2*nxd
@@ -1117,7 +1131,7 @@ CONTAINS
       first = mod(m - 1, 3) + 1
       second = mod(m, 3) + 1
       !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(rVVdx, products) shared(nxd, nzB, y_first, y_last, factor, first, second, m, to) private(a, b)
+      !$omp shared(rVVdx, products, nxd, nzB, y_first, y_last, factor, first, second, m, to) private(a, b)
       DO i = y_first - 2, y_last + 2
         DO j = 1, nzB
           DO k = 1, 2*nxd
@@ -1129,7 +1143,7 @@ CONTAINS
       END DO
     else ! cases 1, 2, 3
       !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(rVVdx, products) shared(nxd, nzB, y_first, y_last, factor, m, to) private(a)
+      !$omp shared(rVVdx, products, nxd, nzB, y_first, y_last, factor, m, to) private(a)
       DO i = y_first - 2, y_last + 2
         DO j = 1, nzB
           DO k = 1, 2*nxd
@@ -1408,9 +1422,9 @@ CONTAINS
 
     SELECT CASE (component)
     CASE (1)
-      !$omp target teams distribute parallel do collapse(3) default(none)  &
+      !$omp target teams distribute parallel do collapse(3) default(none) &
       !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
-      !$omp shared(nz, nx0, nxN, ny, y_first, y_last, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode) shared(vvdz)
+      !$omp shared(nz, nx0, nxN, ny, y_first, y_last, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, VVdz)
       DO iz = -nz, nz
         DO ix = nx0, nxN
           DO iy = y_first, y_last
@@ -1425,9 +1439,9 @@ CONTAINS
       END DO
     CASE (2)
       !contribution from VVdz(:,:,:,2)
-      !$omp target teams distribute parallel do collapse(3) default(none)  &
+      !$omp target teams distribute parallel do collapse(3) default(none) &
       !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
-      !$omp shared(nz, nx0, nxN, ny, y_first, y_last, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
+      !$omp shared(nz, nx0, nxN, ny, y_first, y_last, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2, VVdz)
       DO iz = -nz, nz
         DO ix = nx0, nxN
           DO iy = y_first, y_last
@@ -1439,9 +1453,9 @@ CONTAINS
       END DO
     CASE (3)
       !contribution from VVdz(:,:,:,3)
-      !$omp target teams distribute parallel do collapse(3) default(none)  &
+      !$omp target teams distribute parallel do collapse(3) default(none) &
       !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
-      !$omp shared(nz, nx0, nxN, ny, y_first, y_last, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
+      !$omp shared(nz, nx0, nxN, ny, y_first, y_last, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2, VVdz)
       DO iz = -nz, nz
         DO ix = nx0, nxN
           DO iy = y_first, y_last
@@ -1455,9 +1469,9 @@ CONTAINS
       END DO
     CASE (4)
       !contribution from VVdz(:,:,:,4)
-      !$omp target teams distribute parallel do collapse(3) default(none)  &
+      !$omp target teams distribute parallel do collapse(3) default(none) &
       !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
-      !$omp shared(nz, nx0, nxN, ny, y_first, y_last, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
+      !$omp shared(nz, nx0, nxN, ny, y_first, y_last, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2, VVdz)
       DO iz = -nz, nz
         DO ix = nx0, nxN
           DO iy = y_first, y_last
@@ -1472,9 +1486,9 @@ CONTAINS
       END DO
     CASE (5)
       !contribution from VVdz(:,:,:,5)
-      !$omp target teams distribute parallel do collapse(3) default(none)  &
+      !$omp target teams distribute parallel do collapse(3) default(none) &
       !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
-      !$omp shared(nz, nx0, nxN, ny, y_first, y_last, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
+      !$omp shared(nz, nx0, nxN, ny, y_first, y_last, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2, VVdz)
       DO iz = -nz, nz
         DO ix = nx0, nxN
           DO iy = y_first, y_last
@@ -1490,9 +1504,9 @@ CONTAINS
       END DO
     CASE (6)
       !contribution from VVdz(:,:,:,6)
-      !$omp target teams distribute parallel do collapse(3) default(none)  &
+      !$omp target teams distribute parallel do collapse(3) default(none) &
       !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
-      !$omp shared(nz, nx0, nxN, ny, y_first, y_last, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2) shared(vvdz)
+      !$omp shared(nz, nx0, nxN, ny, y_first, y_last, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2, VVdz)
       DO iz = -nz, nz
         DO ix = nx0, nxN
           DO iy = y_first, y_last
@@ -1511,9 +1525,9 @@ CONTAINS
       iPhi = (component - 4)/3
       SELECT CASE (MODULO((component - 4), 3) + 1)
       CASE (1)
-        !$omp target teams distribute parallel do collapse(3) default(none)  &
+        !$omp target teams distribute parallel do collapse(3) default(none) &
         !$omp private(rhst, iz, ix, iy) &
-        !$omp shared(nz, nx0, nxN, ny, y_first, y_last, ialfa, V, ode, der, oldrhs, iphi, vvdz, izd, from)
+        !$omp shared(nz, nx0, nxN, ny, y_first, y_last, ialfa, V, ode, der, oldrhs, iphi, VVdz, izd, from)
         DO iz = -nz, nz
           DO ix = nx0, nxN
             DO iy = y_first, y_last
@@ -1523,9 +1537,9 @@ CONTAINS
           END DO
         END DO
       CASE (2)
-        !$omp target teams distribute parallel do collapse(3) default(none)  &
+        !$omp target teams distribute parallel do collapse(3) default(none) &
         !$omp private(rhst, iz, ix, iy) &
-        !$omp shared(nz, nx0, nxN, ny, y_first, y_last, V, ode, der, oldrhs, iphi, vvdz, izd, from)
+        !$omp shared(nz, nx0, nxN, ny, y_first, y_last, V, ode, der, oldrhs, iphi, VVdz, izd, from)
         DO iz = -nz, nz
           DO ix = nx0, nxN
             DO iy = y_first, y_last
@@ -1536,9 +1550,9 @@ CONTAINS
           END DO
         END DO
       CASE (3)
-        !$omp target teams distribute parallel do collapse(3) default(none)  &
+        !$omp target teams distribute parallel do collapse(3) default(none) &
         !$omp private(rhst, iz, ix, iy) &
-        !$omp shared(nz, nx0, nxN, ny, y_first, y_last, ibeta,V, ode, der, oldrhs, iphi, vvdz, izd, from)
+        !$omp shared(nz, nx0, nxN, ny, y_first, y_last, ibeta,V, ode, der, oldrhs, iphi, VVdz, izd, from)
         DO iz = -nz, nz
           DO ix = nx0, nxN
             DO iy = y_first, y_last

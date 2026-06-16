@@ -3,7 +3,7 @@
 module y_line_solvers
 
   use, intrinsic :: iso_c_binding
-  use mpi_transpose, only: ny0, nyN, nx0, nxN, nxB, npy_grid, ipy
+  use mpi_transpose, only: ny0, nyN, nx0, nxN, nxB, npy_grid, ipy, iproc
   use y_schur_solver, only: ys_schur_config, ys_schur_workspace, ys_schur_configure, &
                             ys_schur_prepare, ys_schur_release, ys_schur_solve_from_packed, &
                             YS_SCHUR_EXCHANGE_AUTO
@@ -11,6 +11,7 @@ module y_line_solvers
   use mpi_transpose, only: MPI_COMM_Y, ensure_ycomm_buffers, ycomm_sendbuf, ycomm_recvbuf
 #endif
   use roctx, only: roctxPush, roctxPop
+  use byte_workspace, only: workspace_request, workspace_release, workspace_slice, workspace_align_offset
 #ifdef HAVE_MPI
   use mpi_f08
 #endif
@@ -66,7 +67,8 @@ module y_line_solvers
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_CONST = 1_C_INT
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_EVEN_Z = 2_C_INT
 
-  public :: ys_prepare_assembled_workspace, ys_release_workspace
+  public :: ys_prepare_assembled_workspace, ys_release_workspace, ys_get_workspace_bytes
+  public :: ys_get_gpusparse_buffer_bytes
   public :: ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs
   public :: ys_eqm1, ys_eq0, ys_eqn, ys_eqnp1
   public :: ys_boundary_lower_rhs0, ys_boundary_upper_rhsn, ys_boundary_lower_eq, ys_boundary_upper_eq
@@ -84,38 +86,41 @@ module y_line_solvers
   integer(C_INT), save :: ys_workspace_nlines = 0
   integer(C_INT), save :: ys_workspace_active_n = 0
   integer(C_INT), save :: ys_workspace_reduced_node_size = -1
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+  logical, save :: ys_gpsv_buffer_reported = .false.
+#endif
   integer(C_INT), save :: ys_owner_nz = 0
   integer(C_INT), save :: ys_owner_nx = 0
   integer(C_INT), save :: ys_owner_ix0 = 1
   integer(C_INT), save :: ys_owner_ixN = 0
 
-  complex(C_DOUBLE_COMPLEX), allocatable, target, save :: ys_gpsv_matrix_store(:), ys_gpsv_rhs_store(:)
-  complex(C_DOUBLE_COMPLEX), pointer, save :: ys_gpsv_ds(:), ys_gpsv_dl(:), ys_gpsv_d(:), ys_gpsv_du(:), ys_gpsv_dw(:), ys_gpsv_x(:)
-  complex(C_DOUBLE_COMPLEX), pointer, save :: ys_gpsv_matrix(:, :, :, :), ys_gpsv_rhs(:, :, :)
-  complex(C_DOUBLE_COMPLEX), pointer, save :: ys_gpsv_line_matrix(:, :, :), ys_gpsv_line_rhs(:, :)
-  complex(C_DOUBLE_COMPLEX), pointer, save :: ys_gpsv_owner_matrix(:, :, :, :), ys_gpsv_owner_rhs(:, :, :)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_gpsv_matrix_store(:), ys_gpsv_rhs_store(:)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_gpsv_ds(:), ys_gpsv_dl(:), ys_gpsv_d(:), ys_gpsv_du(:), ys_gpsv_dw(:), ys_gpsv_x(:)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_gpsv_matrix(:, :, :, :), ys_gpsv_rhs(:, :, :)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_gpsv_line_matrix(:, :, :), ys_gpsv_line_rhs(:, :)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_gpsv_owner_matrix(:, :, :, :), ys_gpsv_owner_rhs(:, :, :)
 
-  complex(C_DOUBLE_COMPLEX), allocatable, target, save :: ys_lower_ghost_store(:), ys_lower_boundary_store(:)
-  complex(C_DOUBLE_COMPLEX), allocatable, target, save :: ys_upper_boundary_store(:), ys_upper_ghost_store(:)
-  complex(C_DOUBLE_COMPLEX), pointer, save :: ys_lower_ghost_rhs(:), ys_lower_boundary_rhs(:)
-  complex(C_DOUBLE_COMPLEX), pointer, save :: ys_upper_boundary_rhs(:), ys_upper_ghost_rhs(:)
-  complex(C_DOUBLE_COMPLEX), pointer, save :: ys_lower_ghost_owner(:, :), ys_lower_boundary_owner(:, :)
-  complex(C_DOUBLE_COMPLEX), pointer, save :: ys_upper_boundary_owner(:, :), ys_upper_ghost_owner(:, :)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_lower_ghost_store(:), ys_lower_boundary_store(:)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_upper_boundary_store(:), ys_upper_ghost_store(:)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_lower_ghost_rhs(:), ys_lower_boundary_rhs(:)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_upper_boundary_rhs(:), ys_upper_ghost_rhs(:)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_lower_ghost_owner(:, :), ys_lower_boundary_owner(:, :)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_upper_boundary_owner(:, :), ys_upper_ghost_owner(:, :)
 
-  real(C_DOUBLE), allocatable, target, save :: ys_eqm1_store(:), ys_eq0_store(:), ys_eqn_store(:), ys_eqnp1_store(:)
-  real(C_DOUBLE), pointer, save :: ys_eqm1(:, :), ys_eq0(:, :), ys_eqn(:, :), ys_eqnp1(:, :)
-  real(C_DOUBLE), pointer, save :: ys_eqm1_owner(:, :, :), ys_eq0_owner(:, :, :), ys_eqn_owner(:, :, :), ys_eqnp1_owner(:, :, :)
+  real(C_DOUBLE), pointer, contiguous, save :: ys_eqm1_store(:), ys_eq0_store(:), ys_eqn_store(:), ys_eqnp1_store(:)
+  real(C_DOUBLE), pointer, contiguous, save :: ys_eqm1(:, :), ys_eq0(:, :), ys_eqn(:, :), ys_eqnp1(:, :)
+  real(C_DOUBLE), pointer, contiguous, save :: ys_eqm1_owner(:, :, :), ys_eq0_owner(:, :, :), ys_eqn_owner(:, :, :), ys_eqnp1_owner(:, :, :)
 
-  complex(C_DOUBLE_COMPLEX), allocatable, target, save :: ys_boundary_lower_rhs0_store(:), ys_boundary_upper_rhsn_store(:)
-  complex(C_DOUBLE_COMPLEX), pointer, save :: ys_boundary_lower_rhs0(:), ys_boundary_upper_rhsn(:)
-  real(C_DOUBLE), allocatable, target, save :: ys_boundary_lower_eq_store(:), ys_boundary_upper_eq_store(:)
-  real(C_DOUBLE), pointer, save :: ys_boundary_lower_eq(:, :), ys_boundary_upper_eq(:, :)
-  complex(C_DOUBLE_COMPLEX), pointer, save :: ys_boundary_lower_rhs0_owner(:, :), ys_boundary_upper_rhsn_owner(:, :)
-  real(C_DOUBLE), pointer, save :: ys_boundary_lower_eq_owner(:, :, :), ys_boundary_upper_eq_owner(:, :, :)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_boundary_lower_rhs0_store(:), ys_boundary_upper_rhsn_store(:)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_boundary_lower_rhs0(:), ys_boundary_upper_rhsn(:)
+  real(C_DOUBLE), pointer, contiguous, save :: ys_boundary_lower_eq_store(:), ys_boundary_upper_eq_store(:)
+  real(C_DOUBLE), pointer, contiguous, save :: ys_boundary_lower_eq(:, :), ys_boundary_upper_eq(:, :)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_boundary_lower_rhs0_owner(:, :), ys_boundary_upper_rhsn_owner(:, :)
+  real(C_DOUBLE), pointer, contiguous, save :: ys_boundary_lower_eq_owner(:, :, :), ys_boundary_upper_eq_owner(:, :, :)
 
-  complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_reduced_rows_send(:, :)
-  complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_left_interface_values(:, :), ys_right_interface_values(:, :)
-  complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_reduced_rhs(:, :)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_reduced_rows_send(:, :)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_left_interface_values(:, :), ys_right_interface_values(:, :)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_reduced_rhs(:, :)
   integer(C_INT), allocatable, save :: ys_reduced_pass_counts(:)
   integer(C_INT), save :: ys_reduced_exchange_mode = YS_SCHUR_EXCHANGE_AUTO
   type(ys_schur_workspace), save :: ys_reduced_schur_ws
@@ -130,13 +135,18 @@ module y_line_solvers
 #endif
   integer(C_INT), save :: ys_gpsv_n = -1, ys_gpsv_batch = -1
   integer(C_INT64_T), save :: ys_batch_capacity = 0_C_INT64_T
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+  integer(C_SIZE_T), save :: ys_gpsv_buffer_peak_bytes = 0_C_SIZE_T
+#endif
 #if defined(HAVE_CUDA)
   integer(8), save :: ys_gpsv_buffer_size = 0_8
+  integer(8), save :: ys_gpsv_buffer_capacity = 0_8
 #elif defined(HAVE_HIP)
   integer(C_SIZE_T), save :: ys_gpsv_buffer_size = 0_C_SIZE_T
+  integer(C_SIZE_T), save :: ys_gpsv_buffer_capacity = 0_C_SIZE_T
 #endif
-  complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_batch_ds(:), ys_batch_dl(:), ys_batch_d(:)
-  complex(C_DOUBLE_COMPLEX), allocatable, save :: ys_batch_du(:), ys_batch_dw(:), ys_batch_x(:)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_batch_ds(:), ys_batch_dl(:), ys_batch_d(:)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_batch_du(:), ys_batch_dw(:), ys_batch_x(:)
 #if defined(HAVE_CUDA)
   character(c_char), allocatable, target, save :: ys_gpsv_buffer(:)
   !$omp declare target(ys_factor_penta_interleaved)
@@ -239,6 +249,187 @@ contains
     end if
   end subroutine ys_bind_core_views
 
+  subroutine ys_bind_workspace_storage(active_n, nlines, nz)
+    implicit none
+    integer(C_INT), intent(in) :: active_n, nlines, nz
+    type(C_PTR) :: base, ptr
+    complex(C_DOUBLE_COMPLEX), pointer :: cbuf(:)
+    real(C_DOUBLE), pointer :: rbuf(:)
+    integer(C_SIZE_T) :: offset, nall, nx_count, n_complex, n_real
+    integer(C_SIZE_T) :: total_bytes
+
+    nall = int(nlines, C_SIZE_T)*int(active_n, C_SIZE_T)
+    nx_count = int(nlines/(2*nz + 1), C_SIZE_T)
+    ys_batch_capacity = int(active_n, C_INT64_T)* &
+                        (int(nlines, C_INT64_T) + 4_C_INT64_T*int(nx_count, C_INT64_T)*int(nz + 1, C_INT64_T))
+
+    call ys_workspace_bytes(active_n, nlines, nz, total_bytes)
+    call workspace_request(total_bytes, "y_line_solver", base)
+
+    offset = 0_C_SIZE_T
+    n_complex = 5_C_SIZE_T*nall
+    call bind_complex_1d(offset, n_complex, ys_gpsv_matrix_store)
+    n_complex = nall
+    call bind_complex_1d(offset, n_complex, ys_gpsv_rhs_store)
+    n_complex = int(nlines, C_SIZE_T)
+    call bind_complex_1d(offset, n_complex, ys_lower_ghost_store)
+    call bind_complex_1d(offset, n_complex, ys_lower_boundary_store)
+    call bind_complex_1d(offset, n_complex, ys_upper_boundary_store)
+    call bind_complex_1d(offset, n_complex, ys_upper_ghost_store)
+
+    n_real = 5_C_SIZE_T*int(nlines, C_SIZE_T)
+    call bind_real_1d(offset, n_real, ys_eqm1_store)
+    call bind_real_1d(offset, n_real, ys_eq0_store)
+    call bind_real_1d(offset, n_real, ys_eqn_store)
+    call bind_real_1d(offset, n_real, ys_eqnp1_store)
+
+    n_complex = int(nlines, C_SIZE_T)
+    call bind_complex_1d(offset, n_complex, ys_boundary_lower_rhs0_store)
+    call bind_complex_1d(offset, n_complex, ys_boundary_upper_rhsn_store)
+    n_real = 4_C_SIZE_T*int(nlines, C_SIZE_T)
+    call bind_real_1d(offset, n_real, ys_boundary_lower_eq_store)
+    call bind_real_1d(offset, n_real, ys_boundary_upper_eq_store)
+
+    n_complex = int(ys_batch_capacity, C_SIZE_T)
+    call bind_complex_1d(offset, n_complex, ys_batch_ds)
+    call bind_complex_1d(offset, n_complex, ys_batch_dl)
+    call bind_complex_1d(offset, n_complex, ys_batch_d)
+    call bind_complex_1d(offset, n_complex, ys_batch_du)
+    call bind_complex_1d(offset, n_complex, ys_batch_dw)
+    call bind_complex_1d(offset, n_complex, ys_batch_x)
+
+    if (npy_grid > 1) then
+      n_complex = 20_C_SIZE_T*int(nlines, C_SIZE_T)
+      call workspace_slice(offset, ptr)
+      call c_f_pointer(ptr, cbuf, [int(n_complex)])
+      ys_reduced_rows_send(1:20, 1:nlines) => cbuf
+      offset = workspace_align_offset(offset + n_complex*int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T))
+
+      n_complex = 2_C_SIZE_T*int(nlines, C_SIZE_T)
+      call workspace_slice(offset, ptr)
+      call c_f_pointer(ptr, cbuf, [int(n_complex)])
+      ys_left_interface_values(1:2, 1:nlines) => cbuf
+      offset = workspace_align_offset(offset + n_complex*int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T))
+
+      call workspace_slice(offset, ptr)
+      call c_f_pointer(ptr, cbuf, [int(n_complex)])
+      ys_right_interface_values(1:2, 1:nlines) => cbuf
+      offset = workspace_align_offset(offset + n_complex*int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T))
+
+      n_complex = 4_C_SIZE_T*int(npy_grid, C_SIZE_T)*int(nlines, C_SIZE_T)
+      call workspace_slice(offset, ptr)
+      call c_f_pointer(ptr, cbuf, [int(n_complex)])
+      ys_reduced_rhs(1:4*npy_grid, 1:nlines) => cbuf
+    end if
+
+  contains
+    subroutine bind_complex_1d(offset_bytes, count, target)
+      integer(C_SIZE_T), intent(inout) :: offset_bytes
+      integer(C_SIZE_T), intent(in) :: count
+      complex(C_DOUBLE_COMPLEX), pointer, contiguous, intent(out) :: target(:)
+
+      call workspace_slice(offset_bytes, ptr)
+      call c_f_pointer(ptr, cbuf, [int(count)])
+      target(1:int(count)) => cbuf
+      offset_bytes = workspace_align_offset(offset_bytes + count*int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T))
+    end subroutine bind_complex_1d
+
+    subroutine bind_real_1d(offset_bytes, count, target)
+      integer(C_SIZE_T), intent(inout) :: offset_bytes
+      integer(C_SIZE_T), intent(in) :: count
+      real(C_DOUBLE), pointer, contiguous, intent(out) :: target(:)
+
+      call workspace_slice(offset_bytes, ptr)
+      call c_f_pointer(ptr, rbuf, [int(count)])
+      target(1:int(count)) => rbuf
+      offset_bytes = workspace_align_offset(offset_bytes + count*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
+    end subroutine bind_real_1d
+  end subroutine ys_bind_workspace_storage
+
+  subroutine ys_workspace_bytes(active_n, nlines, nz, nbytes)
+    implicit none
+    integer(C_INT), intent(in) :: active_n, nlines, nz
+    integer(C_SIZE_T), intent(out) :: nbytes
+    integer(C_SIZE_T) :: offset, nall, nx_count, batch_capacity, n_complex, n_real
+
+    nall = int(nlines, C_SIZE_T)*int(active_n, C_SIZE_T)
+    nx_count = int(nlines/(2*nz + 1), C_SIZE_T)
+    batch_capacity = int(active_n, C_SIZE_T)*(int(nlines, C_SIZE_T) + 4_C_SIZE_T*nx_count*int(nz + 1, C_SIZE_T))
+
+    offset = 0_C_SIZE_T
+    call add_complex(5_C_SIZE_T*nall)
+    call add_complex(nall)
+    n_complex = int(nlines, C_SIZE_T)
+    call add_complex(n_complex)
+    call add_complex(n_complex)
+    call add_complex(n_complex)
+    call add_complex(n_complex)
+    n_real = 5_C_SIZE_T*int(nlines, C_SIZE_T)
+    call add_real(n_real)
+    call add_real(n_real)
+    call add_real(n_real)
+    call add_real(n_real)
+    n_complex = int(nlines, C_SIZE_T)
+    call add_complex(n_complex)
+    call add_complex(n_complex)
+    n_real = 4_C_SIZE_T*int(nlines, C_SIZE_T)
+    call add_real(n_real)
+    call add_real(n_real)
+    n_complex = batch_capacity
+    call add_complex(n_complex)
+    call add_complex(n_complex)
+    call add_complex(n_complex)
+    call add_complex(n_complex)
+    call add_complex(n_complex)
+    call add_complex(n_complex)
+
+    if (npy_grid > 1) then
+      call add_complex(20_C_SIZE_T*int(nlines, C_SIZE_T))
+      call add_complex(2_C_SIZE_T*int(nlines, C_SIZE_T))
+      call add_complex(2_C_SIZE_T*int(nlines, C_SIZE_T))
+      call add_complex(4_C_SIZE_T*int(npy_grid, C_SIZE_T)*int(nlines, C_SIZE_T))
+    end if
+    nbytes = offset
+
+  contains
+    subroutine add_complex(count)
+      integer(C_SIZE_T), intent(in) :: count
+      offset = workspace_align_offset(offset + count*int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T))
+    end subroutine add_complex
+
+    subroutine add_real(count)
+      integer(C_SIZE_T), intent(in) :: count
+      offset = workspace_align_offset(offset + count*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
+    end subroutine add_real
+  end subroutine ys_workspace_bytes
+
+  subroutine ys_get_workspace_bytes(ny, nz, row_start, row_end, line_start, nlines, nbytes)
+    implicit none
+    integer(C_INT), intent(in) :: ny, nz, row_start, row_end, line_start, nlines
+    integer(C_SIZE_T), intent(out) :: nbytes
+    integer(C_INT) :: active_n, nlines_z
+
+    active_n = row_end - row_start + 1
+    nlines_z = 2*nz + 1
+    if (ny < 1) error stop "ys_get_workspace_bytes requires ny >= 1"
+    if (active_n < 1) error stop "ys_get_workspace_bytes requires at least one row"
+    if (mod(line_start - 1, nlines_z) /= 0) error stop "ys_get_workspace_bytes requires ix-aligned line_start"
+    if (mod(nlines, nlines_z) /= 0) error stop "ys_get_workspace_bytes requires full ix columns"
+
+    call ys_workspace_bytes(active_n, nlines, nz, nbytes)
+  end subroutine ys_get_workspace_bytes
+
+  subroutine ys_get_gpusparse_buffer_bytes(nbytes)
+    implicit none
+    integer(C_SIZE_T), intent(out) :: nbytes
+
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    nbytes = ys_gpsv_buffer_peak_bytes
+#else
+    nbytes = 0_C_SIZE_T
+#endif
+  end subroutine ys_get_gpusparse_buffer_bytes
+
   subroutine ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pass_counts, schur_exchange_mode)
     implicit none
     integer(C_INT), intent(in) :: row_start, row_end, line_start, nlines, nz
@@ -250,37 +441,23 @@ contains
 
     active_n = row_end - row_start + 1
 
-    if (allocated(ys_gpsv_rhs_store)) error stop "ys_allocate_workspace called with core workspace already allocated"
-    if (allocated(ys_batch_ds)) error stop "ys_allocate_workspace called with batch workspace already allocated"
-    if (allocated(ys_reduced_rows_send)) error stop "ys_allocate_workspace called with reduced workspace already allocated"
-
-    allocate (ys_gpsv_matrix_store(5*nlines*active_n), ys_gpsv_rhs_store(nlines*active_n))
-    allocate (ys_lower_ghost_store(nlines), ys_lower_boundary_store(nlines), &
-              ys_upper_boundary_store(nlines), ys_upper_ghost_store(nlines))
-    allocate (ys_eqm1_store(5*nlines), ys_eq0_store(5*nlines), &
-              ys_eqn_store(5*nlines), ys_eqnp1_store(5*nlines))
-    allocate (ys_boundary_lower_rhs0_store(nlines), ys_boundary_upper_rhsn_store(nlines))
-    allocate (ys_boundary_lower_eq_store(4*nlines), ys_boundary_upper_eq_store(4*nlines))
+    if (associated(ys_gpsv_rhs_store)) error stop "ys_allocate_workspace called with core workspace already allocated"
+    if (associated(ys_batch_ds)) error stop "ys_allocate_workspace called with batch workspace already allocated"
+    if (associated(ys_reduced_rows_send)) error stop "ys_allocate_workspace called with reduced workspace already allocated"
+    call ys_bind_workspace_storage(active_n, nlines, nz)
 
     call ys_bind_core_views(row_start, row_end, line_start, nlines)
 
-    !$omp target enter data map(alloc: ys_gpsv_matrix_store, ys_gpsv_rhs_store, &
+    !$omp target enter data map(to: ys_gpsv_matrix_store, ys_gpsv_rhs_store, &
     !$omp& ys_lower_ghost_store, ys_lower_boundary_store, ys_upper_boundary_store, ys_upper_ghost_store, &
     !$omp& ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store, &
     !$omp& ys_boundary_lower_rhs0_store, ys_boundary_upper_rhsn_store, &
     !$omp& ys_boundary_lower_eq_store, ys_boundary_upper_eq_store)
 
     nx_count = int(nlines/(2*nz + 1), C_INT64_T)
-    ys_batch_capacity = int(active_n, C_INT64_T)* &
-                        (int(nlines, C_INT64_T) + 4_C_INT64_T*nx_count*int(nz + 1, C_INT64_T))
-    allocate (ys_batch_ds(ys_batch_capacity), ys_batch_dl(ys_batch_capacity), ys_batch_d(ys_batch_capacity), &
-              ys_batch_du(ys_batch_capacity), ys_batch_dw(ys_batch_capacity), ys_batch_x(ys_batch_capacity))
-    !$omp target enter data map(alloc: ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
+    !$omp target enter data map(to: ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
 
     if (npy_grid > 1) then
-      allocate (ys_reduced_rows_send(20, nlines), ys_left_interface_values(2, nlines), &
-                ys_right_interface_values(2, nlines))
-      allocate (ys_reduced_rhs(4*npy_grid, nlines))
       allocate (ys_reduced_pass_counts(size(schur_pass_counts)))
       ys_reduced_pass_counts = schur_pass_counts
       ys_reduced_exchange_mode = schur_exchange_mode
@@ -288,7 +465,7 @@ contains
       call ys_schur_configure(cfg, schur_pass_counts, exchange_mode=schur_exchange_mode)
       call ys_schur_prepare(ys_reduced_schur_ws, cfg, nlines, npy_grid)
 
-      !$omp target enter data map(alloc: ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values, &
+      !$omp target enter data map(to: ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values, &
       !$omp& ys_reduced_rhs)
       ys_workspace_reduced_node_size = 0_C_INT
     end if
@@ -326,18 +503,26 @@ contains
     ys_workspace_nlines = nlines
     ys_workspace_active_n = active_n
 
-    if (allocated(ys_gpsv_rhs_store) .or. allocated(ys_reduced_rows_send)) then
+    if (associated(ys_gpsv_rhs_store) .or. associated(ys_reduced_rows_send)) then
       error stop "ys_prepare_assembled_workspace should only be called once after ys_release_workspace"
     end if
 
     call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pass_counts, wanted_exchange_mode)
   end subroutine ys_prepare_assembled_workspace
 
-  subroutine ys_release_workspace()
+  subroutine ys_release_workspace(finalize_external)
     implicit none
+    logical, intent(in), optional :: finalize_external
+    logical :: release_byte_workspace
+    logical :: release_external
 
-    if (allocated(ys_gpsv_rhs_store)) then
-      !$omp target exit data map(delete: ys_gpsv_matrix_store, ys_gpsv_rhs_store, &
+    release_byte_workspace = .false.
+    release_external = .false.
+    if (present(finalize_external)) release_external = finalize_external
+
+    if (associated(ys_gpsv_rhs_store)) then
+      release_byte_workspace = .true.
+      !$omp target exit data map(release: ys_gpsv_matrix_store, ys_gpsv_rhs_store, &
       !$omp& ys_lower_ghost_store, ys_lower_boundary_store, ys_upper_boundary_store, ys_upper_ghost_store, &
       !$omp& ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store, &
       !$omp& ys_boundary_lower_rhs0_store, ys_boundary_upper_rhsn_store, &
@@ -345,19 +530,18 @@ contains
 
       call ys_nullify_core_views()
 
-      deallocate (ys_gpsv_matrix_store, ys_gpsv_rhs_store)
-      deallocate (ys_lower_ghost_store, ys_lower_boundary_store, ys_upper_boundary_store, ys_upper_ghost_store)
-      deallocate (ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store)
-      deallocate (ys_boundary_lower_rhs0_store, ys_boundary_upper_rhsn_store, &
-                  ys_boundary_lower_eq_store, ys_boundary_upper_eq_store)
+      nullify (ys_gpsv_matrix_store, ys_gpsv_rhs_store, &
+               ys_lower_ghost_store, ys_lower_boundary_store, ys_upper_boundary_store, ys_upper_ghost_store, &
+               ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store, &
+               ys_boundary_lower_rhs0_store, ys_boundary_upper_rhsn_store, &
+               ys_boundary_lower_eq_store, ys_boundary_upper_eq_store)
     end if
 
     call ys_schur_release(ys_reduced_schur_ws)
-    if (allocated(ys_reduced_rows_send)) then
-      !$omp target exit data map(delete: ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values, &
+    if (associated(ys_reduced_rows_send)) then
+      !$omp target exit data map(release: ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values, &
       !$omp& ys_reduced_rhs)
-      deallocate (ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values)
-      deallocate (ys_reduced_rhs)
+      nullify (ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values, ys_reduced_rhs)
     end if
     if (allocated(ys_reduced_pass_counts)) then
       deallocate (ys_reduced_pass_counts)
@@ -365,37 +549,51 @@ contains
     ys_reduced_exchange_mode = YS_SCHUR_EXCHANGE_AUTO
     ys_workspace_reduced_node_size = -1
 
-    if (allocated(ys_batch_ds)) then
-      !$omp target exit data map(delete: ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
-      deallocate (ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
+    if (associated(ys_batch_ds)) then
+      !$omp target exit data map(release: ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
+      nullify (ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
     end if
+    if (release_byte_workspace) then
+      call workspace_release("y_line_solver")
+    end if
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    if (release_external) call ys_release_gpusparse_external()
+    if (release_external) call ys_destroy_gpusparse_handle()
+#endif
+    ys_batch_capacity = 0_C_INT64_T
+    if (release_external) then
+      ys_gpsv_n = -1
+      ys_gpsv_batch = -1
+#ifdef HAVE_CUDA
+      ys_gpsv_buffer_size = 0_8
+      ys_gpsv_buffer_capacity = 0_8
+#elif defined(HAVE_HIP)
+      ys_gpsv_buffer_size = 0_C_SIZE_T
+      ys_gpsv_buffer_capacity = 0_C_SIZE_T
+      ys_gpsv_buffer = c_null_ptr
+#endif
+    end if
+    call ys_reset_workspace_state()
+  end subroutine ys_release_workspace
+
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+  subroutine ys_release_gpusparse_external()
+    implicit none
 #ifdef HAVE_CUDA
     if (allocated(ys_gpsv_buffer)) then
       !$omp target exit data map(delete: ys_gpsv_buffer)
       deallocate (ys_gpsv_buffer)
     end if
+    ys_gpsv_buffer_capacity = 0_8
 #elif defined(HAVE_HIP)
     if (c_associated(ys_gpsv_buffer)) then
       call omp_target_free(ys_gpsv_buffer, omp_get_default_device())
       ys_gpsv_buffer = c_null_ptr
     end if
+    ys_gpsv_buffer_capacity = 0_C_SIZE_T
 #endif
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
-    call ys_destroy_gpusparse_handle()
-#endif
-    ys_gpsv_n = -1
-    ys_gpsv_batch = -1
-    ys_batch_capacity = 0_C_INT64_T
-#ifdef HAVE_CUDA
-    ys_gpsv_buffer_size = 0_8
-#elif defined(HAVE_HIP)
-    ys_gpsv_buffer_size = 0_C_SIZE_T
-    ys_gpsv_buffer = c_null_ptr
-#endif
-    call ys_reset_workspace_state()
-  end subroutine ys_release_workspace
+  end subroutine ys_release_gpusparse_external
 
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
   subroutine ys_check_gpusparse(status, where)
     integer(C_INT), intent(in) :: status
     character(*), intent(in) :: where
@@ -536,34 +734,37 @@ contains
 #endif
         ) return
 
-#ifdef HAVE_CUDA
-    if (allocated(ys_gpsv_buffer)) then
-      !$omp target exit data map(delete: ys_gpsv_buffer)
-      deallocate (ys_gpsv_buffer)
-    end if
-#elif defined(HAVE_HIP)
-    if (c_associated(ys_gpsv_buffer)) then
-      call omp_target_free(ys_gpsv_buffer, omp_get_default_device())
-      ys_gpsv_buffer = c_null_ptr
-    end if
-#endif
-
     call ys_create_gpusparse_handle()
     call ys_query_gpsv_buffer_size(ds, dl, d, du, dw, x, n, batch_count, buffer_size)
 
     ys_gpsv_buffer_size = buffer_size
+    ys_gpsv_buffer_peak_bytes = max(ys_gpsv_buffer_peak_bytes, int(buffer_size, C_SIZE_T))
+    if (iproc == 0 .and. .not. ys_gpsv_buffer_reported) then
+      print '(A,F12.3,A)', "Sparse gpsv external buffer: exact queried=", &
+        real(buffer_size, C_DOUBLE)/(1024.0d0*1024.0d0), &
+        " MiB (outside shared byte workspace)"
+      ys_gpsv_buffer_reported = .true.
+    end if
 #ifdef HAVE_CUDA
-    allocate (ys_gpsv_buffer(max(1_8, buffer_size)))
-    !$omp target enter data map(alloc: ys_gpsv_buffer)
+    if (.not. allocated(ys_gpsv_buffer) .or. ys_gpsv_buffer_capacity < buffer_size) then
+      call ys_release_gpusparse_external()
+      allocate (ys_gpsv_buffer(max(1_8, buffer_size)))
+      !$omp target enter data map(alloc: ys_gpsv_buffer)
+      ys_gpsv_buffer_capacity = buffer_size
+    end if
 #elif defined(HAVE_HIP)
     ! On MI300A, hipSPARSE gpsv rejects a workspace buffer created by mapping a
     ! Fortran character array with OpenMP target data, even though the operand
     ! arrays from use_device_addr() are accepted. omp_target_alloc() and hipMalloc()
     ! both work for this buffer; use the OpenMP allocator here to match mpi_transpose.
-    ys_gpsv_buffer = omp_target_alloc(max(1_C_SIZE_T, buffer_size), omp_get_default_device())
-    if (.not. c_associated(ys_gpsv_buffer)) then
-      print *, "OpenMP target allocation failed in ys_prepare_gpusparse_workspace"
-      error stop
+    if (.not. c_associated(ys_gpsv_buffer) .or. ys_gpsv_buffer_capacity < buffer_size) then
+      call ys_release_gpusparse_external()
+      ys_gpsv_buffer = omp_target_alloc(max(1_C_SIZE_T, buffer_size), omp_get_default_device())
+      if (.not. c_associated(ys_gpsv_buffer)) then
+        print *, "OpenMP target allocation failed in ys_prepare_gpusparse_workspace"
+        error stop
+      end if
+      ys_gpsv_buffer_capacity = buffer_size
     end if
 #endif
 

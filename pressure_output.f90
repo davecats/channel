@@ -5,14 +5,16 @@ MODULE pressure_output
   USE, intrinsic :: iso_c_binding
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
   USE dnsdata, ONLY: V, der, k2, ialfa, ibeta, d140, d240, d24n, ni, alfa0, beta0, factor, &
-                     ny, nz, nxd, izd, d040, zero_bc, solve_compact_component_current_layout
-  USE ffts, ONLY: FFT, IFT, RFT, HFT, VVdz, VVdx
+                     ny, nz, nxd, nPhi, izd, d040, zero_bc, overlapping, solve_compact_component_current_layout
+  USE ffts, ONLY: FFT, IFT, RFT, HFT, VVdz, VVdx, get_fft_workspace_bytes, get_fft_workspace_bytes_for_dims, &
+                  bind_fft_workspace, unbind_fft_workspace
 #else
   USE dnsdata, ONLY: V, der, k2, ialfa, ibeta, d140, d240, d24n, ni, alfa0, beta0, factor, &
-                     ny, nz, nxd, izd, VVdz, VVdx, d040, zero_bc, solve_compact_component_current_layout
+                     ny, nz, nxd, nPhi, izd, VVdz, VVdx, d040, zero_bc, overlapping, solve_compact_component_current_layout
   USE ffts, ONLY: FFT, IFT, RFT, HFT
 #endif
-  USE mpi_transpose, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, npy_grid, ipy, ierr, &
+  USE byte_workspace, ONLY: workspace_request, workspace_release, workspace_slice, workspace_align_offset
+  USE mpi_transpose, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, npy_grid, ipy, iproc, ierr, &
                            sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, &
                            fft_transpose_is_local, repack_zTOx_local, repack_xTOz_local, &
                            roctxPush, roctxPop, &
@@ -31,52 +33,47 @@ MODULE pressure_output
 
   logical, save :: pressure_initialized = .false.
 
-  ! Pressure output is recomputed on demand, so these buffers are kept alive between output calls.
-  complex(C_DOUBLE_COMPLEX), allocatable, save :: pressure_src0(:, :, :)
-  complex(C_DOUBLE_COMPLEX), allocatable, save :: pressure_src1(:, :, :)
-  real(C_DOUBLE), allocatable, save :: pressure_real0(:, :, :)
-  real(C_DOUBLE), allocatable, save :: pressure_real1(:, :, :)
-  real(C_DOUBLE), allocatable, save :: pressure_h0(:, :, :)
-  real(C_DOUBLE), allocatable, save :: pressure_h1(:, :, :)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: pressure_src0(:, :, :)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: pressure_src1(:, :, :)
+  real(C_DOUBLE), pointer, contiguous, save :: pressure_real0(:, :, :)
+  real(C_DOUBLE), pointer, contiguous, save :: pressure_real1(:, :, :)
+  real(C_DOUBLE), pointer, contiguous, save :: pressure_h0(:, :, :)
+  real(C_DOUBLE), pointer, contiguous, save :: pressure_h1(:, :, :)
 
   public :: init_pressure_output, free_pressure_output
   public :: compute_pressure_output, compute_poisson, compute_dpdy
-  public :: get_pressure_memory_estimate
+  public :: get_pressure_memory_estimate, get_pressure_workspace_estimate
 
 CONTAINS
 
   subroutine get_pressure_memory_estimate(n_floats)
     implicit none
     integer(C_INT64_T), intent(out) :: n_floats
-    integer(C_INT64_T) :: local_y, spectral_planes, real_planes
 
-    local_y = int(nyN - ny0 + 5, C_INT64_T)
-    spectral_planes = local_y*int(2*nz + 1, C_INT64_T)*int(nxN - nx0 + 1, C_INT64_T)
-    real_planes = int(2*(nxd + 1), C_INT64_T)*int(nzB, C_INT64_T)*int(nyN - ny0 + 5, C_INT64_T)
-
-    n_floats = 4_C_INT64_T*spectral_planes + 4_C_INT64_T*real_planes
+    n_floats = 0_C_INT64_T
   end subroutine get_pressure_memory_estimate
+
+  subroutine get_pressure_workspace_estimate(nbytes)
+    implicit none
+    integer(C_SIZE_T), intent(out) :: nbytes
+    integer(C_SIZE_T) :: pressure_bytes, fft_offset, fft_bytes
+
+    call get_pressure_local_workspace_bytes(pressure_bytes)
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    call get_fft_workspace_bytes_for_dims(nxd, nxB, nzd, nzB, nPhi, overlapping, fft_bytes)
+    fft_offset = workspace_align_offset(pressure_bytes)
+    nbytes = workspace_align_offset(fft_offset + fft_bytes)
+#else
+    nbytes = pressure_bytes
+#endif
+  end subroutine get_pressure_workspace_estimate
 
   SUBROUTINE init_pressure_output()
     IMPLICIT NONE
 
     if (pressure_initialized) return
 
-    allocate (pressure_src0(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
-    allocate (pressure_src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
-    allocate (pressure_real0(2*(nxd + 1), nzB, ny0 - 2:nyN + 2))
-    allocate (pressure_real1(2*(nxd + 1), nzB, ny0 - 2:nyN + 2))
-    allocate (pressure_h0(2*(nxd + 1), nzB, ny0 - 2:nyN + 2))
-    allocate (pressure_h1(2*(nxd + 1), nzB, ny0 - 2:nyN + 2))
-
-    pressure_src0 = (0.0d0, 0.0d0)
-    pressure_src1 = (0.0d0, 0.0d0)
-    pressure_real0 = 0.0d0
-    pressure_real1 = 0.0d0
-    pressure_h0 = 0.0d0
-    pressure_h1 = 0.0d0
-
-    !$omp target enter data map(alloc: pressure_src0, pressure_src1, pressure_real0, pressure_real1, pressure_h0, pressure_h1)
+    nullify (pressure_src0, pressure_src1, pressure_real0, pressure_real1, pressure_h0, pressure_h1)
 
     pressure_initialized = .true.
   END SUBROUTINE init_pressure_output
@@ -86,8 +83,7 @@ CONTAINS
 
     if (.not. pressure_initialized) return
 
-    !$omp target exit data map(delete: pressure_src0, pressure_src1, pressure_real0, pressure_real1, pressure_h0, pressure_h1)
-    deallocate (pressure_src0, pressure_src1, pressure_real0, pressure_real1, pressure_h0, pressure_h1)
+    if (associated(pressure_src0)) call release_pressure_workspace("pressure_output")
     pressure_initialized = .false.
   END SUBROUTINE free_pressure_output
 
@@ -113,15 +109,146 @@ CONTAINS
     if (.not. pressure_initialized) call init_pressure_output()
 
     ! Pressure is only needed on output steps, so we rebuild its source terms from the current spectral state.
+    call acquire_pressure_workspace("pressure_output")
     call assemble_pressure_sources()
 
     if (present(p_out)) then
-      call solve_pressure_field(pressure_src0, pressure_src1, p_out)
+      call assemble_pressure_rhs(pressure_src0, pressure_src1, p_out)
     end if
     if (present(dpdy_out)) then
-      call solve_dpdy_field(pressure_src0, pressure_src1, dpdy_out)
+      call assemble_dpdy_rhs(pressure_src0, pressure_src1, dpdy_out)
+    end if
+    call release_pressure_workspace("pressure_output")
+
+    if (present(p_out)) then
+      call solve_compact_component_current_layout(p_out, assemble_pressure_operator, assemble_pressure_boundaries, &
+                                                  0.0d0, 0.0d0, p_out, &
+                                                  solve_label="pressure current-layout gpsv", &
+                                                  symmetric_operator=.true., transpose_derivative=.true.)
+    end if
+    if (present(dpdy_out)) then
+      call solve_compact_component_current_layout(dpdy_out, assemble_dpdy_operator, assemble_dpdy_boundaries, &
+                                                  0.0d0, 0.0d0, dpdy_out, &
+                                                  solve_label="pressure current-layout gpsv", symmetric_operator=.true.)
     end if
   END SUBROUTINE compute_pressure_output
+
+  subroutine get_pressure_workspace_bytes(pressure_bytes, fft_offset, total_bytes)
+    implicit none
+    integer(C_SIZE_T), intent(out) :: pressure_bytes, fft_offset, total_bytes
+    integer(C_SIZE_T) :: fft_bytes
+
+    call get_pressure_local_workspace_bytes(pressure_bytes)
+
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    call get_fft_workspace_bytes(fft_bytes)
+    fft_offset = workspace_align_offset(pressure_bytes)
+    total_bytes = workspace_align_offset(fft_offset + fft_bytes)
+#else
+    fft_offset = 0_C_SIZE_T
+    total_bytes = pressure_bytes
+#endif
+  end subroutine get_pressure_workspace_bytes
+
+  subroutine get_pressure_local_workspace_bytes(nbytes)
+    implicit none
+    integer(C_SIZE_T), intent(out) :: nbytes
+    integer(C_SIZE_T) :: offset, n_src, n_real
+
+    n_src = int(nyN - ny0 + 5, C_SIZE_T)*int(2*nz + 1, C_SIZE_T)*int(nxN - nx0 + 1, C_SIZE_T)
+    n_real = int(2*(nxd + 1), C_SIZE_T)*int(nzB, C_SIZE_T)*int(nyN - ny0 + 5, C_SIZE_T)
+
+    offset = 0_C_SIZE_T
+    offset = workspace_align_offset(offset + n_src*int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T))
+    offset = workspace_align_offset(offset + n_src*int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T))
+    offset = workspace_align_offset(offset + n_real*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
+    offset = workspace_align_offset(offset + n_real*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
+    offset = workspace_align_offset(offset + n_real*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
+    nbytes = workspace_align_offset(offset + n_real*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
+  end subroutine get_pressure_local_workspace_bytes
+
+  subroutine acquire_pressure_workspace(owner)
+    implicit none
+    character(len=*), intent(in) :: owner
+    type(C_PTR) :: base
+    integer(C_SIZE_T) :: pressure_bytes, fft_offset, total_bytes
+
+    call get_pressure_workspace_bytes(pressure_bytes, fft_offset, total_bytes)
+    call workspace_request(total_bytes, owner, base)
+    call bind_pressure_workspace()
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    call bind_fft_workspace(fft_offset)
+#endif
+  end subroutine acquire_pressure_workspace
+
+  subroutine release_pressure_workspace(owner)
+    implicit none
+    character(len=*), intent(in) :: owner
+
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    call unbind_fft_workspace()
+#endif
+    call unbind_pressure_workspace()
+    call workspace_release(owner)
+  end subroutine release_pressure_workspace
+
+  subroutine bind_pressure_workspace()
+    implicit none
+    type(C_PTR) :: ptr
+    complex(C_DOUBLE_COMPLEX), pointer :: cbuf(:)
+    real(C_DOUBLE), pointer :: rbuf(:)
+    integer(C_SIZE_T) :: offset, n_src, n_real
+
+    n_src = int(nyN - ny0 + 5, C_SIZE_T)*int(2*nz + 1, C_SIZE_T)*int(nxN - nx0 + 1, C_SIZE_T)
+    n_real = int(2*(nxd + 1), C_SIZE_T)*int(nzB, C_SIZE_T)*int(nyN - ny0 + 5, C_SIZE_T)
+
+    offset = 0_C_SIZE_T
+    call workspace_slice(offset, ptr)
+    call c_f_pointer(ptr, cbuf, [int(n_src)])
+    pressure_src0(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => cbuf
+    offset = workspace_align_offset(offset + n_src*int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T))
+
+    call workspace_slice(offset, ptr)
+    call c_f_pointer(ptr, cbuf, [int(n_src)])
+    pressure_src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => cbuf
+    offset = workspace_align_offset(offset + n_src*int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T))
+
+    call workspace_slice(offset, ptr)
+    call c_f_pointer(ptr, rbuf, [int(n_real)])
+    pressure_real0(1:2*(nxd + 1), 1:nzB, ny0 - 2:nyN + 2) => rbuf
+    offset = workspace_align_offset(offset + n_real*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
+
+    call workspace_slice(offset, ptr)
+    call c_f_pointer(ptr, rbuf, [int(n_real)])
+    pressure_real1(1:2*(nxd + 1), 1:nzB, ny0 - 2:nyN + 2) => rbuf
+    offset = workspace_align_offset(offset + n_real*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
+
+    call workspace_slice(offset, ptr)
+    call c_f_pointer(ptr, rbuf, [int(n_real)])
+    pressure_h0(1:2*(nxd + 1), 1:nzB, ny0 - 2:nyN + 2) => rbuf
+    offset = workspace_align_offset(offset + n_real*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
+
+    call workspace_slice(offset, ptr)
+    call c_f_pointer(ptr, rbuf, [int(n_real)])
+    pressure_h1(1:2*(nxd + 1), 1:nzB, ny0 - 2:nyN + 2) => rbuf
+
+    !$omp target enter data map(to: pressure_src0, pressure_src1, pressure_real0, pressure_real1, pressure_h0, pressure_h1)
+    !$omp target
+    pressure_src0(ny0 - 2, -nz, nx0) = (0.0_C_DOUBLE, 0.0_C_DOUBLE)
+    pressure_src1(ny0 - 2, -nz, nx0) = (0.0_C_DOUBLE, 0.0_C_DOUBLE)
+    pressure_real0(1, 1, ny0 - 2) = 0.0_C_DOUBLE
+    pressure_real1(1, 1, ny0 - 2) = 0.0_C_DOUBLE
+    pressure_h0(1, 1, ny0 - 2) = 0.0_C_DOUBLE
+    pressure_h1(1, 1, ny0 - 2) = 0.0_C_DOUBLE
+    !$omp end target
+  end subroutine bind_pressure_workspace
+
+  subroutine unbind_pressure_workspace()
+    implicit none
+
+    !$omp target exit data map(release: pressure_src0, pressure_src1, pressure_real0, pressure_real1, pressure_h0, pressure_h1)
+    nullify (pressure_src0, pressure_src1, pressure_real0, pressure_real1, pressure_h0, pressure_h1)
+  end subroutine unbind_pressure_workspace
 
   SUBROUTINE assemble_pressure_sources()
     IMPLICIT NONE

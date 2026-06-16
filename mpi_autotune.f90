@@ -17,6 +17,7 @@ module mpi_autotune
                             ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x
   use y_schur_solver, only: ys_schur_default_pass_counts, YS_SCHUR_EXCHANGE_AUTO, &
                             YS_SCHUR_EXCHANGE_ALLTOALL, YS_SCHUR_EXCHANGE_ALLGATHER
+  use byte_workspace, only: workspace_finalize
   use mpi_f08
   implicit none
   private
@@ -37,7 +38,7 @@ contains
     integer :: ierr, rank, nranks, status, length, io, i, mode, nforced
     integer(C_INT) :: env_npy, env_npxz, forced(MAXP), best_pass(MAXP), best_npass, best_npxz, best_npy, best_exchange
     integer(C_INT), allocatable :: node(:)
-    logical :: has_npy, has_npxz, has_passes, has_exchange, manual, applied, found
+    logical :: has_npy, has_npxz, has_passes, has_exchange, manual, applied, found, ran_scan
     real(C_DOUBLE) :: best_score
 
     call MPI_Comm_rank(MPI_COMM_WORLD, rank, ierr)
@@ -97,8 +98,9 @@ contains
       end select
     end if
     manual = has_npy .or. has_npxz .or. has_passes .or. has_exchange
-    found = .false.; applied = .false.; best_score = huge(0.0_C_DOUBLE)
+    found = .false.; applied = .false.; ran_scan = .false.; best_score = huge(0.0_C_DOUBLE)
     if ((mode == 1 .and. .not. manual) .or. mode == 2) then
+      ran_scan = .true.
       call node_ids(node)
       call scan(int(nranks, C_INT), nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, best_score, &
                 best_npxz, best_npy, best_pass, best_npass, best_exchange, found)
@@ -110,6 +112,9 @@ contains
         print *, "Warning: MPI autotune found no valid candidates; keeping configured decomposition."
       end if
       deallocate (node)
+    end if
+    if (ran_scan) then
+      call workspace_finalize()
     end if
 
     if (applied) then
@@ -386,7 +391,7 @@ contains
 
     !$omp target exit data map(delete: dst)
     deallocate (dst)
-    call ys_release_workspace()
+    call ys_release_workspace(.true.)
   end subroutine time_y_endpoint_solve
 
   subroutine seed_y_endpoint_system(active_n, nlines)

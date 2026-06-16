@@ -16,6 +16,7 @@ add_library(channel_core
     config.f90
     rbmat.f90
     roctx.f90
+    byte_workspace.f90
     y_schur_solver.f90
     y_line_solvers.f90
     compact_line_solvers.f90
