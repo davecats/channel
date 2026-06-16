@@ -333,9 +333,14 @@ CONTAINS
     integer(C_INT64_T), intent(out) :: n_floats
     integer(C_INT64_T) :: sendcount64, nbufs
 
+    if (fft_transpose_is_local) then
+      n_floats = 0_C_INT64_T
+      return
+    end if
+
     sendcount64 = int(nxB, C_INT64_T)*int(nzB, C_INT64_T)*int(nyN - ny0 + 5, C_INT64_T)
     nbufs = int(merge(2, 1, overlapping), C_INT64_T)
-    n_floats = 4_C_INT64_T*sendcount64*int(nproc, C_INT64_T)*nbufs
+    n_floats = 4_C_INT64_T*sendcount64*int(npxz, C_INT64_T)*nbufs
   END SUBROUTINE get_mpi_buffer_memory_estimate
 
   !--------------------------------------------------------------!

@@ -677,7 +677,7 @@
       integer :: i, color, key
       integer :: array_of_sizes(ndims), array_of_subsizes(ndims), array_of_starts(ndims), ierror
       integer(C_INT) :: miny_local, maxy_local
-      integer(c_size_t) :: sendsize, recvsize
+      integer(c_size_t) :: sendsize, recvsize, xcomm_size
       logical :: quiet_verbose
       if (mpi_transpose_initialized) call free_MPI()
       quiet_verbose = .false.
@@ -760,11 +760,15 @@
         end if
         CALL MPI_Abort(MPI_COMM_WORLD, 1, ierror)
       end if
-      sendsize = npxz*nxB*nzB*(nyN - ny0 + 5)
-      recvsize = npxz*nxB*nzB*(nyN - ny0 + 5)
-
       sendcount = nxB*nzB*(nyN - ny0 + 5)
       !$omp target update to(sendcount)
+      if (fft_transpose_is_local) then
+        xcomm_size = 1_c_size_t
+      else
+        xcomm_size = int(npxz, c_size_t)*int(sendcount, c_size_t)
+      end if
+      sendsize = xcomm_size
+      recvsize = xcomm_size
 
       ! Allocate buffers for transposes*int(16, c_size_t)
 #if defined(HAVE_HIP)
