@@ -375,23 +375,16 @@ contains
   subroutine ys_schur_pack_parent_rows(ilevel)
     implicit none
     integer, intent(in) :: ilevel
-    integer(C_INT) :: dest, local_line, irow, first_line, line_count, global_line, src_line, offset
+    integer(C_INT) :: src_line, irow, offset
 
     call roctxPush("ys_schur_pack_rows")
-    !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(ilevel, ycomm_sendbuf, s_rows, s_level_arity, s_level_line_first, &
-    !$omp& s_level_line_count, s_level_prev_first) &
-    !$omp private(dest, local_line, irow, first_line, line_count, global_line, src_line, offset)
-    do dest = 0, s_level_arity(ilevel) - 1
-      do local_line = 1, s_level_line_count(dest + 1, ilevel)
-        do irow = 1, YS_SCHUR_ROW_WIDTH
-          first_line = s_level_line_first(dest + 1, ilevel)
-          line_count = s_level_line_count(dest + 1, ilevel)
-          global_line = first_line + local_line - 1
-          offset = (global_line - s_level_prev_first(ilevel))*YS_SCHUR_ROW_WIDTH + irow
-          src_line = global_line - s_level_prev_first(ilevel) + 1
-          ycomm_sendbuf(offset) = s_rows(irow, src_line, ilevel - 1)
-        end do
+    !$omp target teams distribute parallel do collapse(2) default(none) &
+    !$omp shared(ilevel, ycomm_sendbuf, s_rows, s_level_prev_count) &
+    !$omp private(src_line, irow, offset)
+    do src_line = 1, s_level_prev_count(ilevel)
+      do irow = 1, YS_SCHUR_ROW_WIDTH
+        offset = (src_line - 1)*YS_SCHUR_ROW_WIDTH + irow
+        ycomm_sendbuf(offset) = s_rows(irow, src_line, ilevel - 1)
       end do
     end do
     !$omp end target teams distribute parallel do
@@ -766,11 +759,11 @@ contains
 
     call roctxPush("ys_schur_unpack_parent_values")
     !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(ilevel, ycomm_recvbuf, s_values, s_level_arity, s_level_line_first, s_level_line_count, &
+    !$omp shared(ilevel, ycomm_recvbuf, s_values, s_level_arity, s_level_line_first, &
     !$omp& s_level_owned_count, s_level_prev_first) &
     !$omp private(src, local_line, k, line_first, global_line, dst_line, offset)
     do src = 0, s_level_arity(ilevel) - 1
-      do local_line = 1, s_level_line_count(src + 1, ilevel)
+      do local_line = 1, s_level_owned_count(ilevel)
         do k = 1, YS_SCHUR_VALUE_WIDTH
           line_first = s_level_line_first(src + 1, ilevel)
           global_line = line_first + local_line - 1
