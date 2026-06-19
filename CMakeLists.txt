@@ -49,6 +49,9 @@ target_link_libraries(channel PRIVATE channel_core)
 add_executable(post_pressure post_pressure.f90)
 target_link_libraries(post_pressure PRIVATE channel_core)
 
+add_executable(post_convvelo post_convvelo.f90)
+target_link_libraries(post_convvelo PRIVATE channel_core)
+
 # --------------------------------------------------------------------
 # Tests
 # --------------------------------------------------------------------
@@ -69,6 +72,9 @@ target_link_libraries(test_convvelo_stats PRIVATE channel_core)
 
 add_executable(test_convvelo_runtime test_convvelo_utils.f90 test_convvelo_runtime.f90)
 target_link_libraries(test_convvelo_runtime PRIVATE channel_core)
+
+add_executable(test_post_convvelo test_convvelo_utils.f90 test_post_convvelo.f90)
+target_link_libraries(test_post_convvelo PRIVATE channel_core)
 
 add_executable(test_y_pencil_transpose test_y_pencil_transpose.f90)
 target_link_libraries(test_y_pencil_transpose PRIVATE channel_core)

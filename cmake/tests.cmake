@@ -185,6 +185,17 @@ add_test(NAME post_pressure_1rank
 )
 set_tests_properties(post_pressure_1rank PROPERTIES PROCESSORS 1)
 
+set(POST_CONVVELO_NPROCS 1)
+set(POST_CONVVELO_EXE ${CMAKE_CURRENT_BINARY_DIR}/post_convvelo)
+set(TEST_POST_CONVVELO_EXE ${CMAKE_CURRENT_BINARY_DIR}/test_post_convvelo)
+configure_file(cmake/run_post_convvelo_test.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/run_post_convvelo_test.cmake @ONLY)
+
+add_test(NAME post_convvelo_1rank
+    COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_BINARY_DIR}/run_post_convvelo_test.cmake
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(post_convvelo_1rank PROPERTIES PROCESSORS 1)
+
 add_channel_mpi_test(
     NAME reduced_ghost_backend_2rank
     TARGET test_y_pencil_transpose
