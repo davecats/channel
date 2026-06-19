@@ -1,7 +1,8 @@
 program test_convvelo_runtime
   use, intrinsic :: iso_c_binding
-  use dnsdata, only: nPhi, ny0, nyN, nz, nx0, nxN, free_memory
-  use convvelo, only: free_convvelo, convvelo_has_pending_output, write_convvelo_runtime_snapshot, convvelo_enabled
+  use dnsdata, only: nPhi, ny0, nyN, nz, nx0, nxN, time, free_memory
+  use convvelo, only: free_convvelo, convvelo_has_pending_output, write_convvelo_runtime_snapshot, convvelo_enabled, &
+                      update_convvelo_component_means, acc_convvelo_stats
   use pressure_output, only: free_pressure_output
   use driver, only: initialize, timeloop
   use test_convvelo_utils
@@ -19,6 +20,7 @@ program test_convvelo_runtime
   real(C_DOUBLE), parameter :: expected_start_time = 38.86540781764443d0
   real(C_DOUBLE), parameter :: expected_end_time = 40.99369209898264d0
   real(C_DOUBLE) :: average_end_time, average_start_time, field_tol, header_tol, mean_tol
+  real(C_DOUBLE) :: reset_end_time, reset_start_time
   complex(C_DOUBLE_COMPLEX), allocatable :: generated(:, :, :)
 
   call get_command_argument(1, mode)
@@ -68,6 +70,24 @@ program test_convvelo_runtime
   if (average_count /= 3_C_INT64_T) then
     write (*, '(A,I0,A,I0)') "convvelo average_count mismatch: got ", average_count, ", expected ", 3_C_INT64_T
     nfail = nfail + 1
+  end if
+  if (convvelo_enabled) then
+    call update_convvelo_component_means()
+    call acc_convvelo_stats()
+    call write_convvelo_runtime_snapshot()
+    call read_convvelo_header("convvelo.1.bin", reset_start_time, reset_end_time, average_count)
+    if (abs(reset_start_time - time) >= header_tol) then
+      write (*, '(A,ES20.12,A,ES20.12)') "convvelo reset start_time mismatch: got ", reset_start_time, ", expected ", time
+      nfail = nfail + 1
+    end if
+    if (abs(reset_end_time - time) >= header_tol) then
+      write (*, '(A,ES20.12,A,ES20.12)') "convvelo reset end_time mismatch: got ", reset_end_time, ", expected ", time
+      nfail = nfail + 1
+    end if
+    if (average_count /= 1_C_INT64_T) then
+      write (*, '(A,I0,A,I0)') "convvelo reset average_count mismatch: got ", average_count, ", expected ", 1_C_INT64_T
+      nfail = nfail + 1
+    end if
   end if
 
   if (trim(mode) == "full") then

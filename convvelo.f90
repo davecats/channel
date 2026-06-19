@@ -896,7 +896,7 @@ contains
 
     if (has_terminal) write (*, *) "Writing "//trim(snapshot_filename)//" at time ", time
     call write_convvelo_raw_stats(snapshot_filename)
-    convvelo_dirty = .false.
+    call reset_convvelo_stats()
   end subroutine write_convvelo_runtime_snapshot
 
   subroutine write_convvelo_raw_stats(filename)
