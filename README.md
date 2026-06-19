@@ -96,7 +96,6 @@ A file `dns.in` must be present in the directory `channel` is called from. Its s
 0.00d0 1.0d0 0.0d0              ! deltat, cflmax, t0
 30.d0 30.d0 7000.d0 .TRUE.      ! dt_field, dt_save, t_max, time_from_restart
 999999                          ! nstep
-12                              ! npy
 ```
 - *nx* and *nz* are the number of modes in the statistically homogeneous x and z directions respectively. The corrisponding number of points in physical space used for simulation is _2nx+1_ and _2nz+1_; however, this code is spectral, so x and z directions are in a spectral domain. Hence, the actual number of x-modes stored in memory is _nx+1_ thanks to the Fourier transform of a real velocity field being Hermitian. The number of z-modes is still _2nz+1_. See [domain](#domain).
 - *ny* is the number of points in the wall-normal y direction; the actual number of points, including walls, will be _ny+1_. However, the number of y points stored in memory is _ny+3_ due to the presence of ghost cells. See [domain](#domain).
@@ -112,7 +111,6 @@ A file `dns.in` must be present in the directory `channel` is called from. Its s
 - *dt_save* specifies after how many time units a restart file `Dati.cart.out` is generated. This __cannot__ be used to calculate statistics.
 - *time_from_restart* is a boolean flag. If false, the restart file `Dati.cart.out` is used as the initial condition for the simulation, and the value *t0* is used as the initial value of time. If true, the initial value of time is read from the restart file.
 - *tmax* and *nstep* specify respectively the final value of time and the maximum number of steps that one wants to achieve in a given run. After either of these two trhesholds is reached, execution is terminated.
-- *npy* indicates in how many chunks the domain is divided in the y direction for parallelisation. See [parallelisation](#parallelisation).
 
 <a name="notice_restart">
  
@@ -138,7 +136,7 @@ The number of subdivisions in the x/z directions is stored in variable _npxz_; t
 ```
 number_of_proc = npxz*npy
 ```
-where _npy_ is specified in _dns.in_, whereas npxz is automatically calculated from the number of processes. The number of processes is specified when the program is called. See [input files](#input) and [running](#running).
+where _npy_ and _npxz_ are selected at runtime from the number of MPI ranks and optional environment variables. The number of processes is specified when the program is called. See [running](#running).
 
  
 <a name="running">
@@ -149,7 +147,7 @@ The main program _channel_ must be run with mpi, in the following fashion:
 ```bash
 mpirun -np number_of_proc /path/to/channel
 ```
-where *number_of_proc* is indeed the number of processes used for parallel execution and must be specified by the user. The user thus specifies _npy_ and *number_of_proc*; the program thus calculates _npxz_ (see [parallelisation](#parallelisation) for more on *npxz* and *npy*). The total number of processes must be chosen so that _npxz_ is a divisor of _nx+1_ and _nzd_; _nzd_ is printed out at the beginning of execution.
+where *number_of_proc* is indeed the number of processes used for parallel execution and must be specified by the user. The optional environment variables `CHANNEL_NPY` and `CHANNEL_NPXZ` can be used to request _npy_ and _npxz_; otherwise the decomposition is selected automatically. The total number of processes must be chosen so that _npxz_ is a divisor of _nx+1_ and _nzd_; _nzd_ is printed out at the beginning of execution.
 
 > Hint: *nzd* is always a power of 2 multiplied by 3; no other prime factors appear.
 

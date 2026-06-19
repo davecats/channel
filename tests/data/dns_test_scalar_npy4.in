@@ -1,0 +1,36 @@
+[mesh]
+nx = 5
+ny = 21
+nz = 8
+alfa0 = 0.5
+beta0 = 1.0
+stretching = 1.5
+ymin = 0.0
+ymax = 2.0
+
+[velocity]
+ni = 12431
+meanpx = 0.0
+meanpz = 0.0
+meanflowx = 2.0
+meanflowz = 0.0
+u0 = 0.0
+uN = 0.0
+
+[scalars]
+nPhi = 2
+meantx = 0.0
+meantb = 2.0
+t0 = 0.0
+tN = 0.0
+pr = 0.5 2.0
+
+[timestepping]
+deltat = 0.0
+cflmax = 1.0
+time = 0.0
+dt_field = 30
+dt_save = -1
+t_max = 7000
+time_from_restart = true
+nstep = 3

@@ -5,20 +5,26 @@ module convvelo
   use, intrinsic :: iso_c_binding
   use config, only: ini_config, has_section, get_string, get_real, lower
   use dnsdata, only: V, nPhi, nz, ny, der, nxd, izd, factor, iproc, D0mat, d240, d24m1, d24n, d24np1, &
-                     COMPLEXderiv, LeftLU5div, has_terminal, &
-                     time, deltat
+                     apply_complex_derivative_current_layout, has_terminal, &
+                     time, deltat, overlapping
   use pressure_output, only: compute_poisson, compute_dpdy
   use mpi_transpose, only: ny0, nyN, nx0, nxN, nxB, nzB, nx, has_average, ierr, sendbuf, recvbuf, &
-                           pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, nzd
+                           pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, nzd, fft_transpose_is_local, &
+                           repack_zTOx_local, repack_xTOz_local, roctxPush, roctxPop, &
+                           MPI_Allreduce, MPI_IN_PLACE, MPI_DOUBLE_COMPLEX, MPI_SUM, MPI_COMM_WORLD, &
+                           MPI_Request, MPI_Status, MPI_Wait, MPI_File, MPI_Datatype, MPI_OFFSET_KIND, &
+                           MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, MPI_INTEGER8, MPI_MODE_WRONLY, MPI_MODE_CREATE, &
+                           MPI_INFO_NULL, MPI_Type_create_subarray, MPI_Type_commit, MPI_Type_free, &
+                           MPI_File_open, MPI_File_set_size, MPI_File_write_at, MPI_File_set_view, &
+                           MPI_File_write_all, MPI_File_close
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
-  use ffts, only: IFT, RFT, HFT, FFT, VVdx, VVdz
+  use ffts, only: IFT, RFT, HFT, FFT, VVdx, VVdz, get_fft_workspace_bytes, get_fft_workspace_bytes_for_dims, &
+                  bind_fft_workspace, unbind_fft_workspace
 #else
   use dnsdata, only: VVdx, VVdz
   use ffts, only: IFT, RFT, HFT, FFT
 #endif
-#ifdef HAVE_MPI
-  use mpi_f08
-#endif
+  use byte_workspace, only: workspace_request, workspace_release, workspace_slice, workspace_align_offset
 
   implicit none
 
@@ -78,16 +84,16 @@ module convvelo
   complex(C_DOUBLE_COMPLEX), allocatable, save, public :: convvelo_stats(:, :, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable, save, public :: convvelo_work(:, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable, save, public :: component_means(:, :)
-  real(C_DOUBLE), allocatable, save :: convvelo_real0(:, :, :)
-  real(C_DOUBLE), allocatable, save :: convvelo_real1(:, :, :)
-  real(C_DOUBLE), allocatable, save :: convvelo_real_prod(:, :, :)
+  real(C_DOUBLE), pointer, contiguous, save :: convvelo_real0(:, :, :)
+  real(C_DOUBLE), pointer, contiguous, save :: convvelo_real1(:, :, :)
+  real(C_DOUBLE), pointer, contiguous, save :: convvelo_real_prod(:, :, :)
   integer(C_INT64_T), allocatable, save :: n_field_samples(:)
 
   public :: init_convvelo, reset_convvelo_stats, update_convvelo_component_means, free_convvelo
   public :: finish_convvelo_field
   public :: acc_convvelo_stats, convvelo_has_pending_output
   public :: init_convvelo_runtime, advance_convvelo_runtime, finalize_convvelo_runtime
-  public :: get_convvelo_memory_estimate, write_convvelo_raw_stats, write_convvelo_runtime_snapshot
+  public :: get_convvelo_memory_estimate, get_convvelo_workspace_estimate, write_convvelo_raw_stats, write_convvelo_runtime_snapshot
   public :: configure_convvelo
 
 contains
@@ -137,7 +143,7 @@ contains
   subroutine get_convvelo_memory_estimate(n_floats)
     implicit none
     integer(C_INT64_T), intent(out) :: n_floats
-    integer(C_INT64_T) :: local_y, spectral_planes, real_planes, n_fields
+    integer(C_INT64_T) :: local_y, spectral_planes, component_planes, n_fields
 
     if (.not. convvelo_enabled) then
       n_floats = 0_C_INT64_T
@@ -146,7 +152,7 @@ contains
 
     local_y = int(nyN - ny0 + 5, C_INT64_T)
     spectral_planes = local_y*int(2*nz + 1, C_INT64_T)*int(nxN - nx0 + 1, C_INT64_T)
-    real_planes = int(2*(nxd + 1), C_INT64_T)*int(nzB, C_INT64_T)*int(ny + 3, C_INT64_T)
+    component_planes = local_y*int(3 + nPhi, C_INT64_T)
     if (convvelo_write_full_fields) then
       n_fields = int(n_convvelo_velocity_fields_total + nPhi*n_convvelo_scalar_fields_total, C_INT64_T)
     else
@@ -156,8 +162,28 @@ contains
     n_floats = 0_C_INT64_T
     n_floats = n_floats + 2_C_INT64_T*spectral_planes*n_fields
     n_floats = n_floats + 2_C_INT64_T*spectral_planes
-    n_floats = n_floats + 3_C_INT64_T*real_planes
+    n_floats = n_floats + 2_C_INT64_T*component_planes
   end subroutine get_convvelo_memory_estimate
+
+  subroutine get_convvelo_workspace_estimate(nbytes)
+    implicit none
+    integer(C_SIZE_T), intent(out) :: nbytes
+    integer(C_SIZE_T) :: real_bytes, fft_offset, fft_bytes
+
+    if (.not. convvelo_enabled) then
+      nbytes = 0_C_SIZE_T
+      return
+    end if
+
+    call get_convvelo_local_real_workspace_bytes(real_bytes)
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    call get_fft_workspace_bytes_for_dims(nxd, nxB, nzd, nzB, nPhi, overlapping, fft_bytes)
+    fft_offset = workspace_align_offset(real_bytes)
+    nbytes = workspace_align_offset(fft_offset + fft_bytes)
+#else
+    nbytes = real_bytes
+#endif
+  end subroutine get_convvelo_workspace_estimate
 
   subroutine init_convvelo()
     implicit none
@@ -169,20 +195,15 @@ contains
     allocate (convvelo_stats(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, n_convvelo_fields))
     allocate (convvelo_work(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
     allocate (component_means(ny0 - 2:nyN + 2, 1:3 + nPhi))
-    allocate (convvelo_real0(2*(nxd + 1), nzB, ny + 3))
-    allocate (convvelo_real1(2*(nxd + 1), nzB, ny + 3))
-    allocate (convvelo_real_prod(2*(nxd + 1), nzB, ny + 3))
+    nullify (convvelo_real0, convvelo_real1, convvelo_real_prod)
     allocate (n_field_samples(n_convvelo_fields))
 
     convvelo_stats = (0.0d0, 0.0d0)
     convvelo_work = (0.0d0, 0.0d0)
     component_means = (0.0d0, 0.0d0)
-    convvelo_real0 = 0.0d0
-    convvelo_real1 = 0.0d0
-    convvelo_real_prod = 0.0d0
     n_field_samples = 0_C_INT64_T
 
-    !$omp target enter data map(to: convvelo_stats, convvelo_work, component_means, convvelo_real0, convvelo_real1, convvelo_real_prod)
+    !$omp target enter data map(to: convvelo_stats, convvelo_work, component_means)
 
     n_mean_samples = 0_C_INT64_T
     convvelo_last_write_index = -1_C_INT64_T
@@ -290,7 +311,9 @@ contains
     end if
 
 #ifdef HAVE_MPI
+    call roctxPush("MPI_Allreduce convvelo_component_means")
     call MPI_Allreduce(MPI_IN_PLACE, snapshot, size(snapshot), MPI_DOUBLE_COMPLEX, MPI_SUM, MPI_COMM_WORLD, ierr)
+    call roctxPop("MPI_Allreduce convvelo_component_means")
 #endif
 
     if (n_mean_samples == 0_C_INT64_T) convvelo_average_start_time = time
@@ -414,43 +437,55 @@ contains
   subroutine apply_dy_to_work(component_index)
     implicit none
     integer(C_INT), intent(in) :: component_index
-    integer(C_INT) :: iy, iz, ix
 
-    !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(V, convvelo_work, component_index, der, D0mat, nx0, nxN, nz) private(ix, iz)
-    do ix = nx0, nxN
-      do iz = -nz, nz
-        call COMPLEXderiv(V(:, iz, ix, component_index), convvelo_work(:, iz, ix), der, D0mat)
-      end do
-    end do
+    call apply_complex_derivative_current_layout(V(:, :, :, component_index), convvelo_work)
   end subroutine apply_dy_to_work
 
   subroutine apply_dyy_to_work(component_index)
     implicit none
     integer(C_INT), intent(in) :: component_index
-    integer(C_INT) :: iy, iz, ix
+    integer(C_INT) :: iy, iz, ix, row_lo, row_hi, upper_bw
 
     !$omp target teams distribute parallel do collapse(2) &
-    !$omp shared(convvelo_work, V, component_index, d240, d24m1, d24n, d24np1, der, D0mat, ny0, nyN, ny, nx0, nxN, nz) private(ix, iz, iy)
+    !$omp shared(convvelo_work, V, component_index, d240, d24m1, d24n, d24np1, der, D0mat, ny0, nyN, ny, nx0, nxN, nz) private(ix, iz, iy, row_lo, row_hi, upper_bw)
     do ix = nx0, nxN
       do iz = -nz, nz
-        convvelo_work(0, iz, ix) = sum(d240(-2:2)*V(-1:3, iz, ix, component_index))
-        convvelo_work(-1, iz, ix) = sum(d24m1(-2:2)*V(-1:3, iz, ix, component_index))
-        convvelo_work(ny, iz, ix) = sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, component_index))
-        convvelo_work(ny + 1, iz, ix) = sum(d24np1(-2:2)*V(ny - 3:ny + 1, iz, ix, component_index))
+        if (ny0 <= 1 .and. nyN >= 3) then
+          convvelo_work(0, iz, ix) = sum(d240(-2:2)*V(-1:3, iz, ix, component_index))
+          convvelo_work(-1, iz, ix) = sum(d24m1(-2:2)*V(-1:3, iz, ix, component_index))
+        end if
+        if (ny0 <= ny - 3 .and. nyN >= ny - 1) then
+          convvelo_work(ny, iz, ix) = sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, component_index))
+          convvelo_work(ny + 1, iz, ix) = sum(d24np1(-2:2)*V(ny - 3:ny + 1, iz, ix, component_index))
+        end if
         do iy = ny0, nyN
           convvelo_work(iy, iz, ix) = sum(der(iy, 2, -2:2)*V(iy - 2:iy + 2, iz, ix, component_index))
         end do
-        convvelo_work(1, iz, ix) = convvelo_work(1, iz, ix) - ( &
-                                   der(1, 0, -1)*convvelo_work(0, iz, ix) + &
-                                   der(1, 0, -2)*convvelo_work(-1, iz, ix))
-        convvelo_work(2, iz, ix) = convvelo_work(2, iz, ix) - der(2, 0, -2)*convvelo_work(0, iz, ix)
-        convvelo_work(ny - 1, iz, ix) = convvelo_work(ny - 1, iz, ix) - ( &
-                                        der(ny - 1, 0, 1)*convvelo_work(ny, iz, ix) + &
-                                        der(ny - 1, 0, 2)*convvelo_work(ny + 1, iz, ix))
-        convvelo_work(ny - 2, iz, ix) = convvelo_work(ny - 2, iz, ix) - &
-                                        der(ny - 2, 0, 2)*convvelo_work(ny, iz, ix)
-        call LeftLU5div(convvelo_work(:, iz, ix), D0mat, convvelo_work(:, iz, ix))
+        if (ny0 <= 1 .and. nyN >= 2) then
+          convvelo_work(1, iz, ix) = convvelo_work(1, iz, ix) - ( &
+                                     der(1, 0, -1)*convvelo_work(0, iz, ix) + &
+                                     der(1, 0, -2)*convvelo_work(-1, iz, ix))
+          convvelo_work(2, iz, ix) = convvelo_work(2, iz, ix) - der(2, 0, -2)*convvelo_work(0, iz, ix)
+        end if
+        if (ny0 <= ny - 2 .and. nyN >= ny - 1) then
+          convvelo_work(ny - 1, iz, ix) = convvelo_work(ny - 1, iz, ix) - ( &
+                                          der(ny - 1, 0, 1)*convvelo_work(ny, iz, ix) + &
+                                          der(ny - 1, 0, 2)*convvelo_work(ny + 1, iz, ix))
+          convvelo_work(ny - 2, iz, ix) = convvelo_work(ny - 2, iz, ix) - &
+                                          der(ny - 2, 0, 2)*convvelo_work(ny, iz, ix)
+        end if
+        row_lo = lbound(D0mat, 1)
+        row_hi = ubound(D0mat, 1)
+        upper_bw = ubound(D0mat, 2)
+        do iy = row_hi - upper_bw, row_lo, -1
+          convvelo_work(iy, iz, ix) = convvelo_work(iy, iz, ix) - &
+                                      (D0mat(iy, 1)*convvelo_work(iy + 1, iz, ix) + D0mat(iy, 2)*convvelo_work(iy + 2, iz, ix))
+          convvelo_work(iy, iz, ix) = convvelo_work(iy, iz, ix)*D0mat(iy, 0)
+        end do
+        do iy = row_lo, row_hi
+          convvelo_work(iy, iz, ix) = convvelo_work(iy, iz, ix) - &
+                                      (D0mat(iy, -2)*convvelo_work(iy - 2, iz, ix) + D0mat(iy, -1)*convvelo_work(iy - 1, iz, ix))
+        end do
       end do
     end do
   end subroutine apply_dyy_to_work
@@ -477,8 +512,8 @@ contains
     integer(C_INT) :: iy, iz, ix, jx, izd_idx
 
     !$omp target teams distribute parallel do collapse(3) &
-    !$omp shared(VVdz, nzd, nxB, ny) private(iy, jx, izd_idx)
-    do iy = 1, ny + 3
+    !$omp shared(VVdz, nzd, nxB) private(iy, jx, izd_idx)
+    do iy = ny0 - 2, nyN + 2
       do jx = 1, nxB
         do izd_idx = 1, nzd
           VVdz(izd_idx, jx, iy, 1) = (0.0d0, 0.0d0)
@@ -489,9 +524,9 @@ contains
     !$omp shared(VVdz, V, izd, ny, nz, nx0, nxN, component_index) private(ix, iz, iy, jx)
     do ix = nx0, nxN
       do iz = -nz, nz
-        do iy = -1, ny + 1
+        do iy = ny0 - 2, nyN + 2
           jx = ix - nx0 + 1
-          VVdz(izd(iz) + 1, jx, iy + 2, 1) = V(iy, iz, ix, component_index)
+          VVdz(izd(iz) + 1, jx, iy, 1) = V(iy, iz, ix, component_index)
         end do
       end do
     end do
@@ -499,35 +534,43 @@ contains
 
   subroutine spectral_field_to_real_x(rx)
     implicit none
-    real(C_DOUBLE), intent(out) :: rx(2*(nxd + 1), nzB, ny + 3)
+    real(C_DOUBLE), intent(out) :: rx(:, :, ny0 - 2:)
 #ifdef HAVE_MPI
     type(MPI_Request) :: request
     type(MPI_Status) :: status
 #endif
     integer(C_INT) :: ix, iz, iy
 
-    call IFT(VVdz(:, :, :, 1), ny)
-    call pack_zTOx(VVdz(:, :, :, 1), sendbuf(:, 1), ny)
-    call alltoall(sendbuf(:, 1), recvbuf(:, 1), request)
+    call IFT(VVdz(:, :, :, 1))
+    if (fft_transpose_is_local) then
+      call repack_zTOx_local(VVdz(:, :, :, 1), VVdx(:, :, :, 1), ny)
+    else
+      call pack_zTOx(VVdz(:, :, :, 1), sendbuf(:, 1), ny)
+      call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "zTOx convvelo_spectral_to_real")
+    end if
 #ifdef HAVE_MPI
-    call MPI_Wait(request, status, ierr)
+    if (.not. fft_transpose_is_local) then
+      call roctxPush("MPI_Wait zTOx convvelo_spectral_to_real")
+      call MPI_Wait(request, status, ierr)
+      call roctxPop("MPI_Wait zTOx convvelo_spectral_to_real")
+    end if
 #endif
-    call unpack_zTOx(recvbuf(:, 1), VVdx(:, :, :, 1), ny)
+    if (.not. fft_transpose_is_local) call unpack_zTOx(recvbuf(:, 1), VVdx(:, :, :, 1), ny)
     !$omp target teams distribute parallel do collapse(3) &
-    !$omp shared(VVdx, nx, nxd, nzB, ny) private(ix, iz, iy)
-    do iy = 1, ny + 3
+    !$omp shared(VVdx, nx, nxd, nzB) private(ix, iz, iy)
+    do iy = ny0 - 2, nyN + 2
       do iz = 1, nzB
         do ix = nx + 2, nxd + 1
           VVdx(ix, iz, iy, 1) = (0.0d0, 0.0d0)
         end do
       end do
     end do
-    call RFT(VVdx(:, :, :, 1), rx, ny)
+    call RFT(VVdx(:, :, :, 1), rx)
   end subroutine spectral_field_to_real_x
 
   subroutine real_x_to_spectral_field(rx, field)
     implicit none
-    real(C_DOUBLE), intent(in) :: rx(2*(nxd + 1), nzB, ny + 3)
+    real(C_DOUBLE), intent(in) :: rx(:, :, ny0 - 2:)
     complex(C_DOUBLE_COMPLEX), intent(out) :: field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
 #ifdef HAVE_MPI
     type(MPI_Request) :: request
@@ -535,30 +578,38 @@ contains
 #endif
     integer(C_INT) :: ix, iz, iy
 
-    call HFT(rx, VVdx(:, :, :, 1), ny)
-    call pack_xTOz(VVdx(:, :, :, 1), sendbuf(:, 1), ny)
-    call alltoall(sendbuf(:, 1), recvbuf(:, 1), request)
+    call HFT(rx, VVdx(:, :, :, 1))
+    if (fft_transpose_is_local) then
+      call repack_xTOz_local(VVdx(:, :, :, 1), VVdz(:, :, :, 1), ny)
+    else
+      call pack_xTOz(VVdx(:, :, :, 1), sendbuf(:, 1), ny)
+      call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "xTOz convvelo_real_to_spectral")
+    end if
 #ifdef HAVE_MPI
-    call MPI_Wait(request, status, ierr)
+    if (.not. fft_transpose_is_local) then
+      call roctxPush("MPI_Wait xTOz convvelo_real_to_spectral")
+      call MPI_Wait(request, status, ierr)
+      call roctxPop("MPI_Wait xTOz convvelo_real_to_spectral")
+    end if
 #endif
-    call unpack_xTOz(recvbuf(:, 1), VVdz(:, :, :, 1), ny)
-    call FFT(VVdz(:, :, :, 1), ny)
+    if (.not. fft_transpose_is_local) call unpack_xTOz(recvbuf(:, 1), VVdz(:, :, :, 1), ny)
+    call FFT(VVdz(:, :, :, 1))
 
     !$omp target teams distribute parallel do collapse(3) &
     !$omp shared(VVdz, nx0, nxN, ny, nz, field) private(ix, iz, iy)
     do ix = nx0, nxN
-      do iy = -1, ny + 1
+      do iy = ny0 - 2, nyN + 2
         do iz = 0, nz
-          field(iy, iz, ix) = VVdz(iz + 1, ix - nx0 + 1, iy + 2, 1)
+          field(iy, iz, ix) = VVdz(iz + 1, ix - nx0 + 1, iy, 1)
         end do
       end do
     end do
     !$omp target teams distribute parallel do collapse(3) &
     !$omp shared(VVdz, nx0, nxN, ny, nz, field, izd) private(ix, iz, iy)
     do ix = nx0, nxN
-      do iy = -1, ny + 1
+      do iy = ny0 - 2, nyN + 2
         do iz = -nz, -1
-          field(iy, iz, ix) = VVdz(izd(iz) + 1, ix - nx0 + 1, iy + 2, 1)
+          field(iy, iz, ix) = VVdz(izd(iz) + 1, ix - nx0 + 1, iy, 1)
         end do
       end do
     end do
@@ -633,13 +684,14 @@ contains
     integer(C_INT), intent(in) :: rhs0, rhs1
     integer(C_INT) :: iy, iz, ix
 
+    call acquire_convvelo_real_workspace("convvelo_real")
     call load_convvelo_field_to_zbuf(rhs0)
     call spectral_field_to_real_x(convvelo_real0)
     call load_convvelo_field_to_zbuf(rhs1)
     call spectral_field_to_real_x(convvelo_real1)
     !$omp target teams distribute parallel do collapse(3) &
-    !$omp shared(convvelo_real_prod, convvelo_real0, convvelo_real1, factor, nxd, nzB, ny) private(ix, iz, iy)
-    do iy = 1, ny + 3
+    !$omp shared(convvelo_real_prod, convvelo_real0, convvelo_real1, factor, nxd, nzB) private(ix, iz, iy)
+    do iy = ny0 - 2, nyN + 2
       do iz = 1, nzB
         do ix = 1, 2*(nxd + 1)
           convvelo_real_prod(ix, iz, iy) = factor*convvelo_real0(ix, iz, iy)*convvelo_real1(ix, iz, iy)
@@ -647,21 +699,109 @@ contains
       end do
     end do
     call real_x_to_spectral_field(convvelo_real_prod, convvelo_work)
+    call release_convvelo_real_workspace("convvelo_real")
   end subroutine build_cross_product_work
+
+  subroutine get_convvelo_real_workspace_bytes(real_bytes, fft_offset, total_bytes)
+    implicit none
+    integer(C_SIZE_T), intent(out) :: real_bytes, fft_offset, total_bytes
+    integer(C_SIZE_T) :: fft_bytes
+
+    call get_convvelo_local_real_workspace_bytes(real_bytes)
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    call get_fft_workspace_bytes(fft_bytes)
+    fft_offset = workspace_align_offset(real_bytes)
+    total_bytes = workspace_align_offset(fft_offset + fft_bytes)
+#else
+    fft_offset = 0_C_SIZE_T
+    total_bytes = real_bytes
+#endif
+  end subroutine get_convvelo_real_workspace_bytes
+
+  subroutine get_convvelo_local_real_workspace_bytes(nbytes)
+    implicit none
+    integer(C_SIZE_T), intent(out) :: nbytes
+    integer(C_SIZE_T) :: real_count, offset
+
+    real_count = int(2*(nxd + 1), C_SIZE_T)*int(nzB, C_SIZE_T)*int(nyN - ny0 + 5, C_SIZE_T)
+    offset = 0_C_SIZE_T
+    offset = workspace_align_offset(offset + real_count*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
+    offset = workspace_align_offset(offset + real_count*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
+    nbytes = workspace_align_offset(offset + real_count*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
+  end subroutine get_convvelo_local_real_workspace_bytes
+
+  subroutine acquire_convvelo_real_workspace(owner)
+    implicit none
+    character(len=*), intent(in) :: owner
+    type(C_PTR) :: base
+    integer(C_SIZE_T) :: real_bytes, fft_offset, total_bytes
+
+    call get_convvelo_real_workspace_bytes(real_bytes, fft_offset, total_bytes)
+    call workspace_request(total_bytes, owner, base)
+    call bind_convvelo_real_workspace()
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    call bind_fft_workspace(fft_offset)
+#endif
+  end subroutine acquire_convvelo_real_workspace
+
+  subroutine release_convvelo_real_workspace(owner)
+    implicit none
+    character(len=*), intent(in) :: owner
+
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    call unbind_fft_workspace()
+#endif
+    call unbind_convvelo_real_workspace()
+    call workspace_release(owner)
+  end subroutine release_convvelo_real_workspace
+
+  subroutine bind_convvelo_real_workspace()
+    implicit none
+    type(C_PTR) :: ptr
+    real(C_DOUBLE), pointer :: rbuf(:)
+    integer(C_SIZE_T) :: offset, real_count
+
+    real_count = int(2*(nxd + 1), C_SIZE_T)*int(nzB, C_SIZE_T)*int(nyN - ny0 + 5, C_SIZE_T)
+    offset = 0_C_SIZE_T
+    call bind_real_3d(offset, convvelo_real0)
+    call bind_real_3d(offset, convvelo_real1)
+    call bind_real_3d(offset, convvelo_real_prod)
+
+    !$omp target enter data map(to: convvelo_real0, convvelo_real1, convvelo_real_prod)
+    !$omp target
+    convvelo_real0(1, 1, ny0 - 2) = 0.0_C_DOUBLE
+    convvelo_real1(1, 1, ny0 - 2) = 0.0_C_DOUBLE
+    convvelo_real_prod(1, 1, ny0 - 2) = 0.0_C_DOUBLE
+    !$omp end target
+
+  contains
+    subroutine bind_real_3d(offset_bytes, target)
+      integer(C_SIZE_T), intent(inout) :: offset_bytes
+      real(C_DOUBLE), pointer, contiguous, intent(out) :: target(:, :, :)
+
+      call workspace_slice(offset_bytes, ptr)
+      call c_f_pointer(ptr, rbuf, [int(real_count)])
+      target(1:2*(nxd + 1), 1:nzB, ny0 - 2:nyN + 2) => rbuf
+      offset_bytes = workspace_align_offset(offset_bytes + real_count*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
+    end subroutine bind_real_3d
+  end subroutine bind_convvelo_real_workspace
+
+  subroutine unbind_convvelo_real_workspace()
+    implicit none
+
+    !$omp target exit data map(release: convvelo_real0, convvelo_real1, convvelo_real_prod)
+    nullify (convvelo_real0, convvelo_real1, convvelo_real_prod)
+  end subroutine unbind_convvelo_real_workspace
 
   subroutine apply_dy_to_existing_work()
     implicit none
-    complex(C_DOUBLE_COMPLEX) :: tmp(ny0 - 2:nyN + 2)
-    integer(C_INT) :: iz, ix
+    complex(C_DOUBLE_COMPLEX), allocatable :: deriv(:, :, :)
 
-    !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(convvelo_work, der, D0mat, nx0, nxN, nz) private(ix, iz, tmp)
-    do ix = nx0, nxN
-      do iz = -nz, nz
-        tmp = convvelo_work(:, iz, ix)
-        call COMPLEXderiv(tmp, convvelo_work(:, iz, ix), der, D0mat)
-      end do
-    end do
+    allocate (deriv(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
+    call apply_complex_derivative_current_layout(convvelo_work, deriv)
+    convvelo_work = deriv
+    !$omp target update to(convvelo_work)
+    deallocate (deriv)
   end subroutine apply_dy_to_existing_work
 
   subroutine free_convvelo()
@@ -669,8 +809,8 @@ contains
 
     if (.not. convvelo_initialized) return
 
-    !$omp target exit data map(delete: convvelo_stats, convvelo_work, component_means, convvelo_real0, convvelo_real1, convvelo_real_prod)
-    deallocate (convvelo_stats, convvelo_work, component_means, convvelo_real0, convvelo_real1, convvelo_real_prod, n_field_samples)
+    !$omp target exit data map(delete: convvelo_stats, convvelo_work, component_means)
+    deallocate (convvelo_stats, convvelo_work, component_means, n_field_samples)
     if (allocated(convvelo_velocity_field_ids)) deallocate (convvelo_velocity_field_ids)
     if (allocated(convvelo_scalar_field_ids)) deallocate (convvelo_scalar_field_ids)
     if (allocated(convvelo_field_map)) deallocate (convvelo_field_map)
@@ -822,10 +962,13 @@ contains
     call MPI_File_set_size(fh, total_bytes)
 
     if (iproc == 0) then
+      call roctxPush("MPI_File_write_at convvelo_header")
       call MPI_File_write_at(fh, 0_MPI_OFFSET_KIND, header_times, 2, MPI_DOUBLE_PRECISION, status)
       call MPI_File_write_at(fh, 16_MPI_OFFSET_KIND, header_sample_count, 1, MPI_INTEGER8, status)
+      call roctxPop("MPI_File_write_at convvelo_header")
     end if
 
+    call roctxPush("MPI_File_write_all convvelo_profiles")
     disp = convvelo_file_header_bytes
     call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, profile_file_type, 'native', MPI_INFO_NULL)
     call MPI_File_write_all(fh, component_means(:, 1), 1, profile_mem_type, status)
@@ -840,13 +983,16 @@ contains
       call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, profile_file_type, 'native', MPI_INFO_NULL)
       call MPI_File_write_all(fh, component_means(:, 3 + iPhi), 1, profile_mem_type, status)
     end do
+    call roctxPop("MPI_File_write_all convvelo_profiles")
 
+    call roctxPush("MPI_File_write_all convvelo_fields")
     do field_index = 1, n_convvelo_fields
       disp = convvelo_file_header_bytes + int(n_convvelo_profile_slots, MPI_OFFSET_KIND)*profile_bytes + &
              int(field_index - 1, MPI_OFFSET_KIND)*field_bytes
       call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, file_type, 'native', MPI_INFO_NULL)
       call MPI_File_write_all(fh, convvelo_stats(:, :, :, field_index), 1, mem_type, status)
     end do
+    call roctxPop("MPI_File_write_all convvelo_fields")
 
     call MPI_File_close(fh)
     call MPI_Type_free(file_type, ierror)
