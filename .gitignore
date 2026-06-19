@@ -1,0 +1,120 @@
+# Ignore all files without extension
+*
+!*.*
+!*/
+#######################################
+# DO NOT INSERT CHANGES ABOVE THIS LINE
+# They will be most likely ineffective
+# due to the line !*.*
+#######################################
+
+# Ignore changes to config file of Makefile (so that local changes from user do not overwrite template in repo)
+compiler.settings
+
+# Ignore Python cache
+__pycache__/
+*/__pycache__/
+*/*/__pycache__/
+*/*/*/__pycache__/
+*/*/*/*/__pycache__/
+
+# Ignore CPL cache
+.cpl/
+*/.cpl/
+*/*/.cpl/
+*/*/*/.cpl/
+*/*/*/*/.cpl/
+
+# Ignore compiled channel at the repository root
+/channel
+
+# Prerequisites
+*.d
+
+# Object files
+*.o
+*.ko
+*.obj
+*.elf
+
+# Linker output
+*.ilk
+*.map
+*.exp
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Libraries
+*.lib
+*.a
+*.la
+*.lo
+
+# Shared objects (inc. Windows DLLs)
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# Executables
+*.exe
+*.out
+*.app
+*.i*86
+*.x86_64
+*.hex
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Kernel Module Compile Results
+*.pyc
+*.mod*
+*.cmd
+.tmp_versions/
+modules.order
+Module.symvers
+Mkfile.old
+dkms.conf
+
+# VS code hidden files
+.vscode/
+
+build*/
+.venv/
+!tests/data/*.out
+Runtimedata*
+x1000*
+.rocprofv3/
+*.nsys-rep
+*.sqlite
+*.pftrace
+x1001*
+*.i
+*.csv
+
+fri*
+*-cpl.sh
+
+!tests/poisson/Dati.cart.35.out
+tests/convvelo/*.bin
+!tests/convvelo/*.bin
+!tests/convvelo/*.bin.fields
+tests/convvelo/*.in
+**/*.zarr
+tests/convvel/*.fld
+*.bin
+*.bin.fields
+!tests/convvelo/Dati.cart.*.out
+*.nfs*
+bench*
+nsys_*
+ncu_runs*
+plain_runs*
+crosscheck_*
+*.log

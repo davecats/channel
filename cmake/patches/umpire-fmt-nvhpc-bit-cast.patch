@@ -1,0 +1,13 @@
+diff --git a/include/fmt/format.h b/include/fmt/format.h
+index 4a653007..5995d08e 100644
+--- a/include/fmt/format.h
++++ b/include/fmt/format.h
+@@ -278,7 +278,7 @@ constexpr Char string_literal<Char, C...>::value[sizeof...(C)];
+ // Implementation of std::bit_cast for pre-C++20.
+ template <typename To, typename From, FMT_ENABLE_IF(sizeof(To) == sizeof(From))>
+ FMT_CONSTEXPR20 auto bit_cast(const From& from) -> To {
+-#ifdef __cpp_lib_bit_cast
++#if defined(__cpp_lib_bit_cast) && !defined(__NVCOMPILER)
+   if (is_constant_evaluated()) return std::bit_cast<To>(from);
+ #endif
+   auto to = To();

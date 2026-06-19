@@ -1,0 +1,14 @@
+diff --git a/UmpireSpace.hpp b/UmpireSpace.hpp
+index 3841ee2..5ad247c 100644
+--- a/UmpireSpace.hpp
++++ b/UmpireSpace.hpp
+@@ -3,6 +3,9 @@
+ 
+ #include "umpire/ResourceManager.hpp"
+ #include <Kokkos_Core.hpp>
++#include <cassert>
++#include <concepts>
++#include <optional>
+ #include <string>
+ 
+ template <typename MemorySpace, typename TagType = void> class UmpireSpace {

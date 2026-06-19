@@ -1,0 +1,19 @@
+[submodule "third_party/kokkos"]
+	path = third_party/kokkos
+	url = https://github.com/kokkos/kokkos.git
+
+[submodule "third_party/kokkos-fft"]
+	path = third_party/kokkos-fft
+	url = https://github.com/kokkos/kokkos-fft.git
+
+[submodule "third_party/kokkos-tools"]
+	path = third_party/kokkos-tools
+	url = https://github.com/kokkos/kokkos-tools.git
+
+[submodule "third_party/umpire"]
+	path = third_party/umpire
+	url = https://github.com/LLNL/Umpire.git
+
+[submodule "third_party/umpire-kokkos"]
+	path = third_party/umpire-kokkos
+	url = https://github.com/llnl/umpire-kokkos.git
