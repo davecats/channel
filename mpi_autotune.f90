@@ -171,12 +171,77 @@ contains
     integer(C_INT) :: npxz, path(MAXP)
     path = 1_C_INT
     do npxz = 1_C_INT, nranks
-      if (mod(nranks, npxz) == 0_C_INT) &
+      if (mod(nranks, npxz) == 0_C_INT) then
+        call try_pipelined_candidate(nranks, npxz, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, &
+                                     best_score, best_npxz, best_npy, best_pass, best_npass, best_exchange, &
+                                     best_y_solver, best_y_batches, found)
         call gen(nranks, npxz, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, &
                  nranks/npxz, path, 0_C_INT, best_score, best_npxz, best_npy, best_pass, &
                  best_npass, best_exchange, best_y_solver, best_y_batches, found)
+      end if
     end do
   end subroutine scan
+
+  subroutine try_pipelined_candidate(nranks, npxz, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, &
+                                     best_score, best_npxz, best_npy, best_pass, best_npass, best_exchange, &
+                                     best_y_solver, best_y_batches, found)
+    integer(C_INT), intent(in) :: nranks, npxz, nxpp, nxd, nzd, nz, ny, nphi, node(0:)
+    logical, intent(in) :: overlapping
+    real(C_DOUBLE), intent(inout) :: best_score
+    integer(C_INT), intent(inout) :: best_npxz, best_npy, best_pass(MAXP), best_npass, best_exchange
+    integer(C_INT), intent(inout) :: best_y_solver, best_y_batches
+    logical, intent(inout) :: found
+    real(C_DOUBLE) :: xz_forward_cost, xz_back_cost, y_cost, score
+    real(C_DOUBLE) :: y_error
+    integer(C_INT) :: ib, batches, npy, nlines, placeholder_path(MAXP), placeholder_npass, batch_candidates(5)
+    integer(C_INT), allocatable :: placeholder_passes(:)
+    logical :: y_ok
+    integer :: ierr, rank
+
+    if (.not. valid_decomposition(nranks, npxz, nxpp, nzd, ny, node)) return
+    npy = nranks/npxz
+    if (npy <= 1_C_INT) return
+
+    call MPI_Comm_rank(MPI_COMM_WORLD, rank, ierr)
+    call time_xz_sweep(nxpp, nxd, nzd, nz, ny, nphi, overlapping, npy, xz_forward_cost, xz_back_cost)
+
+    placeholder_path = 1_C_INT
+    call ys_schur_default_pass_counts(npy, placeholder_passes)
+    placeholder_npass = int(size(placeholder_passes), C_INT)
+    if (placeholder_npass > MAXP) error stop "autotune placeholder pass list exceeds MAXP"
+    if (placeholder_npass > 0_C_INT) placeholder_path(1:placeholder_npass) = placeholder_passes
+
+    nlines = (nxpp/npxz)*(2_C_INT*nz + 1_C_INT)
+    batch_candidates = [1_C_INT, 2_C_INT, 4_C_INT, 8_C_INT, 16_C_INT]
+    do ib = 1_C_INT, int(size(batch_candidates), C_INT)
+      batches = batch_candidates(ib)
+      if (batches > nlines) cycle
+      y_cost = time_y(nxpp, nzd, nz, ny, nphi, overlapping, npy, placeholder_path, placeholder_npass, &
+                      YS_SCHUR_EXCHANGE_AUTO, Y_SOLVER_PIPELINED_LU, batches, y_ok, y_error)
+      if (.not. y_ok) then
+        if (rank == 0) write (*, '(*(g0,1x))') "MPI autotune rejected: npxz=", npxz, &
+          "npy=", npy, "passes=", trim(pass_string(placeholder_path, placeholder_npass)), &
+          "exchange= auto y_solver=", trim(y_solver_string(Y_SOLVER_PIPELINED_LU)), &
+          "y_batches=", batches, "y_correctness_error=", y_error
+        cycle
+      end if
+      score = RK_SUBSTEPS*(xz_forward_cost*real(3_C_INT + nphi, C_DOUBLE) + &
+                           xz_back_cost*real(6_C_INT + 3_C_INT*nphi, C_DOUBLE) + &
+                           y_cost*real(3_C_INT + nphi, C_DOUBLE))
+      if (rank == 0) write (*, '(*(g0,1x))') "MPI autotune tested: npxz=", npxz, &
+        "npy=", npy, "passes=", trim(pass_string(placeholder_path, placeholder_npass)), &
+        "exchange= auto xz_forward_ms=", 1d3*xz_forward_cost, &
+        "xz_back_ms=", 1d3*xz_back_cost, "y_solver=", trim(y_solver_string(Y_SOLVER_PIPELINED_LU)), &
+        "y_batches=", batches, "y_ms=", 1d3*y_cost, "y_correctness_error=", y_error, &
+        "score_timestep_ms=", 1d3*score
+      if (.not. found .or. score < best_score) then
+        found = .true.; best_score = score; best_npxz = npxz; best_npy = npy
+        best_pass = placeholder_path; best_npass = placeholder_npass; best_exchange = YS_SCHUR_EXCHANGE_AUTO
+        best_y_solver = Y_SOLVER_PIPELINED_LU; best_y_batches = batches
+      end if
+    end do
+    if (allocated(placeholder_passes)) deallocate (placeholder_passes)
+  end subroutine try_pipelined_candidate
 
   recursive subroutine gen(nranks, npxz, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, &
                            remaining, path, npass, best_score, best_npxz, best_npy, best_pass, &
@@ -222,21 +287,12 @@ contains
     integer :: ierr, rank
     real(C_DOUBLE) :: xz_forward_cost, xz_back_cost, y_cost, score
     real(C_DOUBLE) :: y_error
-    integer(C_INT) :: ib, batches, nlines, batch_candidates(5)
     logical :: y_ok
     if (.not. valid(nranks, npxz, nxpp, nzd, nz, ny, node, path, npass)) return
     call MPI_Comm_rank(MPI_COMM_WORLD, rank, ierr)
     call time_xz_sweep(nxpp, nxd, nzd, nz, ny, nphi, overlapping, nranks/npxz, xz_forward_cost, xz_back_cost)
 
     call score_y_backend(Y_SOLVER_SCHUR, 0_C_INT)
-    if (nranks/npxz > 1_C_INT) then
-      nlines = (nxpp/npxz)*(2_C_INT*nz + 1_C_INT)
-      batch_candidates = [1_C_INT, 2_C_INT, 4_C_INT, 8_C_INT, 16_C_INT]
-      do ib = 1_C_INT, int(size(batch_candidates), C_INT)
-        batches = batch_candidates(ib)
-        if (batches <= nlines) call score_y_backend(Y_SOLVER_PIPELINED_LU, batches)
-      end do
-    end if
 
   contains
     subroutine score_y_backend(y_solver, y_batches)
@@ -270,8 +326,22 @@ contains
 
   logical function valid(nranks, npxz, nxpp, nzd, nz, ny, node, path, npass)
     integer(C_INT), intent(in) :: nranks, npxz, nxpp, nzd, nz, ny, node(0:), path(MAXP), npass
-    integer(C_INT) :: npy, ipy, ipxz, prev, level, y0, yN
+    integer(C_INT) :: npy, prev, level
     valid = .false.; npy = nranks/npxz
+    if (.not. valid_decomposition(nranks, npxz, nxpp, nzd, ny, node)) return
+    prev = (nxpp/npxz)*(2_C_INT*nz + 1_C_INT)
+    do level = 1_C_INT, npass
+      if (mod(prev, path(level)) /= 0_C_INT) return
+      prev = prev/path(level)
+    end do
+    valid = .true.
+  end function valid
+
+  logical function valid_decomposition(nranks, npxz, nxpp, nzd, ny, node)
+    integer(C_INT), intent(in) :: nranks, npxz, nxpp, nzd, ny, node(0:)
+    integer(C_INT) :: npy, ipy, y0, yN
+    valid_decomposition = .false.
+    npy = nranks/npxz
     if (mod(nxpp, npxz) /= 0_C_INT .or. mod(nzd, npxz) /= 0_C_INT) return
     if (npy > 1_C_INT) then
       do ipy = 0_C_INT, npy - 1_C_INT
@@ -285,14 +355,8 @@ contains
         if (.not. local(node, ipy*npxz, npxz, 1_C_INT)) return
       end do
     end if
-    do ipxz = 0_C_INT, npxz - 1_C_INT; if (.not. clean(node, ipxz, npy, npxz)) return; end do
-    prev = (nxpp/npxz)*(2_C_INT*nz + 1_C_INT)
-    do level = 1_C_INT, npass
-      if (mod(prev, path(level)) /= 0_C_INT .or. .not. clean_schur_level(npxz, npy, node, path, level)) return
-      prev = prev/path(level)
-    end do
-    valid = .true.
-  end function valid
+    valid_decomposition = .true.
+  end function valid_decomposition
 
   logical function clean_schur_level(npxz, npy, node, path, level)
     integer(C_INT), intent(in) :: npxz, npy, node(0:), path(MAXP), level
