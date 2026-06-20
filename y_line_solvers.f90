@@ -1394,10 +1394,11 @@ contains
     integer(C_INT), parameter :: TAG_BACKWARD = 8610_C_INT
     integer(C_INT) :: factor_stride, solve_stride, factor_total, solve_total, send_elems, recv_elems
     integer(C_INT) :: batch, first_line, line_count, factor_count, solve_count
-    integer(C_INT) :: factor_offset, solve_offset
+    integer(C_INT) :: factor_offset, forward_offset, backward_offset
+    integer(C_INT) :: next_backward
     integer :: ierr
-    type(MPI_Request), allocatable :: send_req(:)
-    type(MPI_Request) :: factor_recv_req, forward_recv_req, recv_req
+    type(MPI_Request), allocatable :: factor_send_req(:), forward_send_req(:), backward_recv_req(:), backward_send_req(:)
+    type(MPI_Request) :: factor_recv_req, forward_recv_req
     type(MPI_Status) :: status
 
     if (active_n < 2_C_INT) error stop "pipelined LU distributed solve requires at least two local rows"
@@ -1407,79 +1408,172 @@ contains
     factor_total = factor_stride*nbatches
     solve_total = solve_stride*nbatches
     send_elems = factor_total + solve_total
-    recv_elems = send_elems
+    recv_elems = factor_total + 2_C_INT*solve_total
     call ensure_ycomm_buffers(send_elems, recv_elems)
-    allocate (send_req(2*nbatches))
+    allocate (factor_send_req(nbatches), forward_send_req(nbatches), backward_recv_req(nbatches), backward_send_req(nbatches))
 
-    send_req = MPI_REQUEST_NULL
+    factor_send_req = MPI_REQUEST_NULL
+    forward_send_req = MPI_REQUEST_NULL
+    backward_recv_req = MPI_REQUEST_NULL
+    backward_send_req = MPI_REQUEST_NULL
+
+    if (ipy < npy_grid - 1_C_INT) then
+      call roctxPush("ys_pipeline post_backward_recvs")
+      do batch = 1_C_INT, nbatches
+        call ys_pipeline_batch_range(batch, nbatches, nlines, first_line, line_count)
+        solve_count = 2_C_INT*line_count
+        backward_offset = factor_total + solve_total + (batch - 1_C_INT)*solve_stride
+        !$omp target data use_device_addr(ycomm_recvbuf)
+        call MPI_Irecv(ycomm_recvbuf(backward_offset + 1), solve_count, &
+                       MPI_DOUBLE_COMPLEX, ipy + 1_C_INT, TAG_BACKWARD + batch, MPI_COMM_Y, backward_recv_req(batch), ierr)
+        !$omp end target data
+      end do
+      call roctxPop("ys_pipeline post_backward_recvs")
+    end if
+
+    next_backward = 1_C_INT
+    call roctxPush("ys_pipeline forward_sweep")
     do batch = 1_C_INT, nbatches
+      call roctxPush("ys_pipeline forward_batch")
       call ys_pipeline_batch_range(batch, nbatches, nlines, first_line, line_count)
       factor_count = 6_C_INT*line_count
       solve_count = 2_C_INT*line_count
       factor_offset = (batch - 1_C_INT)*factor_stride
-      solve_offset = factor_total + (batch - 1_C_INT)*solve_stride
+      forward_offset = factor_total + (batch - 1_C_INT)*solve_stride
       if (ipy > 0_C_INT) then
         !$omp target data use_device_addr(ycomm_recvbuf)
         call MPI_Irecv(ycomm_recvbuf(factor_offset + 1), factor_count, &
                        MPI_DOUBLE_COMPLEX, ipy - 1_C_INT, TAG_FACTOR + batch, MPI_COMM_Y, factor_recv_req, ierr)
-        call MPI_Irecv(ycomm_recvbuf(solve_offset + 1), solve_count, &
+        call MPI_Irecv(ycomm_recvbuf(forward_offset + 1), solve_count, &
                        MPI_DOUBLE_COMPLEX, ipy - 1_C_INT, TAG_FORWARD + batch, MPI_COMM_Y, forward_recv_req, ierr)
         !$omp end target data
+        call roctxPush("ys_pipeline MPI_Wait factor_recv")
         call MPI_Wait(factor_recv_req, status, ierr)
+        call roctxPop("ys_pipeline MPI_Wait factor_recv")
+        call roctxPush("ys_pipeline apply_factor_continuation")
         call ys_apply_factor_continuation(first_line, line_count, active_n, factor_offset)
+        call roctxPop("ys_pipeline apply_factor_continuation")
       end if
+      call roctxPush("ys_pipeline factor_batch")
       call ys_factor_pipelined_batch(first_line, line_count, active_n, ipy < npy_grid - 1_C_INT)
+      call roctxPop("ys_pipeline factor_batch")
       if (ipy < npy_grid - 1_C_INT) then
+        call roctxPush("ys_pipeline pack_factor_state")
         call ys_pack_factor_state(first_line, line_count, active_n, factor_offset)
+        call roctxPop("ys_pipeline pack_factor_state")
+        call roctxPush("ys_pipeline MPI_Isend factor_state")
         !$omp target data use_device_addr(ycomm_sendbuf)
         call MPI_Isend(ycomm_sendbuf(factor_offset + 1), factor_count, &
-                       MPI_DOUBLE_COMPLEX, ipy + 1_C_INT, TAG_FACTOR + batch, MPI_COMM_Y, send_req(batch), ierr)
+                       MPI_DOUBLE_COMPLEX, ipy + 1_C_INT, TAG_FACTOR + batch, MPI_COMM_Y, factor_send_req(batch), ierr)
         !$omp end target data
+        call roctxPop("ys_pipeline MPI_Isend factor_state")
       end if
       if (ipy > 0_C_INT) then
+        call roctxPush("ys_pipeline MPI_Wait forward_recv")
         call MPI_Wait(forward_recv_req, status, ierr)
-        call ys_forward_pipelined_batch_continue(first_line, line_count, active_n, solve_offset)
+        call roctxPop("ys_pipeline MPI_Wait forward_recv")
+        call roctxPush("ys_pipeline forward_continue")
+        call ys_forward_pipelined_batch_continue(first_line, line_count, active_n, forward_offset)
+        call roctxPop("ys_pipeline forward_continue")
       else
+        call roctxPush("ys_pipeline forward_first_rank")
         call ys_forward_pipelined_batch(first_line, line_count, active_n)
+        call roctxPop("ys_pipeline forward_first_rank")
       end if
       if (ipy < npy_grid - 1_C_INT) then
-        call ys_pack_forward_state(first_line, line_count, active_n, solve_offset)
+        call roctxPush("ys_pipeline pack_forward_state")
+        call ys_pack_forward_state(first_line, line_count, active_n, forward_offset)
+        call roctxPop("ys_pipeline pack_forward_state")
+        call roctxPush("ys_pipeline MPI_Isend forward_state")
         !$omp target data use_device_addr(ycomm_sendbuf)
-        call MPI_Isend(ycomm_sendbuf(solve_offset + 1), solve_count, &
-                       MPI_DOUBLE_COMPLEX, ipy + 1_C_INT, TAG_FORWARD + batch, MPI_COMM_Y, send_req(nbatches + batch), ierr)
+        call MPI_Isend(ycomm_sendbuf(forward_offset + 1), solve_count, &
+                       MPI_DOUBLE_COMPLEX, ipy + 1_C_INT, TAG_FORWARD + batch, MPI_COMM_Y, forward_send_req(batch), ierr)
         !$omp end target data
+        call roctxPop("ys_pipeline MPI_Isend forward_state")
       end if
+      call roctxPush("ys_pipeline drain_backward_nonblocking")
+      call drain_backward_batches(batch, .false.)
+      call roctxPop("ys_pipeline drain_backward_nonblocking")
+      call roctxPop("ys_pipeline forward_batch")
     end do
-    if (ipy < npy_grid - 1_C_INT) call MPI_Waitall(2*nbatches, send_req, MPI_STATUSES_IGNORE, ierr)
+    call roctxPop("ys_pipeline forward_sweep")
+    call roctxPush("ys_pipeline drain_backward_blocking")
+    call drain_backward_batches(nbatches, .true.)
+    call roctxPop("ys_pipeline drain_backward_blocking")
 
-    send_req = MPI_REQUEST_NULL
-    do batch = 1_C_INT, nbatches
-      call ys_pipeline_batch_range(batch, nbatches, nlines, first_line, line_count)
-      solve_count = 2_C_INT*line_count
-      solve_offset = factor_total + (batch - 1_C_INT)*solve_stride
-      if (ipy < npy_grid - 1_C_INT) then
-        !$omp target data use_device_addr(ycomm_recvbuf)
-        call MPI_Irecv(ycomm_recvbuf(solve_offset + 1), solve_count, &
-                       MPI_DOUBLE_COMPLEX, ipy + 1_C_INT, TAG_BACKWARD + batch, MPI_COMM_Y, recv_req, ierr)
-        !$omp end target data
-        call MPI_Wait(recv_req, status, ierr)
-        call ys_backward_pipelined_batch_continue(first_line, line_count, active_n, solve_offset)
-      else
-        call ys_backward_pipelined_batch(first_line, line_count, active_n)
-      end if
-      if (ipy > 0_C_INT) then
-        call ys_pack_backward_state(first_line, line_count, solve_offset)
-        !$omp target data use_device_addr(ycomm_sendbuf)
-        call MPI_Isend(ycomm_sendbuf(solve_offset + 1), solve_count, &
-                       MPI_DOUBLE_COMPLEX, ipy - 1_C_INT, TAG_BACKWARD + batch, MPI_COMM_Y, send_req(batch), ierr)
-        !$omp end target data
-      end if
-    end do
-    if (ipy > 0_C_INT) call MPI_Waitall(nbatches, send_req, MPI_STATUSES_IGNORE, ierr)
+    if (ipy < npy_grid - 1_C_INT) then
+      call roctxPush("ys_pipeline MPI_Waitall factor_sends")
+      call MPI_Waitall(nbatches, factor_send_req, MPI_STATUSES_IGNORE, ierr)
+      call roctxPop("ys_pipeline MPI_Waitall factor_sends")
+      call roctxPush("ys_pipeline MPI_Waitall forward_sends")
+      call MPI_Waitall(nbatches, forward_send_req, MPI_STATUSES_IGNORE, ierr)
+      call roctxPop("ys_pipeline MPI_Waitall forward_sends")
+    end if
+    if (ipy > 0_C_INT) then
+      call roctxPush("ys_pipeline MPI_Waitall backward_sends")
+      call MPI_Waitall(nbatches, backward_send_req, MPI_STATUSES_IGNORE, ierr)
+      call roctxPop("ys_pipeline MPI_Waitall backward_sends")
+    end if
 
+    call roctxPush("ys_pipeline exchange_solution_halos")
     call ys_exchange_pipelined_solution_halos(active_n, nlines)
+    call roctxPop("ys_pipeline exchange_solution_halos")
 
-    deallocate (send_req)
+    deallocate (factor_send_req, forward_send_req, backward_recv_req, backward_send_req)
+
+  contains
+    subroutine drain_backward_batches(completed_batch, blocking)
+      integer(C_INT), intent(in) :: completed_batch
+      logical, intent(in) :: blocking
+      logical :: ready
+
+      do while (next_backward <= completed_batch)
+        call ys_pipeline_batch_range(next_backward, nbatches, nlines, first_line, line_count)
+        solve_count = 2_C_INT*line_count
+        forward_offset = factor_total + (next_backward - 1_C_INT)*solve_stride
+        backward_offset = factor_total + solve_total + (next_backward - 1_C_INT)*solve_stride
+
+        if (ipy < npy_grid - 1_C_INT) then
+          if (blocking) then
+            call roctxPush("ys_pipeline MPI_Wait backward_recv")
+            call MPI_Wait(backward_recv_req(next_backward), status, ierr)
+            call roctxPop("ys_pipeline MPI_Wait backward_recv")
+            ready = .true.
+          else
+            call roctxPush("ys_pipeline MPI_Test backward_recv")
+            call MPI_Test(backward_recv_req(next_backward), ready, status, ierr)
+            call roctxPop("ys_pipeline MPI_Test backward_recv")
+          end if
+          if (.not. ready) exit
+          call roctxPush("ys_pipeline backward_continue")
+          call ys_backward_pipelined_batch_continue(first_line, line_count, active_n, backward_offset)
+          call roctxPop("ys_pipeline backward_continue")
+        else
+          call roctxPush("ys_pipeline backward_top_rank")
+          call ys_backward_pipelined_batch(first_line, line_count, active_n)
+          call roctxPop("ys_pipeline backward_top_rank")
+        end if
+
+        if (ipy > 0_C_INT) then
+          if (ipy < npy_grid - 1_C_INT) then
+            call roctxPush("ys_pipeline MPI_Wait forward_send_reuse")
+            call MPI_Wait(forward_send_req(next_backward), status, ierr)
+            call roctxPop("ys_pipeline MPI_Wait forward_send_reuse")
+          end if
+          call roctxPush("ys_pipeline pack_backward_state")
+          call ys_pack_backward_state(first_line, line_count, forward_offset)
+          call roctxPop("ys_pipeline pack_backward_state")
+          call roctxPush("ys_pipeline MPI_Isend backward_state")
+          !$omp target data use_device_addr(ycomm_sendbuf)
+          call MPI_Isend(ycomm_sendbuf(forward_offset + 1), solve_count, &
+                         MPI_DOUBLE_COMPLEX, ipy - 1_C_INT, TAG_BACKWARD + next_backward, &
+                         MPI_COMM_Y, backward_send_req(next_backward), ierr)
+          !$omp end target data
+          call roctxPop("ys_pipeline MPI_Isend backward_state")
+        end if
+        next_backward = next_backward + 1_C_INT
+      end do
+    end subroutine drain_backward_batches
   end subroutine ys_solve_pipelined_lu_distributed
 
   subroutine ys_exchange_pipelined_solution_halos(active_n, nlines)
