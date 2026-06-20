@@ -1392,34 +1392,40 @@ contains
     integer(C_INT), parameter :: TAG_FACTOR = 8410_C_INT
     integer(C_INT), parameter :: TAG_FORWARD = 8510_C_INT
     integer(C_INT), parameter :: TAG_BACKWARD = 8610_C_INT
-    integer(C_INT) :: factor_stride, solve_stride, send_elems, recv_elems
+    integer(C_INT) :: factor_stride, solve_stride, factor_total, solve_total, send_elems, recv_elems
     integer(C_INT) :: batch, first_line, line_count, factor_count, solve_count
     integer(C_INT) :: factor_offset, solve_offset
     integer :: ierr
     type(MPI_Request), allocatable :: send_req(:)
-    type(MPI_Request) :: recv_req
+    type(MPI_Request) :: factor_recv_req, forward_recv_req, recv_req
     type(MPI_Status) :: status
 
     if (active_n < 2_C_INT) error stop "pipelined LU distributed solve requires at least two local rows"
 
     factor_stride = 6_C_INT*batch_max_lines
     solve_stride = 2_C_INT*batch_max_lines
-    send_elems = max(factor_stride, solve_stride)*nbatches
+    factor_total = factor_stride*nbatches
+    solve_total = solve_stride*nbatches
+    send_elems = factor_total + solve_total
     recv_elems = send_elems
     call ensure_ycomm_buffers(send_elems, recv_elems)
-    allocate (send_req(nbatches))
+    allocate (send_req(2*nbatches))
 
     send_req = MPI_REQUEST_NULL
     do batch = 1_C_INT, nbatches
       call ys_pipeline_batch_range(batch, nbatches, nlines, first_line, line_count)
       factor_count = 6_C_INT*line_count
+      solve_count = 2_C_INT*line_count
       factor_offset = (batch - 1_C_INT)*factor_stride
+      solve_offset = factor_total + (batch - 1_C_INT)*solve_stride
       if (ipy > 0_C_INT) then
         !$omp target data use_device_addr(ycomm_recvbuf)
         call MPI_Irecv(ycomm_recvbuf(factor_offset + 1), factor_count, &
-                       MPI_DOUBLE_COMPLEX, ipy - 1_C_INT, TAG_FACTOR + batch, MPI_COMM_Y, recv_req, ierr)
+                       MPI_DOUBLE_COMPLEX, ipy - 1_C_INT, TAG_FACTOR + batch, MPI_COMM_Y, factor_recv_req, ierr)
+        call MPI_Irecv(ycomm_recvbuf(solve_offset + 1), solve_count, &
+                       MPI_DOUBLE_COMPLEX, ipy - 1_C_INT, TAG_FORWARD + batch, MPI_COMM_Y, forward_recv_req, ierr)
         !$omp end target data
-        call MPI_Wait(recv_req, status, ierr)
+        call MPI_Wait(factor_recv_req, status, ierr)
         call ys_apply_factor_continuation(first_line, line_count, active_n, factor_offset)
       end if
       call ys_factor_pipelined_batch(first_line, line_count, active_n, ipy < npy_grid - 1_C_INT)
@@ -1430,20 +1436,8 @@ contains
                        MPI_DOUBLE_COMPLEX, ipy + 1_C_INT, TAG_FACTOR + batch, MPI_COMM_Y, send_req(batch), ierr)
         !$omp end target data
       end if
-    end do
-    if (ipy < npy_grid - 1_C_INT) call MPI_Waitall(nbatches, send_req, MPI_STATUSES_IGNORE, ierr)
-
-    send_req = MPI_REQUEST_NULL
-    do batch = 1_C_INT, nbatches
-      call ys_pipeline_batch_range(batch, nbatches, nlines, first_line, line_count)
-      solve_count = 2_C_INT*line_count
-      solve_offset = (batch - 1_C_INT)*solve_stride
       if (ipy > 0_C_INT) then
-        !$omp target data use_device_addr(ycomm_recvbuf)
-        call MPI_Irecv(ycomm_recvbuf(solve_offset + 1), solve_count, &
-                       MPI_DOUBLE_COMPLEX, ipy - 1_C_INT, TAG_FORWARD + batch, MPI_COMM_Y, recv_req, ierr)
-        !$omp end target data
-        call MPI_Wait(recv_req, status, ierr)
+        call MPI_Wait(forward_recv_req, status, ierr)
         call ys_forward_pipelined_batch_continue(first_line, line_count, active_n, solve_offset)
       else
         call ys_forward_pipelined_batch(first_line, line_count, active_n)
@@ -1452,17 +1446,17 @@ contains
         call ys_pack_forward_state(first_line, line_count, active_n, solve_offset)
         !$omp target data use_device_addr(ycomm_sendbuf)
         call MPI_Isend(ycomm_sendbuf(solve_offset + 1), solve_count, &
-                       MPI_DOUBLE_COMPLEX, ipy + 1_C_INT, TAG_FORWARD + batch, MPI_COMM_Y, send_req(batch), ierr)
+                       MPI_DOUBLE_COMPLEX, ipy + 1_C_INT, TAG_FORWARD + batch, MPI_COMM_Y, send_req(nbatches + batch), ierr)
         !$omp end target data
       end if
     end do
-    if (ipy < npy_grid - 1_C_INT) call MPI_Waitall(nbatches, send_req, MPI_STATUSES_IGNORE, ierr)
+    if (ipy < npy_grid - 1_C_INT) call MPI_Waitall(2*nbatches, send_req, MPI_STATUSES_IGNORE, ierr)
 
     send_req = MPI_REQUEST_NULL
     do batch = 1_C_INT, nbatches
       call ys_pipeline_batch_range(batch, nbatches, nlines, first_line, line_count)
       solve_count = 2_C_INT*line_count
-      solve_offset = (batch - 1_C_INT)*solve_stride
+      solve_offset = factor_total + (batch - 1_C_INT)*solve_stride
       if (ipy < npy_grid - 1_C_INT) then
         !$omp target data use_device_addr(ycomm_recvbuf)
         call MPI_Irecv(ycomm_recvbuf(solve_offset + 1), solve_count, &
