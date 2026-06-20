@@ -523,22 +523,49 @@ CONTAINS
   END SUBROUTINE apply_complex_derivative_current_layout
 
   subroutine assemble_compact_derivative_interior(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end)
-    use y_line_solvers, only: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs
+    use y_line_solvers, only: ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
     real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
     integer(C_INT), intent(in) :: row_start, row_end
-    integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner
+    integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner, nlines_z, nlines, iline
+    integer(C_INT64_T) :: p
+    complex(C_DOUBLE_COMPLEX) :: src_m2, src_m1, src_0, src_p1, src_p2
     ix0_owner = lbound(owner_src, 3)
     ixN_owner = ubound(owner_src, 3)
+    nlines_z = 2_C_INT*nz + 1_C_INT
+    nlines = (ixN_owner - ix0_owner + 1_C_INT)*nlines_z
     !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(owner_src, der, ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, row_start, row_end, nz, ix0_owner, ixN_owner) &
-    !$omp private(ix, iz, iy)
+    !$omp shared(owner_src, der, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, &
+    !$omp& row_start, row_end, nz, ix0_owner, ixN_owner, nlines_z, nlines) &
+    !$omp private(ix, iz, iy, iline, p, src_m2, src_m1, src_0, src_p1, src_p2)
     do ix = ix0_owner, ixN_owner
       do iz = -nz, nz
+        iline = (ix - ix0_owner)*nlines_z + iz + nz + 1_C_INT
+        src_m2 = owner_src(row_start - 2_C_INT, iz, ix)
+        src_m1 = owner_src(row_start - 1_C_INT, iz, ix)
+        src_0 = owner_src(row_start, iz, ix)
+        src_p1 = owner_src(row_start + 1_C_INT, iz, ix)
+        src_p2 = owner_src(row_start + 2_C_INT, iz, ix)
         do iy = row_start, row_end
-          ys_gpsv_owner_matrix(iz, ix, iy, -2:2) = cmplx(der(iy, 0, -2:2), 0.0d0, kind=C_DOUBLE)
-          ys_gpsv_owner_rhs(iz, ix, iy) = sum(der(iy, 1, -2:2)*owner_src(iy - 2:iy + 2, iz, ix))
+          p = int(iy - row_start, C_INT64_T)*int(nlines, C_INT64_T) + int(iline, C_INT64_T)
+          ys_gpsv_ds(p) = cmplx(der(iy, 0, -2), 0.0d0, kind=C_DOUBLE)
+          ys_gpsv_dl(p) = cmplx(der(iy, 0, -1), 0.0d0, kind=C_DOUBLE)
+          ys_gpsv_d(p) = cmplx(der(iy, 0, 0), 0.0d0, kind=C_DOUBLE)
+          ys_gpsv_du(p) = cmplx(der(iy, 0, 1), 0.0d0, kind=C_DOUBLE)
+          ys_gpsv_dw(p) = cmplx(der(iy, 0, 2), 0.0d0, kind=C_DOUBLE)
+          ys_gpsv_x(p) = der(iy, 1, -2)*src_m2 + &
+                         der(iy, 1, -1)*src_m1 + &
+                         der(iy, 1, 0)*src_0 + &
+                         der(iy, 1, 1)*src_p1 + &
+                         der(iy, 1, 2)*src_p2
+          if (iy < row_end) then
+            src_m2 = src_m1
+            src_m1 = src_0
+            src_0 = src_p1
+            src_p1 = src_p2
+            src_p2 = owner_src(iy + 3_C_INT, iz, ix)
+          end if
         end do
       end do
     end do
@@ -871,7 +898,9 @@ CONTAINS
 
   SUBROUTINE solve_compact_component_current_layout(field_values, assemble_system, boundary_system, lambda_coeff, diffusion_coeff, source_values, &
                                                     solve_label, symmetric_operator, transpose_derivative)
-    use y_line_solvers, only: ys_prepare_assembled_workspace, ys_release_workspace, ys_solve_endpoint_schur
+    use y_line_solvers, only: ys_prepare_assembled_workspace, ys_release_workspace, ys_solve_endpoint_schur, ys_solve_pipelined_lu
+    use mpi_autotune, only: mpi_autotune_selected_y_solver, mpi_autotune_selected_y_batches, &
+                            Y_SOLVER_SCHUR, Y_SOLVER_PIPELINED_LU
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), target, intent(inout) :: field_values(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     procedure(compact_component_assembly) :: assemble_system
@@ -884,12 +913,17 @@ CONTAINS
     character(len=*), optional, intent(in) :: solve_label
     logical, optional, intent(in) :: symmetric_operator, transpose_derivative
     logical :: has_lower_boundary, has_upper_boundary, symmetric_operator_value
+    character(len=32) :: y_solver
+    integer :: env_length, env_status
     complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :), owner_dst(:, :, :)
 
     symmetric_operator_value = .true.
     if (present(symmetric_operator)) symmetric_operator_value = symmetric_operator
     if (present(solve_label)) continue
     if (present(transpose_derivative)) continue
+    y_solver = "auto"
+    call get_environment_variable("CHANNEL_Y_SOLVER", y_solver, env_length, env_status)
+    if (env_status /= 0 .or. env_length <= 0) y_solver = "auto"
 
     owner_src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => source_values
     owner_dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => field_values
@@ -900,7 +934,23 @@ CONTAINS
     call assemble_system(owner_src, lambda_coeff, diffusion_coeff, ny0, nyN)
     call boundary_system(owner_src, ny0, nyN, has_lower_boundary, has_upper_boundary)
     call eliminate_assembled_boundaries(ny0, nyN, has_lower_boundary, has_upper_boundary)
-    call ys_solve_endpoint_schur(field_values, symmetric_operator_value)
+    select case (adjustl(trim(y_solver)))
+    case ("auto", "AUTO", "default", "DEFAULT")
+      select case (mpi_autotune_selected_y_solver)
+      case (Y_SOLVER_PIPELINED_LU)
+        call ys_solve_pipelined_lu(field_values, mpi_autotune_selected_y_batches)
+      case (Y_SOLVER_SCHUR)
+        call ys_solve_endpoint_schur(field_values, symmetric_operator_value)
+      case default
+        error stop "invalid autotuned y solver"
+      end select
+    case ("schur", "SCHUR")
+      call ys_solve_endpoint_schur(field_values, symmetric_operator_value)
+    case ("pipelined_lu", "PIPELINED_LU", "pipelined-lu", "PIPELINED-LU")
+      call ys_solve_pipelined_lu(field_values)
+    case default
+      error stop "invalid CHANNEL_Y_SOLVER"
+    end select
     call reconstruct_assembled_boundaries(owner_dst, ny0, nyN, has_lower_boundary, has_upper_boundary)
     call ys_release_workspace()
   END SUBROUTINE solve_compact_component_current_layout

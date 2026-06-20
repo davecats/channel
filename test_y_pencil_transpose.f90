@@ -6,7 +6,7 @@ program test_y_reduced_known_good_local_dst
   use mpi_transpose, only: ierr, iproc, nproc, init_MPI, npy_grid, npxz, ipy, ny0, nyN, nx0, nxN, nxB, MPI_COMM_WORLD, &
                            MPI_Init, MPI_Comm_rank, MPI_Comm_size, MPI_Abort, MPI_Barrier, MPI_Allreduce, MPI_Finalize, &
                            MPI_DOUBLE_PRECISION, MPI_MAX
-  use y_line_solvers, only: ys_prepare_assembled_workspace, ys_solve_endpoint_schur, &
+  use y_line_solvers, only: ys_prepare_assembled_workspace, ys_solve_endpoint_schur, ys_solve_pipelined_lu, &
                             ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, &
                             ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs, &
                             ys_eqm1, ys_eq0, ys_eqn, ys_eqnp1
@@ -121,6 +121,41 @@ program test_y_reduced_known_good_local_dst
     if (iproc == 0) write (*, *) "Known-good local-dst reduced y-solver test PASSED, max error = ", global_err
   else
     if (iproc == 0) write (*, *) "Known-good local-dst reduced y-solver test FAILED, max error = ", global_err
+    call MPI_Abort(MPI_COMM_WORLD, 1, ierr)
+  end if
+
+  reduced_local = cmplx(-999.0d0, -999.0d0, kind=C_DOUBLE)
+  do ix = 1, nxB
+    global_x = nx0 + ix - 1
+    do iz = 1, 2*nz_test + 1
+      global_z = iz
+      iline = (ix - 1)*(2*nz_test + 1) + iz
+      call clear_line_storage(iline)
+      call fill_exact_line(exact, global_z, global_x)
+      call assemble_owned_rows_from_exact(exact, iline)
+    end do
+  end do
+
+  call eliminate_assembled_boundaries(ny0, nyN, ny0 == 1_C_INT, nyN == ny_test - 1)
+  call ys_solve_pipelined_lu(reduced_local)
+
+  local_err = 0.0d0
+  do ix = 1, nxB
+    global_x = nx0 + ix - 1
+    do iz = 1, 2*nz_test + 1
+      global_z = iz
+      call fill_exact_line(exact, global_z, global_x)
+      do iy = ny0, nyN
+        local_err = max(local_err, abs(reduced_local(iy, iz, ix) - exact(iy)))
+      end do
+    end do
+  end do
+
+  call MPI_Allreduce(local_err, global_err, 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, ierr)
+  if (global_err < tol) then
+    if (iproc == 0) write (*, *) "Known-good pipelined LU y-solver test PASSED, max error = ", global_err
+  else
+    if (iproc == 0) write (*, *) "Known-good pipelined LU y-solver test FAILED, max error = ", global_err
     call MPI_Abort(MPI_COMM_WORLD, 1, ierr)
   end if
 
