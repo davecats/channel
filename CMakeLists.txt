@@ -115,6 +115,21 @@ elseif (CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
     target_link_libraries(channel_core PUBLIC CUDA::cufft CUDA::cudart CUDA::cusparse)
 
     set(_NCCL_ROOT_HINTS)
+    foreach(_NCCL_ENV_PATH IN ITEMS
+        "$ENV{CPATH}"
+        "$ENV{C_INCLUDE_PATH}"
+        "$ENV{LD_LIBRARY_PATH}"
+        "$ENV{LIBRARY_PATH}"
+    )
+        if(_NCCL_ENV_PATH)
+            string(REPLACE ":" ";" _NCCL_ENV_HINTS "${_NCCL_ENV_PATH}")
+            foreach(_NCCL_ENV_HINT IN LISTS _NCCL_ENV_HINTS)
+                list(APPEND _NCCL_ROOT_HINTS "${_NCCL_ENV_HINT}")
+                get_filename_component(_NCCL_ENV_ROOT "${_NCCL_ENV_HINT}" DIRECTORY)
+                list(APPEND _NCCL_ROOT_HINTS "${_NCCL_ENV_ROOT}")
+            endforeach()
+        endif()
+    endforeach()
     foreach(_NCCL_ROOT IN ITEMS
         "$ENV{NCCL_HOME}"
         "$ENV{NVHPC_ROOT}"
@@ -125,7 +140,9 @@ elseif (CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
             list(APPEND _NCCL_ROOT_HINTS "${_NCCL_ROOT}")
             file(GLOB _NCCL_VERSIONED_HINTS
                 "${_NCCL_ROOT}/comm_libs/${CUDAToolkit_VERSION}/nccl*"
+                "${_NCCL_ROOT}/comm_libs/${CUDAToolkit_VERSION}/openmpi*/latest/nccl"
                 "${_NCCL_ROOT}/Linux_x86_64/*/comm_libs/${CUDAToolkit_VERSION}/nccl*"
+                "${_NCCL_ROOT}/Linux_x86_64/*/comm_libs/${CUDAToolkit_VERSION}/openmpi*/latest/nccl"
             )
             if(_NCCL_VERSIONED_HINTS)
                 list(SORT _NCCL_VERSIONED_HINTS)
@@ -134,7 +151,9 @@ elseif (CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
             list(APPEND _NCCL_ROOT_HINTS ${_NCCL_VERSIONED_HINTS})
             file(GLOB _NCCL_GLOB_HINTS
                 "${_NCCL_ROOT}/comm_libs/*/nccl*"
+                "${_NCCL_ROOT}/comm_libs/*/openmpi*/latest/nccl"
                 "${_NCCL_ROOT}/Linux_x86_64/*/comm_libs/*/nccl*"
+                "${_NCCL_ROOT}/Linux_x86_64/*/comm_libs/*/openmpi*/latest/nccl"
                 "${_NCCL_ROOT}/REDIST/comm_libs/*/nccl*"
                 "${_NCCL_ROOT}/Linux_x86_64/*/REDIST/comm_libs/*/nccl*"
             )

@@ -131,7 +131,9 @@ cd "${SRC}"
 } > "${RUN_ROOT}/source_state.log"
 
 mkdir -p "${BUILD_DIR}"
-cmake -S "${SRC}" -B "${BUILD_DIR}" > "${RUN_ROOT}/cmake.log" 2>&1
+cmake -S "${SRC}" -B "${BUILD_DIR}" \
+  -U NCCL_ROOT_DIR -U NCCL_INCLUDE_DIR -U NCCL_LIBRARY \
+  > "${RUN_ROOT}/cmake.log" 2>&1
 cmake --build "${BUILD_DIR}" -j > "${RUN_ROOT}/build.log" 2>&1
 
 if [[ ! -x "${CHANNEL_EXE}" ]]; then
