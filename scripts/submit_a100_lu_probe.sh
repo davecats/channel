@@ -12,12 +12,39 @@ INPUT_FILE="${INPUT_FILE:-${SUBMIT_DIR}/dns.in}"
 RUN_ROOT="${RUN_ROOT:-${SUBMIT_DIR}/test_2xa100_lu_probe_$(date +%Y%m%d_%H%M%S)}"
 BUILD_DIR="${BUILD_DIR:-${SRC}/build}"
 CHANNEL_EXE="${CHANNEL_EXE:-${BUILD_DIR}/channel}"
-NVHPC_MODULE="${NVHPC_MODULE:-toolkits/nvhpc/25.5}"
+NVHPC_MODULE="${NVHPC_MODULE:-toolkit/nvidia-hpc-sdk/25.3}"
 
 NP="${NP:-8}"
 AUTOTUNE_REPEATS="${AUTOTUNE_REPEATS:-1}"
 RUN_DNS_MAIN="${RUN_DNS_MAIN:-0}"
 RUN_STANDALONE_PROBES="${RUN_STANDALONE_PROBES:-1}"
+
+read_mesh_value() {
+  local key="$1"
+  local default="$2"
+  local value
+  value="$(
+    awk -F= -v key="${key}" '
+      BEGIN { in_mesh = 0 }
+      /^\[/ { in_mesh = ($0 == "[mesh]") }
+      in_mesh {
+        lhs = $1
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", lhs)
+        if (lhs == key) {
+          rhs = $2
+          gsub(/^[[:space:]]+|[[:space:]]+$/, "", rhs)
+          print rhs
+          exit
+        }
+      }
+    ' "${INPUT_FILE}" 2>/dev/null || true
+  )"
+  echo "${value:-${default}}"
+}
+
+PROBE_NX="${PROBE_NX:-$(read_mesh_value nx 255)}"
+PROBE_NY="${PROBE_NY:-$(read_mesh_value ny 250)}"
+PROBE_NZ="${PROBE_NZ:-$(read_mesh_value nz 257)}"
 
 load_nvhpc() {
   if [[ -f /etc/profile.d/lmod.sh ]]; then
@@ -37,6 +64,9 @@ mkdir -p "${RUN_ROOT}"
   echo "channel_exe=${CHANNEL_EXE}"
   echo "nvhpc_module=${NVHPC_MODULE}"
   echo "np=${NP}"
+  echo "probe_nx=${PROBE_NX}"
+  echo "probe_ny=${PROBE_NY}"
+  echo "probe_nz=${PROBE_NZ}"
   echo "autotune_repeats=${AUTOTUNE_REPEATS}"
   echo "run_dns_main=${RUN_DNS_MAIN}"
   echo "run_standalone_probes=${RUN_STANDALONE_PROBES}"
@@ -199,9 +229,9 @@ if [[ "${RUN_STANDALONE_PROBES}" == "1" ]]; then
     NPXZ=1
     ACTIVE_N=0
     NLINES=0
-    NX=255
-    NY=250
-    NZ=257
+    NX="${PROBE_NX}"
+    NY="${PROBE_NY}"
+    NZ="${PROBE_NZ}"
     ITERS=30
     WARMUP=5
   )
@@ -222,6 +252,18 @@ if [[ "${RUN_STANDALONE_PROBES}" == "1" ]]; then
   run_probe lu8_none_sweep_workspace \
     SWEEP_BATCHES=1 KERNEL_MODE=none STORAGE_MODE=workspace
 
+  # Profile the communication-only LU path. KERNEL_MODE=none keeps the same
+  # solver-style workspace and device MPI calls, but removes LU/pack/halo
+  # kernels so D/H behavior in Nsight is easier to attribute.
+  run_probe lu8_none_profile_b1_nvtx_workspace \
+    BATCHES=1 KERNEL_MODE=none STORAGE_MODE=workspace PROFILE=1 TRACE=nvtx ITERS=5 WARMUP=1
+  run_probe lu8_none_profile_b1_nvtx_cuda_workspace \
+    BATCHES=1 KERNEL_MODE=none STORAGE_MODE=workspace PROFILE=1 TRACE=nvtx,cuda ITERS=5 WARMUP=1
+  run_probe lu8_none_profile_b2_nvtx_workspace \
+    BATCHES=2 KERNEL_MODE=none STORAGE_MODE=workspace PROFILE=1 TRACE=nvtx ITERS=5 WARMUP=1
+  run_probe lu8_none_profile_b2_nvtx_cuda_workspace \
+    BATCHES=2 KERNEL_MODE=none STORAGE_MODE=workspace PROFILE=1 TRACE=nvtx,cuda ITERS=5 WARMUP=1
+
   # Detailed timings around the suspicious batch counts.
   run_probe lu8_real_detail_b1 \
     ITERS=5 WARMUP=1 BATCHES=1 DETAIL=1 KERNEL_MODE=real STORAGE_MODE=workspace
@@ -237,7 +279,7 @@ if [[ "${RUN_STANDALONE_PROBES}" == "1" ]]; then
     MPIRUN_ARGS="--map-by ppr:1:node" \
     NP=2 NPY=2 NPXZ=1 \
     ACTIVE_N=0 NLINES=0 \
-    NX=255 NY=250 NZ=257 \
+    NX="${PROBE_NX}" NY="${PROBE_NY}" NZ="${PROBE_NZ}" \
     ITERS=30 WARMUP=5 \
     SWEEP_BATCHES=1 KERNEL_MODE=real STORAGE_MODE=workspace \
     OUT_DIR="${RUN_ROOT}/lu2_two_nodes_real_sweep_workspace" \
@@ -249,7 +291,7 @@ if [[ "${RUN_STANDALONE_PROBES}" == "1" ]]; then
     MPIRUN_ARGS="--map-by ppr:2:node" \
     NP=2 NPY=2 NPXZ=1 \
     ACTIVE_N=0 NLINES=0 \
-    NX=255 NY=250 NZ=257 \
+    NX="${PROBE_NX}" NY="${PROBE_NY}" NZ="${PROBE_NZ}" \
     ITERS=30 WARMUP=5 \
     SWEEP_BATCHES=1 KERNEL_MODE=real STORAGE_MODE=workspace \
     OUT_DIR="${RUN_ROOT}/lu2_one_node_real_sweep_workspace" \
