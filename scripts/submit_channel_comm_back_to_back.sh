@@ -17,7 +17,7 @@ NVHPC_MODULE="${NVHPC_MODULE:-toolkits/nvhpc/25.5}"
 NP="${NP:-${SLURM_NTASKS:-8}}"
 AUTOTUNE_REPEATS="${AUTOTUNE_REPEATS:-3}"
 RUN_FORCED="${RUN_FORCED:-1}"
-PROFILE="${PROFILE:-0}"
+PROFILE="${PROFILE:-1}"
 NSYS_TRACE="${NSYS_TRACE:-nvtx,cuda}"
 LU_BATCHES="${LU_BATCHES:-4}"
 
@@ -93,6 +93,18 @@ run_profile_case() {
   )
 }
 
+run_case_with_optional_profile() {
+  local label="$1"
+  local comm_backend="$2"
+  local np="$3"
+  shift 3
+
+  run_case "${label}" "${comm_backend}" "${np}" "$@"
+  if [[ "${PROFILE}" == "1" ]]; then
+    run_profile_case "${label}" "${comm_backend}" "${np}" "$@"
+  fi
+}
+
 mkdir -p "${RUN_ROOT}"
 load_toolchain
 
@@ -134,29 +146,24 @@ common_autotune_env=(
   CHANNEL_Y_PIPELINE_TIMING=1
 )
 
-run_case autotune mpi "${NP}" "${common_autotune_env[@]}"
-run_case autotune nccl "${NP}" "${common_autotune_env[@]}"
+run_case_with_optional_profile autotune mpi "${NP}" "${common_autotune_env[@]}"
+run_case_with_optional_profile autotune nccl "${NP}" "${common_autotune_env[@]}"
 
 if [[ "${RUN_FORCED}" == "1" ]]; then
-  run_case forced_lu_b${LU_BATCHES} mpi "${NP}" \
+  run_case_with_optional_profile forced_lu_b${LU_BATCHES} mpi "${NP}" \
     CHANNEL_NPXZ=1 CHANNEL_NPY="${NP}" CHANNEL_Y_SOLVER=pipelined_lu CHANNEL_Y_PIPELINE_BATCHES="${LU_BATCHES}"
-  run_case forced_lu_b${LU_BATCHES} nccl "${NP}" \
+  run_case_with_optional_profile forced_lu_b${LU_BATCHES} nccl "${NP}" \
     CHANNEL_NPXZ=1 CHANNEL_NPY="${NP}" CHANNEL_Y_SOLVER=pipelined_lu CHANNEL_Y_PIPELINE_BATCHES="${LU_BATCHES}"
 
-  run_case forced_xz mpi "${NP}" \
+  run_case_with_optional_profile forced_xz mpi "${NP}" \
     CHANNEL_NPXZ="${NP}" CHANNEL_NPY=1
-  run_case forced_xz nccl "${NP}" \
+  run_case_with_optional_profile forced_xz nccl "${NP}" \
     CHANNEL_NPXZ="${NP}" CHANNEL_NPY=1
 
-  run_case forced_schur_alltoall mpi "${NP}" \
+  run_case_with_optional_profile forced_schur_alltoall mpi "${NP}" \
     CHANNEL_NPXZ=1 CHANNEL_NPY="${NP}" CHANNEL_Y_SOLVER=schur CHANNEL_Y_SCHUR_EXCHANGE=alltoall
-  run_case forced_schur_alltoall nccl "${NP}" \
+  run_case_with_optional_profile forced_schur_alltoall nccl "${NP}" \
     CHANNEL_NPXZ=1 CHANNEL_NPY="${NP}" CHANNEL_Y_SOLVER=schur CHANNEL_Y_SCHUR_EXCHANGE=alltoall
-fi
-
-if [[ "${PROFILE}" == "1" ]]; then
-  run_profile_case autotune mpi "${NP}" "${common_autotune_env[@]}"
-  run_profile_case autotune nccl "${NP}" "${common_autotune_env[@]}"
 fi
 
 echo "Wrote runs to ${RUN_ROOT}"
