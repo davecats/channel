@@ -6,6 +6,7 @@
 > &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;[Important notice on restarting simulations](#notice_restart)<br/>
 > [Parallelisation](#parallelisation)<br/>
 > [Running](#running)<br/>
+> [Runtime environment variables](#runtime_environment)<br/>
 > [Output files](#output)<br/>
 > &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;[Runtimedata](#notice_restart)<br/>
 > &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;[Velocity fields (Dati.cart*.out)](#velocity_fields)<br/>
@@ -27,8 +28,8 @@ Turbulent Couette flow <br/> at a friction Reynolds number of Reτ=500 <br/> 3 7
 The code has been explicitly designed for shortness, compactness and simplicity, while still being parallel. Simplicity is preferred over excessive optimization. The code is optimized for reasonable parallel performance on up to O(2000) cores in 1024^3-sized problems. The main features are:
 
 * *simple*: written with simplicity in mind 
-* *compact*: consists of ~ 500 lines 
-* *parallel*: two-dimensional pencil decomposition with MPI 
+* *compact*: keeps the numerics in a small set of Fortran modules
+* *parallel*: MPI x/z decomposition plus distributed wall-normal solves
 * *elegant*: data transposition with MPI interleaved datatypes and nonblocking communication
 * *validated*: based on the engine developed by  [Luchini & Quadrio, J. Comp. Phys. (2006)](https://www.sciencedirect.com/science/article/pii/S0021999105002871?via%3Dihub)
 
@@ -84,35 +85,56 @@ In essence, **_Dati.cart.out_ always contains the initial field for the current 
  
 A file `dns.in` must be present in the directory `channel` is called from. Its structure needs to be something like this:
 
-```FORTRAN
-191 384 189                     ! nx, ny, nz
-0.5d0 1.0d0                     ! alfa0 beta0  
-12431.d0                        ! ni
-1.5d0 0.0d0 2.0d0               ! a, ymin, ymax
-.TRUE. 1 0.161436d0             ! CPI, CPItype, gamma
-0.0d0  0.0d0                    ! meanpx, meanpz
-0.0d0  0.0d0                    ! meanflowx meanflowz
-0.0d0  0.0d0                    ! u0 uN
-0.00d0 1.0d0 0.0d0              ! deltat, cflmax, t0
-30.d0 30.d0 7000.d0 .TRUE.      ! dt_field, dt_save, t_max, time_from_restart
-999999                          ! nstep
-12                              ! npy
+```ini
+[mesh]
+nx = 191
+ny = 384
+nz = 189
+alfa0 = 0.5
+beta0 = 1.0
+stretching = 1.5
+ymin = 0.0
+ymax = 2.0
+
+[velocity]
+ni = 12431.0
+meanpx = 0.0
+meanpz = 0.0
+meanflowx = 0.0
+meanflowz = 0.0
+u0 = 0.0
+uN = 0.0
+
+[scalars]
+nPhi = 0
+meantx = 0.0
+meantb = 0.0
+t0 = 0.0
+tN = 0.0
+
+[timestepping]
+deltat = 0.0
+cflmax = 1.0
+time = 0.0
+dt_field = 30.0
+dt_save = 30.0
+t_max = 7000.0
+time_from_restart = true
+nstep = 999999
 ```
 - *nx* and *nz* are the number of modes in the statistically homogeneous x and z directions respectively. The corrisponding number of points in physical space used for simulation is _2nx+1_ and _2nz+1_; however, this code is spectral, so x and z directions are in a spectral domain. Hence, the actual number of x-modes stored in memory is _nx+1_ thanks to the Fourier transform of a real velocity field being Hermitian. The number of z-modes is still _2nz+1_. See [domain](#domain).
 - *ny* is the number of points in the wall-normal y direction; the actual number of points, including walls, will be _ny+1_. However, the number of y points stored in memory is _ny+3_ due to the presence of ghost cells. See [domain](#domain).
 - *ni* is the scaling Reynolds number at which the simulation is performed.
 - *ymin*, *ymax* specify the y coordinates of the walls; *a* is a parameter determining how points are distributed in the domain. See [domain](#domain).
-- *CPI* is a flag that activates (if true) or deactivates constant-power-input-like forcing; this option has been designed for Poiseuille flows (with still walls), thus it will provide wrong results if the walls are moving (Couette flow). *CPItype* specifies the type of CPI-like forcing. _CPI = 0_ corresponds to a standard constant power input; in this case, *gamma* represents the fraction of power passed to the control, while the user should specify the desired power input by setting *ni* to be the power Reynolds number as in [here](https://www.cambridge.org/core/journals/journal-of-fluid-mechanics/article/global-energy-fluxes-in-turbulent-channels-with-flow-control/288CE28A721734161742427A0989E28D). Otherwise, _CPI = 1_ provides a constant ratio between laminar dissipation and total power input; the definition for laminar dissipation can still be found [here](https://www.cambridge.org/core/journals/journal-of-fluid-mechanics/article/global-energy-fluxes-in-turbulent-channels-with-flow-control/288CE28A721734161742427A0989E28D). In such case, the value of laminar dissipation is provided as variable *gamma*; the Reynolds number is arbitrary
 - *meanpx* and *meanpz* prescribe a pressure gradient in the x and z directions; no pressure gradient is imposed if zero.
 - *meanflowx* and *meanflowz* prescribe a flow rate in the x and z directions; no flow rate is imposed if zero.
 - *u0* and *uN* represent a boundary condition; they are the x-component of the velocity at the walls.
-- *t0* prescribes the initial time instant for the simulation; such value is not used if *time_from_restart* on next line is true.
+- *time* prescribes the initial time instant for the simulation; such value is not used if *time_from_restart* is true.
 - User can either specify a timestep _deltat_ or prescribe a maximum CFL (_cflmax_).
 - *dt_field* specifies after how many time units a new snapshot is saved; the so saved snapshots can be used to calculate statistics.
 - *dt_save* specifies after how many time units a restart file `Dati.cart.out` is generated. This __cannot__ be used to calculate statistics.
 - *time_from_restart* is a boolean flag. If false, the restart file `Dati.cart.out` is used as the initial condition for the simulation, and the value *t0* is used as the initial value of time. If true, the initial value of time is read from the restart file.
-- *tmax* and *nstep* specify respectively the final value of time and the maximum number of steps that one wants to achieve in a given run. After either of these two trhesholds is reached, execution is terminated.
-- *npy* indicates in how many chunks the domain is divided in the y direction for parallelisation. See [parallelisation](#parallelisation).
+- *t_max* and *nstep* specify respectively the final value of time and the maximum number of steps that one wants to achieve in a given run. After either of these two thresholds is reached, execution is terminated.
 
 <a name="notice_restart">
  
@@ -131,14 +153,70 @@ Notice that the *Runtimedata* file will contain data about timesteps which come 
 
 ## Parallelisation
 
-This program is parallelised with distributed memory, meaning that computations are divided among different processes which communicate one with each other; each process has access to only a limited portion of data. More specifically, the simulation domain is divided into parts, each of which is given to a different process. Partitioning of the domain can be done:
-1. in the statistically homogeneous x and z directions (both wall-parallel);
-2. in the wall-normal direction y.
-The number of subdivisions in the x/z directions is stored in variable _npxz_; the number of subdivisions in the wall-normal direction y is instead stored in _npy_. The total number of processes is thus:
+This program is parallelised with distributed memory. Each MPI rank belongs to one wall-normal group and one wall-parallel group. The number of subdivisions in the wall-parallel transform directions is stored in _npxz_; the number of subdivisions in the wall-normal direction is stored in _npy_. The total number of MPI ranks is
 ```
 number_of_proc = npxz*npy
 ```
-where _npy_ is specified in _dns.in_, whereas npxz is automatically calculated from the number of processes. The number of processes is specified when the program is called. See [input files](#input) and [running](#running).
+where _npy_ and _npxz_ are selected at runtime. By default, the MPI autotuner may choose _npxz_, _npy_ and the y-Schur hierarchy. Manual runs should set `CHANNEL_NPY`, `CHANNEL_NPXZ`, or both through the environment.
+
+The x/z decomposition is used for FFT transposes. Because the transpose buffers use uniform counts, _npxz_ must divide both `nx+1` and `nzd = 3*nz`. The rank-local x/z block is
+```
+nx0 = ipxz*(nx+1)/npxz
+nxN = (ipxz+1)*(nx+1)/npxz - 1
+nz0 = ipxz*nzd/npxz
+nzN = (ipxz+1)*nzd/npxz - 1
+```
+where `ipxz` is the rank coordinate inside the wall-parallel communicator.
+
+The y decomposition splits the active unknown rows `1:ny-1` into contiguous slabs:
+```
+ny0 = 1 + ipy*(ny-1)/npy
+nyN = (ipy+1)*(ny-1)/npy
+```
+where `ipy` is the rank coordinate inside the wall-normal communicator. Physical wall and ghost rows are only present on the end ranks, but the compact y solves also exchange the interface information needed by neighboring slabs.
+
+### y-line Schur split
+
+For each Fourier line, the compact wall-normal solve is a pentadiagonal linear system
+```
+A u = b.
+```
+With multiple y ranks, rank `r` owns a contiguous part of the line. Split its local unknowns into interior rows `i_r` and exposed interface rows `e_r`. The exposed rows are the two rows nearest each neighboring y slab; at physical walls the missing side is replaced by the wall boundary equations. In block form,
+```
+[ A_II  A_IE ] [ i_r ] = [ b_I ]
+[ A_EI  A_EE ] [ e_r ]   [ b_E ].
+```
+The interior block is local to rank `r`, so it can be eliminated independently:
+```
+i_r = A_II^{-1}(b_I - A_IE e_r)
+```
+and therefore
+```
+(A_EE - A_EI A_II^{-1} A_IE) e_r = b_E - A_EI A_II^{-1} b_I.
+```
+This is the local Schur complement. The implementation packs this as up to four interface equations per rank and per Fourier line: one right-hand side plus coefficients for the four possible neighboring interface values. In other words each rank contributes an affine relation
+```
+e_r = c_r + G_r g_r,
+```
+where `g_r` are interface values owned by neighboring y slabs. Assembling all y ranks gives the reduced interface system
+```
+(I - G) e = c.
+```
+After this reduced system is solved, each rank reconstructs its eliminated interior rows using the first formula above.
+
+The reduced system is solved hierarchically over the y communicator. A Schur pass list
+```
+p_1, p_2, ..., p_L
+```
+must satisfy
+```
+p_1*p_2*...*p_L = npy.
+```
+At level `ell`, groups of `p_ell` child systems are composed into a coarser Schur system. The span of a level is
+```
+P_ell = p_1*p_2*...*p_ell.
+```
+Ranks with the same `floor(ipy/P_ell)` are in the same parent group at that level. The final root system is solved, and interface values are propagated back down the same hierarchy. This keeps the global y solve distributed instead of gathering the full wall-normal line on one rank.
 
  
 <a name="running">
@@ -149,9 +227,30 @@ The main program _channel_ must be run with mpi, in the following fashion:
 ```bash
 mpirun -np number_of_proc /path/to/channel
 ```
-where *number_of_proc* is indeed the number of processes used for parallel execution and must be specified by the user. The user thus specifies _npy_ and *number_of_proc*; the program thus calculates _npxz_ (see [parallelisation](#parallelisation) for more on *npxz* and *npy*). The total number of processes must be chosen so that _npxz_ is a divisor of _nx+1_ and _nzd_; _nzd_ is printed out at the beginning of execution.
+where *number_of_proc* is indeed the number of processes used for parallel execution and must be specified by the user. If `CHANNEL_NPY` is set, the program calculates _npxz_ unless `CHANNEL_NPXZ` is also set. If neither variable is set, the autotuner can choose the decomposition; with autotuning disabled, the fallback is `npy = 1` and `npxz = number_of_proc`. The total number of processes must be chosen so that _npxz_ is a divisor of _nx+1_ and _nzd_; _nzd_ is printed out at the beginning of execution.
 
 > Hint: *nzd* is always a power of 2 multiplied by 3; no other prime factors appear.
+
+<a name="runtime_environment">
+
+## Runtime environment variables
+
+The following environment variables are optional. Boolean variables accept `1/0`, `true/false`, `yes/no`, and `on/off` forms unless stated otherwise.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CHANNEL_NPY` | autotuned, otherwise `1` | Override the number of wall-normal MPI slabs. If `CHANNEL_NPXZ` is not set, `npxz = number_of_proc / CHANNEL_NPY`. |
+| `CHANNEL_NPXZ` | autotuned, otherwise `number_of_proc` | Override the number of wall-parallel MPI groups. If `CHANNEL_NPY` is not set, `npy = number_of_proc / CHANNEL_NPXZ`. |
+| `CHANNEL_MPI_AUTOTUNE` | enabled | `0`, `false`, `off`, or `no` disables autotuning. `report` prints a recommendation but does not apply it. When enabled and no manual decomposition variables are set, the autotuner may select _npxz_, _npy_, the Schur pass list, and the exchange mode. |
+| `CHANNEL_MPI_AUTOTUNE_REPEATS` | `2` | Number of timed repeats per autotune candidate. The value is clamped to at least one. |
+| `CHANNEL_Y_SCHUR_PASSES` | generated from _npy_ | Manual y-Schur pass list. Separators may be spaces, commas, semicolons, colons, `x`, or `X`. Each pass arity must be one of `2, 3, 4, 6, 8`, and the product must equal _npy_. |
+| `CHANNEL_Y_SCHUR_EXCHANGE` | `auto` | Manual y-Schur exchange mode. Accepted values are `auto`, `default`, `alltoall`, `alltoallv`, `allgather`, and `allgatherv`. |
+| `CHANNEL_Y_SCHUR_GLOBAL_EXCHANGE` | same as above | Backward-compatible alias checked before `CHANNEL_Y_SCHUR_EXCHANGE`. |
+| `CHANNEL_OVERLAPPING` | disabled | Enables double-buffered overlap of x/z transpose communication and computation where supported. |
+| `CHANNEL_DISABLE_RESTART_WRITE` | disabled | Skips writing the final `Dati.cart.out`, useful for benchmark/profiling runs that should not modify restart state. |
+| `CHANNEL_YS_BATCH_MAX_COMPLEX` | `120000000` | Caps the complex workspace used by batched y-line endpoint solves. Lower it to reduce peak memory at the cost of smaller chunks. |
+| `CHANNEL_YS_CHUNK_NX` | unlimited | Forces the maximum number of local x columns solved per y-line chunk. |
+| `CHANNEL_YS_FORCE_CUSTOM_GPSV` | disabled | Nonzero integer forces the built-in pentadiagonal solver instead of the vendor sparse batched solver path. |
 
  
 <a name="output">

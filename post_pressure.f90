@@ -41,6 +41,7 @@ PROGRAM post_pressure
     if (iproc == 0) write (*, '(A,1X,A)') 'Processing', trim(restart_files(ifile))
 
     call compute_pressure_output(p_out=p, dpdy_out=dpdy)
+    !$omp target update from(p, dpdy)
 
     step_id = extract_timestep(trim(restart_files(ifile)))
     p_filename = 'pField'//trim(step_id)//'.dat'

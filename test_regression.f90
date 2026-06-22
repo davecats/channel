@@ -5,6 +5,7 @@ PROGRAM regression_test
   IMPLICIT NONE
 
   CHARACTER(len=256) :: config_file, restart_in, restart_expected
+  CHARACTER(len=256) :: arg
   COMPLEX(C_DOUBLE_COMPLEX), ALLOCATABLE :: V_expected(:, :, :, :)
   REAL(C_DOUBLE) :: diffnorm, tol
   integer(C_INT) :: n
@@ -13,6 +14,12 @@ PROGRAM regression_test
   config_file = "tests/data/dns_test.in"
   restart_in = "tests/data/start_field.out"
   restart_expected = "tests/data/end_field.out"
+  call get_command_argument(1, arg)
+  if (len_trim(arg) > 0) config_file = trim(arg)
+  call get_command_argument(2, arg)
+  if (len_trim(arg) > 0) restart_in = trim(arg)
+  call get_command_argument(3, arg)
+  if (len_trim(arg) > 0) restart_expected = trim(arg)
 
   ! Initialise with test input/restart
   CALL initialize(config_file, restart_in)
@@ -44,6 +51,6 @@ PROGRAM regression_test
 
   CALL free_memory(.TRUE.)
 #ifdef HAVE_MPI
-    CALL MPI_Finalize()
+  CALL MPI_Finalize()
 #endif
 END PROGRAM regression_test

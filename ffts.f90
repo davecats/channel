@@ -23,51 +23,211 @@ MODULE ffts
   use hipfort_hipfft
 #endif
   USE, intrinsic :: iso_c_binding
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+  use omp_lib, only: omp_get_default_device, omp_get_mapped_ptr
+#endif
+  use byte_workspace, only: workspace_request, workspace_release, workspace_slice, workspace_align_offset
+  use mpi_transpose, only: ny0, nyN
   IMPLICIT NONE
 
+#ifdef HAVE_CUDA
+  interface
+    function c_cufftExecZ2Z(plan, idata, odata, direction) bind(c, name="cufftExecZ2Z")
+      use, intrinsic :: iso_c_binding
+      implicit none
+      integer(C_INT) :: c_cufftExecZ2Z
+      integer(C_INT), value :: plan
+      type(C_PTR), value :: idata, odata
+      integer(C_INT), value :: direction
+    end function c_cufftExecZ2Z
+    function c_cufftExecZ2D(plan, idata, odata) bind(c, name="cufftExecZ2D")
+      use, intrinsic :: iso_c_binding
+      implicit none
+      integer(C_INT) :: c_cufftExecZ2D
+      integer(C_INT), value :: plan
+      type(C_PTR), value :: idata, odata
+    end function c_cufftExecZ2D
+    function c_cufftExecD2Z(plan, idata, odata) bind(c, name="cufftExecD2Z")
+      use, intrinsic :: iso_c_binding
+      implicit none
+      integer(C_INT) :: c_cufftExecD2Z
+      integer(C_INT), value :: plan
+      type(C_PTR), value :: idata, odata
+    end function c_cufftExecD2Z
+  end interface
+#endif
+
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
-  complex(C_DOUBLE_COMPLEX), dimension(:, :, :, :), allocatable :: VVdz, VVdx
-  real(C_DOUBLE), dimension(:, :, :, :), allocatable :: rVVdx, products
+  complex(C_DOUBLE_COMPLEX), dimension(:, :, :, :), pointer, contiguous :: VVdz, VVdx
+  real(C_DOUBLE), dimension(:, :, :, :), pointer, contiguous :: rVVdx, products
 #elif defined(HAVE_FFTW)
   INCLUDE 'fftw3.f03'
   integer, save        :: plan_type = FFTW_PATIENT
   real(C_DOUBLE), dimension(:, :, :, :), pointer :: products
-  TYPE(C_PTR), save    :: pFFT, pIFT, pRFT, pHFT, ptrVVdx, ptrVVdz, ptrFdx, ptrFdz
+  TYPE(C_PTR), save    :: pFFT, pIFT, pRFT, pHFT
+  complex(C_DOUBLE_COMPLEX), target, allocatable, save :: fftw_VVdz(:, :, :, :), fftw_VVdx(:, :, :, :)
+  real(C_DOUBLE), target, allocatable, save :: fftw_rVVdx(:, :, :, :)
 #endif
 #ifdef HAVE_CUDA
   integer :: cu_pFFT, cu_pIFT, cu_pRFT, cu_pHFT
 #elif HAVE_HIP
   type(c_ptr) :: hip_pFFT, hip_pIFT, hip_pRFT, hip_pHFT
 #endif
-
+  integer(C_INT), save :: fft_y0, fft_yN, fft_ny
+  integer(C_INT), save :: fft_nxd = 0, fft_nxB = 0, fft_nzd = 0, fft_nzB = 0, fft_nPhi = 0, fft_nflds = 0
+  logical, save :: fft_workspace_bound = .false.
 CONTAINS
 
-  subroutine get_fft_memory_estimate(nxd, nxB, ny, nzd, nzB, nPhi, overlapping, n_floats)
+  subroutine get_fft_memory_estimate(nxd, nxB, nzd, nzB, nPhi, overlapping, n_floats)
     implicit none
-    integer(C_INT), intent(in) :: nxd, nxB, ny, nzd, nzB, nPhi
+    integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, nPhi
     logical, intent(in) :: overlapping
     integer(C_INT64_T), intent(out) :: n_floats
     integer(C_INT64_T) :: nflds
+    integer(C_INT64_T) :: local_y
 
     nflds = int(merge(2, 1, overlapping), C_INT64_T)
+    local_y = int(nyN - ny0 + 5, C_INT64_T)
 
     n_floats = 0_C_INT64_T
-    n_floats = n_floats + 2_C_INT64_T*int(nzd, C_INT64_T)*int(nxB, C_INT64_T)*int(ny + 3, C_INT64_T)*nflds
-    n_floats = n_floats + 2_C_INT64_T*int(nxd + 1, C_INT64_T)*int(nzB, C_INT64_T)*int(ny + 3, C_INT64_T)*nflds
-    n_floats = n_floats + int(2*(nxd + 1), C_INT64_T)*int(nzB, C_INT64_T)*int(ny + 3, C_INT64_T)*int(3 + nPhi, C_INT64_T)
-    n_floats = n_floats + int(2*(nxd + 1), C_INT64_T)*int(nzB, C_INT64_T)*int(ny + 3, C_INT64_T)*nflds
+    n_floats = n_floats + 2_C_INT64_T*int(nzd, C_INT64_T)*int(nxB, C_INT64_T)*local_y*nflds
+    n_floats = n_floats + 2_C_INT64_T*int(nxd + 1, C_INT64_T)*int(nzB, C_INT64_T)*local_y*nflds
+    n_floats = n_floats + int(2*(nxd + 1), C_INT64_T)*int(nzB, C_INT64_T)*local_y*int(3 + nPhi, C_INT64_T)
+    n_floats = n_floats + int(2*(nxd + 1), C_INT64_T)*int(nzB, C_INT64_T)*local_y*nflds
   end subroutine get_fft_memory_estimate
 
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+  subroutine get_fft_workspace_bytes_for_dims(nxd, nxB, nzd, nzB, nPhi, overlapping, nbytes)
+    implicit none
+    integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, nPhi
+    logical, intent(in) :: overlapping
+    integer(C_SIZE_T), intent(out) :: nbytes
+    integer(C_SIZE_T) :: offset, local_y, nflds
+
+    local_y = int(nyN - ny0 + 5, C_SIZE_T)
+    nflds = int(merge(2, 1, overlapping), C_SIZE_T)
+
+    offset = 0_C_SIZE_T
+    offset = workspace_align_offset(offset + int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T)* &
+                                    int(nzd, C_SIZE_T)*int(nxB, C_SIZE_T)*local_y*nflds)
+    offset = workspace_align_offset(offset + int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T)* &
+                                    int(nxd + 1, C_SIZE_T)*int(nzB, C_SIZE_T)*local_y*nflds)
+    offset = workspace_align_offset(offset + int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T)* &
+                                    int(2*(nxd + 1), C_SIZE_T)*int(nzB, C_SIZE_T)*local_y* &
+                                    int(3 + nPhi, C_SIZE_T))
+    nbytes = workspace_align_offset(offset + int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T)* &
+                                    int(2*(nxd + 1), C_SIZE_T)*int(nzB, C_SIZE_T)*local_y*nflds)
+  end subroutine get_fft_workspace_bytes_for_dims
+
+  subroutine get_fft_workspace_bytes(nbytes)
+    implicit none
+    integer(C_SIZE_T), intent(out) :: nbytes
+
+    call get_fft_workspace_bytes_for_dims(fft_nxd, fft_nxB, fft_nzd, fft_nzB, fft_nPhi, fft_nflds == 2, nbytes)
+  end subroutine get_fft_workspace_bytes
+
+  subroutine acquire_fft_workspace(owner)
+    implicit none
+    character(len=*), intent(in) :: owner
+    type(C_PTR) :: base
+    integer(C_SIZE_T) :: nbytes
+
+    call get_fft_workspace_bytes(nbytes)
+    call workspace_request(nbytes, owner, base)
+    call bind_fft_workspace()
+  end subroutine acquire_fft_workspace
+
+  subroutine release_fft_workspace(owner)
+    implicit none
+    character(len=*), intent(in) :: owner
+
+    call unbind_fft_workspace()
+    call workspace_release(owner)
+  end subroutine release_fft_workspace
+
+  subroutine bind_fft_workspace(offset0)
+    implicit none
+    integer(C_SIZE_T), intent(in), optional :: offset0
+    type(C_PTR) :: ptr
+    complex(C_DOUBLE_COMPLEX), pointer :: cbuf(:)
+    real(C_DOUBLE), pointer :: rbuf(:)
+    integer(C_SIZE_T) :: offset, base_offset
+    integer(C_SIZE_T) :: n_vvdz, n_vvdx, n_rvvdx, n_products
+
+    if (fft_workspace_bound) error stop "bind_fft_workspace: FFT workspace already bound"
+    base_offset = 0_C_SIZE_T
+    if (present(offset0)) base_offset = offset0
+    n_vvdz = int(fft_nzd, C_SIZE_T)*int(fft_nxB, C_SIZE_T)*int(fft_ny, C_SIZE_T)*int(fft_nflds, C_SIZE_T)
+    n_vvdx = int(fft_nxd + 1, C_SIZE_T)*int(fft_nzB, C_SIZE_T)*int(fft_ny, C_SIZE_T)*int(fft_nflds, C_SIZE_T)
+    n_rvvdx = int(2*(fft_nxd + 1), C_SIZE_T)*int(fft_nzB, C_SIZE_T)*int(fft_ny, C_SIZE_T)*int(3 + fft_nPhi, C_SIZE_T)
+    n_products = int(2*(fft_nxd + 1), C_SIZE_T)*int(fft_nzB, C_SIZE_T)*int(fft_ny, C_SIZE_T)*int(fft_nflds, C_SIZE_T)
+
+    offset = base_offset
+    call workspace_slice(offset, ptr)
+    call c_f_pointer(ptr, cbuf, [int(n_vvdz)])
+    VVdz(1:fft_nzd, 1:fft_nxB, fft_y0:fft_yN, 1:fft_nflds) => cbuf
+    offset = workspace_align_offset(offset + n_vvdz*int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T))
+
+    call workspace_slice(offset, ptr)
+    call c_f_pointer(ptr, cbuf, [int(n_vvdx)])
+    VVdx(1:fft_nxd + 1, 1:fft_nzB, fft_y0:fft_yN, 1:fft_nflds) => cbuf
+    offset = workspace_align_offset(offset + n_vvdx*int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T))
+
+    call workspace_slice(offset, ptr)
+    call c_f_pointer(ptr, rbuf, [int(n_rvvdx)])
+    rVVdx(1:2*(fft_nxd + 1), 1:fft_nzB, fft_y0:fft_yN, 1:3 + fft_nPhi) => rbuf
+    offset = workspace_align_offset(offset + n_rvvdx*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
+
+    call workspace_slice(offset, ptr)
+    call c_f_pointer(ptr, rbuf, [int(n_products)])
+    products(1:2*(fft_nxd + 1), 1:fft_nzB, fft_y0:fft_yN, 1:fft_nflds) => rbuf
+
+    !$omp target enter data map(to: VVdz, VVdx, rVVdx, products)
+    !$omp target
+    VVdz(1, 1, fft_y0, 1) = (0.0_C_DOUBLE, 0.0_C_DOUBLE)
+    VVdx(1, 1, fft_y0, 1) = (0.0_C_DOUBLE, 0.0_C_DOUBLE)
+    rVVdx(1, 1, fft_y0, 1) = 0.0_C_DOUBLE
+    products(1, 1, fft_y0, 1) = 0.0_C_DOUBLE
+    !$omp end target
+    call fft_device_synchronize("bind_fft_workspace")
+    fft_workspace_bound = .true.
+  end subroutine bind_fft_workspace
+
+  subroutine unbind_fft_workspace()
+    implicit none
+
+    if (.not. fft_workspace_bound) return
+    call fft_device_synchronize("unbind_fft_workspace before delete")
+    !$omp target exit data map(release: VVdz, VVdx, rVVdx, products)
+    call fft_device_synchronize("unbind_fft_workspace after delete")
+    nullify (VVdz, VVdx, rVVdx, products)
+    fft_workspace_bound = .false.
+  end subroutine unbind_fft_workspace
+
+  subroutine fft_device_synchronize(where)
+    implicit none
+    character(len=*), intent(in) :: where
+    integer :: istat
+
+#ifdef HAVE_CUDA
+    istat = cudaDeviceSynchronize()
+    if (istat /= 0) print *, "cudaDeviceSynchronize failed in ", trim(where), ": ", istat
+#elif defined(HAVE_HIP)
+    istat = hipDeviceSynchronize()
+    if (istat /= 0) print *, "hipDeviceSynchronize failed in ", trim(where), ": ", istat
+#endif
+  end subroutine fft_device_synchronize
+#endif
+
 #ifdef HAVE_FFTW
-  SUBROUTINE init_fft(VVdz, VVdx, rVVdx, nxd, nxB, ny, nzd, nzB, nPhi, overlapping, odd_n_real, s)
-    integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, ny, nPhi
+  SUBROUTINE init_fft(VVdz, VVdx, rVVdx, nxd, nxB, nzd, nzB, nPhi, overlapping, odd_n_real, s)
+    integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, nPhi
     complex(C_DOUBLE_COMPLEX), pointer, dimension(:, :, :, :), intent(out) :: VVdx, VVdz
     real(C_DOUBLE), pointer, dimension(:, :, :, :), intent(out) :: rVVdx
     logical, intent(in) :: overlapping
     logical, optional, intent(in) :: odd_n_real
     integer, dimension(2), optional :: s
     integer, dimension(2) :: sn = 6
-
     integer(C_INT), dimension(1) :: n_z, n_x, rn_x
     integer :: nflds
     n_z = [nzd]; n_x = [nxd]; rn_x = [2*nxd]; 
@@ -79,34 +239,34 @@ CONTAINS
     if (present(s)) sn = s
 
     nflds = merge(2, 1, overlapping)
+    fft_y0 = ny0 - 2
+    fft_yN = nyN + 2
+    fft_ny = fft_yN - fft_y0 + 1
 
-    sn(2) = ny + 3
+    sn(2) = fft_ny
     sn(1) = 6 + 3*nPhi
-    !Allocate aligned memory
-    ptrVVdz = fftw_alloc_complex(int(nxB*nzd*nflds*sn(2), C_SIZE_T))
-    ptrVVdx = fftw_alloc_complex(int((nxd + 1)*nzB*nflds*sn(2), C_SIZE_T))
-    ptrFdx = fftw_alloc_real(int(2*(nxd + 1)*nzB*(3 + nPhi)*sn(2), C_SIZE_T))
-
-    !Convert C to F pointer
-    CALL c_f_pointer(ptrVVdz, VVdz, [nzd, nxB, sn(2), nflds]); 
-    CALL c_f_pointer(ptrVVdx, VVdx, [nxd + 1, nzB, sn(2), nflds])
-    CALL c_f_pointer(ptrFdx, rVVdx, [2*(nxd + 1), nzB, sn(2), 3 + nPhi])
-    allocate (products(2*(nxd + 1), nzB, sn(2), nflds))
+    allocate (fftw_VVdz(nzd, nxB, fft_y0:fft_yN, nflds))
+    allocate (fftw_VVdx(nxd + 1, nzB, fft_y0:fft_yN, nflds))
+    allocate (fftw_rVVdx(2*(nxd + 1), nzB, fft_y0:fft_yN, 3 + nPhi))
+    VVdz => fftw_VVdz
+    VVdx => fftw_VVdx
+    rVVdx => fftw_rVVdx
+    allocate (products(2*(nxd + 1), nzB, fft_y0:fft_yN, nflds))
 
     !$omp target enter data map(to: VVdz)
     !FFTs plans
-    pFFT = fftw_plan_many_dft(1, n_z, nxB, VVdz(:, :, 1, 1), n_z, 1, nzd, VVdz(:, :, 1, 1), n_z, 1, nzd, FFTW_FORWARD, plan_type)
-    pIFT = fftw_plan_many_dft(1, n_z, nxB, VVdz(:, :, 1, 1), n_z, 1, nzd, VVdz(:, :, 1, 1), n_z, 1, nzd, FFTW_BACKWARD, plan_type)
-    pRFT = fftw_plan_many_dft_c2r(1, rn_x, nzB, VVdx(:, :, 1, 1), n_x + 1, 1, (nxd + 1), &
-                                  rVVdx(:, :, 1, 1), 2*(n_x + 1), 1, 2*(nxd + 1), plan_type)
-    pHFT = fftw_plan_many_dft_r2c(1, rn_x, nzB, rVVdx(:, :, 1, 1), 2*(n_x + 1), 1, 2*(nxd + 1), &
-                                  VVdx(:, :, 1, 1), n_x + 1, 1, (nxd + 1), plan_type)
+    pFFT = fftw_plan_many_dft(1, n_z, nxB, VVdz(:, :, fft_y0, 1), n_z, 1, nzd, VVdz(:, :, fft_y0, 1), n_z, 1, nzd, FFTW_FORWARD, plan_type)
+    pIFT = fftw_plan_many_dft(1, n_z, nxB, VVdz(:, :, fft_y0, 1), n_z, 1, nzd, VVdz(:, :, fft_y0, 1), n_z, 1, nzd, FFTW_BACKWARD, plan_type)
+    pRFT = fftw_plan_many_dft_c2r(1, rn_x, nzB, VVdx(:, :, fft_y0, 1), n_x + 1, 1, (nxd + 1), &
+                                  rVVdx(:, :, fft_y0, 1), 2*(n_x + 1), 1, 2*(nxd + 1), plan_type)
+    pHFT = fftw_plan_many_dft_r2c(1, rn_x, nzB, rVVdx(:, :, fft_y0, 1), 2*(n_x + 1), 1, 2*(nxd + 1), &
+                                  VVdx(:, :, fft_y0, 1), n_x + 1, 1, (nxd + 1), plan_type)
   END SUBROUTINE init_fft
 #elif defined HAVE_CUDA
-  SUBROUTINE init_cufft(nxd, nxB, ny, nzd, nzB, nPhi, overlapping)
+  SUBROUTINE init_cufft(nxd, nxB, nzd, nzB, nPhi, overlapping)
     use cufft
     IMPLICIT NONE
-    integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, ny, nPhi
+    integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, nPhi
     logical, intent(in) :: overlapping
     integer :: istat
     integer, dimension(1) :: n, inembed, onembed
@@ -114,24 +274,27 @@ CONTAINS
     integer :: nflds
 
     nflds = merge(2, 1, overlapping)
-
-    allocate (VVdz(nzd, nxB, ny + 3, nflds))
-    allocate (VVdx(nxd + 1, nzB, ny + 3, nflds))
-    allocate (rVVdx(2*(nxd + 1), nzB, ny + 3, 3 + nPhi))
-    allocate (products(2*(nxd + 1), nzB, ny + 3, nflds))
-    !$omp target enter data map(to: VVdz, VVdx, rVVdx, products)
+    fft_y0 = ny0 - 2
+    fft_yN = nyN + 2
+    fft_ny = fft_yN - fft_y0 + 1
+    fft_nxd = nxd
+    fft_nxB = nxB
+    fft_nzd = nzd
+    fft_nzB = nzB
+    fft_nPhi = nPhi
+    fft_nflds = nflds
 
     !FFTs plans
     istat = cufftCreate(cu_pIFT)
     istat = cufftSetAutoAllocation(cu_pIFT, 0)
-    istat = cufftPlan1d(cu_pIFT, nzd, CUFFT_Z2Z, (ny + 3)*nxB)
+    istat = cufftPlan1d(cu_pIFT, nzd, CUFFT_Z2Z, fft_ny*nxB)
 
     istat = cufftCreate(cu_pFFT)
     istat = cufftSetAutoAllocation(cu_pFFT, 0)
-    istat = cufftPlan1d(cu_pFFT, nzd, CUFFT_Z2Z, (ny + 3)*nxB)
+    istat = cufftPlan1d(cu_pFFT, nzd, CUFFT_Z2Z, fft_ny*nxB)
 
     n(1) = 2*nxd            ! length
-    batch = nzB*(ny + 3)
+    batch = nzB*fft_ny
     istride = 1                  ! contiguous along x
     ostride = 1
     idist = nxd + 1            ! distance between consecutive complex transforms
@@ -147,15 +310,15 @@ CONTAINS
     istat = cufftCreate(cu_pHFT)
     istat = cufftSetAutoAllocation(cu_pHFT, 0)
     istat = cufftPlanMany(cu_pHFT, 1, n, onembed, ostride, odist, &
-                          inembed, istride, idist, CUFFT_D2Z, nzB*(ny + 3))
+                          inembed, istride, idist, CUFFT_D2Z, nzB*fft_ny)
 
   END SUBROUTINE init_cufft
 #elif defined(HAVE_HIP)
-  SUBROUTINE init_hipfft(nxd, nxB, ny, nzd, nzB, nPhi, overlapping)
+  SUBROUTINE init_hipfft(nxd, nxB, nzd, nzB, nPhi, overlapping)
     use hipfort
     use hipfort_hipfft
     IMPLICIT NONE
-    integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, ny, nPhi
+    integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, nPhi
     logical, intent(in) :: overlapping
     integer :: istat
     integer, dimension(1), target :: n, inembed, onembed
@@ -163,24 +326,27 @@ CONTAINS
     integer :: nflds
 
     nflds = merge(2, 1, overlapping)
-
-    allocate (VVdz(nzd, nxB, ny + 3, nflds))
-    allocate (VVdx(nxd + 1, nzB, ny + 3, nflds))
-    allocate (rVVdx(2*(nxd + 1), nzB, ny + 3, 3 + nPhi))
-    allocate (products(2*(nxd + 1), nzB, ny + 3, nflds))
-    !$omp target enter data map(to: VVdz, VVdx, rVVdx, products)
+    fft_y0 = ny0 - 2
+    fft_yN = nyN + 2
+    fft_ny = fft_yN - fft_y0 + 1
+    fft_nxd = nxd
+    fft_nxB = nxB
+    fft_nzd = nzd
+    fft_nzB = nzB
+    fft_nPhi = nPhi
+    fft_nflds = nflds
 
     !FFTs plans
     istat = hipfftCreate(hip_pIFT)
     istat = hipfftSetAutoAllocation(hip_pIFT, 0)
-    istat = hipfftPlan1d(hip_pIFT, nzd, HIPFFT_Z2Z, (ny + 3)*nxB)
+    istat = hipfftPlan1d(hip_pIFT, nzd, HIPFFT_Z2Z, fft_ny*nxB)
 
     istat = hipfftCreate(hip_pFFT)
     istat = hipfftSetAutoAllocation(hip_pFFT, 0)
-    istat = hipfftPlan1d(hip_pFFT, nzd, HIPFFT_Z2Z, (ny + 3)*nxB)
+    istat = hipfftPlan1d(hip_pFFT, nzd, HIPFFT_Z2Z, fft_ny*nxB)
 
     n(1) = 2*nxd            ! length
-    batch = nzB*(ny + 3)
+    batch = nzB*fft_ny
     istride = 1                  ! contiguous along x
     ostride = 1
     idist = nxd + 1            ! distance between consecutive complex transforms
@@ -196,7 +362,7 @@ CONTAINS
     istat = hipfftCreate(hip_pHFT)
     istat = hipfftSetAutoAllocation(hip_pHFT, 0)
     istat = hipfftPlanMany(hip_pHFT, int(1, c_int), c_loc(n), c_loc(onembed), ostride, odist, &
-                           c_loc(inembed), istride, idist, HIPFFT_D2Z, int(nzB*(ny + 3), c_int))
+                           c_loc(inembed), istride, idist, HIPFFT_D2Z, int(nzB*fft_ny, c_int))
 
   END SUBROUTINE init_hipfft
 #endif
@@ -211,115 +377,159 @@ CONTAINS
     isFIT = ((j == 1) .OR. (j == 3))
   END FUNCTION fftFIT
 
-  SUBROUTINE FFT(x, ny)
-#if defined(HAVE_HIP)
-    complex(C_DOUBLE_COMPLEX), intent(inout), target :: x(:, :, :)
+  SUBROUTINE FFT(x)
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    complex(C_DOUBLE_COMPLEX), intent(inout), target :: x(:, :, ny0 - 2:)
 #else
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, :)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, ny0 - 2:)
 #endif
-    integer(C_INT), intent(in) :: ny
-    integer :: i, istat
+    integer :: y0
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    integer :: istat
+    type(C_PTR) :: xptr
+#elif defined(HAVE_FFTW)
+    integer :: i
+#endif
+    y0 = lbound(x, 3)
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(x)
     istat = cudaDeviceSynchronize()
-    istat = cufftExecZ2Z(cu_pFFT, x(1, 1, 1), x(1, 1, 1), CUFFT_FORWARD)
+    istat = cufftExecZ2Z(cu_pFFT, x(1, 1, y0), x(1, 1, y0), CUFFT_FORWARD)
+    if (istat /= 0) print *, "cufftExecZ2Z FFT failed:", istat
     istat = cudaDeviceSynchronize()
+    if (istat /= 0) print *, "cudaDeviceSynchronize FFT failed:", istat
     !$omp end target data
 #elif defined(HAVE_HIP)
     !$omp target data use_device_addr(x)
     istat = hipDeviceSynchronize()
-    istat = hipfftExecZ2Z(hip_pFFT, c_loc(x(1, 1, 1)), c_loc(x(1, 1, 1)), HIPFFT_FORWARD)
+    istat = hipfftExecZ2Z(hip_pFFT, c_loc(x(1, 1, y0)), c_loc(x(1, 1, y0)), HIPFFT_FORWARD)
     istat = hipDeviceSynchronize()
     !$omp end target data
 #elif defined(HAVE_FFTW)
-    DO i = 1, ny + 3
+    DO i = fft_y0, fft_yN
       CALL fftw_execute_dft(pFFT, x(:, :, i), x(:, :, i)); 
     END DO
 #endif
   END SUBROUTINE FFT
 
-  SUBROUTINE IFT(x, ny)
-#if defined(HAVE_HIP)
-    complex(C_DOUBLE_COMPLEX), intent(inout), target :: x(:, :, :)
+  SUBROUTINE IFT(x)
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    complex(C_DOUBLE_COMPLEX), intent(inout), target :: x(:, :, ny0 - 2:)
 #else
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, :)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, ny0 - 2:)
 #endif
-    integer(C_INT), intent(in) :: ny
-    integer :: i, istat
+    integer :: y0
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    integer :: istat
+    type(C_PTR) :: xptr
+#elif defined(HAVE_FFTW)
+    integer :: i
+#endif
+    y0 = lbound(x, 3)
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(x)
     istat = cudaDeviceSynchronize()
-    istat = cufftExecZ2Z(cu_pIFT, x(1, 1, 1), x(1, 1, 1), CUFFT_INVERSE)
+    istat = cufftExecZ2Z(cu_pIFT, x(1, 1, y0), x(1, 1, y0), CUFFT_INVERSE)
+    if (istat /= 0) print *, "cufftExecZ2Z IFT failed:", istat
     istat = cudaDeviceSynchronize()
+    if (istat /= 0) print *, "cudaDeviceSynchronize IFT failed:", istat
     !$omp end target data
 #elif defined(HAVE_HIP)
     !$omp target data use_device_addr(x)
     istat = hipDeviceSynchronize()
-    istat = hipfftExecZ2Z(hip_pIFT, c_loc(x(1, 1, 1)), c_loc(x(1, 1, 1)), HIPFFT_INVERSE)
+    istat = hipfftExecZ2Z(hip_pIFT, c_loc(x(1, 1, y0)), c_loc(x(1, 1, y0)), HIPFFT_INVERSE)
     istat = hipDeviceSynchronize()
     !$omp end target data
 #elif defined(HAVE_FFTW)
-    DO i = 1, ny + 3
+    DO i = fft_y0, fft_yN
       CALL fftw_execute_dft(pIFT, x(:, :, i), x(:, :, i))
     END DO
 #endif
   END SUBROUTINE IFT
 
-  SUBROUTINE RFT(x, rx, ny)
+  SUBROUTINE RFT(x, rx)
     IMPLICIT NONE
-#if defined(HAVE_HIP)
-    complex(C_DOUBLE_COMPLEX), target :: x(:, :, :)
-    real(C_DOUBLE), target :: rx(:, :, :)
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    complex(C_DOUBLE_COMPLEX), target :: x(:, :, ny0 - 2:)
+    real(C_DOUBLE), target :: rx(:, :, ny0 - 2:)
 #else
-    complex(C_DOUBLE_COMPLEX) :: x(:, :, :)
-    real(C_DOUBLE) :: rx(:, :, :)
+    complex(C_DOUBLE_COMPLEX) :: x(:, :, ny0 - 2:)
+    real(C_DOUBLE) :: rx(:, :, ny0 - 2:)
 #endif
-    integer(C_INT), intent(in) :: ny
-    integer :: i, istat
+    integer :: x_y0, rx_y0, nreal
+    integer :: i, j, k
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    integer :: istat
+    type(C_PTR) :: xptr, rxptr
+#endif
+    x_y0 = lbound(x, 3)
+    rx_y0 = lbound(rx, 3)
+    nreal = 2*(size(x, 1) - 1)
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(x, rx)
     istat = cudaDeviceSynchronize()
-    istat = cufftExecZ2D(cu_pRFT, x(1, 1, 1), rx(1, 1, 1))
+    istat = cufftExecZ2D(cu_pRFT, x(1, 1, x_y0), rx(1, 1, rx_y0))
+    if (istat /= 0) print *, "cufftExecZ2D RFT failed:", istat
     istat = cudaDeviceSynchronize()
+    if (istat /= 0) print *, "cudaDeviceSynchronize RFT failed:", istat
     !$omp end target data
 #elif defined(HAVE_HIP)
     !$omp target data use_device_addr(x, rx)
     istat = hipDeviceSynchronize()
-    istat = hipfftExecZ2D(hip_pRFT, c_loc(x(1, 1, 1)), c_loc(rx(1, 1, 1)))
+    istat = hipfftExecZ2D(hip_pRFT, c_loc(x(1, 1, x_y0)), c_loc(rx(1, 1, rx_y0)))
     istat = hipDeviceSynchronize()
+    if (nreal < size(rx, 1)) then
+      !$omp target teams distribute parallel do collapse(3) default(none) shared(rx, nreal) private(i, j, k)
+      do k = lbound(rx, 3), ubound(rx, 3)
+        do j = 1, size(rx, 2)
+          do i = nreal + 1, size(rx, 1)
+            rx(i, j, k) = 0.0d0
+          end do
+        end do
+      end do
+    end if
     !$omp end target data
 #elif defined(HAVE_FFTW)
-    DO i = 1, ny + 3
+    DO i = fft_y0, fft_yN
       CALL fftw_execute_dft_c2r(pRFT, x(:, :, i), rx(:, :, i))
     END DO
 #endif
   END SUBROUTINE RFT
 
-  SUBROUTINE HFT(rx, x, ny)
+  SUBROUTINE HFT(rx, x)
     IMPLICIT NONE
-#if defined(HAVE_HIP)
-    complex(C_DOUBLE_COMPLEX), target :: x(:, :, :)
-    real(C_DOUBLE), target :: rx(:, :, :)
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    complex(C_DOUBLE_COMPLEX), target :: x(:, :, ny0 - 2:)
+    real(C_DOUBLE), target :: rx(:, :, ny0 - 2:)
 #else
-    complex(C_DOUBLE_COMPLEX) :: x(:, :, :)
-    real(C_DOUBLE) :: rx(:, :, :)
+    complex(C_DOUBLE_COMPLEX) :: x(:, :, ny0 - 2:)
+    real(C_DOUBLE) :: rx(:, :, ny0 - 2:)
 #endif
-    integer(C_INT), intent(in) :: ny
-    integer :: i, istat
+    integer :: x_y0, rx_y0
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    integer :: istat
+    type(C_PTR) :: xptr, rxptr
+#elif defined(HAVE_FFTW)
+    integer :: i
+#endif
+    x_y0 = lbound(x, 3)
+    rx_y0 = lbound(rx, 3)
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(rx, x)
     istat = cudaDeviceSynchronize()
-    istat = cufftExecD2Z(cu_pHFT, rx(1, 1, 1), x(1, 1, 1))
+    istat = cufftExecD2Z(cu_pHFT, rx(1, 1, rx_y0), x(1, 1, x_y0))
+    if (istat /= 0) print *, "cufftExecD2Z HFT failed:", istat
     istat = cudaDeviceSynchronize()
+    if (istat /= 0) print *, "cudaDeviceSynchronize HFT failed:", istat
     !$omp end target data
 #elif defined(HAVE_HIP)
     !$omp target data use_device_addr(rx, x)
     istat = hipDeviceSynchronize()
-    istat = hipfftExecD2Z(hip_pHFT, c_loc(rx(1, 1, 1)), c_loc(x(1, 1, 1)))
+    istat = hipfftExecD2Z(hip_pHFT, c_loc(rx(1, 1, rx_y0)), c_loc(x(1, 1, x_y0)))
     istat = hipDeviceSynchronize()
     !$omp end target data
 #elif defined(HAVE_FFTW)
-    DO i = 1, ny + 3
+    DO i = fft_y0, fft_yN
       CALL fftw_execute_dft_r2c(pHFT, rx(:, :, i), x(:, :, i)); 
     END DO
 #endif
@@ -331,8 +541,33 @@ CONTAINS
     real(C_DOUBLE), pointer, dimension(:, :, :, :), intent(out) :: rVVdx
 
     !$omp target exit data map(from: VVdz)
+    call fftw_destroy_plan(pFFT)
+    call fftw_destroy_plan(pIFT)
+    call fftw_destroy_plan(pRFT)
+    call fftw_destroy_plan(pHFT)
     if (associated(products)) deallocate (products)
-    CALL fftw_free(ptrFdx); CALL fftw_free(ptrVVdx); CALL fftw_free(ptrVVdz); 
+    if (allocated(fftw_rVVdx)) deallocate (fftw_rVVdx)
+    if (allocated(fftw_VVdx)) deallocate (fftw_VVdx)
+    if (allocated(fftw_VVdz)) deallocate (fftw_VVdz)
+    nullify (VVdz, VVdx, rVVdx)
+  END SUBROUTINE free_fft
+#elif defined(HAVE_CUDA)
+  SUBROUTINE free_fft()
+    integer :: istat
+    istat = cufftDestroy(cu_pFFT)
+    istat = cufftDestroy(cu_pIFT)
+    istat = cufftDestroy(cu_pRFT)
+    istat = cufftDestroy(cu_pHFT)
+    call unbind_fft_workspace()
+  END SUBROUTINE free_fft
+#elif defined(HAVE_HIP)
+  SUBROUTINE free_fft()
+    integer :: istat
+    istat = hipfftDestroy(hip_pFFT)
+    istat = hipfftDestroy(hip_pIFT)
+    istat = hipfftDestroy(hip_pRFT)
+    istat = hipfftDestroy(hip_pHFT)
+    call unbind_fft_workspace()
   END SUBROUTINE free_fft
 #endif
 

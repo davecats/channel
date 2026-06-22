@@ -1,10 +1,13 @@
 program test_post_convvelo
   use, intrinsic :: iso_c_binding
-  use dnsdata
+  use dnsdata, only: nPhi, ny0, nyN, nz, nx0, nxN, free_memory
   use convvelo, only: free_convvelo
-  use pressure_output
-  use driver
+  use pressure_output, only: free_pressure_output
+  use driver, only: initialize
   use test_convvelo_utils
+#ifdef HAVE_MPI
+  use mpi_f08
+#endif
   implicit none
 
   character(len=256) :: config_file, restart_file, generated_file

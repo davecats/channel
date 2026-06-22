@@ -1,0 +1,177 @@
+#include "header.h"
+
+module compact_line_solvers
+
+  use, intrinsic :: iso_c_binding
+
+  implicit none
+  private
+  public :: compact_lu5decomp, solve_full_line_compact
+
+contains
+
+  subroutine compact_lu5decomp(a)
+    real(C_DOUBLE), intent(inout) :: a(0:, -2:)
+    integer(C_INT) :: hi1, hi2
+    real(C_DOUBLE) :: piv
+    integer :: i, k, j
+
+    hi1 = size(a, 1) - 1
+    hi2 = size(a, 2) - 3
+    a(hi1 - 2, 1:2) = 0
+    a(hi1 - 3, 2) = 0
+    do i = hi1 - hi2, 0, -1
+      do k = hi2, 1, -1
+        piv = a(i, k)
+        do j = -1, -2, -1
+          a(i, j + k) = a(i, j + k) - piv*a(i + k, j)
+        end do
+      end do
+      piv = 1.0d0/a(i, 0)
+      a(i, 0) = piv
+      a(i, -2:-1) = a(i, -2:-1)*piv
+    end do
+    a(0, -2:-1) = 0
+    a(1, -2) = 0
+  end subroutine compact_lu5decomp
+
+  subroutine factor_penta(a)
+    real(C_DOUBLE), intent(inout) :: a(0:, -2:)
+    integer(C_INT) :: n, i
+    real(C_DOUBLE) :: piv, factor
+
+    n = size(a, 1)
+    do i = 0, n - 1
+      piv = a(i, 0)
+      a(i, 0) = 1.0d0/piv
+
+      if (i + 1 < n) then
+        factor = a(i + 1, -1)*a(i, 0)
+        a(i + 1, -1) = factor
+        a(i + 1, 0) = a(i + 1, 0) - factor*a(i, 1)
+        if (i + 2 < n) a(i + 1, 1) = a(i + 1, 1) - factor*a(i, 2)
+      end if
+
+      if (i + 2 < n) then
+        factor = a(i + 2, -2)*a(i, 0)
+        a(i + 2, -2) = factor
+        a(i + 2, -1) = a(i + 2, -1) - factor*a(i, 1)
+        a(i + 2, 0) = a(i + 2, 0) - factor*a(i, 2)
+      end if
+    end do
+  end subroutine factor_penta
+
+  subroutine solve_factored_penta(rhs, a)
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs(0:)
+    real(C_DOUBLE), intent(in) :: a(0:, -2:)
+    integer(C_INT) :: n, i
+
+    n = size(a, 1)
+
+    do i = 0, n - 1
+      if (i >= 2) rhs(i) = rhs(i) - a(i, -2)*rhs(i - 2)
+      if (i >= 1) rhs(i) = rhs(i) - a(i, -1)*rhs(i - 1)
+    end do
+
+    do i = n - 1, 0, -1
+      if (i + 1 < n) rhs(i) = rhs(i) - a(i, 1)*rhs(i + 1)
+      if (i + 2 < n) rhs(i) = rhs(i) - a(i, 2)*rhs(i + 2)
+      rhs(i) = rhs(i)*a(i, 0)
+    end do
+  end subroutine solve_factored_penta
+
+  subroutine compact_boundary_equations(lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, rhs_lower, rhs_lower_ghost, &
+                                        rhs_upper, rhs_upper_ghost, lower_rhs0, lower_eq0, upper_rhsn, upper_eqn)
+    real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: rhs_lower, rhs_lower_ghost, rhs_upper, rhs_upper_ghost
+    complex(C_DOUBLE_COMPLEX), intent(out) :: lower_rhs0, upper_rhsn
+    real(C_DOUBLE), intent(out) :: lower_eq0(-2:2), upper_eqn(-2:2)
+
+    lower_rhs0 = rhs_lower - rhs_lower_ghost*lower_bc(-2)/lower_ghost_bc(-2)
+    lower_eq0 = lower_bc - lower_ghost_bc*lower_bc(-2)/lower_ghost_bc(-2)
+    lower_eq0(-2) = 0.0d0
+    upper_rhsn = rhs_upper - rhs_upper_ghost*upper_bc(2)/upper_ghost_bc(2)
+    upper_eqn = upper_bc - upper_ghost_bc*upper_bc(2)/upper_ghost_bc(2)
+    upper_eqn(2) = 0.0d0
+  end subroutine compact_boundary_equations
+
+  subroutine eliminate_physical_boundary_row(local_idx, active_n, rhs_value, row_coeffs, lower_ghost_value, lower_rhs0, &
+                                             lower_ghost_row, lower_eq0, upper_ghost_value, upper_rhsn, upper_ghost_row, upper_eqn)
+    integer(C_INT), intent(in) :: local_idx, active_n
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs_value
+    real(C_DOUBLE), intent(inout) :: row_coeffs(-2:2)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: lower_ghost_value, lower_rhs0, upper_ghost_value, upper_rhsn
+    real(C_DOUBLE), intent(in) :: lower_ghost_row(-2:2), lower_eq0(-2:2), upper_ghost_row(-2:2), upper_eqn(-2:2)
+    real(C_DOUBLE) :: fac
+
+    if (local_idx == 0) then
+      fac = row_coeffs(-2)/lower_ghost_row(-2)
+      rhs_value = rhs_value - lower_ghost_value*fac
+      row_coeffs = row_coeffs - lower_ghost_row*fac
+      row_coeffs(-2) = 0.0d0
+      fac = row_coeffs(-1)/lower_eq0(-1)
+      rhs_value = rhs_value - lower_rhs0*fac
+      row_coeffs = row_coeffs - lower_eq0*fac
+      row_coeffs(-1) = 0.0d0
+    else if (local_idx == 1) then
+      fac = row_coeffs(-2)/lower_eq0(-1)
+      rhs_value = rhs_value - lower_rhs0*fac
+      row_coeffs(-2:1) = row_coeffs(-2:1) - lower_eq0(-1:2)*fac
+      row_coeffs(-2) = 0.0d0
+    end if
+
+    if (local_idx == active_n - 2) then
+      fac = row_coeffs(2)/upper_eqn(1)
+      rhs_value = rhs_value - upper_rhsn*fac
+      row_coeffs(-1:2) = row_coeffs(-1:2) - upper_eqn(-2:1)*fac
+      row_coeffs(2) = 0.0d0
+    else if (local_idx == active_n - 1) then
+      fac = row_coeffs(2)/upper_ghost_row(2)
+      rhs_value = rhs_value - upper_ghost_value*fac
+      row_coeffs = row_coeffs - upper_ghost_row*fac
+      row_coeffs(2) = 0.0d0
+      fac = row_coeffs(1)/upper_eqn(1)
+      rhs_value = rhs_value - upper_rhsn*fac
+      row_coeffs = row_coeffs - upper_eqn*fac
+      row_coeffs(1) = 0.0d0
+    end if
+  end subroutine eliminate_physical_boundary_row
+
+  subroutine solve_full_line_compact(x, a, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
+                                     rhs_lower, rhs_lower_ghost, rhs_upper, rhs_upper_ghost, ny)
+    integer(C_INT), intent(in) :: ny
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(-1:ny + 1)
+    real(C_DOUBLE), intent(in) :: a(1:ny + 1, -2:2)
+    real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: rhs_lower, rhs_lower_ghost, rhs_upper, rhs_upper_ghost
+    complex(C_DOUBLE_COMPLEX) :: rhs(0:ny - 2), value
+    complex(C_DOUBLE_COMPLEX) :: lower_rhs0, upper_rhsn
+    real(C_DOUBLE) :: mat(0:ny - 2, -2:2), row_coeffs(-2:2)
+    real(C_DOUBLE) :: lower_eq0(-2:2), upper_eqn(-2:2)
+    integer(C_INT) :: iy, local_idx
+
+    call compact_boundary_equations(lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, rhs_lower, rhs_lower_ghost, &
+                                    rhs_upper, rhs_upper_ghost, lower_rhs0, lower_eq0, upper_rhsn, upper_eqn)
+    do iy = 1, ny - 1
+      local_idx = iy - 1
+      value = x(iy)
+      row_coeffs = a(iy, -2:2)
+      call eliminate_physical_boundary_row(local_idx, ny - 1, value, row_coeffs, rhs_lower_ghost, lower_rhs0, lower_ghost_bc, &
+                                           lower_eq0, rhs_upper_ghost, upper_rhsn, upper_ghost_bc, upper_eqn)
+      rhs(local_idx) = value
+      mat(local_idx, -2:2) = row_coeffs
+    end do
+
+    call factor_penta(mat)
+    call solve_factored_penta(rhs, mat)
+
+    do iy = 1, ny - 1
+      x(iy) = rhs(iy - 1)
+    end do
+    x(0) = (lower_rhs0 - sum(lower_eq0(0:2)*x(1:3)))/lower_eq0(-1)
+    x(-1) = (rhs_lower_ghost - sum(lower_ghost_bc(-1:2)*x(0:3)))/lower_ghost_bc(-2)
+    x(ny) = (upper_rhsn - sum(upper_eqn(-2:0)*x(ny - 3:ny - 1)))/upper_eqn(1)
+    x(ny + 1) = (rhs_upper_ghost - sum(upper_ghost_bc(-2:1)*x(ny - 3:ny)))/upper_ghost_bc(2)
+  end subroutine solve_full_line_compact
+
+end module compact_line_solvers

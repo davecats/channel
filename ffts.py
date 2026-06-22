@@ -18,9 +18,9 @@ def full_mesh2k(phi: float, node_size: int) -> np.ndarray:
     return mesh2k(phi, (node_size - 1)//2)
 
 
-"""Module for transforming Fourier-space fields to physical space and back, as output by the channel code 
+"""Module for transforming Fourier-space fields to physical space and back, as output by the channel code
 
-Christian's old reference is at the end. 
+Christian's old reference is at the end.
 
 The code operates on dask-backed xr.DataArray objects, and minimizes the number of tasks while keeping all operations chunk-local.
 """
@@ -35,12 +35,12 @@ def ifft_minimal(tmp: xr.DataArray, dim: str = "var") -> xr.DataArray:
     Assumes regular, increasing coord along `dim`.
     """
     axis = tmp.get_axis_num(dim)
-    
+
 
     # Inverse FFT (no shift, no scaling)
     if tmp.data.chunks:
         f = dask.array.fft.ifft(tmp.data, axis=axis)
-    else: 
+    else:
         f = np.fft.ifft(tmp.data, axis=axis)
 
     # Spacing from coord (xrft uses _diff_coord then abs(diff[0]))
@@ -84,7 +84,7 @@ def layout_fourier_axis(
     def _pad_zeros_block(block, nodeSize_local, nx, mirror):
         if mirror:
             Nk = block.shape[-1]
-            M = 2 * Nk - 1  
+            M = 2 * Nk - 1
             full = np.empty(block.shape[:-1] + (M,), dtype=block.dtype)
 
             conj_block = np.conjugate(block)
@@ -113,7 +113,7 @@ def layout_fourier_axis(
         right = block[..., nModes + 1 :]    # (..., nModes)
         zeros = np.zeros(block.shape[:-1] + (pad_len,), dtype=block.dtype)
         return np.concatenate([left, zeros, right], axis=-1)
-    
+
     size_axis = data.shape[axis]
     if len(data.chunks[axis]) != 1 or data.chunks[axis][0] != size_axis:
         data = data.rechunk({axis: size_axis})
@@ -229,8 +229,8 @@ def physical(xArray: xr.DataArray, dns: dict) -> xr.DataArray:
 ### OLD CODE - just for comparison
 def my_ifft_Xarray_old(fourierField: xr.DataArray, dim: str, phi: float, nodeSize: int):
     import xrft
-    nModes = int((fourierField.sizes[dim]-1)/2)                               
-   
+    nModes = int((fourierField.sizes[dim]-1)/2)
+
     tmp = (fourierField
                         .roll(shifts={dim: nModes})
                         .rename({dim: 'var'})
@@ -239,15 +239,15 @@ def my_ifft_Xarray_old(fourierField: xr.DataArray, dim: str, phi: float, nodeSiz
                         .assign_coords({'var': mesh2k(phi, int((nodeSize-1)/2))})
                         )
 
-    physicalField = xrft.ifft(tmp.chunk(chunks=({'var': -1})), 
+    physicalField = xrft.ifft(tmp.chunk(chunks=({'var': -1})),
                               dim='var', true_amplitude=False, lag=0, shift=False)
     # Normalizing the inverse-Fourier-transformed field
-    physicalField *= nodeSize                                                   
+    physicalField *= nodeSize
 
-    return physicalField.rename({'freq_var': dim[-1]}).assign_coords({dim[-1]: np.arange(nodeSize)/(nodeSize)*(2*np.pi/phi)})  
+    return physicalField.rename({'freq_var': dim[-1]}).assign_coords({dim[-1]: np.arange(nodeSize)/(nodeSize)*(2*np.pi/phi)})
 
-def physical_old(xArray, dns):  
-    tmpField1 = my_ifft_Xarray_old(xArray, 'kz', dns['beta0'], dns['nzd']+1)    
+def physical_old(xArray, dns):
+    tmpField1 = my_ifft_Xarray_old(xArray, 'kz', dns['beta0'], dns['nzd']+1)
     tmpField2 = tmpField1.conj().assign_coords({'kx_folded': -tmpField1.coords['kx_folded']}).isel(kx_folded = slice(-1,0,-1))
     tmpField3 = tmpField1.combine_first(tmpField2).rename({'kx_folded': 'kx'}).roll(shifts={'kx': -dns['nx']}, roll_coords=True)
 
@@ -255,22 +255,22 @@ def physical_old(xArray, dns):
 
     return physicalArray.real
 
-def my_fft_Xarray_old(physicalField: xr.DataArray, dim: str, phi: float, modeSize: int):    
-    nodeSize = physicalField.sizes[dim]                               
-    
-    fourierField = xrft.fft(physicalField.chunk(chunks=({dim: -1})), dim=dim, true_amplitude=False, shift=False)      
-    fourierField /= nodeSize 
+def my_fft_Xarray_old(physicalField: xr.DataArray, dim: str, phi: float, modeSize: int):
+    nodeSize = physicalField.sizes[dim]
+
+    fourierField = xrft.fft(physicalField.chunk(chunks=({dim: -1})), dim=dim, true_amplitude=False, shift=False)
+    fourierField /= nodeSize
 
     firstHalf = fourierField.rename({'freq_' + dim: 'var'}).isel(var = slice(None, modeSize+1))
     secondHalf = fourierField.rename({'freq_' + dim: 'var'}).isel(var = slice(-modeSize,None))
     fourierField = firstHalf.combine_first(secondHalf).roll(shifts={'var': -modeSize}, roll_coords=True)
 
-    return fourierField.rename({'var': 'k' + dim}).assign_coords({'k' + dim: mesh2k(phi, modeSize)})                                
+    return fourierField.rename({'var': 'k' + dim}).assign_coords({'k' + dim: mesh2k(phi, modeSize)})
 
-def fourier_old(xArray, dns):  
+def fourier_old(xArray, dns):
     tmpField1 = my_fft_Xarray_old(xArray, 'x', dns['alfa0'], dns['nx'])
     tmpField2 = tmpField1.isel(kx = slice(None,dns['nx']+1)).rename({'kx': 'kx_folded'})
-    
+
     fourierArray = my_fft_Xarray_old(tmpField2, 'z', dns['beta0'], dns['nz'])
 
     return fourierArray
@@ -349,13 +349,13 @@ def fft_minimal(
     )
     daft = daft.swap_dims(swap_dims).assign_coords(newcoords)
 
-    up_dim = daft.dims[da.get_axis_num(dim)] 
+    up_dim = daft.dims[da.get_axis_num(dim)]
     if true_phase:
         daft = daft * xr.DataArray(
             np.exp(-1j * 2.0 * np.pi * newcoords[up_dim] * lag_x),
             dims=up_dim,
             coords={up_dim: newcoords[up_dim]},
-        )  
+        )
     daft[up_dim].attrs.update({"direct_lag": lag_x})
 
     return daft
@@ -455,10 +455,10 @@ def my_fft_Xarray(
 
     return out
 
-def fourier(xArray, dns):  
+def fourier(xArray, dns):
     tmpField1 = my_fft_Xarray(xArray, 'x', dns['alfa0'], dns['nx'])
     tmpField2 = tmpField1.isel(kx = slice(None,dns['nx']+1)).rename({'kx': 'kx_folded'})
-    
+
     fourierArray = my_fft_Xarray(tmpField2, 'z', dns['beta0'], dns['nz'])
 
     return fourierArray

@@ -7,12 +7,12 @@ from scipy.linalg import solve as sp_solve
 
 """Banded vector-matrix multiplication and derivatives"""
 
-DERIVS = np.dtype([('d0', np.float64), ('d1', np.float64), ('d2', np.float64), ('d4', np.float64)]) 
-def setup_derivatives(dns,y):                                                              
-    ny = dns['ny']                                                              
+DERIVS = np.dtype([('d0', np.float64), ('d1', np.float64), ('d2', np.float64), ('d4', np.float64)])
+def setup_derivatives(dns,y):
+    ny = dns['ny']
     der = np.zeros([ny+3,ny+3],DERIVS)
     matder=np.zeros([5,5],np.float64)
-    rhsder=np.zeros([5],np.float64)  
+    rhsder=np.zeros([5],np.float64)
 
     for iy in range(2,ny+1):
         matder = np.fromfunction(lambda i,j: (y[iy-2+j]-y[iy])**(4.0-np.float64(i)), (5,5), dtype=int)
@@ -24,7 +24,7 @@ def setup_derivatives(dns,y):
 
         for i in range(5):
             rhsder[i] = np.sum(der[iy,iy-2:iy+3]['d4']*(y[iy-2:iy+3]-y[iy])**np.float64(8-i))
-            
+
         der[iy,iy-2:iy+3]['d0'] = sp_solve(matder,rhsder)
         matder = np.fromfunction(lambda i,j: (y[iy-2+j]-y[iy])**(4-np.float64(i)), (5,5), dtype=int)
         rhsder *= 0
@@ -39,7 +39,7 @@ def setup_derivatives(dns,y):
             rhsder[i] = np.sum((4.0-i)*der[iy,iy-2:iy+3]['d0']*(y[iy-2:iy+3]-y[iy])**np.float64(3-i))
 
         der[iy,iy-2:iy+3]['d1'] = sp_solve(matder,rhsder)
-        
+
     # Bottom wall
     der[1,1]['d0'] = np.float64(1.0)
     der[0,0]['d0'] = np.float64(1.0)
@@ -139,7 +139,7 @@ def fourier_dy_fast(
 ) -> xr.DataArray:
     """
     Compute dy via:
-        rhs = 
+        rhs =
         d0_banded_xr @ out = Dnb_xr @ field
     in a single dask.map_blocks over `field.data`.
 
@@ -152,7 +152,7 @@ def fourier_dy_fast(
 
     # --- validate operators (no alignment along band_dim) ---
     def _check_op(op: xr.DataArray, name: str, l: int, u: int):
-        
+
         assert list(op.dims) == [band_dim, y_dim], f"{name} must have only dims {band_dim!r} and {y_dim!r}"
         assert op.sizes[band_dim] == l + u + 1, (
             f"{name}.{band_dim!r} size must be l+u+1={l+u+1}, "

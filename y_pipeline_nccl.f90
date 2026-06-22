@@ -1,0 +1,269 @@
+#include "header.h"
+
+module y_pipeline_nccl
+  use, intrinsic :: iso_c_binding
+  use mpi_f08
+  implicit none
+  private
+
+  public :: channel_comm_use_nccl
+  public :: channel_comm_alltoall_complex
+  public :: channel_comm_p2p_ensure, channel_comm_send, channel_comm_recv, channel_comm_sendrecv
+  public :: channel_comm_p2p_reset, channel_comm_context_reset
+
+#ifdef HAVE_NCCL
+  interface
+    function channel_nccl_get_unique_id(id_bytes) bind(c, name="channel_nccl_get_unique_id")
+      use, intrinsic :: iso_c_binding
+      implicit none
+      integer(c_int) :: channel_nccl_get_unique_id
+      type(c_ptr), value :: id_bytes
+    end function channel_nccl_get_unique_id
+
+    function channel_nccl_init(nranks, rank, id_bytes) bind(c, name="channel_nccl_init")
+      use, intrinsic :: iso_c_binding
+      implicit none
+      integer(c_int) :: channel_nccl_init
+      integer(c_int), value :: nranks, rank
+      type(c_ptr), value :: id_bytes
+    end function channel_nccl_init
+
+    function channel_nccl_finalize() bind(c, name="channel_nccl_finalize")
+      use, intrinsic :: iso_c_binding
+      implicit none
+      integer(c_int) :: channel_nccl_finalize
+    end function channel_nccl_finalize
+
+    function channel_nccl_sendrecv(sendbuf, send_elems, send_peer, recvbuf, recv_elems, recv_peer) &
+      bind(c, name="channel_nccl_sendrecv")
+      use, intrinsic :: iso_c_binding
+      implicit none
+      integer(c_int) :: channel_nccl_sendrecv
+      type(c_ptr), value :: sendbuf, recvbuf
+      integer(c_size_t), value :: send_elems, recv_elems
+      integer(c_int), value :: send_peer, recv_peer
+    end function channel_nccl_sendrecv
+
+    function channel_nccl_context_create(nranks, rank, id_bytes, ctx) bind(c, name="channel_nccl_context_create")
+      use, intrinsic :: iso_c_binding
+      implicit none
+      integer(c_int) :: channel_nccl_context_create
+      integer(c_int), value :: nranks, rank
+      type(c_ptr), value :: id_bytes
+      type(c_ptr) :: ctx
+    end function channel_nccl_context_create
+
+    function channel_nccl_context_alltoall(ctx, sendbuf, recvbuf, count_elems) bind(c, name="channel_nccl_context_alltoall")
+      use, intrinsic :: iso_c_binding
+      implicit none
+      integer(c_int) :: channel_nccl_context_alltoall
+      type(c_ptr), value :: ctx, sendbuf, recvbuf
+      integer(c_size_t), value :: count_elems
+    end function channel_nccl_context_alltoall
+
+    function channel_nccl_context_destroy(ctx) bind(c, name="channel_nccl_context_destroy")
+      use, intrinsic :: iso_c_binding
+      implicit none
+      integer(c_int) :: channel_nccl_context_destroy
+      type(c_ptr), value :: ctx
+    end function channel_nccl_context_destroy
+  end interface
+
+  logical, save :: p2p_initialized = .false.
+#endif
+
+contains
+  logical function channel_comm_available()
+#ifdef HAVE_NCCL
+    channel_comm_available = .true.
+#else
+    channel_comm_available = .false.
+#endif
+  end function channel_comm_available
+
+  logical function channel_comm_use_nccl()
+    integer :: status, length
+    character(len=32) :: value
+
+    channel_comm_use_nccl = .false.
+    call get_environment_variable("CHANNEL_COMM", value, length, status)
+    if (status /= 0 .or. length <= 0) return
+    select case (adjustl(trim(value(:length))))
+    case ("nccl", "NCCL", "rccl", "RCCL")
+      if (.not. channel_comm_available()) &
+        error stop "CHANNEL_COMM=nccl requested, but this build has no NCCL/RCCL support"
+      channel_comm_use_nccl = .true.
+    case ("mpi", "MPI", "auto", "AUTO")
+      channel_comm_use_nccl = .false.
+    case default
+      error stop "CHANNEL_COMM must be mpi, auto, or nccl"
+    end select
+  end function channel_comm_use_nccl
+
+  subroutine channel_comm_p2p_ensure(comm)
+    type(MPI_Comm), intent(in) :: comm
+#ifdef HAVE_NCCL
+    integer(c_int8_t), target :: id_bytes(128)
+    integer(c_int) :: nranks, rank, status
+    integer :: ierr
+
+    if (p2p_initialized) return
+
+    call MPI_Comm_rank(comm, rank, ierr)
+    call MPI_Comm_size(comm, nranks, ierr)
+    if (rank == 0_c_int) then
+      status = channel_nccl_get_unique_id(c_loc(id_bytes))
+      if (status /= 0_c_int) error stop "channel_nccl_get_unique_id failed"
+    end if
+    call MPI_Bcast(id_bytes, 128, MPI_BYTE, 0, comm, ierr)
+    status = channel_nccl_init(nranks, rank, c_loc(id_bytes))
+    if (status /= 0_c_int) error stop "channel_nccl_init failed"
+    p2p_initialized = .true.
+#else
+    error stop "NCCL/RCCL point-to-point backend requested, but this build has no support"
+#endif
+  end subroutine channel_comm_p2p_ensure
+
+  subroutine channel_comm_p2p_reset()
+#ifdef HAVE_NCCL
+    integer(c_int) :: status
+
+    if (.not. p2p_initialized) return
+    status = channel_nccl_finalize()
+    if (status /= 0_c_int) error stop "channel_nccl_finalize failed"
+    p2p_initialized = .false.
+#endif
+  end subroutine channel_comm_p2p_reset
+
+  subroutine channel_comm_context_reset(ctx)
+    type(c_ptr), intent(inout) :: ctx
+#ifdef HAVE_NCCL
+    integer(c_int) :: status
+
+    if (.not. c_associated(ctx)) return
+    status = channel_nccl_context_destroy(ctx)
+    if (status /= 0_c_int) error stop "channel_nccl_context_destroy failed"
+    ctx = c_null_ptr
+#else
+    ctx = c_null_ptr
+#endif
+  end subroutine channel_comm_context_reset
+
+  subroutine channel_comm_ensure_context(comm, ctx)
+    type(MPI_Comm), intent(in) :: comm
+    type(c_ptr), intent(inout) :: ctx
+#ifdef HAVE_NCCL
+    integer(c_int8_t), target :: id_bytes(128)
+    integer(c_int) :: nranks, rank, status
+    integer :: ierr
+
+    if (c_associated(ctx)) return
+
+    call MPI_Comm_rank(comm, rank, ierr)
+    call MPI_Comm_size(comm, nranks, ierr)
+    if (rank == 0_c_int) then
+      status = channel_nccl_get_unique_id(c_loc(id_bytes))
+      if (status /= 0_c_int) error stop "channel_nccl_get_unique_id failed"
+    end if
+    call MPI_Bcast(id_bytes, 128, MPI_BYTE, 0, comm, ierr)
+    status = channel_nccl_context_create(nranks, rank, c_loc(id_bytes), ctx)
+    if (status /= 0_c_int) error stop "channel_nccl_context_create failed"
+#else
+    error stop "NCCL/RCCL collective backend requested, but this build has no support"
+#endif
+  end subroutine channel_comm_ensure_context
+
+  subroutine channel_comm_alltoall_complex(sendbuf, recvbuf, count, comm, comm_ctx, request)
+    complex(c_double_complex), intent(in), target, contiguous :: sendbuf(:)
+    complex(c_double_complex), intent(out), target, contiguous :: recvbuf(:)
+    integer(c_int), intent(in), value :: count
+    type(MPI_Comm), intent(in) :: comm
+    type(c_ptr), intent(inout) :: comm_ctx
+    type(MPI_Request), intent(inout), optional :: request
+    integer :: ierr
+
+    if (channel_comm_use_nccl()) then
+#ifdef HAVE_NCCL
+      call channel_comm_ensure_context(comm, comm_ctx)
+#ifndef HAVE_HIP
+      !$omp target data use_device_addr(sendbuf, recvbuf)
+#endif
+      call channel_nccl_alltoall(comm_ctx, c_loc(sendbuf(1)), c_loc(recvbuf(1)), count)
+#ifndef HAVE_HIP
+      !$omp end target data
+#endif
+      if (present(request)) request = MPI_REQUEST_NULL
+#else
+      error stop "CHANNEL_COMM=nccl requested, but this build has no NCCL/RCCL support"
+#endif
+    else
+#ifndef HAVE_HIP
+      !$omp target data use_device_addr(sendbuf, recvbuf)
+#endif
+      if (present(request)) then
+        call MPI_Ialltoall(sendbuf, int(count), MPI_DOUBLE_COMPLEX, &
+                           recvbuf, int(count), MPI_DOUBLE_COMPLEX, comm, request, ierr)
+      else
+        call MPI_Alltoall(sendbuf, int(count), MPI_DOUBLE_COMPLEX, &
+                          recvbuf, int(count), MPI_DOUBLE_COMPLEX, comm, ierr)
+      end if
+#ifndef HAVE_HIP
+      !$omp end target data
+#endif
+      if (ierr /= MPI_SUCCESS) error stop "channel_comm_alltoall_complex MPI failed"
+    end if
+  end subroutine channel_comm_alltoall_complex
+
+  subroutine channel_nccl_alltoall(ctx, sendptr, recvptr, count)
+    type(c_ptr), intent(in), value :: ctx, sendptr, recvptr
+    integer(c_int), intent(in), value :: count
+#ifdef HAVE_NCCL
+    integer(c_int) :: status
+
+    status = channel_nccl_context_alltoall(ctx, sendptr, recvptr, int(count, c_size_t))
+    if (status /= 0_c_int) error stop "channel_nccl_alltoall failed"
+#else
+    error stop "NCCL/RCCL collective backend requested, but this build has no support"
+#endif
+  end subroutine channel_nccl_alltoall
+
+  subroutine channel_comm_send(sendptr, count, peer)
+    type(c_ptr), intent(in), value :: sendptr
+    integer(c_int), intent(in), value :: count, peer
+#ifdef HAVE_NCCL
+    integer(c_int) :: status
+
+    status = channel_nccl_sendrecv(sendptr, int(count, c_size_t), peer, c_null_ptr, 0_c_size_t, -1_c_int)
+    if (status /= 0_c_int) error stop "channel_comm_send failed"
+#else
+    error stop "NCCL/RCCL point-to-point backend requested, but this build has no support"
+#endif
+  end subroutine channel_comm_send
+
+  subroutine channel_comm_recv(recvptr, count, peer)
+    type(c_ptr), intent(in), value :: recvptr
+    integer(c_int), intent(in), value :: count, peer
+#ifdef HAVE_NCCL
+    integer(c_int) :: status
+
+    status = channel_nccl_sendrecv(c_null_ptr, 0_c_size_t, -1_c_int, recvptr, int(count, c_size_t), peer)
+    if (status /= 0_c_int) error stop "channel_comm_recv failed"
+#else
+    error stop "NCCL/RCCL point-to-point backend requested, but this build has no support"
+#endif
+  end subroutine channel_comm_recv
+
+  subroutine channel_comm_sendrecv(sendptr, send_count, send_peer, recvptr, recv_count, recv_peer)
+    type(c_ptr), intent(in), value :: sendptr, recvptr
+    integer(c_int), intent(in), value :: send_count, send_peer, recv_count, recv_peer
+#ifdef HAVE_NCCL
+    integer(c_int) :: status
+
+    status = channel_nccl_sendrecv(sendptr, int(send_count, c_size_t), send_peer, &
+                                   recvptr, int(recv_count, c_size_t), recv_peer)
+    if (status /= 0_c_int) error stop "channel_comm_sendrecv failed"
+#else
+    error stop "NCCL/RCCL point-to-point backend requested, but this build has no support"
+#endif
+  end subroutine channel_comm_sendrecv
+end module y_pipeline_nccl
