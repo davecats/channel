@@ -1191,15 +1191,12 @@ F90
 } > run_info.txt
 
 if [[ "${PROFILE}" == "1" ]]; then
-  "${MPIRUN}" "${MPIRUN_EXTRA_ARGS[@]}" -np "${NP}" bash -lc '
-    if [[ -f /etc/profile.d/lmod.sh ]]; then
-      . /etc/profile.d/lmod.sh
-      module load "'"${NVHPC_MODULE}"'"
-    fi
+  "${MPIRUN}" "${MPIRUN_EXTRA_ARGS[@]}" -np "${NP}" bash -c '
+    set -euo pipefail
     host=$(hostname -s)
     rank=${OMPI_COMM_WORLD_RANK:-${PMIX_RANK:-${PMI_RANK:-${SLURM_PROCID:-0}}}}
     out="nsys_lu_${host}_rank_${rank}"
-    nsys profile --trace="'"${TRACE}"'" --sample=none --cpuctxsw=none --stats=true \
+    exec nsys profile --trace="'"${TRACE}"'" --sample=none --cpuctxsw=none --stats=true \
       --force-overwrite=true --export=sqlite -o "${out}" \
       ./bench_y_lu_pipeline_autotune "'"${ITERS}"'" "'"${WARMUP}"'" "'"${ACTIVE_N}"'" "'"${NLINES}"'" "'"${BATCHES}"'" "'"${STORAGE_MODE}"'" "'"${NX}"'" "'"${NY}"'" "'"${NZ}"'" "'"${NPXZ}"'" "'"${NPY}"'" "'"${KERNEL_MODE}"'" "'"${DETAIL}"'"
   ' > stdout.log 2> nsys.log
