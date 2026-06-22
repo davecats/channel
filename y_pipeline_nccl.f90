@@ -9,6 +9,7 @@ module y_pipeline_nccl
   public :: channel_comm_use_nccl
   public :: channel_comm_alltoall_complex
   public :: channel_comm_p2p_ensure, channel_comm_send, channel_comm_recv, channel_comm_sendrecv
+  public :: channel_comm_p2p_reset, channel_comm_context_reset
 
 #ifdef HAVE_NCCL
   interface
@@ -26,6 +27,12 @@ module y_pipeline_nccl
       integer(c_int), value :: nranks, rank
       type(c_ptr), value :: id_bytes
     end function channel_nccl_init
+
+    function channel_nccl_finalize() bind(c, name="channel_nccl_finalize")
+      use, intrinsic :: iso_c_binding
+      implicit none
+      integer(c_int) :: channel_nccl_finalize
+    end function channel_nccl_finalize
 
     function channel_nccl_sendrecv(sendbuf, send_elems, send_peer, recvbuf, recv_elems, recv_peer) &
       bind(c, name="channel_nccl_sendrecv")
@@ -53,6 +60,13 @@ module y_pipeline_nccl
       type(c_ptr), value :: ctx, sendbuf, recvbuf
       integer(c_size_t), value :: count_elems
     end function channel_nccl_context_alltoall
+
+    function channel_nccl_context_destroy(ctx) bind(c, name="channel_nccl_context_destroy")
+      use, intrinsic :: iso_c_binding
+      implicit none
+      integer(c_int) :: channel_nccl_context_destroy
+      type(c_ptr), value :: ctx
+    end function channel_nccl_context_destroy
   end interface
 
   logical, save :: p2p_initialized = .false.
@@ -109,6 +123,31 @@ contains
     error stop "NCCL/RCCL point-to-point backend requested, but this build has no support"
 #endif
   end subroutine channel_comm_p2p_ensure
+
+  subroutine channel_comm_p2p_reset()
+#ifdef HAVE_NCCL
+    integer(c_int) :: status
+
+    if (.not. p2p_initialized) return
+    status = channel_nccl_finalize()
+    if (status /= 0_c_int) error stop "channel_nccl_finalize failed"
+    p2p_initialized = .false.
+#endif
+  end subroutine channel_comm_p2p_reset
+
+  subroutine channel_comm_context_reset(ctx)
+    type(c_ptr), intent(inout) :: ctx
+#ifdef HAVE_NCCL
+    integer(c_int) :: status
+
+    if (.not. c_associated(ctx)) return
+    status = channel_nccl_context_destroy(ctx)
+    if (status /= 0_c_int) error stop "channel_nccl_context_destroy failed"
+    ctx = c_null_ptr
+#else
+    ctx = c_null_ptr
+#endif
+  end subroutine channel_comm_context_reset
 
   subroutine channel_comm_ensure_context(comm, ctx)
     type(MPI_Comm), intent(in) :: comm

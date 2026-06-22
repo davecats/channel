@@ -39,7 +39,7 @@
     use omp_lib
 #endif
     use roctx
-    use y_pipeline_nccl, only: channel_comm_alltoall_complex
+    use y_pipeline_nccl, only: channel_comm_alltoall_complex, channel_comm_context_reset
 
     IMPLICIT NONE
 
@@ -812,6 +812,7 @@
 #endif
 
       if (.not. mpi_transpose_initialized) return
+      call channel_comm_context_reset(xcomm_nccl_ctx)
 
 #if defined(HAVE_HIP)
       if (c_associated(xcomm_sendptr)) call omp_target_free(xcomm_sendptr, omp_get_default_device())

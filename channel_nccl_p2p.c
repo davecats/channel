@@ -1,4 +1,5 @@
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -44,7 +45,9 @@ typedef struct {
 static channel_nccl_context *channel_nccl_default_context = NULL;
 
 static int channel_nccl_check(ncclResult_t result) {
-  return result == ncclSuccess ? 0 : (int)result;
+  if (result == ncclSuccess) return 0;
+  fprintf(stderr, "NCCL/RCCL error: %s\n", ncclGetErrorString(result));
+  return (int)result;
 }
 
 int channel_nccl_get_unique_id(void *id_bytes) {

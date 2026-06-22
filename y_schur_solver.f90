@@ -6,7 +6,7 @@ module y_schur_solver
   use roctx, only: roctxPush, roctxPop
 #ifdef HAVE_MPI
   use mpi_transpose, only: MPI_COMM_Y, ensure_ycomm_buffers, ycomm_sendbuf, ycomm_recvbuf, ipy
-  use y_pipeline_nccl, only: channel_comm_alltoall_complex
+  use y_pipeline_nccl, only: channel_comm_alltoall_complex, channel_comm_context_reset
   use mpi_f08
 #endif
 
@@ -138,6 +138,7 @@ contains
 #ifdef HAVE_MPI
     if (allocated(s_level_comm)) then
       do ilevel = 1, size(s_level_comm)
+        if (allocated(s_level_nccl_ctx)) call channel_comm_context_reset(s_level_nccl_ctx(ilevel))
         if (s_level_comm_active(ilevel)) then
           call MPI_Comm_free(s_level_comm(ilevel), ierr_local)
           if (ierr_local /= MPI_SUCCESS) error stop "MPI_Comm_free y-Schur level communicator failed"

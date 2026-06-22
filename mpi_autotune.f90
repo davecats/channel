@@ -16,6 +16,7 @@ module mpi_autotune
   use y_line_solvers, only: ys_prepare_assembled_workspace, ys_release_workspace, &
                             ys_solve_endpoint_schur, ys_solve_pipelined_lu, ys_gpsv_ds, ys_gpsv_dl, &
                             ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x
+  use y_pipeline_nccl, only: channel_comm_p2p_reset
   use y_schur_solver, only: ys_schur_default_pass_counts, YS_SCHUR_EXCHANGE_AUTO, &
                             YS_SCHUR_EXCHANGE_ALLTOALL, YS_SCHUR_EXCHANGE_ALLGATHER
   use byte_workspace, only: workspace_finalize
@@ -552,6 +553,7 @@ contains
     !$omp target exit data map(delete: dst)
     deallocate (dst)
     call ys_release_workspace(.true.)
+    call channel_comm_p2p_reset()
   end subroutine time_y_endpoint_solve
 
   subroutine seed_y_endpoint_system(ny, row_start, active_n, nlines)
