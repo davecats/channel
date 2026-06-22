@@ -1,0 +1,44 @@
+set(case_dir "@CMAKE_CURRENT_BINARY_DIR@/post_convvelo_case")
+file(REMOVE_RECURSE "${case_dir}")
+file(MAKE_DIRECTORY "${case_dir}")
+file(COPY "@CMAKE_SOURCE_DIR@/tests/convvelo/dns_runtime.in" DESTINATION "${case_dir}")
+file(RENAME "${case_dir}/dns_runtime.in" "${case_dir}/dns.in")
+file(COPY
+     "@CMAKE_SOURCE_DIR@/tests/convvelo/Dati.cart.39.out"
+     "@CMAKE_SOURCE_DIR@/tests/convvelo/Dati.cart.40.out"
+     "@CMAKE_SOURCE_DIR@/tests/convvelo/Dati.cart.41.out"
+     DESTINATION "${case_dir}")
+
+execute_process(
+  COMMAND @MPIEXEC_EXECUTABLE@ @MPIEXEC_NUMPROC_FLAG@ @POST_CONVVELO_NPROCS@ @MPIEXEC_PREFLAGS@ @POST_CONVVELO_EXE@ @MPIEXEC_POSTFLAGS@
+  WORKING_DIRECTORY "${case_dir}"
+  RESULT_VARIABLE post_convvelo_status
+)
+if(NOT post_convvelo_status EQUAL 0)
+  message(FATAL_ERROR "post_convvelo execution failed with status ${post_convvelo_status}")
+endif()
+
+execute_process(
+  COMMAND ${CMAKE_COMMAND} -E compare_files
+          "${case_dir}/convvelo.bin.fields"
+          "@CMAKE_SOURCE_DIR@/tests/convvelo/raw_statistics.bin.fields"
+  WORKING_DIRECTORY "@CMAKE_SOURCE_DIR@"
+  RESULT_VARIABLE compare_layout_status
+)
+if(NOT compare_layout_status EQUAL 0)
+  message(FATAL_ERROR "post_convvelo field-layout comparison failed with status ${compare_layout_status}")
+endif()
+
+execute_process(
+  COMMAND @MPIEXEC_EXECUTABLE@ @MPIEXEC_NUMPROC_FLAG@ 1 @MPIEXEC_PREFLAGS@
+          @TEST_POST_CONVVELO_EXE@
+          "${case_dir}/dns.in"
+          "${case_dir}/Dati.cart.39.out"
+          "${case_dir}/convvelo.0.bin"
+          @MPIEXEC_POSTFLAGS@
+  WORKING_DIRECTORY "@CMAKE_SOURCE_DIR@"
+  RESULT_VARIABLE verify_status
+)
+if(NOT verify_status EQUAL 0)
+  message(FATAL_ERROR "post_convvelo verification failed with status ${verify_status}")
+endif()

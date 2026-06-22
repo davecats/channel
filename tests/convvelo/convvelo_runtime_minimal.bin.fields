@@ -1,3 +1,3 @@
 profile_fields: mean_u mean_v mean_w mean_t
-velocity_fields: u_cross_u u_cross_v v_cross_v w_cross_w u_cross_p v_cross_dpdy w_cross_p u_cross_uu u_cross_uw v_cross_uv v_cross_vw w_cross_uw w_cross_ww u_cross_dyyu v_cross_dyyv w_cross_dyyw u_cross_dyuv v_cross_dyvv w_cross_dyvw u_cross_dyv
+velocity_fields: u_cross_u u_cross_v u_cross_w v_cross_v w_cross_w u_cross_p v_cross_dpdy w_cross_p u_cross_uu u_cross_uw v_cross_uv v_cross_vw w_cross_uw w_cross_ww u_cross_dyyu v_cross_dyyv w_cross_dyyw u_cross_dyuv v_cross_dyvv w_cross_dyvw u_cross_dyv
 scalar_fields: t_cross_t t_cross_u t_cross_v t_cross_w t_cross_tu t_cross_tw t_cross_dyyt t_cross_dytv t_cross_dyv

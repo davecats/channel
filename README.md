@@ -250,7 +250,7 @@ We use ftn here
 
 - Build hipfort:  
   ```sh
-  git clone https://github.com/ROCm/hipfort.git
+  git clone git@github.com:ROCm/hipfort.git && cd hipfort
   mkdir build && cd build 
   cmake .. -DCMAKE_Fortran_COMPILER=ftn -DCMAKE_INSTALL_PREFIX=~/hipfort-cray
   make -j # this takes a while (~30 mins)
@@ -259,7 +259,7 @@ We use ftn here
 - Build the channel project:
   ```
   mkdir build && cd build 
-  cmake .. -DCMAKE_Fortran_COMPILER=ftn -DCMAKE_PREFIX_PATH=$HOME/hipfort-cray
+  cmake .. -DCMAKE_Fortran_COMPILER=ftn -Dhipfort_DIR=$HOME/hipfort-cray/lib/fortran/ftn/cmake/hipfort
   ```
 
 Alternatively using AMD's new Fortran compiler:

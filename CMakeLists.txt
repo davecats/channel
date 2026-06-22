@@ -43,6 +43,9 @@ target_link_libraries(channel PRIVATE channel_core)
 add_executable(post_pressure post_pressure.f90)
 target_link_libraries(post_pressure PRIVATE channel_core)
 
+add_executable(post_convvelo post_convvelo.f90)
+target_link_libraries(post_convvelo PRIVATE channel_core)
+
 # --------------------------------------------------------------------
 # Tests
 # --------------------------------------------------------------------
@@ -63,6 +66,9 @@ target_link_libraries(test_convvelo_stats PRIVATE channel_core)
 
 add_executable(test_convvelo_runtime test_convvelo_utils.f90 test_convvelo_runtime.f90)
 target_link_libraries(test_convvelo_runtime PRIVATE channel_core)
+
+add_executable(test_post_convvelo test_convvelo_utils.f90 test_post_convvelo.f90)
+target_link_libraries(test_post_convvelo PRIVATE channel_core)
 
 # Add a CTest target
 enable_testing()
@@ -173,6 +179,17 @@ add_test(NAME post_pressure_1rank
 )
 set_tests_properties(post_pressure_1rank PROPERTIES PROCESSORS 1)
 
+set(POST_CONVVELO_NPROCS 1)
+set(POST_CONVVELO_EXE ${CMAKE_CURRENT_BINARY_DIR}/post_convvelo)
+set(TEST_POST_CONVVELO_EXE ${CMAKE_CURRENT_BINARY_DIR}/test_post_convvelo)
+configure_file(cmake/run_post_convvelo_test.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/run_post_convvelo_test.cmake @ONLY)
+
+add_test(NAME post_convvelo_1rank
+    COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_BINARY_DIR}/run_post_convvelo_test.cmake
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(post_convvelo_1rank PROPERTIES PROCESSORS 1)
+
 # --------------------------------------------------------------------
 # Compiler flags
 # --------------------------------------------------------------------
@@ -196,6 +213,11 @@ elseif (CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
 
     target_include_directories(channel_core PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
     target_link_libraries(channel_core PUBLIC CUDA::cufft CUDA::cudart)
+    if(TARGET CUDA::nvToolsExt)
+        target_link_libraries(channel_core PUBLIC CUDA::nvToolsExt)
+    elseif(CUDA_nvToolsExt_LIBRARY)
+        target_link_libraries(channel_core PUBLIC ${CUDA_nvToolsExt_LIBRARY})
+    endif()
 
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cpp -O3 -mp -mp=gpu -Minfo=mp -Mcache_align -cuda") #
     target_compile_definitions(channel_core PRIVATE HAVE_CUDA)
