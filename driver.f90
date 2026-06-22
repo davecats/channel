@@ -47,7 +47,9 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
     integer(C_SIZE_T) :: solver_workspace_bytes, fft_workspace_bytes, pressure_workspace_bytes, convvelo_workspace_bytes
     integer(C_SIZE_T) :: workspace_peak_bytes, sparse_external_bytes
     integer :: iy, iPhi, num_dev, dev
+    integer :: env_status, env_length
     logical :: run_solver
+    character(len=32) :: env_value
     complex(C_DOUBLE_COMPLEX), allocatable :: zero_mode(:)
 
     run_solver = .true.
@@ -78,6 +80,17 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
 
     call read_ini_file(config_file, cfg)
     CALL read_dnsin(cfg)
+    call get_environment_variable("CHANNEL_EXIT_AFTER_MPI_AUTOTUNE", env_value, env_length, env_status)
+    if (env_status == 0) then
+      select case (adjustl(trim(env_value(:env_length))))
+      case ("1", "true", "TRUE", "yes", "YES", "on", "ON")
+        if (iproc == 0) print *, "CHANNEL_EXIT_AFTER_MPI_AUTOTUNE set; exiting after MPI autotune/configuration."
+#ifdef HAVE_MPI
+        CALL MPI_FINALIZE(ierr)
+#endif
+        stop
+      end select
+    end if
     call configure_convvelo(cfg)
     deltat_from_dnsin = deltat
     CALL init_MPI(nx + 1, nz, ny, nzd, nPhi, overlapping, npy)
@@ -185,10 +198,10 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
       print *, "CFL", deltat, cfl
       ! Compute flow rate
       IF (has_average) THEN
-        call gather_full_y_line(ny, V(:, 0, 0, 1), zero_mode); fr(1) = yintegr(zero_mode, y);
-        call gather_full_y_line(ny, V(:, 0, 0, 3), zero_mode); fr(2) = yintegr(zero_mode, y);
+        call gather_full_y_line(ny, V(:, 0, 0, 1), zero_mode); fr(1) = yintegr(zero_mode, y); 
+        call gather_full_y_line(ny, V(:, 0, 0, 3), zero_mode); fr(2) = yintegr(zero_mode, y); 
         DO iPhi = 1, nPhi
-          call gather_full_y_line(ny, V(:, 0, 0, 3 + iPhi), zero_mode); fr(3 + iPhi) = yintegr(zero_mode, y);
+          call gather_full_y_line(ny, V(:, 0, 0, 3 + iPhi), zero_mode); fr(3 + iPhi) = yintegr(zero_mode, y); 
         END DO
       END IF
       CALL outstats()

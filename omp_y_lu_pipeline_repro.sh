@@ -22,7 +22,9 @@ TRACE="${TRACE:-nvtx,cuda}"
 NVHPC_MODULE="${NVHPC_MODULE:-toolkits/nvhpc/25.5}"
 MPIF90="${MPIF90:-mpifort}"
 MPIRUN="${MPIRUN:-mpirun}"
+MPIRUN_ARGS="${MPIRUN_ARGS:-}"
 GPU_FLAGS="${GPU_FLAGS:--gpu=cc80}"
+read -r -a MPIRUN_EXTRA_ARGS <<< "${MPIRUN_ARGS}"
 
 mkdir -p "${OUT_DIR}"
 cd "${OUT_DIR}"
@@ -1182,13 +1184,14 @@ F90
   echo "sweep_batches=${SWEEP_BATCHES}"
   echo "mpif90=$("${MPIF90}" --version 2>&1 | head -1)"
   echo "mpirun=$("${MPIRUN}" --version 2>&1 | head -1)"
+  echo "mpirun_args=${MPIRUN_ARGS}"
   echo "gpu_flags=${GPU_FLAGS}"
   echo "profile=${PROFILE}"
   nvidia-smi -L 2>/dev/null || true
 } > run_info.txt
 
 if [[ "${PROFILE}" == "1" ]]; then
-  "${MPIRUN}" -np "${NP}" bash -lc '
+  "${MPIRUN}" "${MPIRUN_EXTRA_ARGS[@]}" -np "${NP}" bash -lc '
     if [[ -f /etc/profile.d/lmod.sh ]]; then
       . /etc/profile.d/lmod.sh
       module load "'"${NVHPC_MODULE}"'"
@@ -1207,11 +1210,11 @@ else
     for b in 1 2 4 8 16; do
       {
         echo "=== batches=${b} kernel_mode=${KERNEL_MODE} storage_mode=${STORAGE_MODE} ==="
-        "${MPIRUN}" -np "${NP}" ./bench_y_lu_pipeline_autotune "${ITERS}" "${WARMUP}" "${ACTIVE_N}" "${NLINES}" "${b}" "${STORAGE_MODE}" "${NX}" "${NY}" "${NZ}" "${NPXZ}" "${NPY}" "${KERNEL_MODE}" "${DETAIL}"
+        "${MPIRUN}" "${MPIRUN_EXTRA_ARGS[@]}" -np "${NP}" ./bench_y_lu_pipeline_autotune "${ITERS}" "${WARMUP}" "${ACTIVE_N}" "${NLINES}" "${b}" "${STORAGE_MODE}" "${NX}" "${NY}" "${NZ}" "${NPXZ}" "${NPY}" "${KERNEL_MODE}" "${DETAIL}"
       } >> stdout.log 2>> stderr.log
     done
   else
-    "${MPIRUN}" -np "${NP}" ./bench_y_lu_pipeline_autotune "${ITERS}" "${WARMUP}" "${ACTIVE_N}" "${NLINES}" "${BATCHES}" "${STORAGE_MODE}" "${NX}" "${NY}" "${NZ}" "${NPXZ}" "${NPY}" "${KERNEL_MODE}" "${DETAIL}" \
+    "${MPIRUN}" "${MPIRUN_EXTRA_ARGS[@]}" -np "${NP}" ./bench_y_lu_pipeline_autotune "${ITERS}" "${WARMUP}" "${ACTIVE_N}" "${NLINES}" "${BATCHES}" "${STORAGE_MODE}" "${NX}" "${NY}" "${NZ}" "${NPXZ}" "${NPY}" "${KERNEL_MODE}" "${DETAIL}" \
       > stdout.log 2> stderr.log
   fi
 fi

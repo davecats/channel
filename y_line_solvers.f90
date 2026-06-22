@@ -96,6 +96,7 @@ module y_line_solvers
   integer(C_SIZE_T), parameter :: YS_BATCH_DEFAULT_COMPLEX_CAP = 120000000_C_SIZE_T
   integer(C_SIZE_T), save :: ys_batch_complex_cap = YS_BATCH_DEFAULT_COMPLEX_CAP
   logical, save :: ys_batch_complex_cap_initialized = .false.
+  integer(C_INT), save :: ys_pipeline_timing_solve_id = 0_C_INT
 
   complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_gpsv_matrix_store(:), ys_gpsv_rhs_store(:)
   complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_gpsv_ds(:), ys_gpsv_dl(:), ys_gpsv_d(:), ys_gpsv_du(:), ys_gpsv_dw(:), ys_gpsv_x(:)
@@ -1396,12 +1397,29 @@ contains
     integer(C_INT) :: batch, first_line, line_count, factor_count, solve_count
     integer(C_INT) :: factor_offset, forward_offset, backward_offset
     integer(C_INT) :: next_backward
-    integer :: ierr
+    integer :: ierr, env_status, env_length
     type(MPI_Request), allocatable :: factor_send_req(:), forward_send_req(:), backward_recv_req(:), backward_send_req(:)
     type(MPI_Request) :: factor_recv_req, forward_recv_req
     type(MPI_Status) :: status
+    character(len=32) :: env_value
+    logical :: timing_enabled
+    real(C_DOUBLE) :: timing(10), time_start, time_t0, time_t1
 
     if (active_n < 2_C_INT) error stop "pipelined LU distributed solve requires at least two local rows"
+
+    timing_enabled = .false.
+    call get_environment_variable("CHANNEL_Y_PIPELINE_TIMING", env_value, env_length, env_status)
+    if (env_status == 0) then
+      select case (adjustl(trim(env_value(:env_length))))
+      case ("1", "true", "TRUE", "yes", "YES", "on", "ON")
+        timing_enabled = .true.
+      end select
+    end if
+    timing = 0.0_C_DOUBLE
+    if (timing_enabled) then
+      ys_pipeline_timing_solve_id = ys_pipeline_timing_solve_id + 1_C_INT
+      time_start = MPI_Wtime()
+    end if
 
     factor_stride = 6_C_INT*batch_max_lines
     solve_stride = 2_C_INT*batch_max_lines
@@ -1424,8 +1442,13 @@ contains
         solve_count = 2_C_INT*line_count
         backward_offset = factor_total + solve_total + (batch - 1_C_INT)*solve_stride
         !$omp target data use_device_addr(ycomm_recvbuf)
+        if (timing_enabled) time_t0 = MPI_Wtime()
         call MPI_Irecv(ycomm_recvbuf(backward_offset + 1), solve_count, &
                        MPI_DOUBLE_COMPLEX, ipy + 1_C_INT, TAG_BACKWARD + batch, MPI_COMM_Y, backward_recv_req(batch), ierr)
+        if (timing_enabled) then
+          time_t1 = MPI_Wtime()
+          timing(9) = timing(9) + (time_t1 - time_t0)
+        end if
         !$omp end target data
       end do
       call roctxPop("ys_pipeline post_backward_recvs")
@@ -1442,52 +1465,107 @@ contains
       forward_offset = factor_total + (batch - 1_C_INT)*solve_stride
       if (ipy > 0_C_INT) then
         !$omp target data use_device_addr(ycomm_recvbuf)
+        if (timing_enabled) time_t0 = MPI_Wtime()
         call MPI_Irecv(ycomm_recvbuf(factor_offset + 1), factor_count, &
                        MPI_DOUBLE_COMPLEX, ipy - 1_C_INT, TAG_FACTOR + batch, MPI_COMM_Y, factor_recv_req, ierr)
         call MPI_Irecv(ycomm_recvbuf(forward_offset + 1), solve_count, &
                        MPI_DOUBLE_COMPLEX, ipy - 1_C_INT, TAG_FORWARD + batch, MPI_COMM_Y, forward_recv_req, ierr)
+        if (timing_enabled) then
+          time_t1 = MPI_Wtime()
+          timing(9) = timing(9) + (time_t1 - time_t0)
+        end if
         !$omp end target data
         call roctxPush("ys_pipeline MPI_Wait factor_recv")
+        if (timing_enabled) time_t0 = MPI_Wtime()
         call MPI_Wait(factor_recv_req, status, ierr)
+        if (timing_enabled) then
+          time_t1 = MPI_Wtime()
+          timing(2) = timing(2) + (time_t1 - time_t0)
+        end if
         call roctxPop("ys_pipeline MPI_Wait factor_recv")
         call roctxPush("ys_pipeline apply_factor_continuation")
+        if (timing_enabled) time_t0 = MPI_Wtime()
         call ys_apply_factor_continuation(first_line, line_count, active_n, factor_offset)
+        if (timing_enabled) then
+          time_t1 = MPI_Wtime()
+          timing(5) = timing(5) + (time_t1 - time_t0)
+        end if
         call roctxPop("ys_pipeline apply_factor_continuation")
       end if
       call roctxPush("ys_pipeline factor_batch")
+      if (timing_enabled) time_t0 = MPI_Wtime()
       call ys_factor_pipelined_batch(first_line, line_count, active_n, ipy < npy_grid - 1_C_INT)
+      if (timing_enabled) then
+        time_t1 = MPI_Wtime()
+        timing(5) = timing(5) + (time_t1 - time_t0)
+      end if
       call roctxPop("ys_pipeline factor_batch")
       if (ipy < npy_grid - 1_C_INT) then
         call roctxPush("ys_pipeline pack_factor_state")
+        if (timing_enabled) time_t0 = MPI_Wtime()
         call ys_pack_factor_state(first_line, line_count, active_n, factor_offset)
+        if (timing_enabled) then
+          time_t1 = MPI_Wtime()
+          timing(8) = timing(8) + (time_t1 - time_t0)
+        end if
         call roctxPop("ys_pipeline pack_factor_state")
         call roctxPush("ys_pipeline MPI_Isend factor_state")
         !$omp target data use_device_addr(ycomm_sendbuf)
+        if (timing_enabled) time_t0 = MPI_Wtime()
         call MPI_Isend(ycomm_sendbuf(factor_offset + 1), factor_count, &
                        MPI_DOUBLE_COMPLEX, ipy + 1_C_INT, TAG_FACTOR + batch, MPI_COMM_Y, factor_send_req(batch), ierr)
+        if (timing_enabled) then
+          time_t1 = MPI_Wtime()
+          timing(9) = timing(9) + (time_t1 - time_t0)
+        end if
         !$omp end target data
         call roctxPop("ys_pipeline MPI_Isend factor_state")
       end if
       if (ipy > 0_C_INT) then
         call roctxPush("ys_pipeline MPI_Wait forward_recv")
+        if (timing_enabled) time_t0 = MPI_Wtime()
         call MPI_Wait(forward_recv_req, status, ierr)
+        if (timing_enabled) then
+          time_t1 = MPI_Wtime()
+          timing(3) = timing(3) + (time_t1 - time_t0)
+        end if
         call roctxPop("ys_pipeline MPI_Wait forward_recv")
         call roctxPush("ys_pipeline forward_continue")
+        if (timing_enabled) time_t0 = MPI_Wtime()
         call ys_forward_pipelined_batch_continue(first_line, line_count, active_n, forward_offset)
+        if (timing_enabled) then
+          time_t1 = MPI_Wtime()
+          timing(6) = timing(6) + (time_t1 - time_t0)
+        end if
         call roctxPop("ys_pipeline forward_continue")
       else
         call roctxPush("ys_pipeline forward_first_rank")
+        if (timing_enabled) time_t0 = MPI_Wtime()
         call ys_forward_pipelined_batch(first_line, line_count, active_n)
+        if (timing_enabled) then
+          time_t1 = MPI_Wtime()
+          timing(6) = timing(6) + (time_t1 - time_t0)
+        end if
         call roctxPop("ys_pipeline forward_first_rank")
       end if
       if (ipy < npy_grid - 1_C_INT) then
         call roctxPush("ys_pipeline pack_forward_state")
+        if (timing_enabled) time_t0 = MPI_Wtime()
         call ys_pack_forward_state(first_line, line_count, active_n, forward_offset)
+        if (timing_enabled) then
+          time_t1 = MPI_Wtime()
+          timing(8) = timing(8) + (time_t1 - time_t0)
+        end if
         call roctxPop("ys_pipeline pack_forward_state")
         call roctxPush("ys_pipeline MPI_Isend forward_state")
         !$omp target data use_device_addr(ycomm_sendbuf)
+        if (timing_enabled) time_t0 = MPI_Wtime()
         call MPI_Isend(ycomm_sendbuf(forward_offset + 1), solve_count, &
                        MPI_DOUBLE_COMPLEX, ipy + 1_C_INT, TAG_FORWARD + batch, MPI_COMM_Y, forward_send_req(batch), ierr)
+        if (timing_enabled) then
+          time_t1 = MPI_Wtime()
+          timing(9) = timing(9) + (time_t1 - time_t0)
+        end if
         !$omp end target data
         call roctxPop("ys_pipeline MPI_Isend forward_state")
       end if
@@ -1503,25 +1581,70 @@ contains
 
     if (ipy < npy_grid - 1_C_INT) then
       call roctxPush("ys_pipeline MPI_Waitall factor_sends")
+      if (timing_enabled) time_t0 = MPI_Wtime()
       call MPI_Waitall(nbatches, factor_send_req, MPI_STATUSES_IGNORE, ierr)
+      if (timing_enabled) then
+        time_t1 = MPI_Wtime()
+        timing(9) = timing(9) + (time_t1 - time_t0)
+      end if
       call roctxPop("ys_pipeline MPI_Waitall factor_sends")
       call roctxPush("ys_pipeline MPI_Waitall forward_sends")
+      if (timing_enabled) time_t0 = MPI_Wtime()
       call MPI_Waitall(nbatches, forward_send_req, MPI_STATUSES_IGNORE, ierr)
+      if (timing_enabled) then
+        time_t1 = MPI_Wtime()
+        timing(9) = timing(9) + (time_t1 - time_t0)
+      end if
       call roctxPop("ys_pipeline MPI_Waitall forward_sends")
     end if
     if (ipy > 0_C_INT) then
       call roctxPush("ys_pipeline MPI_Waitall backward_sends")
+      if (timing_enabled) time_t0 = MPI_Wtime()
       call MPI_Waitall(nbatches, backward_send_req, MPI_STATUSES_IGNORE, ierr)
+      if (timing_enabled) then
+        time_t1 = MPI_Wtime()
+        timing(9) = timing(9) + (time_t1 - time_t0)
+      end if
       call roctxPop("ys_pipeline MPI_Waitall backward_sends")
     end if
 
     call roctxPush("ys_pipeline exchange_solution_halos")
+    if (timing_enabled) time_t0 = MPI_Wtime()
     call ys_exchange_pipelined_solution_halos(active_n, nlines)
+    if (timing_enabled) then
+      time_t1 = MPI_Wtime()
+      timing(10) = timing(10) + (time_t1 - time_t0)
+      timing(1) = time_t1 - time_start
+      call ys_print_pipeline_timing(ys_pipeline_timing_solve_id, active_n, nlines, nbatches, timing)
+    end if
     call roctxPop("ys_pipeline exchange_solution_halos")
 
     deallocate (factor_send_req, forward_send_req, backward_recv_req, backward_send_req)
 
   contains
+    subroutine ys_print_pipeline_timing(solve_id, active_n_value, nlines_value, nbatches_value, timing_value)
+      integer(C_INT), intent(in) :: solve_id, active_n_value, nlines_value, nbatches_value
+      real(C_DOUBLE), intent(in) :: timing_value(10)
+      integer :: print_rank
+
+      do print_rank = 0, int(npy_grid) - 1
+        call MPI_Barrier(MPI_COMM_Y, ierr)
+        if (int(ipy) == print_rank) then
+          if (ipy == 0_C_INT) then
+            write (*, '(a)') &
+              "Y_PIPELINE_TIMING solve, ipy, active_n, nlines, batches, total_us, factor_wait_us, forward_wait_us, backward_wait_us, factor_kernel_us, forward_kernel_us, backward_kernel_us, pack_us, send_post_wait_us, halo_us"
+          end if
+          write (*, '(i0,", ",i0,", ",i0,", ",i0,", ",i0,", ",f12.3,", ",f12.3,", ",f12.3,", ",f12.3,", ",f12.3,", ",f12.3,", ",f12.3,", ",f12.3,", ",f12.3,", ",f12.3)') &
+            solve_id, ipy, active_n_value, nlines_value, nbatches_value, &
+            timing_value(1)*1.0d6, timing_value(2)*1.0d6, timing_value(3)*1.0d6, &
+            timing_value(4)*1.0d6, timing_value(5)*1.0d6, timing_value(6)*1.0d6, &
+            timing_value(7)*1.0d6, timing_value(8)*1.0d6, timing_value(9)*1.0d6, &
+            timing_value(10)*1.0d6
+        end if
+      end do
+      call MPI_Barrier(MPI_COMM_Y, ierr)
+    end subroutine ys_print_pipeline_timing
+
     subroutine drain_backward_batches(completed_batch, blocking)
       integer(C_INT), intent(in) :: completed_batch
       logical, intent(in) :: blocking
@@ -1536,7 +1659,12 @@ contains
         if (ipy < npy_grid - 1_C_INT) then
           if (blocking) then
             call roctxPush("ys_pipeline MPI_Wait backward_recv")
+            if (timing_enabled) time_t0 = MPI_Wtime()
             call MPI_Wait(backward_recv_req(next_backward), status, ierr)
+            if (timing_enabled) then
+              time_t1 = MPI_Wtime()
+              timing(4) = timing(4) + (time_t1 - time_t0)
+            end if
             call roctxPop("ys_pipeline MPI_Wait backward_recv")
             ready = .true.
           else
@@ -1546,28 +1674,53 @@ contains
           end if
           if (.not. ready) exit
           call roctxPush("ys_pipeline backward_continue")
+          if (timing_enabled) time_t0 = MPI_Wtime()
           call ys_backward_pipelined_batch_continue(first_line, line_count, active_n, backward_offset)
+          if (timing_enabled) then
+            time_t1 = MPI_Wtime()
+            timing(7) = timing(7) + (time_t1 - time_t0)
+          end if
           call roctxPop("ys_pipeline backward_continue")
         else
           call roctxPush("ys_pipeline backward_top_rank")
+          if (timing_enabled) time_t0 = MPI_Wtime()
           call ys_backward_pipelined_batch(first_line, line_count, active_n)
+          if (timing_enabled) then
+            time_t1 = MPI_Wtime()
+            timing(7) = timing(7) + (time_t1 - time_t0)
+          end if
           call roctxPop("ys_pipeline backward_top_rank")
         end if
 
         if (ipy > 0_C_INT) then
           if (ipy < npy_grid - 1_C_INT) then
             call roctxPush("ys_pipeline MPI_Wait forward_send_reuse")
+            if (timing_enabled) time_t0 = MPI_Wtime()
             call MPI_Wait(forward_send_req(next_backward), status, ierr)
+            if (timing_enabled) then
+              time_t1 = MPI_Wtime()
+              timing(9) = timing(9) + (time_t1 - time_t0)
+            end if
             call roctxPop("ys_pipeline MPI_Wait forward_send_reuse")
           end if
           call roctxPush("ys_pipeline pack_backward_state")
+          if (timing_enabled) time_t0 = MPI_Wtime()
           call ys_pack_backward_state(first_line, line_count, forward_offset)
+          if (timing_enabled) then
+            time_t1 = MPI_Wtime()
+            timing(8) = timing(8) + (time_t1 - time_t0)
+          end if
           call roctxPop("ys_pipeline pack_backward_state")
           call roctxPush("ys_pipeline MPI_Isend backward_state")
           !$omp target data use_device_addr(ycomm_sendbuf)
+          if (timing_enabled) time_t0 = MPI_Wtime()
           call MPI_Isend(ycomm_sendbuf(forward_offset + 1), solve_count, &
                          MPI_DOUBLE_COMPLEX, ipy - 1_C_INT, TAG_BACKWARD + next_backward, &
                          MPI_COMM_Y, backward_send_req(next_backward), ierr)
+          if (timing_enabled) then
+            time_t1 = MPI_Wtime()
+            timing(9) = timing(9) + (time_t1 - time_t0)
+          end if
           !$omp end target data
           call roctxPop("ys_pipeline MPI_Isend backward_state")
         end if
