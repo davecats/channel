@@ -9,6 +9,8 @@ module y_line_solvers
                             YS_SCHUR_EXCHANGE_AUTO
 #ifdef HAVE_MPI
   use mpi_transpose, only: MPI_COMM_Y, ensure_ycomm_buffers, ycomm_sendbuf, ycomm_recvbuf
+  use y_pipeline_nccl, only: channel_comm_use_nccl, channel_comm_p2p_ensure, &
+                             channel_comm_send, channel_comm_recv, channel_comm_sendrecv
 #endif
   use roctx, only: roctxPush, roctxPop
   use byte_workspace, only: workspace_request, workspace_release, workspace_slice, workspace_align_offset
@@ -1387,6 +1389,10 @@ contains
   end subroutine ys_pipeline_batch_range
 
 #ifdef HAVE_MPI
+  logical function ys_pipeline_use_nccl()
+    ys_pipeline_use_nccl = channel_comm_use_nccl()
+  end function ys_pipeline_use_nccl
+
   subroutine ys_solve_pipelined_lu_distributed(active_n, nlines, nbatches, batch_max_lines)
     implicit none
     integer(C_INT), intent(in) :: active_n, nlines, nbatches, batch_max_lines
@@ -1406,6 +1412,10 @@ contains
     real(C_DOUBLE) :: timing(10), time_start, time_t0, time_t1
 
     if (active_n < 2_C_INT) error stop "pipelined LU distributed solve requires at least two local rows"
+    if (ys_pipeline_use_nccl()) then
+      call ys_solve_pipelined_lu_nccl_distributed(active_n, nlines, nbatches, batch_max_lines)
+      return
+    end if
 
     timing_enabled = .false.
     call get_environment_variable("CHANNEL_Y_PIPELINE_TIMING", env_value, env_length, env_status)
@@ -1729,6 +1739,124 @@ contains
     end subroutine drain_backward_batches
   end subroutine ys_solve_pipelined_lu_distributed
 
+  subroutine ys_solve_pipelined_lu_nccl_distributed(active_n, nlines, nbatches, batch_max_lines)
+    implicit none
+    integer(C_INT), intent(in) :: active_n, nlines, nbatches, batch_max_lines
+    integer(C_INT) :: factor_stride, solve_stride, factor_total, solve_total, send_elems, recv_elems
+    integer(C_INT) :: batch, first_line, line_count, factor_count, solve_count
+    integer(C_INT) :: factor_offset, forward_offset, backward_offset
+
+    factor_stride = 6_C_INT*batch_max_lines
+    solve_stride = 2_C_INT*batch_max_lines
+    factor_total = factor_stride*nbatches
+    solve_total = solve_stride*nbatches
+    send_elems = factor_total + solve_total
+    recv_elems = factor_total + 2_C_INT*solve_total
+    call ensure_ycomm_buffers(send_elems, recv_elems)
+    call channel_comm_p2p_ensure(MPI_COMM_Y)
+
+    call roctxPush("ys_pipeline_nccl forward_sweep")
+    do batch = 1_C_INT, nbatches
+      call ys_pipeline_batch_range(batch, nbatches, nlines, first_line, line_count)
+      factor_count = 6_C_INT*line_count
+      solve_count = 2_C_INT*line_count
+      factor_offset = (batch - 1_C_INT)*factor_stride
+      forward_offset = factor_total + (batch - 1_C_INT)*solve_stride
+
+      if (ipy > 0_C_INT) then
+        call roctxPush("ys_pipeline_nccl recv_factor")
+        !$omp target data use_device_addr(ycomm_recvbuf)
+        call channel_comm_recv(c_loc(ycomm_recvbuf(factor_offset + 1)), factor_count, ipy - 1_C_INT)
+        !$omp end target data
+        call roctxPop("ys_pipeline_nccl recv_factor")
+        call roctxPush("ys_pipeline_nccl apply_factor_continuation")
+        call ys_apply_factor_continuation(first_line, line_count, active_n, factor_offset)
+        call roctxPop("ys_pipeline_nccl apply_factor_continuation")
+      end if
+
+      call roctxPush("ys_pipeline_nccl factor_batch")
+      call ys_factor_pipelined_batch(first_line, line_count, active_n, ipy < npy_grid - 1_C_INT)
+      call roctxPop("ys_pipeline_nccl factor_batch")
+
+      if (ipy < npy_grid - 1_C_INT) then
+        call roctxPush("ys_pipeline_nccl pack_factor_state")
+        call ys_pack_factor_state(first_line, line_count, active_n, factor_offset)
+        call roctxPop("ys_pipeline_nccl pack_factor_state")
+        call roctxPush("ys_pipeline_nccl send_factor")
+        !$omp target data use_device_addr(ycomm_sendbuf)
+        call channel_comm_send(c_loc(ycomm_sendbuf(factor_offset + 1)), factor_count, ipy + 1_C_INT)
+        !$omp end target data
+        call roctxPop("ys_pipeline_nccl send_factor")
+      end if
+
+      if (ipy > 0_C_INT) then
+        call roctxPush("ys_pipeline_nccl recv_forward")
+        !$omp target data use_device_addr(ycomm_recvbuf)
+        call channel_comm_recv(c_loc(ycomm_recvbuf(forward_offset + 1)), solve_count, ipy - 1_C_INT)
+        !$omp end target data
+        call roctxPop("ys_pipeline_nccl recv_forward")
+        call roctxPush("ys_pipeline_nccl forward_continue")
+        call ys_forward_pipelined_batch_continue(first_line, line_count, active_n, forward_offset)
+        call roctxPop("ys_pipeline_nccl forward_continue")
+      else
+        call roctxPush("ys_pipeline_nccl forward_first_rank")
+        call ys_forward_pipelined_batch(first_line, line_count, active_n)
+        call roctxPop("ys_pipeline_nccl forward_first_rank")
+      end if
+
+      if (ipy < npy_grid - 1_C_INT) then
+        call roctxPush("ys_pipeline_nccl pack_forward_state")
+        call ys_pack_forward_state(first_line, line_count, active_n, forward_offset)
+        call roctxPop("ys_pipeline_nccl pack_forward_state")
+        call roctxPush("ys_pipeline_nccl send_forward")
+        !$omp target data use_device_addr(ycomm_sendbuf)
+        call channel_comm_send(c_loc(ycomm_sendbuf(forward_offset + 1)), solve_count, ipy + 1_C_INT)
+        !$omp end target data
+        call roctxPop("ys_pipeline_nccl send_forward")
+      end if
+    end do
+    call roctxPop("ys_pipeline_nccl forward_sweep")
+
+    call roctxPush("ys_pipeline_nccl backward_sweep")
+    do batch = nbatches, 1_C_INT, -1_C_INT
+      call ys_pipeline_batch_range(batch, nbatches, nlines, first_line, line_count)
+      solve_count = 2_C_INT*line_count
+      forward_offset = factor_total + (batch - 1_C_INT)*solve_stride
+      backward_offset = factor_total + solve_total + (batch - 1_C_INT)*solve_stride
+
+      if (ipy < npy_grid - 1_C_INT) then
+        call roctxPush("ys_pipeline_nccl recv_backward")
+        !$omp target data use_device_addr(ycomm_recvbuf)
+        call channel_comm_recv(c_loc(ycomm_recvbuf(backward_offset + 1)), solve_count, ipy + 1_C_INT)
+        !$omp end target data
+        call roctxPop("ys_pipeline_nccl recv_backward")
+        call roctxPush("ys_pipeline_nccl backward_continue")
+        call ys_backward_pipelined_batch_continue(first_line, line_count, active_n, backward_offset)
+        call roctxPop("ys_pipeline_nccl backward_continue")
+      else
+        call roctxPush("ys_pipeline_nccl backward_top_rank")
+        call ys_backward_pipelined_batch(first_line, line_count, active_n)
+        call roctxPop("ys_pipeline_nccl backward_top_rank")
+      end if
+
+      if (ipy > 0_C_INT) then
+        call roctxPush("ys_pipeline_nccl pack_backward_state")
+        call ys_pack_backward_state(first_line, line_count, forward_offset)
+        call roctxPop("ys_pipeline_nccl pack_backward_state")
+        call roctxPush("ys_pipeline_nccl send_backward")
+        !$omp target data use_device_addr(ycomm_sendbuf)
+        call channel_comm_send(c_loc(ycomm_sendbuf(forward_offset + 1)), solve_count, ipy - 1_C_INT)
+        !$omp end target data
+        call roctxPop("ys_pipeline_nccl send_backward")
+      end if
+    end do
+    call roctxPop("ys_pipeline_nccl backward_sweep")
+
+    call roctxPush("ys_pipeline_nccl exchange_solution_halos")
+    call ys_exchange_pipelined_solution_halos_nccl(active_n, nlines)
+    call roctxPop("ys_pipeline_nccl exchange_solution_halos")
+  end subroutine ys_solve_pipelined_lu_nccl_distributed
+
   subroutine ys_exchange_pipelined_solution_halos(active_n, nlines)
     implicit none
     integer(C_INT), intent(in) :: active_n, nlines
@@ -1776,6 +1904,39 @@ contains
     if (ipy > 0_C_INT) call ys_unpack_lower_solution_halo(nlines, lower_offset)
     if (ipy < npy_grid - 1_C_INT) call ys_unpack_upper_solution_halo(nlines, upper_offset)
   end subroutine ys_exchange_pipelined_solution_halos
+
+  subroutine ys_exchange_pipelined_solution_halos_nccl(active_n, nlines)
+    implicit none
+    integer(C_INT), intent(in) :: active_n, nlines
+    integer(C_INT) :: count, lower_offset, upper_offset
+
+    count = 2_C_INT*nlines
+    lower_offset = 0_C_INT
+    upper_offset = count
+
+    if (ipy > 0_C_INT) call ys_pack_lower_solution_halo(nlines, lower_offset)
+    if (ipy < npy_grid - 1_C_INT) call ys_pack_upper_solution_halo(active_n, nlines, upper_offset)
+
+    if (ipy > 0_C_INT) then
+      call roctxPush("ys_pipeline_nccl halo_lower")
+      !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
+      call channel_comm_sendrecv(c_loc(ycomm_sendbuf(lower_offset + 1)), count, ipy - 1_C_INT, &
+                                 c_loc(ycomm_recvbuf(lower_offset + 1)), count, ipy - 1_C_INT)
+      !$omp end target data
+      call roctxPop("ys_pipeline_nccl halo_lower")
+      call ys_unpack_lower_solution_halo(nlines, lower_offset)
+    end if
+
+    if (ipy < npy_grid - 1_C_INT) then
+      call roctxPush("ys_pipeline_nccl halo_upper")
+      !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
+      call channel_comm_sendrecv(c_loc(ycomm_sendbuf(upper_offset + 1)), count, ipy + 1_C_INT, &
+                                 c_loc(ycomm_recvbuf(upper_offset + 1)), count, ipy + 1_C_INT)
+      !$omp end target data
+      call roctxPop("ys_pipeline_nccl halo_upper")
+      call ys_unpack_upper_solution_halo(nlines, upper_offset)
+    end if
+  end subroutine ys_exchange_pipelined_solution_halos_nccl
 
   subroutine ys_pack_lower_solution_halo(nlines, send_offset)
     implicit none

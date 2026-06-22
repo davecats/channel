@@ -6,6 +6,7 @@ module y_schur_solver
   use roctx, only: roctxPush, roctxPop
 #ifdef HAVE_MPI
   use mpi_transpose, only: MPI_COMM_Y, ensure_ycomm_buffers, ycomm_sendbuf, ycomm_recvbuf, ipy
+  use y_pipeline_nccl, only: channel_comm_alltoall_complex
   use mpi_f08
 #endif
 
@@ -58,6 +59,7 @@ module y_schur_solver
 #ifdef HAVE_MPI
   type(MPI_Comm), allocatable, save :: s_level_comm(:)
   logical, allocatable, save :: s_level_comm_active(:)
+  type(c_ptr), allocatable, save :: s_level_nccl_ctx(:)
 #else
   integer(C_INT), parameter :: ipy = 0_C_INT
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ycomm_sendbuf(:), ycomm_recvbuf(:)
@@ -144,6 +146,7 @@ contains
         end if
       end do
       deallocate (s_level_comm, s_level_comm_active)
+      if (allocated(s_level_nccl_ctx)) deallocate (s_level_nccl_ctx)
     end if
 #endif
 
@@ -237,9 +240,10 @@ contains
     s_value_recv_elems = 0_C_INT
 
 #ifdef HAVE_MPI
-    allocate (s_level_comm(ws%pass_count), s_level_comm_active(ws%pass_count))
+    allocate (s_level_comm(ws%pass_count), s_level_comm_active(ws%pass_count), s_level_nccl_ctx(ws%pass_count))
     s_level_comm = MPI_COMM_NULL
     s_level_comm_active = .false.
+    s_level_nccl_ctx = c_null_ptr
 #else
     error stop "distributed y-Schur requires MPI"
 #endif
@@ -420,26 +424,18 @@ contains
       end if
       call roctxPop("MPI_Allgather ys_schur_rows")
     else if (s_level_use_alltoall(ilevel)) then
-      call roctxPush("MPI_Alltoall ys_schur_rows")
+      call roctxPush("channel_comm_alltoall ys_schur_rows")
       if (s_comm_stats_enabled) comm_t0 = MPI_Wtime()
-#ifndef HAVE_HIP
-      !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
-#endif
-      call MPI_Alltoall(ycomm_sendbuf(1:s_row_send_elems(ilevel)), &
-                        YS_SCHUR_ROW_WIDTH*s_level_owned_count(ilevel), MPI_DOUBLE_COMPLEX, &
-                        ycomm_recvbuf(1:s_row_recv_elems(ilevel)), &
-                        YS_SCHUR_ROW_WIDTH*s_level_owned_count(ilevel), MPI_DOUBLE_COMPLEX, &
-                        s_level_comm(ilevel), ierr_local)
-#ifndef HAVE_HIP
-      !$omp end target data
-#endif
-      if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoall y-Schur rows failed"
+      call channel_comm_alltoall_complex(ycomm_sendbuf(1:s_row_send_elems(ilevel)), &
+                                         ycomm_recvbuf(1:s_row_recv_elems(ilevel)), &
+                                         YS_SCHUR_ROW_WIDTH*s_level_owned_count(ilevel), &
+                                         s_level_comm(ilevel), s_level_nccl_ctx(ilevel))
       if (s_comm_stats_enabled) then
         elapsed = MPI_Wtime() - comm_t0
         call ys_schur_report_comm_stats("ys_schur_rows_alltoall", s_level_comm(ilevel), &
                                         s_row_send_elems(ilevel), s_row_recv_elems(ilevel), elapsed)
       end if
-      call roctxPop("MPI_Alltoall ys_schur_rows")
+      call roctxPop("channel_comm_alltoall ys_schur_rows")
     else
       error stop "internal error: nonuniform y-Schur Alltoallv path disabled"
     end if
@@ -464,26 +460,18 @@ contains
     if (.not. s_level_use_alltoall(ilevel)) &
       error stop "internal error: nonuniform y-Schur value Alltoallv path disabled"
 
-    call roctxPush("MPI_Alltoall ys_schur_values")
+    call roctxPush("channel_comm_alltoall ys_schur_values")
     if (s_comm_stats_enabled) comm_t0 = MPI_Wtime()
-#ifndef HAVE_HIP
-    !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
-#endif
-    call MPI_Alltoall(ycomm_sendbuf(1:s_value_send_elems(ilevel)), &
-                      YS_SCHUR_VALUE_WIDTH*s_level_owned_count(ilevel), MPI_DOUBLE_COMPLEX, &
-                      ycomm_recvbuf(1:s_value_recv_elems(ilevel)), &
-                      YS_SCHUR_VALUE_WIDTH*s_level_owned_count(ilevel), MPI_DOUBLE_COMPLEX, &
-                      s_level_comm(ilevel), ierr_local)
-#ifndef HAVE_HIP
-    !$omp end target data
-#endif
-    if (ierr_local /= MPI_SUCCESS) error stop "MPI_Alltoall y-Schur values failed"
+    call channel_comm_alltoall_complex(ycomm_sendbuf(1:s_value_send_elems(ilevel)), &
+                                       ycomm_recvbuf(1:s_value_recv_elems(ilevel)), &
+                                       YS_SCHUR_VALUE_WIDTH*s_level_owned_count(ilevel), &
+                                       s_level_comm(ilevel), s_level_nccl_ctx(ilevel))
     if (s_comm_stats_enabled) then
       elapsed = MPI_Wtime() - comm_t0
       call ys_schur_report_comm_stats("ys_schur_values_alltoall", s_level_comm(ilevel), &
                                       s_value_send_elems(ilevel), s_value_recv_elems(ilevel), elapsed)
     end if
-    call roctxPop("MPI_Alltoall ys_schur_values")
+    call roctxPop("channel_comm_alltoall ys_schur_values")
 #else
     error stop "ys_schur_exchange_values requires MPI"
 #endif

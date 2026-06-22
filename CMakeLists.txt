@@ -17,6 +17,7 @@ add_library(channel_core
     rbmat.f90
     roctx.f90
     byte_workspace.f90
+    y_pipeline_nccl.f90
     y_schur_solver.f90
     y_line_solvers.f90
     compact_line_solvers.f90
@@ -112,6 +113,69 @@ elseif (CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
 
     target_include_directories(channel_core PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
     target_link_libraries(channel_core PUBLIC CUDA::cufft CUDA::cudart CUDA::cusparse)
+
+    set(_NCCL_ROOT_HINTS)
+    foreach(_NCCL_ROOT IN ITEMS
+        "$ENV{NCCL_HOME}"
+        "$ENV{NVHPC_ROOT}"
+        "$ENV{NVCOMPILER}"
+        "$ENV{NVHPC}"
+    )
+        if(_NCCL_ROOT)
+            list(APPEND _NCCL_ROOT_HINTS "${_NCCL_ROOT}")
+            file(GLOB _NCCL_VERSIONED_HINTS
+                "${_NCCL_ROOT}/comm_libs/${CUDAToolkit_VERSION}/nccl*"
+                "${_NCCL_ROOT}/Linux_x86_64/*/comm_libs/${CUDAToolkit_VERSION}/nccl*"
+            )
+            if(_NCCL_VERSIONED_HINTS)
+                list(SORT _NCCL_VERSIONED_HINTS)
+                list(REVERSE _NCCL_VERSIONED_HINTS)
+            endif()
+            list(APPEND _NCCL_ROOT_HINTS ${_NCCL_VERSIONED_HINTS})
+            file(GLOB _NCCL_GLOB_HINTS
+                "${_NCCL_ROOT}/comm_libs/*/nccl*"
+                "${_NCCL_ROOT}/Linux_x86_64/*/comm_libs/*/nccl*"
+                "${_NCCL_ROOT}/REDIST/comm_libs/*/nccl*"
+                "${_NCCL_ROOT}/Linux_x86_64/*/REDIST/comm_libs/*/nccl*"
+            )
+            if(_NCCL_GLOB_HINTS)
+                list(SORT _NCCL_GLOB_HINTS)
+                list(REVERSE _NCCL_GLOB_HINTS)
+            endif()
+            list(APPEND _NCCL_ROOT_HINTS ${_NCCL_GLOB_HINTS})
+        endif()
+    endforeach()
+
+    foreach(_NCCL_CANDIDATE IN LISTS _NCCL_ROOT_HINTS)
+        if(NOT NCCL_ROOT_DIR
+           AND EXISTS "${_NCCL_CANDIDATE}/include/nccl.h"
+           AND EXISTS "${_NCCL_CANDIDATE}/lib/libnccl.so")
+            set(NCCL_ROOT_DIR "${_NCCL_CANDIDATE}" CACHE PATH "NCCL installation root" FORCE)
+        endif()
+    endforeach()
+
+    if(NCCL_ROOT_DIR)
+        set(NCCL_INCLUDE_DIR "${NCCL_ROOT_DIR}/include" CACHE PATH "NCCL include directory" FORCE)
+        set(NCCL_LIBRARY "${NCCL_ROOT_DIR}/lib/libnccl.so" CACHE FILEPATH "NCCL library" FORCE)
+    else()
+        find_path(NCCL_INCLUDE_DIR nccl.h
+            HINTS ${_NCCL_ROOT_HINTS}
+            PATH_SUFFIXES include
+        )
+        find_library(NCCL_LIBRARY nccl
+            HINTS ${_NCCL_ROOT_HINTS}
+            PATH_SUFFIXES lib lib64
+        )
+    endif()
+    if(NCCL_INCLUDE_DIR AND NCCL_LIBRARY)
+        target_sources(channel_core PRIVATE channel_nccl_p2p.c)
+        target_include_directories(channel_core PRIVATE ${NCCL_INCLUDE_DIR})
+        target_link_libraries(channel_core PUBLIC ${NCCL_LIBRARY})
+        target_compile_definitions(channel_core PRIVATE HAVE_NCCL)
+        message(STATUS "NCCL y-pipeline backend enabled: ${NCCL_LIBRARY}")
+    else()
+        message(STATUS "NCCL not found; y-pipeline NCCL backend disabled")
+    endif()
     if(TARGET CUDA::nvToolsExt)
         target_link_libraries(channel_core PUBLIC CUDA::nvToolsExt)
     elseif(CUDA_nvToolsExt_LIBRARY)
@@ -130,14 +194,52 @@ elseif (CMAKE_Fortran_COMPILER_ID MATCHES "Cray")
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -e Z -O2 -hfp0 -homp -lrocprofiler-sdk-roctx")
 
     find_package(hipfort REQUIRED COMPONENTS hip hipfft hipsparse)
-    target_link_libraries(channel_core PRIVATE hipfort::hipfft hipfort::hipsparse)
+    target_link_libraries(channel_core PRIVATE hipfort::hip hipfort::hipfft hipfort::hipsparse)
+    find_path(RCCL_INCLUDE_DIR
+        NAMES rccl/rccl.h nccl.h
+        HINTS ENV RCCL_HOME ENV ROCM_PATH /opt/rocm
+        PATH_SUFFIXES include
+    )
+    find_library(RCCL_LIBRARY
+        NAMES rccl
+        HINTS ENV RCCL_HOME ENV ROCM_PATH /opt/rocm
+        PATH_SUFFIXES lib lib64
+    )
+    if(RCCL_INCLUDE_DIR AND RCCL_LIBRARY)
+        target_sources(channel_core PRIVATE channel_nccl_p2p.c)
+        target_include_directories(channel_core PRIVATE ${RCCL_INCLUDE_DIR})
+        target_link_libraries(channel_core PRIVATE ${RCCL_LIBRARY})
+        target_compile_definitions(channel_core PRIVATE HAVE_NCCL HAVE_RCCL)
+        message(STATUS "RCCL communication backend enabled: ${RCCL_LIBRARY}")
+    else()
+        message(STATUS "RCCL not found; CHANNEL_COMM=nccl backend disabled for HIP")
+    endif()
     target_compile_definitions(channel_core PRIVATE HAVE_HIP)
     message(STATUS "hipfort_DIR = ${hipfort_DIR}")
 elseif (CMAKE_Fortran_COMPILER_ID MATCHES "LLVMFlang")
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cpp -O2 -fopenmp -fopenmp -fopenmp-targets=amdgcn-amd-amdhsa --offload-arch=gfx942")
 
     find_package(hipfort REQUIRED COMPONENTS hip hipfft hipsparse)
-    target_link_libraries(channel_core PUBLIC hipfort::hipfft hipfort::hipsparse)
+    target_link_libraries(channel_core PUBLIC hipfort::hip hipfort::hipfft hipfort::hipsparse)
+    find_path(RCCL_INCLUDE_DIR
+        NAMES rccl/rccl.h nccl.h
+        HINTS ENV RCCL_HOME ENV ROCM_PATH /opt/rocm
+        PATH_SUFFIXES include
+    )
+    find_library(RCCL_LIBRARY
+        NAMES rccl
+        HINTS ENV RCCL_HOME ENV ROCM_PATH /opt/rocm
+        PATH_SUFFIXES lib lib64
+    )
+    if(RCCL_INCLUDE_DIR AND RCCL_LIBRARY)
+        target_sources(channel_core PRIVATE channel_nccl_p2p.c)
+        target_include_directories(channel_core PRIVATE ${RCCL_INCLUDE_DIR})
+        target_link_libraries(channel_core PUBLIC ${RCCL_LIBRARY})
+        target_compile_definitions(channel_core PRIVATE HAVE_NCCL HAVE_RCCL)
+        message(STATUS "RCCL communication backend enabled: ${RCCL_LIBRARY}")
+    else()
+        message(STATUS "RCCL not found; CHANNEL_COMM=nccl backend disabled for HIP")
+    endif()
     target_compile_definitions(channel_core PRIVATE HAVE_HIP)
     message(STATUS "hipfort_DIR = ${hipfort_DIR}")
 

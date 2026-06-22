@@ -39,6 +39,7 @@
     use omp_lib
 #endif
     use roctx
+    use y_pipeline_nccl, only: channel_comm_alltoall_complex
 
     IMPLICIT NONE
 
@@ -76,6 +77,7 @@
 #ifdef HAVE_MPI
     TYPE(MPI_Datatype), save :: writeview_type, owned2write_type, vel_read_type, vel_field_type
 #endif
+    type(c_ptr), save :: xcomm_nccl_ctx = c_null_ptr
 
   CONTAINS
 
@@ -559,23 +561,16 @@
 
     SUBROUTINE alltoall(send, recv, request, label)
       IMPLICIT NONE
-      complex(C_DOUBLE_COMPLEX), intent(out) :: recv(:)
-      complex(C_DOUBLE_COMPLEX), intent(in)  :: send(:)
+      complex(C_DOUBLE_COMPLEX), intent(out), target :: recv(:)
+      complex(C_DOUBLE_COMPLEX), intent(in), target  :: send(:)
       type(MPI_Request), intent(inout) :: request
       character(len=*), intent(in), optional :: label
       character(len=96) :: range_name
 
-      range_name = "MPI_Ialltoall fft_transpose"
-      if (present(label)) range_name = "MPI_Ialltoall "//trim(label)
+      range_name = "channel_comm_alltoall fft_transpose"
+      if (present(label)) range_name = "channel_comm_alltoall "//trim(label)
       call roctxPush(range_name)
-#ifndef HAVE_HIP
-      !$omp target data use_device_addr(send, recv)
-#endif
-      call MPI_IALLTOALL(send, sendcount, MPI_DOUBLE_COMPLEX, &
-                         recv, sendcount, MPI_DOUBLE_COMPLEX, MPI_COMM_X, request, ierr)
-#ifndef HAVE_HIP
-      !$omp end target data
-#endif
+      call channel_comm_alltoall_complex(send, recv, sendcount, MPI_COMM_X, xcomm_nccl_ctx, request)
       call roctxPop(range_name)
 
     END SUBROUTINE alltoall
@@ -728,8 +723,12 @@
       end if
 
       ! Calculate domain division
-      nx0 = ipxz*(nxpp)/npxz; nxN = (ipxz + 1)*(nxpp)/npxz - 1; nxB = nxN - nx0 + 1;
-      nz0 = ipxz*nzd/npxz; nzN = (ipxz + 1)*nzd/npxz - 1; nzB = nzN - nz0 + 1;
+      nx0 = ipxz*(nxpp)/npxz
+      nxN = (ipxz + 1)*(nxpp)/npxz - 1
+      nxB = nxN - nx0 + 1
+      nz0 = ipxz*nzd/npxz
+      nzN = (ipxz + 1)*nzd/npxz - 1
+      nzB = nzN - nz0 + 1
       call setup_y_decomposition(ny, 2*nz + 1, nxB)
       has_average = (nx0 == 0)
       !$omp target update to(npy_grid, npxz, ipy, ipxz, nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN)
