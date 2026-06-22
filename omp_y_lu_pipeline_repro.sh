@@ -19,7 +19,7 @@ NPY="${NPY:-${NP}}"
 OUT_DIR="${OUT_DIR:-omp_y_lu_pipeline_repro_$(date +%Y%m%d_%H%M%S)}"
 PROFILE="${PROFILE:-0}"
 TRACE="${TRACE:-nvtx,cuda}"
-NVHPC_MODULE="${NVHPC_MODULE:-toolkits/nvhpc/25.5}"
+NVHPC_MODULE="${NVHPC_MODULE:-toolkit/nvidia-hpc-sdk/25.3}"
 MPIF90="${MPIF90:-mpifort}"
 MPIRUN="${MPIRUN:-mpirun}"
 MPIRUN_ARGS="${MPIRUN_ARGS:-}"
@@ -32,7 +32,7 @@ cd "${OUT_DIR}"
 if [[ -f /etc/profile.d/lmod.sh ]]; then
   # shellcheck disable=SC1091
   . /etc/profile.d/lmod.sh
-  module load "${NVHPC_MODULE}" || true
+  module load "${NVHPC_MODULE}"
 fi
 
 cat > bench_y_lu_pipeline_autotune.f90 <<'F90'
