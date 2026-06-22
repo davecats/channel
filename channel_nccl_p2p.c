@@ -97,6 +97,18 @@ int channel_nccl_context_sendrecv(void *ctx_ptr, const void *sendbuf, size_t sen
 }
 
 int channel_nccl_context_alltoall(void *ctx_ptr, const void *sendbuf, void *recvbuf, size_t count_elems) {
+#if defined(HAVE_NCCL_ALLTOALL)
+  int status;
+  size_t count_bytes = count_elems*16;
+  channel_nccl_context *ctx = (channel_nccl_context *)ctx_ptr;
+  if (ctx == NULL) return -1;
+  status = channel_nccl_check(ncclAlltoAll(sendbuf, recvbuf, count_bytes,
+                                           ncclUint8, ctx->comm, ctx->stream));
+  if (status != 0) return status;
+  channelError_t stream_status = channelStreamSynchronize(ctx->stream);
+  if (stream_status != channelSuccess) return 100000 + (int)stream_status;
+  return 0;
+#else
   int peer;
   int status;
   const char *send_bytes = (const char *)sendbuf;
@@ -119,6 +131,7 @@ int channel_nccl_context_alltoall(void *ctx_ptr, const void *sendbuf, void *recv
   channelError_t stream_status = channelStreamSynchronize(ctx->stream);
   if (stream_status != channelSuccess) return 100000 + (int)stream_status;
   return 0;
+#endif
 }
 
 int channel_nccl_context_destroy(void *ctx_ptr) {
