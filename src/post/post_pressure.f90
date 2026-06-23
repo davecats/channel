@@ -2,7 +2,7 @@
 
 PROGRAM post_pressure
   USE, intrinsic :: iso_c_binding
-  USE dnsdata, ONLY: iproc, ierr, read_restart_file, free_memory, V, ny, nz, nx, ny0, nyN, nx0, nxN
+  USE dnsdata, ONLY: iproc, read_restart_file, free_memory, V, ny, nz, nx, ny0, nyN, nx0, nxN
   USE pressure_output, ONLY: free_pressure_output, compute_pressure_output
   USE driver, ONLY: initialize
 #ifdef HAVE_FFTW
@@ -72,7 +72,7 @@ CONTAINS
     INTEGER :: unit, io, count, exitstat, cmdstat
     INTEGER(C_INT) :: pid
 
-    pid = getpid()
+    pid = process_id()
     write (listfile, '(A,I0)') '.post_pressure_files.', pid
     command = "find . -maxdepth 1 -type f -name 'Dati.cart.*.out' -printf '%f\n' | sort -V > "//trim(listfile)
     call execute_command_line(trim(command), wait=.true., exitstat=exitstat, cmdstat=cmdstat)
@@ -157,13 +157,13 @@ CONTAINS
 #endif
   END SUBROUTINE write_field_mpi
 
-  INTEGER(C_INT) FUNCTION getpid()
+  INTEGER(C_INT) FUNCTION process_id()
     INTERFACE
       INTEGER(C_INT) FUNCTION c_getpid() BIND(C, NAME='getpid')
         USE, intrinsic :: iso_c_binding
       END FUNCTION c_getpid
     END INTERFACE
-    getpid = c_getpid()
-  END FUNCTION getpid
+    process_id = c_getpid()
+  END FUNCTION process_id
 
 END PROGRAM post_pressure

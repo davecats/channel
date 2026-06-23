@@ -1,11 +1,18 @@
+from pathlib import Path
+import sys
+
+POSTPRO_DIR = Path(__file__).resolve().parents[1] / "postpro"
+postpro_path = str(POSTPRO_DIR)
+if postpro_path not in sys.path:
+    sys.path.insert(0, postpro_path)
+
 import numpy as np
 import dask.array as da
 import dask
 import xarray as xr
-import xrft
 from utils import mesh2k
 
-from xrft.xrft import  _new_dims_and_coords
+from xrft.xrft import _new_dims_and_coords
 
 def full_mesh2k(phi: float, node_size: int) -> np.ndarray:
     """Full Fourier wavenumber layout for padded inverse transforms."""
@@ -18,11 +25,10 @@ def full_mesh2k(phi: float, node_size: int) -> np.ndarray:
     return mesh2k(phi, (node_size - 1)//2)
 
 
-"""Module for transforming Fourier-space fields to physical space and back, as output by the channel code
+"""Transform channel Fourier-space fields to physical space and back.
 
-Christian's old reference is at the end.
-
-The code operates on dask-backed xr.DataArray objects, and minimizes the number of tasks while keeping all operations chunk-local.
+The code operates on dask-backed xr.DataArray objects and minimizes the number
+of tasks while keeping operations chunk-local.
 """
 
 def ifft_minimal(tmp: xr.DataArray, dim: str = "var") -> xr.DataArray:
@@ -145,15 +151,14 @@ def my_ifft_Xarray(
     nx = 0,
 ) -> xr.DataArray:
     """
-    Inverse FFT along `dim` with layout identical to my_ifft_Xarray_old,
-    optionally mirroring a folded spectrum first.
+    Inverse FFT along `dim`, optionally mirroring a folded spectrum first.
 
     mirror=False:
-        - behaves like my_ifft_Xarray_old on that dimension.
+        - lays out the compact Fourier spectrum and pads unresolved modes.
 
     mirror=True:
         - first mirror+conj the folded spectrum along `dim`
-        - then pad zeros in the middle as before.
+        - then pads unresolved modes in the middle.
     """
 
     axis = fourierField.get_axis_num(dim)
@@ -224,57 +229,6 @@ def physical(xArray: xr.DataArray, dns: dict) -> xr.DataArray:
     )
 
     return physicalArray.real
-
-
-### OLD CODE - just for comparison
-def my_ifft_Xarray_old(fourierField: xr.DataArray, dim: str, phi: float, nodeSize: int):
-    import xrft
-    nModes = int((fourierField.sizes[dim]-1)/2)
-
-    tmp = (fourierField
-                        .roll(shifts={dim: nModes})
-                        .rename({dim: 'var'})
-                        .pad(var=(0,int(nodeSize-1-2*nModes)), constant_values=0)
-                        .roll(shifts={'var': -nModes})
-                        .assign_coords({'var': mesh2k(phi, int((nodeSize-1)/2))})
-                        )
-
-    physicalField = xrft.ifft(tmp.chunk(chunks=({'var': -1})),
-                              dim='var', true_amplitude=False, lag=0, shift=False)
-    # Normalizing the inverse-Fourier-transformed field
-    physicalField *= nodeSize
-
-    return physicalField.rename({'freq_var': dim[-1]}).assign_coords({dim[-1]: np.arange(nodeSize)/(nodeSize)*(2*np.pi/phi)})
-
-def physical_old(xArray, dns):
-    tmpField1 = my_ifft_Xarray_old(xArray, 'kz', dns['beta0'], dns['nzd']+1)
-    tmpField2 = tmpField1.conj().assign_coords({'kx_folded': -tmpField1.coords['kx_folded']}).isel(kx_folded = slice(-1,0,-1))
-    tmpField3 = tmpField1.combine_first(tmpField2).rename({'kx_folded': 'kx'}).roll(shifts={'kx': -dns['nx']}, roll_coords=True)
-
-    physicalArray = my_ifft_Xarray_old(tmpField3, 'kx', dns['alfa0'], dns['nxd']+1)
-
-    return physicalArray.real
-
-def my_fft_Xarray_old(physicalField: xr.DataArray, dim: str, phi: float, modeSize: int):
-    nodeSize = physicalField.sizes[dim]
-
-    fourierField = xrft.fft(physicalField.chunk(chunks=({dim: -1})), dim=dim, true_amplitude=False, shift=False)
-    fourierField /= nodeSize
-
-    firstHalf = fourierField.rename({'freq_' + dim: 'var'}).isel(var = slice(None, modeSize+1))
-    secondHalf = fourierField.rename({'freq_' + dim: 'var'}).isel(var = slice(-modeSize,None))
-    fourierField = firstHalf.combine_first(secondHalf).roll(shifts={'var': -modeSize}, roll_coords=True)
-
-    return fourierField.rename({'var': 'k' + dim}).assign_coords({'k' + dim: mesh2k(phi, modeSize)})
-
-def fourier_old(xArray, dns):
-    tmpField1 = my_fft_Xarray_old(xArray, 'x', dns['alfa0'], dns['nx'])
-    tmpField2 = tmpField1.isel(kx = slice(None,dns['nx']+1)).rename({'kx': 'kx_folded'})
-
-    fourierArray = my_fft_Xarray_old(tmpField2, 'z', dns['beta0'], dns['nz'])
-
-    return fourierArray
-
 
 
 def _ifftshift_block(block, axis=-1):

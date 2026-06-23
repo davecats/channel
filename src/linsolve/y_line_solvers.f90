@@ -851,14 +851,6 @@ contains
     ys_gpsv_n = n
     ys_gpsv_batch = batch_count
   end subroutine ys_prepare_gpusparse_workspace
-#else
-  subroutine ys_prepare_gpusparse_workspace(n, batch_count)
-    implicit none
-    integer(C_INT), intent(in) :: n, batch_count
-
-    ys_gpsv_n = n
-    ys_gpsv_batch = batch_count
-  end subroutine ys_prepare_gpusparse_workspace
 #endif
 
   subroutine ys_solve_interleaved_pentadiagonal(ds, dl, d, du, dw, x, n, batch_count, label)

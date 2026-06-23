@@ -168,7 +168,10 @@ contains
   subroutine get_convvelo_workspace_estimate(nbytes)
     implicit none
     integer(C_SIZE_T), intent(out) :: nbytes
-    integer(C_SIZE_T) :: real_bytes, fft_offset, fft_bytes
+    integer(C_SIZE_T) :: real_bytes
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    integer(C_SIZE_T) :: fft_offset, fft_bytes
+#endif
 
     if (.not. convvelo_enabled) then
       nbytes = 0_C_SIZE_T
@@ -543,9 +546,9 @@ contains
 
     call IFT(VVdz(:, :, :, 1))
     if (fft_transpose_is_local) then
-      call repack_zTOx_local(VVdz(:, :, :, 1), VVdx(:, :, :, 1), ny)
+      call repack_zTOx_local(VVdz(:, :, :, 1), VVdx(:, :, :, 1))
     else
-      call pack_zTOx(VVdz(:, :, :, 1), sendbuf(:, 1), ny)
+      call pack_zTOx(VVdz(:, :, :, 1), sendbuf(:, 1))
       call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "zTOx convvelo_spectral_to_real")
     end if
 #ifdef HAVE_MPI
@@ -555,7 +558,7 @@ contains
       call roctxPop("MPI_Wait zTOx convvelo_spectral_to_real")
     end if
 #endif
-    if (.not. fft_transpose_is_local) call unpack_zTOx(recvbuf(:, 1), VVdx(:, :, :, 1), ny)
+    if (.not. fft_transpose_is_local) call unpack_zTOx(recvbuf(:, 1), VVdx(:, :, :, 1))
     !$omp target teams distribute parallel do collapse(3) &
     !$omp shared(VVdx, nx, nxd, nzB) private(ix, iz, iy)
     do iy = ny0 - 2, nyN + 2
@@ -580,9 +583,9 @@ contains
 
     call HFT(rx, VVdx(:, :, :, 1))
     if (fft_transpose_is_local) then
-      call repack_xTOz_local(VVdx(:, :, :, 1), VVdz(:, :, :, 1), ny)
+      call repack_xTOz_local(VVdx(:, :, :, 1), VVdz(:, :, :, 1))
     else
-      call pack_xTOz(VVdx(:, :, :, 1), sendbuf(:, 1), ny)
+      call pack_xTOz(VVdx(:, :, :, 1), sendbuf(:, 1))
       call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "xTOz convvelo_real_to_spectral")
     end if
 #ifdef HAVE_MPI
@@ -592,7 +595,7 @@ contains
       call roctxPop("MPI_Wait xTOz convvelo_real_to_spectral")
     end if
 #endif
-    if (.not. fft_transpose_is_local) call unpack_xTOz(recvbuf(:, 1), VVdz(:, :, :, 1), ny)
+    if (.not. fft_transpose_is_local) call unpack_xTOz(recvbuf(:, 1), VVdz(:, :, :, 1))
     call FFT(VVdz(:, :, :, 1))
 
     !$omp target teams distribute parallel do collapse(3) &
@@ -705,7 +708,9 @@ contains
   subroutine get_convvelo_real_workspace_bytes(real_bytes, fft_offset, total_bytes)
     implicit none
     integer(C_SIZE_T), intent(out) :: real_bytes, fft_offset, total_bytes
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
     integer(C_SIZE_T) :: fft_bytes
+#endif
 
     call get_convvelo_local_real_workspace_bytes(real_bytes)
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)

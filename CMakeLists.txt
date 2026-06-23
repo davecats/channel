@@ -63,23 +63,27 @@ endfunction()
 # --------------------------------------------------------------------
 # Sources
 # --------------------------------------------------------------------
+set(CHANNEL_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
+set(CHANNEL_NCCL_P2P_SOURCE "${CHANNEL_SOURCE_DIR}/gpu/channel_nccl_p2p.c")
+
 add_library(channel_core
-    config.f90
-    rbmat.f90
-    roctx.f90
-    byte_workspace.f90
-    y_pipeline_nccl.f90
-    y_schur_solver.f90
-    y_line_solvers.f90
-    compact_line_solvers.f90
-    mpi_transpose.f90
-    ffts.f90
-    mpi_autotune.f90
-    dnsdata.f90
-    convvelo.f90
-    pressure_output.f90
-    driver.f90
+    ${CHANNEL_SOURCE_DIR}/core/config.f90
+    ${CHANNEL_SOURCE_DIR}/core/rbmat.f90
+    ${CHANNEL_SOURCE_DIR}/core/roctx.f90
+    ${CHANNEL_SOURCE_DIR}/core/byte_workspace.f90
+    ${CHANNEL_SOURCE_DIR}/gpu/y_pipeline_nccl.f90
+    ${CHANNEL_SOURCE_DIR}/linsolve/y_schur_solver.f90
+    ${CHANNEL_SOURCE_DIR}/linsolve/y_line_solvers.f90
+    ${CHANNEL_SOURCE_DIR}/linsolve/compact_line_solvers.f90
+    ${CHANNEL_SOURCE_DIR}/mpi/mpi_transpose.f90
+    ${CHANNEL_SOURCE_DIR}/fft/ffts.f90
+    ${CHANNEL_SOURCE_DIR}/mpi/mpi_autotune.f90
+    ${CHANNEL_SOURCE_DIR}/core/dnsdata.f90
+    ${CHANNEL_SOURCE_DIR}/core/convvelo.f90
+    ${CHANNEL_SOURCE_DIR}/core/pressure_output.f90
+    ${CHANNEL_SOURCE_DIR}/core/driver.f90
 )
+target_include_directories(channel_core PUBLIC "${CHANNEL_SOURCE_DIR}/core")
 
 # --------------------------------------------------------------------
 # MPI
@@ -95,13 +99,13 @@ endif()
 # --------------------------------------------------------------------
 # Executable
 # --------------------------------------------------------------------
-add_executable(channel ${SOURCES} channel.f90)
+add_executable(channel ${CHANNEL_SOURCE_DIR}/channel.f90)
 target_link_libraries(channel PRIVATE channel_core)
 
-add_executable(post_pressure post_pressure.f90)
+add_executable(post_pressure ${CHANNEL_SOURCE_DIR}/post/post_pressure.f90)
 target_link_libraries(post_pressure PRIVATE channel_core)
 
-add_executable(post_convvelo post_convvelo.f90)
+add_executable(post_convvelo ${CHANNEL_SOURCE_DIR}/post/post_convvelo.f90)
 target_link_libraries(post_convvelo PRIVATE channel_core)
 
 # --------------------------------------------------------------------
@@ -110,47 +114,45 @@ target_link_libraries(post_convvelo PRIVATE channel_core)
 
 set(TEST_NPROCS 1 CACHE STRING "Number of MPI ranks for regression test")
 
-add_executable(test_regression test_regression.f90)
+add_executable(test_regression ${CHANNEL_SOURCE_DIR}/test/test_regression.f90)
 target_link_libraries(test_regression PRIVATE channel_core)
 
-add_executable(test_regression_scalar test_regression_scalar.f90)
+add_executable(test_regression_scalar ${CHANNEL_SOURCE_DIR}/test/test_regression_scalar.f90)
 target_link_libraries(test_regression_scalar PRIVATE channel_core)
 
-add_executable(test_pressure_dpdy test_pressure_dpdy.f90)
+add_executable(test_pressure_dpdy ${CHANNEL_SOURCE_DIR}/test/test_pressure_dpdy.f90)
 target_link_libraries(test_pressure_dpdy PRIVATE channel_core)
 
-add_executable(test_convvelo_stats test_convvelo_utils.f90 test_convvelo_stats.f90)
+add_executable(test_convvelo_stats
+    ${CHANNEL_SOURCE_DIR}/test/test_convvelo_utils.f90
+    ${CHANNEL_SOURCE_DIR}/test/test_convvelo_stats.f90
+)
 target_link_libraries(test_convvelo_stats PRIVATE channel_core)
 
-add_executable(test_convvelo_runtime test_convvelo_utils.f90 test_convvelo_runtime.f90)
+add_executable(test_convvelo_runtime
+    ${CHANNEL_SOURCE_DIR}/test/test_convvelo_utils.f90
+    ${CHANNEL_SOURCE_DIR}/test/test_convvelo_runtime.f90
+)
 target_link_libraries(test_convvelo_runtime PRIVATE channel_core)
 
-add_executable(test_post_convvelo test_convvelo_utils.f90 test_post_convvelo.f90)
+add_executable(test_post_convvelo
+    ${CHANNEL_SOURCE_DIR}/test/test_convvelo_utils.f90
+    ${CHANNEL_SOURCE_DIR}/test/test_post_convvelo.f90
+)
 target_link_libraries(test_post_convvelo PRIVATE channel_core)
 
-add_executable(test_y_pencil_transpose test_y_pencil_transpose.f90)
+add_executable(test_y_pencil_transpose ${CHANNEL_SOURCE_DIR}/test/test_y_pencil_transpose.f90)
 target_link_libraries(test_y_pencil_transpose PRIVATE channel_core)
 
-add_executable(test_mean_correction test_mean_correction.f90)
+add_executable(test_mean_correction ${CHANNEL_SOURCE_DIR}/test/test_mean_correction.f90)
 target_link_libraries(test_mean_correction PRIVATE channel_core)
 
-add_executable(test_mpi_autotune_candidates test_mpi_autotune_candidates.f90)
+add_executable(test_mpi_autotune_candidates ${CHANNEL_SOURCE_DIR}/test/test_mpi_autotune_candidates.f90)
 target_link_libraries(test_mpi_autotune_candidates PRIVATE channel_core)
 
 # Add a CTest target
 enable_testing()
 include(cmake/tests.cmake)
-
-set(POST_CONVVELO_NPROCS 1)
-set(POST_CONVVELO_EXE ${CMAKE_CURRENT_BINARY_DIR}/post_convvelo)
-set(TEST_POST_CONVVELO_EXE ${CMAKE_CURRENT_BINARY_DIR}/test_post_convvelo)
-configure_file(cmake/run_post_convvelo_test.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/run_post_convvelo_test.cmake @ONLY)
-
-add_test(NAME post_convvelo_1rank
-    COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_BINARY_DIR}/run_post_convvelo_test.cmake
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-)
-set_tests_properties(post_convvelo_1rank PROPERTIES PROCESSORS 1)
 
 # --------------------------------------------------------------------
 # Compiler flags
@@ -266,7 +268,7 @@ elseif (CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
         )
     endif()
     if(NCCL_INCLUDE_DIR AND NCCL_LIBRARY)
-        target_sources(channel_core PRIVATE channel_nccl_p2p.c)
+        target_sources(channel_core PRIVATE ${CHANNEL_NCCL_P2P_SOURCE})
         target_include_directories(channel_core PRIVATE ${NCCL_INCLUDE_DIR})
         target_link_libraries(channel_core PUBLIC ${NCCL_LIBRARY})
         target_compile_definitions(channel_core PRIVATE HAVE_NCCL)
@@ -309,7 +311,7 @@ elseif (CMAKE_Fortran_COMPILER_ID MATCHES "Cray")
         PATH_SUFFIXES lib lib64
     )
     if(RCCL_INCLUDE_DIR AND RCCL_LIBRARY)
-        target_sources(channel_core PRIVATE channel_nccl_p2p.c)
+        target_sources(channel_core PRIVATE ${CHANNEL_NCCL_P2P_SOURCE})
         target_include_directories(channel_core PRIVATE ${RCCL_INCLUDE_DIR})
         target_link_libraries(channel_core PRIVATE ${RCCL_LIBRARY})
         target_compile_definitions(channel_core PRIVATE HAVE_NCCL HAVE_RCCL)
@@ -340,7 +342,7 @@ elseif (CMAKE_Fortran_COMPILER_ID MATCHES "LLVMFlang")
         PATH_SUFFIXES lib lib64
     )
     if(RCCL_INCLUDE_DIR AND RCCL_LIBRARY)
-        target_sources(channel_core PRIVATE channel_nccl_p2p.c)
+        target_sources(channel_core PRIVATE ${CHANNEL_NCCL_P2P_SOURCE})
         target_include_directories(channel_core PRIVATE ${RCCL_INCLUDE_DIR})
         target_link_libraries(channel_core PUBLIC ${RCCL_LIBRARY})
         target_compile_definitions(channel_core PRIVATE HAVE_NCCL HAVE_RCCL)

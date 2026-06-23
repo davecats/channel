@@ -1,0 +1,52 @@
+# Kim, Moin & Moser (1987), turbulent channel flow.
+#
+# Paper target:
+#   Re_c = 3300 based on mean centerline velocity and half-height.
+#   Re_tau = 180 based on wall shear velocity and half-height.
+#   Lx = 4*pi*h, Lz = 2*pi*h.
+#   Reported grid: 192 x 129 x 160 in x, y, z.
+#
+# Code convention used here:
+#   ymin = 0, ymax = 2 gives half-height h = 1.
+#   meanflowx = 2 gives unit bulk velocity over the height-2 channel.
+#   ni is therefore set near the half-height bulk Reynolds number Re_b ~= 2800,
+#   corresponding to the KMM Re_tau ~= 180 case.
+#   The spectral sizes below are the closest odd-storage counterpart to the
+#   paper grid under this code's Fourier-mode input convention.
+
+[mesh]
+nx = 95
+ny = 128
+nz = 80
+alfa0 = 0.5
+beta0 = 1.0
+stretching = 1.5
+ymin = 0.0
+ymax = 2.0
+
+[velocity]
+ni = 2800.0
+meanpx = 0.0
+meanpz = 0.0
+meanflowx = 2.0
+meanflowz = 0.0
+u0 = 0.0
+uN = 0.0
+perturbation_amplitude = 1.0e-3
+
+[scalars]
+nPhi = 0
+meantx = 0.0
+meantb = 0.0
+t0 = 0.0
+tN = 0.0
+
+[timestepping]
+deltat = 0.0
+cflmax = 0.6
+time = 0.0
+dt_field = 25.0
+dt_save = 25.0
+t_max = 1000.0
+time_from_restart = false
+nstep = 200000

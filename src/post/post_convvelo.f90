@@ -73,7 +73,7 @@ contains
     integer :: unit, io, count, exitstat, cmdstat
     integer(C_INT) :: pid
 
-    pid = getpid()
+    pid = process_id()
     write (listfile, '(A,I0)') ".post_convvelo_files.", pid
     command = "find . -maxdepth 1 -name 'Dati.cart.*.out' -printf '%f\n' | sort -V > "//trim(listfile)
     call execute_command_line(trim(command), wait=.true., exitstat=exitstat, cmdstat=cmdstat)
@@ -105,13 +105,13 @@ contains
     nfiles = count
   end subroutine discover_restart_files
 
-  integer(C_INT) function getpid()
+  integer(C_INT) function process_id()
     interface
       integer(C_INT) function c_getpid() bind(C, name="getpid")
         use, intrinsic :: iso_c_binding
       end function c_getpid
     end interface
-    getpid = c_getpid()
-  end function getpid
+    process_id = c_getpid()
+  end function process_id
 
 end program post_convvelo

@@ -1,0 +1,51 @@
+# Jimenez & Moin (1991), minimal flow unit in near-wall turbulence.
+#
+# Paper target:
+#   Re = 3000 based on the laminar centerline velocity U and half-height h.
+#   Lx = pi*h.
+#   A representative sustained minimal width is Lz = 0.30*pi*h.
+#   Most runs used 32 x 129 x 16 modes/points in x, y, z
+#   (48 x 129 x 24 before dealiasing).
+#
+# Code convention used here:
+#   ymin = 0, ymax = 2 gives half-height h = 1.
+#   The generated laminar profile is 1.5*y*(2-y) when meanflowx = 2.
+#   meanflowx = 4/3 rescales that initial profile to unit centerline velocity,
+#   matching the paper's U = 1 normalization.
+
+[mesh]
+nx = 16
+ny = 128
+nz = 8
+alfa0 = 2.0
+beta0 = 6.666666666666667
+stretching = 1.5
+ymin = 0.0
+ymax = 2.0
+
+[velocity]
+ni = 3000.0
+meanpx = 0.0
+meanpz = 0.0
+meanflowx = 1.3333333333333333
+meanflowz = 0.0
+u0 = 0.0
+uN = 0.0
+perturbation_amplitude = 5.0e-3
+
+[scalars]
+nPhi = 0
+meantx = 0.0
+meantb = 0.0
+t0 = 0.0
+tN = 0.0
+
+[timestepping]
+deltat = 0.0
+cflmax = 0.6
+time = 0.0
+dt_field = 50.0
+dt_save = 100.0
+t_max = 3000.0
+time_from_restart = false
+nstep = 500000

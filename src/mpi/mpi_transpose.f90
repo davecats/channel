@@ -420,12 +420,11 @@
       !$omp end target teams distribute parallel do
     end subroutine yslab_copy_from_full
 
-    SUBROUTINE repack_zTOx_local(Vz, Vx, ny)
+    SUBROUTINE repack_zTOx_local(Vz, Vx)
       use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
       implicit none
       complex(C_DOUBLE_COMPLEX), intent(in) :: Vz(1:, 1:, :)
       complex(C_DOUBLE_COMPLEX), intent(out) :: Vx(1:, 1:, :)
-      integer(C_INT), intent(in) :: ny
       integer(C_SIZE_T) :: iy, ix, iz
       integer(C_INT) :: ny_batch
 
@@ -441,12 +440,11 @@
       end do
     END SUBROUTINE repack_zTOx_local
 
-    SUBROUTINE repack_xTOz_local(Vx, Vz, ny)
+    SUBROUTINE repack_xTOz_local(Vx, Vz)
       use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
       implicit none
       complex(C_DOUBLE_COMPLEX), intent(in) :: Vx(1:, 1:, :)
       complex(C_DOUBLE_COMPLEX), intent(out) :: Vz(1:, 1:, :)
-      integer(C_INT), intent(in) :: ny
       integer(C_SIZE_T) :: iy, ix, iz
       integer(C_INT) :: ny_batch
 
@@ -462,12 +460,11 @@
       end do
     END SUBROUTINE repack_xTOz_local
 
-    SUBROUTINE pack_zTOx(Vz, send, ny)
+    SUBROUTINE pack_zTOx(Vz, send)
       use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
       implicit none
       complex(C_DOUBLE_COMPLEX), intent(in)  :: Vz(1:, 1:, :)
       complex(C_DOUBLE_COMPLEX), intent(out) :: send(:)
-      integer(C_INT), intent(in)  :: ny
       integer(C_SIZE_T) :: iy, ix, iz, dest, p
       integer(C_INT) :: ny_batch
 
@@ -487,12 +484,11 @@
 
     END SUBROUTINE pack_zTOx
 
-    SUBROUTINE unpack_zTOx(recv, Vx, ny)
+    SUBROUTINE unpack_zTOx(recv, Vx)
       use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
       implicit none
       complex(C_DOUBLE_COMPLEX), intent(in)  :: recv(:)
       complex(C_DOUBLE_COMPLEX), intent(out) :: Vx(1:, 1:, :)
-      integer(C_INT), intent(in)  :: ny
       integer(C_SIZE_T) :: iy, ix, iz, src, p
       integer(C_INT) :: ny_batch
 
@@ -511,12 +507,11 @@
       end do
     END SUBROUTINE unpack_zTOx
 
-    SUBROUTINE pack_xTOz(Vx, send, ny)
+    SUBROUTINE pack_xTOz(Vx, send)
       use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
       implicit none
       complex(C_DOUBLE_COMPLEX), intent(in)  :: Vx(1:, 1:, :)
       complex(C_DOUBLE_COMPLEX), intent(out) :: send(:)
-      integer(C_INT), intent(in)  :: ny
       integer(C_SIZE_T) :: iy, ix, iz, dest, p
       integer(C_INT) :: ny_batch
 
@@ -535,12 +530,11 @@
       end do
     END SUBROUTINE pack_xTOz
 
-    SUBROUTINE unpack_xTOz(recv, Vz, ny)
+    SUBROUTINE unpack_xTOz(recv, Vz)
       use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
       implicit none
       complex(C_DOUBLE_COMPLEX), intent(in)  :: recv(:)
       complex(C_DOUBLE_COMPLEX), intent(out) :: Vz(1:, 1:, :)
-      integer(C_INT), intent(in)  :: ny
       integer(C_SIZE_T) :: iy, ix, iz, src, p
       integer(C_INT) :: ny_batch
 

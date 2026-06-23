@@ -8,7 +8,15 @@ index ``y`` contiguous in the file.
 
 import argparse
 from pathlib import Path
+import sys
 from typing import BinaryIO, Dict, Any
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+POSTPRO_DIR = REPO_ROOT / "postpro"
+for path in (REPO_ROOT / "tools", POSTPRO_DIR):
+    path_text = str(path)
+    if path_text not in sys.path:
+        sys.path.insert(0, path_text)
 
 import numpy as np
 import xarray as xr

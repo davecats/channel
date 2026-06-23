@@ -56,7 +56,10 @@ CONTAINS
   subroutine get_pressure_workspace_estimate(nbytes)
     implicit none
     integer(C_SIZE_T), intent(out) :: nbytes
-    integer(C_SIZE_T) :: pressure_bytes, fft_offset, fft_bytes
+    integer(C_SIZE_T) :: pressure_bytes
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    integer(C_SIZE_T) :: fft_offset, fft_bytes
+#endif
 
     call get_pressure_local_workspace_bytes(pressure_bytes)
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
@@ -136,7 +139,9 @@ CONTAINS
   subroutine get_pressure_workspace_bytes(pressure_bytes, fft_offset, total_bytes)
     implicit none
     integer(C_SIZE_T), intent(out) :: pressure_bytes, fft_offset, total_bytes
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
     integer(C_SIZE_T) :: fft_bytes
+#endif
 
     call get_pressure_local_workspace_bytes(pressure_bytes)
 
@@ -528,9 +533,9 @@ CONTAINS
 
     call IFT(VVdz(:, :, :, 1))
     if (fft_transpose_is_local) then
-      call repack_zTOx_local(VVdz(:, :, :, 1), VVdx(:, :, :, 1), ny)
+      call repack_zTOx_local(VVdz(:, :, :, 1), VVdx(:, :, :, 1))
     else
-      call pack_zTOx(VVdz(:, :, :, 1), sendbuf(:, 1), ny)
+      call pack_zTOx(VVdz(:, :, :, 1), sendbuf(:, 1))
       call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "zTOx pressure_spectral_to_real")
     end if
 #ifdef HAVE_MPI
@@ -540,7 +545,7 @@ CONTAINS
       call roctxPop("MPI_Wait zTOx pressure_spectral_to_real")
     end if
 #endif
-    if (.not. fft_transpose_is_local) call unpack_zTOx(recvbuf(:, 1), VVdx(:, :, :, 1), ny)
+    if (.not. fft_transpose_is_local) call unpack_zTOx(recvbuf(:, 1), VVdx(:, :, :, 1))
     !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp shared(VVdx, nx, nxd, nzB, y_first, y_last) private(ix, iz, iy)
     do iy = y_first - 2, y_last + 2
@@ -567,9 +572,9 @@ CONTAINS
 
     call HFT(rx, VVdx(:, :, :, 1))
     if (fft_transpose_is_local) then
-      call repack_xTOz_local(VVdx(:, :, :, 1), VVdz(:, :, :, 1), ny)
+      call repack_xTOz_local(VVdx(:, :, :, 1), VVdz(:, :, :, 1))
     else
-      call pack_xTOz(VVdx(:, :, :, 1), sendbuf(:, 1), ny)
+      call pack_xTOz(VVdx(:, :, :, 1), sendbuf(:, 1))
       call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "xTOz pressure_real_to_spectral")
     end if
 #ifdef HAVE_MPI
@@ -579,7 +584,7 @@ CONTAINS
       call roctxPop("MPI_Wait xTOz pressure_real_to_spectral")
     end if
 #endif
-    if (.not. fft_transpose_is_local) call unpack_xTOz(recvbuf(:, 1), VVdz(:, :, :, 1), ny)
+    if (.not. fft_transpose_is_local) call unpack_xTOz(recvbuf(:, 1), VVdz(:, :, :, 1))
     call FFT(VVdz(:, :, :, 1))
     !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp shared(VVdz, nx0, nxN, ny, y_first, y_last, nz, field) private(ix, iz, iy)
@@ -614,26 +619,6 @@ CONTAINS
     v_owner(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => V(:, :, :, 2)
     w_owner(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => V(:, :, :, 3)
   end subroutine pressure_velocity_view
-
-  SUBROUTINE solve_pressure_field(src0, src1, p)
-    IMPLICIT NONE
-    complex(C_DOUBLE_COMPLEX), intent(in) :: src0(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: p(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    call assemble_pressure_rhs(src0, src1, p)
-    call solve_compact_component_current_layout(p, assemble_pressure_operator, assemble_pressure_boundaries, 0.0d0, 0.0d0, p, &
-                                 solve_label="pressure current-layout gpsv", symmetric_operator=.true., transpose_derivative=.true.)
-  END SUBROUTINE solve_pressure_field
-
-  SUBROUTINE solve_dpdy_field(src0, src1, dpdy)
-    IMPLICIT NONE
-    complex(C_DOUBLE_COMPLEX), intent(in) :: src0(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: dpdy(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    call assemble_dpdy_rhs(src0, src1, dpdy)
-    call solve_compact_component_current_layout(dpdy, assemble_dpdy_operator, assemble_dpdy_boundaries, 0.0d0, 0.0d0, dpdy, &
-                                                solve_label="pressure current-layout gpsv", symmetric_operator=.true.)
-  END SUBROUTINE solve_dpdy_field
 
   subroutine assemble_pressure_rhs(src0, src1, rhs)
     implicit none
@@ -697,6 +682,8 @@ CONTAINS
     real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
     integer(C_INT), intent(in) :: row_start, row_end
     integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner
+    associate (unused_lambda => lambda_coeff, unused_diffusion => diffusion_coeff)
+    end associate
 
     ix0_owner = lbound(owner_src, 3)
     ixN_owner = ubound(owner_src, 3)
@@ -727,6 +714,8 @@ CONTAINS
     real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
     integer(C_INT), intent(in) :: row_start, row_end
     integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner
+    associate (unused_lambda => lambda_coeff, unused_diffusion => diffusion_coeff)
+    end associate
 
     ix0_owner = lbound(owner_src, 3)
     ixN_owner = ubound(owner_src, 3)
@@ -754,6 +743,8 @@ CONTAINS
     logical, intent(in) :: has_lower_boundary, has_upper_boundary
     integer(C_INT) :: ix, iz, ix0_owner, ixN_owner
     complex(C_DOUBLE_COMPLEX), pointer :: u_owner(:, :, :), v_owner(:, :, :), w_owner(:, :, :)
+    associate (unused_row_start => row_start, unused_row_end => row_end)
+    end associate
 
     call pressure_velocity_view(owner_src, u_owner, v_owner, w_owner, ix0_owner, ixN_owner)
 
@@ -815,6 +806,8 @@ CONTAINS
     logical, intent(in) :: has_lower_boundary, has_upper_boundary
     integer(C_INT) :: ix, iz, ix0_owner, ixN_owner
     complex(C_DOUBLE_COMPLEX), pointer :: u_owner(:, :, :), v_owner(:, :, :), w_owner(:, :, :)
+    associate (unused_row_start => row_start, unused_row_end => row_end)
+    end associate
 
     call pressure_velocity_view(owner_src, u_owner, v_owner, w_owner, ix0_owner, ixN_owner)
 

@@ -18,11 +18,11 @@ mpirun -n 1 ../../build/post_pressure
 for file in *.dat; do
   mv "$file" "${file%.dat}.fld"
 done
-../../.venv/bin/python ../../export_scalar_raw_statistics.py .
+../../.venv/bin/python ../../tools/export_scalar_raw_statistics.py .
 rm -f *.fld
 popd >/dev/null
 
 rm -f tests/convvelo/raw_statistics.bin tests/convvelo/raw_statistics.bin.fields
 rm -f tests/convvelo/convvelo_runtime_minimal.bin tests/convvelo/convvelo_runtime_minimal.bin.fields
-.venv/bin/python export_scalar_raw_statistics.py tests/convvelo --output raw_statistics.bin --prepend-means
-.venv/bin/python export_scalar_raw_statistics.py tests/convvelo --output convvelo_runtime_minimal.bin --prepend-means --minimal
+.venv/bin/python tools/export_scalar_raw_statistics.py tests/convvelo --output raw_statistics.bin --prepend-means
+.venv/bin/python tools/export_scalar_raw_statistics.py tests/convvelo --output convvelo_runtime_minimal.bin --prepend-means --minimal

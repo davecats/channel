@@ -7,7 +7,6 @@ PROGRAM regression_test
   CHARACTER(len=256) :: arg
   COMPLEX(C_DOUBLE_COMPLEX), ALLOCATABLE :: V_expected(:, :, :, :)
   REAL(C_DOUBLE) :: diffnorm, tol
-  integer(C_INT) :: n
 
   ! Filenames (adapt for your tests/data/ structure)
   config_file = "tests/data/dns_test_scalar.in"

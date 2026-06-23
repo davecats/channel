@@ -1,6 +1,6 @@
 program test_convvelo_stats
   use, intrinsic :: iso_c_binding
-  use dnsdata, only: nPhi, ny0, nyN, nz, nx0, nxN, V, read_restart_file, sync_velocity_to_device, free_memory
+  use dnsdata, only: nPhi, V, read_restart_file, sync_velocity_to_device, free_memory
   use convvelo, only: init_convvelo, reset_convvelo_stats, acc_convvelo_stats, convvelo_stats, free_convvelo
   use pressure_output, only: free_pressure_output
   use driver, only: initialize

@@ -120,6 +120,8 @@ contains
     if (status /= 0_c_int) error stop "channel_nccl_init failed"
     p2p_initialized = .true.
 #else
+    associate (unused_comm => comm)
+    end associate
     error stop "NCCL/RCCL point-to-point backend requested, but this build has no support"
 #endif
   end subroutine channel_comm_p2p_ensure
@@ -149,10 +151,10 @@ contains
 #endif
   end subroutine channel_comm_context_reset
 
+#ifdef HAVE_NCCL
   subroutine channel_comm_ensure_context(comm, ctx)
     type(MPI_Comm), intent(in) :: comm
     type(c_ptr), intent(inout) :: ctx
-#ifdef HAVE_NCCL
     integer(c_int8_t), target :: id_bytes(128)
     integer(c_int) :: nranks, rank, status
     integer :: ierr
@@ -168,10 +170,8 @@ contains
     call MPI_Bcast(id_bytes, 128, MPI_BYTE, 0, comm, ierr)
     status = channel_nccl_context_create(nranks, rank, c_loc(id_bytes), ctx)
     if (status /= 0_c_int) error stop "channel_nccl_context_create failed"
-#else
-    error stop "NCCL/RCCL collective backend requested, but this build has no support"
-#endif
   end subroutine channel_comm_ensure_context
+#endif
 
   subroutine channel_comm_alltoall_complex(sendbuf, recvbuf, count, comm, comm_ctx, request)
     complex(c_double_complex), intent(in), target, contiguous :: sendbuf(:)
@@ -194,6 +194,8 @@ contains
 #endif
       if (present(request)) request = MPI_REQUEST_NULL
 #else
+      associate (unused_comm_ctx => comm_ctx)
+      end associate
       error stop "CHANNEL_COMM=nccl requested, but this build has no NCCL/RCCL support"
 #endif
     else
@@ -214,18 +216,16 @@ contains
     end if
   end subroutine channel_comm_alltoall_complex
 
+#ifdef HAVE_NCCL
   subroutine channel_nccl_alltoall(ctx, sendptr, recvptr, count)
     type(c_ptr), intent(in), value :: ctx, sendptr, recvptr
     integer(c_int), intent(in), value :: count
-#ifdef HAVE_NCCL
     integer(c_int) :: status
 
     status = channel_nccl_context_alltoall(ctx, sendptr, recvptr, int(count, c_size_t))
     if (status /= 0_c_int) error stop "channel_nccl_alltoall failed"
-#else
-    error stop "NCCL/RCCL collective backend requested, but this build has no support"
-#endif
   end subroutine channel_nccl_alltoall
+#endif
 
   subroutine channel_comm_send(sendptr, count, peer)
     type(c_ptr), intent(in), value :: sendptr
@@ -236,6 +236,8 @@ contains
     status = channel_nccl_sendrecv(sendptr, int(count, c_size_t), peer, c_null_ptr, 0_c_size_t, -1_c_int)
     if (status /= 0_c_int) error stop "channel_comm_send failed"
 #else
+    associate (unused_sendptr => sendptr, unused_count => count, unused_peer => peer)
+    end associate
     error stop "NCCL/RCCL point-to-point backend requested, but this build has no support"
 #endif
   end subroutine channel_comm_send
@@ -249,6 +251,8 @@ contains
     status = channel_nccl_sendrecv(c_null_ptr, 0_c_size_t, -1_c_int, recvptr, int(count, c_size_t), peer)
     if (status /= 0_c_int) error stop "channel_comm_recv failed"
 #else
+    associate (unused_recvptr => recvptr, unused_count => count, unused_peer => peer)
+    end associate
     error stop "NCCL/RCCL point-to-point backend requested, but this build has no support"
 #endif
   end subroutine channel_comm_recv
@@ -263,6 +267,9 @@ contains
                                    recvptr, int(recv_count, c_size_t), recv_peer)
     if (status /= 0_c_int) error stop "channel_comm_sendrecv failed"
 #else
+    associate (unused_sendptr => sendptr, unused_send_count => send_count, unused_send_peer => send_peer, &
+               unused_recvptr => recvptr, unused_recv_count => recv_count, unused_recv_peer => recv_peer)
+    end associate
     error stop "NCCL/RCCL point-to-point backend requested, but this build has no support"
 #endif
   end subroutine channel_comm_sendrecv

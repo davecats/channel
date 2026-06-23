@@ -433,24 +433,24 @@ contains
       t0 = MPI_Wtime()
 
       if (fft_transpose_is_local) then
-        call repack_zTOx_local(VVdz(:, :, :, 1), VVdx(:, :, :, 1), ny)
+        call repack_zTOx_local(VVdz(:, :, :, 1), VVdx(:, :, :, 1))
       else
-        call pack_zTOx(VVdz(:, :, :, 1), sendbuf(:, 1), ny)
+        call pack_zTOx(VVdz(:, :, :, 1), sendbuf(:, 1))
         call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "zTOx autotune_xz_sweep")
         call MPI_Wait(request, status, ierr)
-        call unpack_zTOx(recvbuf(:, 1), VVdx(:, :, :, 1), ny)
+        call unpack_zTOx(recvbuf(:, 1), VVdx(:, :, :, 1))
       end if
       call MPI_Barrier(MPI_COMM_WORLD, ierr)
       if (iter > 0) forward_elapsed = forward_elapsed + MPI_Wtime() - t0
 
       t0 = MPI_Wtime()
       if (fft_transpose_is_local) then
-        call repack_xTOz_local(VVdx(:, :, :, 1), VVdz(:, :, :, 1), ny)
+        call repack_xTOz_local(VVdx(:, :, :, 1), VVdz(:, :, :, 1))
       else
-        call pack_xTOz(VVdx(:, :, :, 1), sendbuf(:, 1), ny)
+        call pack_xTOz(VVdx(:, :, :, 1), sendbuf(:, 1))
         call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "xTOz autotune_xz_sweep")
         call MPI_Wait(request, status, ierr)
-        call unpack_xTOz(recvbuf(:, 1), VVdz(:, :, :, 1), ny)
+        call unpack_xTOz(recvbuf(:, 1), VVdz(:, :, :, 1))
       end if
 
       call MPI_Barrier(MPI_COMM_WORLD, ierr)

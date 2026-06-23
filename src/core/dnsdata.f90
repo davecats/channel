@@ -59,7 +59,7 @@ MODULE dnsdata
   real(C_DOUBLE), target, allocatable ::  ws(:)
   complex(C_DOUBLE_COMPLEX), pointer :: memrhs(:, :, :, :)
 #if !(defined(HAVE_CUDA) || defined(HAVE_HIP))
-  !Fourier-transformable arrays (allocated in ffts.f90)
+  !Fourier-transformable arrays (allocated in src/fft/ffts.f90)
   complex(C_DOUBLE_COMPLEX), pointer, dimension(:, :, :, :) :: VVdx, VVdz
   real(C_DOUBLE), pointer, dimension(:, :, :, :) :: rVVdx
 #endif
@@ -532,6 +532,8 @@ CONTAINS
     integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner, nlines_z, nlines, iline
     integer(C_INT64_T) :: p
     complex(C_DOUBLE_COMPLEX) :: src_m2, src_m1, src_0, src_p1, src_p2
+    associate (unused_lambda => lambda_coeff, unused_diffusion => diffusion_coeff)
+    end associate
     ix0_owner = lbound(owner_src, 3)
     ixN_owner = ubound(owner_src, 3)
     nlines_z = 2_C_INT*nz + 1_C_INT
@@ -581,6 +583,8 @@ CONTAINS
     integer(C_INT), intent(in) :: row_start, row_end
     logical, intent(in) :: has_lower_boundary, has_upper_boundary
     integer(C_INT) :: ix, iz, ix0_owner, ixN_owner
+    associate (unused_row_start => row_start, unused_row_end => row_end)
+    end associate
     ix0_owner = lbound(owner_src, 3)
     ixN_owner = ubound(owner_src, 3)
 
@@ -644,6 +648,8 @@ CONTAINS
     integer(C_INT), intent(in) :: row_start, row_end
     logical, intent(in) :: has_lower_boundary, has_upper_boundary
     integer(C_INT) :: ix, iz, ix0_owner, ixN_owner
+    associate (unused_row_start => row_start, unused_row_end => row_end)
+    end associate
     ix0_owner = lbound(owner_src, 3)
     ixN_owner = ubound(owner_src, 3)
 
@@ -689,6 +695,8 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX) :: rhs_value
     real(C_DOUBLE) :: row_coeffs(-2:2)
     integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner
+    associate (unused_diffusion => diffusion_coeff)
+    end associate
     ix0_owner = lbound(owner_src, 3)
     ixN_owner = ubound(owner_src, 3)
 
@@ -848,6 +856,8 @@ CONTAINS
     logical, intent(in) :: has_lower_boundary, has_upper_boundary
     integer(C_INT), optional, intent(in) :: ix_start, ix_end
     integer(C_INT) :: ix, iz, jx, ix0_owner, ixN_owner
+    associate (unused_row_end => row_end)
+    end associate
 
     if (.not. has_lower_boundary .and. .not. has_upper_boundary) return
 
@@ -1227,11 +1237,11 @@ CONTAINS
         call roctxPop("transform_to_physical IFT")
         if (fft_transpose_is_local) then
           call roctxPush("transform_to_physical repack_zTOx_local")
-          call repack_zTOx_local(VVdz(:, :, :, to), VVdx(:, :, :, to), ny)
+          call repack_zTOx_local(VVdz(:, :, :, to), VVdx(:, :, :, to))
           call roctxPop("transform_to_physical repack_zTOx_local")
         else
           call roctxPush("transform_to_physical pack_zTOx")
-          CALL pack_zTOx(VVdz(:, :, :, to), sendbuf(:, to), ny)
+          CALL pack_zTOx(VVdz(:, :, :, to), sendbuf(:, to))
           call roctxPop("transform_to_physical pack_zTOx")
           CALL alltoall(sendbuf(:, to), recvbuf(:, to), requests(m), "zTOx transform_to_physical")
         end if
@@ -1244,7 +1254,7 @@ CONTAINS
           CALL MPI_WAIT(requests(mm1), status, ierr)
           call roctxPop("MPI_Wait zTOx transform_to_physical")
           call roctxPush("transform_to_physical unpack_zTOx")
-          CALL unpack_zTOx(recvbuf(:, from), VVdx(:, :, :, from), ny)
+          CALL unpack_zTOx(recvbuf(:, from), VVdx(:, :, :, from))
           call roctxPop("transform_to_physical unpack_zTOx")
         end if
         call roctxPush("transform_to_physical zero_vvdx_hft")
@@ -1282,11 +1292,11 @@ CONTAINS
         call roctxPop("transform_back HFT")
         if (fft_transpose_is_local) then
           call roctxPush("transform_back repack_xTOz_local")
-          call repack_xTOz_local(VVdx(:, :, :, to), VVdz(:, :, :, to), ny)
+          call repack_xTOz_local(VVdx(:, :, :, to), VVdz(:, :, :, to))
           call roctxPop("transform_back repack_xTOz_local")
         else
           call roctxPush("transform_back pack_xTOz")
-          call pack_xTOz(VVdx(:, :, :, to), sendbuf(:, to), ny)
+          call pack_xTOz(VVdx(:, :, :, to), sendbuf(:, to))
           call roctxPop("transform_back pack_xTOz")
           call alltoall(sendbuf(:, to), recvbuf(:, to), requests(m), "xTOz transform_back_and_build_rhs")
         end if
@@ -1299,7 +1309,7 @@ CONTAINS
           call MPI_WAIT(requests(mm1), status, ierr)
           call roctxPop("MPI_Wait xTOz transform_back_and_build_rhs")
           call roctxPush("transform_back unpack_xTOz")
-          call unpack_xTOz(recvbuf(:, from), VVdz(:, :, :, from), ny)
+          call unpack_xTOz(recvbuf(:, from), VVdz(:, :, :, from))
           call roctxPop("transform_back unpack_xTOz")
         end if
         call roctxPush("transform_back FFT")
@@ -1338,7 +1348,10 @@ CONTAINS
   SUBROUTINE buildrhs_prepare(ODE)
     IMPLICIT NONE
     real(C_DOUBLE), intent(in) :: ODE(1:3)
-    integer(C_INT) :: iy, iz, ix, i, k, iPhi, y_first, y_last
+    integer(C_INT) :: iy, iz, ix, k, iPhi, y_first, y_last
+#ifdef bodyforce
+    integer(C_INT) :: i
+#endif
     complex(C_DOUBLE_COMPLEX) :: tmp, unkn
     y_first = ny0
     y_last = nyN

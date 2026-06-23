@@ -449,7 +449,6 @@ contains
     implicit none
     integer, intent(in) :: ilevel
 #ifdef HAVE_MPI
-    integer :: ierr_local
     real(C_DOUBLE) :: comm_t0, elapsed
 
     comm_t0 = 0.0_C_DOUBLE

@@ -457,7 +457,12 @@ CONTAINS
     real(C_DOUBLE) :: rx(:, :, ny0 - 2:)
 #endif
     integer :: x_y0, rx_y0, nreal
-    integer :: i, j, k
+#if defined(HAVE_HIP) || defined(HAVE_FFTW)
+    integer :: i
+#endif
+#ifdef HAVE_HIP
+    integer :: j, k
+#endif
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
     integer :: istat
     type(C_PTR) :: xptr, rxptr

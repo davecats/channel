@@ -46,7 +46,10 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
     integer(C_INT64_T) :: solver_floats, fft_floats, pressure_floats, convvelo_floats, external_floats, persistent_floats
     integer(C_SIZE_T) :: solver_workspace_bytes, fft_workspace_bytes, pressure_workspace_bytes, convvelo_workspace_bytes
     integer(C_SIZE_T) :: workspace_peak_bytes, sparse_external_bytes
-    integer :: iy, iPhi, num_dev, dev
+    integer :: iPhi
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    integer :: num_dev, dev
+#endif
     integer :: env_status, env_length
     logical :: run_solver
     character(len=32) :: env_value
@@ -216,7 +219,7 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
     USE ffts, only: acquire_fft_workspace, release_fft_workspace
 #endif
     IMPLICIT NONE
-    integer:: iPhi, ix, iz, i, ic
+    integer:: iPhi, ix, iz, i
 #ifdef chron
     REAL timei, timee, elapsed_run_time
 
