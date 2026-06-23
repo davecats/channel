@@ -13,6 +13,7 @@ RUN_ROOT="${RUN_ROOT:-${SUBMIT_DIR}/test_2xa100_lu_probe_$(date +%Y%m%d_%H%M%S)}
 BUILD_DIR="${BUILD_DIR:-${SRC}/build}"
 CHANNEL_EXE="${CHANNEL_EXE:-${BUILD_DIR}/channel}"
 NVHPC_MODULE="${NVHPC_MODULE:-toolkit/nvidia-hpc-sdk/25.3}"
+LU_PROBE_SCRIPT="${LU_PROBE_SCRIPT:-${SRC}/scripts/omp_y_lu_pipeline_repro.sh}"
 
 NP="${NP:-8}"
 AUTOTUNE_REPEATS="${AUTOTUNE_REPEATS:-1}"
@@ -241,7 +242,7 @@ if [[ "${RUN_STANDALONE_PROBES}" == "1" ]]; then
     shift
 
     echo "==> ${label}"
-    env "${common_probe_env[@]}" OUT_DIR="${RUN_ROOT}/${label}" "$@" ./omp_y_lu_pipeline_repro.sh
+    env "${common_probe_env[@]}" OUT_DIR="${RUN_ROOT}/${label}" "$@" "${LU_PROBE_SCRIPT}"
   }
 
   # Standalone controls: same communication pattern, increasingly stripped down.
@@ -283,7 +284,7 @@ if [[ "${RUN_STANDALONE_PROBES}" == "1" ]]; then
     ITERS=30 WARMUP=5 \
     SWEEP_BATCHES=1 KERNEL_MODE=real STORAGE_MODE=workspace \
     OUT_DIR="${RUN_ROOT}/lu2_two_nodes_real_sweep_workspace" \
-    ./omp_y_lu_pipeline_repro.sh
+    "${LU_PROBE_SCRIPT}"
 
   echo "==> lu2_one_node_real_sweep_workspace"
   env \
@@ -295,7 +296,7 @@ if [[ "${RUN_STANDALONE_PROBES}" == "1" ]]; then
     ITERS=30 WARMUP=5 \
     SWEEP_BATCHES=1 KERNEL_MODE=real STORAGE_MODE=workspace \
     OUT_DIR="${RUN_ROOT}/lu2_one_node_real_sweep_workspace" \
-    ./omp_y_lu_pipeline_repro.sh
+    "${LU_PROBE_SCRIPT}"
 fi
 
 echo "Wrote ${RUN_ROOT}"
