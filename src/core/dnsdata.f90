@@ -304,7 +304,8 @@ CONTAINS
 
     spectral_planes = int(nyN - ny0 + 5, C_INT64_T)*int(2*nz + 1, C_INT64_T)*int(nxN - nx0 + 1, C_INT64_T)
     bc_planes = int(2*nz + 1, C_INT64_T)*int(nxN - nx0 + 1, C_INT64_T)*int(5 + nPhi, C_INT64_T)
-    linear_planes = int(ny - 1, C_INT64_T)*int(2*nz + 1, C_INT64_T)*int(nxN - nx0 + 1, C_INT64_T)*int(2 + nPhi, C_INT64_T)
+    linear_planes = int(nyN - ny0 + 5, C_INT64_T)*int(2*nz + 1, C_INT64_T)* &
+                    int(nxN - nx0 + 1, C_INT64_T)*int(2 + nPhi, C_INT64_T)
 
     n_floats = 0_C_INT64_T
     n_floats = n_floats + 2_C_INT64_T*spectral_planes*int(3 + nPhi, C_INT64_T)

@@ -286,12 +286,18 @@ CONTAINS
 
     !FFTs plans
     istat = cufftCreate(cu_pIFT)
-    istat = cufftSetAutoAllocation(cu_pIFT, 0)
+    call check_cufft_status("cufftCreate IFT", istat)
+    istat = cufftSetAutoAllocation(cu_pIFT, 1)
+    call check_cufft_status("cufftSetAutoAllocation IFT", istat)
     istat = cufftPlan1d(cu_pIFT, nzd, CUFFT_Z2Z, fft_ny*nxB)
+    call check_cufft_status("cufftPlan1d IFT", istat)
 
     istat = cufftCreate(cu_pFFT)
-    istat = cufftSetAutoAllocation(cu_pFFT, 0)
+    call check_cufft_status("cufftCreate FFT", istat)
+    istat = cufftSetAutoAllocation(cu_pFFT, 1)
+    call check_cufft_status("cufftSetAutoAllocation FFT", istat)
     istat = cufftPlan1d(cu_pFFT, nzd, CUFFT_Z2Z, fft_ny*nxB)
+    call check_cufft_status("cufftPlan1d FFT", istat)
 
     n(1) = 2*nxd            ! length
     batch = nzB*fft_ny
@@ -303,16 +309,31 @@ CONTAINS
     onembed(1) = 2*(nxd + 1)       ! padded leading dim of real array
 
     istat = cufftCreate(cu_pRFT)
-    istat = cufftSetAutoAllocation(cu_pRFT, 0)
+    call check_cufft_status("cufftCreate RFT", istat)
+    istat = cufftSetAutoAllocation(cu_pRFT, 1)
+    call check_cufft_status("cufftSetAutoAllocation RFT", istat)
     istat = cufftPlanMany(cu_pRFT, 1, n, inembed, istride, idist, &
                           onembed, ostride, odist, CUFFT_Z2D, batch)
+    call check_cufft_status("cufftPlanMany RFT", istat)
 
     istat = cufftCreate(cu_pHFT)
-    istat = cufftSetAutoAllocation(cu_pHFT, 0)
+    call check_cufft_status("cufftCreate HFT", istat)
+    istat = cufftSetAutoAllocation(cu_pHFT, 1)
+    call check_cufft_status("cufftSetAutoAllocation HFT", istat)
     istat = cufftPlanMany(cu_pHFT, 1, n, onembed, ostride, odist, &
                           inembed, istride, idist, CUFFT_D2Z, nzB*fft_ny)
+    call check_cufft_status("cufftPlanMany HFT", istat)
 
   END SUBROUTINE init_cufft
+
+  subroutine check_cufft_status(where, istat)
+    implicit none
+    character(len=*), intent(in) :: where
+    integer, intent(in) :: istat
+
+    if (istat /= 0) print *, trim(where), " failed:", istat
+  end subroutine check_cufft_status
+
 #elif defined(HAVE_HIP)
   SUBROUTINE init_hipfft(nxd, nxB, nzd, nzB, nPhi, overlapping)
     use hipfort

@@ -129,11 +129,12 @@ contains
       select case (adjustl(trim(text(:length))))
       case ("0", "false", "FALSE", "off", "OFF", "no", "NO"); mode = 0
       case ("report", "REPORT"); mode = 2
+      case ("report_only", "REPORT_ONLY", "report-only", "REPORT-ONLY", "scan", "SCAN"); mode = 3
       end select
     end if
     manual = has_npy .or. has_npxz .or. has_passes .or. has_exchange .or. has_y_solver
     found = .false.; applied = .false.; ran_scan = .false.; best_score = huge(0.0_C_DOUBLE)
-    if ((mode == 1 .and. .not. manual) .or. mode == 2) then
+    if ((mode == 1 .and. .not. manual) .or. mode == 2 .or. mode == 3) then
       ran_scan = .true.
       call node_ids(node)
       call scan(int(nranks, C_INT), nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, best_score, &
@@ -216,7 +217,7 @@ contains
     logical, intent(inout) :: found
     real(C_DOUBLE) :: xz_forward_cost, xz_back_cost, y_cost, score
     real(C_DOUBLE) :: y_error
-    integer(C_INT) :: ib, batches, npy, nlines, placeholder_path(MAXP), placeholder_npass, batch_candidates(5)
+    integer(C_INT) :: ib, batches, npy, nlines, placeholder_path(MAXP), placeholder_npass, batch_candidates(3)
     integer(C_INT), allocatable :: placeholder_passes(:)
     logical :: y_ok
     integer :: ierr, rank
@@ -236,7 +237,7 @@ contains
     if (placeholder_npass > 0_C_INT) placeholder_path(1:placeholder_npass) = placeholder_passes
 
     nlines = (nxpp/npxz)*(2_C_INT*nz + 1_C_INT)
-    batch_candidates = [1_C_INT, 2_C_INT, 4_C_INT, 8_C_INT, 16_C_INT]
+    batch_candidates = [max(1_C_INT, npy/2_C_INT), npy, 2_C_INT*npy]
     do ib = 1_C_INT, int(size(batch_candidates), C_INT)
       batches = batch_candidates(ib)
       if (batches > nlines) cycle
@@ -245,7 +246,7 @@ contains
       if (.not. y_ok) then
         if (rank == 0) write (*, '(*(g0,1x))') "MPI autotune rejected: npxz=", npxz, &
           "npy=", npy, "comm=", trim(channel_comm_backend_name(comm_backend)), &
-          "passes=", trim(pass_string(placeholder_path, placeholder_npass)), &
+          "passes=", trim(display_pass_string(placeholder_path, placeholder_npass, Y_SOLVER_PIPELINED_LU)), &
           "exchange= auto y_solver=", trim(y_solver_string(Y_SOLVER_PIPELINED_LU)), &
           "y_batches=", batches, "y_correctness_error=", y_error
         cycle
@@ -255,7 +256,7 @@ contains
                            y_cost*real(3_C_INT + nphi, C_DOUBLE))
       if (rank == 0) write (*, '(*(g0,1x))') "MPI autotune tested: npxz=", npxz, &
         "npy=", npy, "comm=", trim(channel_comm_backend_name(comm_backend)), &
-        "passes=", trim(pass_string(placeholder_path, placeholder_npass)), &
+        "passes=", trim(display_pass_string(placeholder_path, placeholder_npass, Y_SOLVER_PIPELINED_LU)), &
         "exchange= auto xz_forward_ms=", 1d3*xz_forward_cost, &
         "xz_back_ms=", 1d3*xz_back_cost, "y_solver=", trim(y_solver_string(Y_SOLVER_PIPELINED_LU)), &
         "y_batches=", batches, "y_ms=", 1d3*y_cost, "y_correctness_error=", y_error, &
@@ -280,7 +281,7 @@ contains
     integer(C_INT), intent(inout) :: best_npxz, best_npy, best_pass(MAXP), best_npass, best_exchange, best_comm_backend
     integer(C_INT), intent(inout) :: best_y_solver, best_y_batches
     logical, intent(inout) :: found
-    integer(C_INT) :: i, next_path(MAXP)
+    integer(C_INT) :: i, next_path(MAXP), min_arity
     if (remaining == 1_C_INT) then
       call try_candidate(nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, path, &
                          npass, YS_SCHUR_EXCHANGE_ALLTOALL, best_score, best_npxz, best_npy, &
@@ -294,9 +295,12 @@ contains
       return
     end if
     if (npass >= MAXP) return
+    min_arity = min_schur_arity(nranks/npxz)
     do i = 1_C_INT, int(size(ARITY), C_INT)
+      if (ARITY(i) < min_arity) cycle
       if (mod(remaining, ARITY(i)) /= 0_C_INT) cycle
       next_path = path; next_path(npass + 1_C_INT) = ARITY(i)
+      if (.not. schur_pass_prefix_has_uniform_lines(nxpp, npxz, nz, next_path, npass + 1_C_INT)) cycle
       call gen(nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, &
                remaining/ARITY(i), next_path, npass + 1_C_INT, best_score, best_npxz, &
                best_npy, best_pass, best_npass, best_exchange, best_comm_backend, best_y_solver, best_y_batches, found)
@@ -333,7 +337,7 @@ contains
       if (.not. y_ok) then
         if (rank == 0) write (*, '(*(g0,1x))') "MPI autotune rejected: npxz=", npxz, &
           "npy=", nranks/npxz, "comm=", trim(channel_comm_backend_name(comm_backend)), &
-          "passes=", trim(pass_string(path, npass)), &
+          "passes=", trim(display_pass_string(path, npass, y_solver)), &
           "exchange=", trim(exchange_string(exchange)), "y_solver=", trim(y_solver_string(y_solver)), &
           "y_batches=", y_batches, "y_correctness_error=", y_error
         return
@@ -343,7 +347,7 @@ contains
                            y_cost*real(3_C_INT + nphi, C_DOUBLE))
       if (rank == 0) write (*, '(*(g0,1x))') "MPI autotune tested: npxz=", npxz, &
         "npy=", nranks/npxz, "comm=", trim(channel_comm_backend_name(comm_backend)), &
-        "passes=", trim(pass_string(path, npass)), &
+        "passes=", trim(display_pass_string(path, npass, y_solver)), &
         "exchange=", trim(exchange_string(exchange)), "xz_forward_ms=", 1d3*xz_forward_cost, &
         "xz_back_ms=", 1d3*xz_back_cost, "y_solver=", trim(y_solver_string(y_solver)), &
         "y_batches=", y_batches, "y_ms=", 1d3*y_cost, "y_correctness_error=", y_error, &
@@ -359,14 +363,10 @@ contains
 
   logical function valid(nranks, npxz, nxpp, nzd, nz, ny, node, path, npass)
     integer(C_INT), intent(in) :: nranks, npxz, nxpp, nzd, nz, ny, node(0:), path(MAXP), npass
-    integer(C_INT) :: npy, prev, level
+    integer(C_INT) :: npy
     valid = .false.; npy = nranks/npxz
     if (.not. valid_decomposition(nranks, npxz, nxpp, nzd, ny, node)) return
-    prev = (nxpp/npxz)*(2_C_INT*nz + 1_C_INT)
-    do level = 1_C_INT, npass
-      if (mod(prev, path(level)) /= 0_C_INT) return
-      prev = prev/path(level)
-    end do
+    if (.not. schur_pass_prefix_has_uniform_lines(nxpp, npxz, nz, path, npass)) return
     valid = .true.
   end function valid
 
@@ -456,6 +456,14 @@ contains
       autotune_node_size = max(autotune_node_size, count)
     end do
   end function autotune_node_size
+
+  integer(C_INT) function min_schur_arity(npy)
+    integer(C_INT), intent(in) :: npy
+    min_schur_arity = 1_C_INT
+    do while (min_schur_arity*min_schur_arity*min_schur_arity < npy)
+      min_schur_arity = min_schur_arity + 1_C_INT
+    end do
+  end function min_schur_arity
 
   subroutine time_xz_sweep(nxpp, nxd, nzd, nz, ny, nphi, overlapping, npy, forward_cost, back_cost)
     integer(C_INT), intent(in) :: nxpp, nxd, nzd, nz, ny, nphi, npy
@@ -561,7 +569,8 @@ contains
     integer :: ierr, iter, bad_local, bad_global
     real(C_DOUBLE) :: local_elapsed, local_error, global_error
 
-    call ys_prepare_assembled_workspace(ny, nz, row_start, row_end, line_start, nlines, passes, exchange)
+    call ys_prepare_assembled_workspace(ny, nz, row_start, row_end, line_start, nlines, passes, exchange, &
+                                        prepare_schur=(y_solver == Y_SOLVER_SCHUR))
     active_n = row_end - row_start + 1_C_INT
     nlines_z = 2_C_INT*nz + 1_C_INT
     nx_count = nlines/nlines_z
@@ -753,6 +762,20 @@ contains
     mpi_autotune_has_pass_sequence = (product == npy)
   end function mpi_autotune_has_pass_sequence
 
+  pure logical function schur_pass_prefix_has_uniform_lines(nxpp, npxz, nz, passes, npass)
+    integer(C_INT), intent(in) :: nxpp, npxz, nz, passes(MAXP), npass
+    integer(C_INT) :: level, nlines
+
+    schur_pass_prefix_has_uniform_lines = .false.
+    if (npxz < 1_C_INT .or. mod(nxpp, npxz) /= 0_C_INT) return
+    nlines = (nxpp/npxz)*(2_C_INT*nz + 1_C_INT)
+    do level = 1_C_INT, npass
+      if (mod(nlines, passes(level)) /= 0_C_INT) return
+      nlines = nlines/passes(level)
+    end do
+    schur_pass_prefix_has_uniform_lines = .true.
+  end function schur_pass_prefix_has_uniform_lines
+
   integer function tune_repeats()
     character(64) :: text
     integer :: status, length, io, value
@@ -773,6 +796,16 @@ contains
     pass_string = ""
     do i = 1_C_INT, npass; write (item, '(I0)') passes(i); if (i > 1_C_INT) pass_string = trim(pass_string)//","; pass_string = trim(pass_string)//trim(item); end do
   end function pass_string
+
+  character(128) function display_pass_string(passes, npass, y_solver)
+    integer(C_INT), intent(in) :: passes(:), npass, y_solver
+
+    if (y_solver == Y_SOLVER_PIPELINED_LU) then
+      display_pass_string = "none"
+    else
+      display_pass_string = pass_string(passes, npass)
+    end if
+  end function display_pass_string
 
   character(16) function exchange_string(exchange)
     integer(C_INT), intent(in) :: exchange
@@ -839,7 +872,8 @@ contains
     if (present(comm_backend)) backend = comm_backend
     if (present(y_solver)) solver = y_solver
     if (present(y_batches)) batches = y_batches
-    write (*, '(*(g0,1x))') trim(label)//": npxz=", npxz, "npy=", npy, "passes=", trim(pass_string(passes, npass)), &
+    write (*, '(*(g0,1x))') trim(label)//": npxz=", npxz, "npy=", npy, &
+      "passes=", trim(display_pass_string(passes, npass, solver)), &
       "exchange=", trim(exchange_string(exchange)), "comm=", trim(channel_comm_backend_name(backend)), &
       "xz_enabled=", npxz > 1_C_INT, &
       "y_solver=", trim(y_solver_string(solver)), "y_batches=", batches
