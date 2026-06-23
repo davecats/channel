@@ -349,6 +349,7 @@ CONTAINS
   !--------------- Deallocate memory for solution ---------------!
   SUBROUTINE free_memory(solveNS)
     use y_line_solvers, only: ys_release_workspace
+    use y_schur_solver, only: ys_schur_finalize_contexts
     IMPLICIT NONE
     LOGICAL, intent(IN) :: solveNS
     !$omp target exit data map(delete: d240, d24m1, d04n, d24n, d24np1, D0mat)
@@ -370,6 +371,7 @@ CONTAINS
       IF (has_terminal) CLOSE (UNIT=121)
     END IF
     call ys_release_workspace(.true.)
+    call ys_schur_finalize_contexts()
   END SUBROUTINE free_memory
 
   SUBROUTINE sync_velocity_to_device()

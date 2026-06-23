@@ -23,6 +23,7 @@ PROGRAM regression_test
   CALL initialize(config_file, restart_in)
 
   CALL timeloop()
+  !$omp target update from(V)
 
   ! Allocate and read expected result
   ALLOCATE (V_expected, SOURCE=V)
