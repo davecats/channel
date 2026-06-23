@@ -69,6 +69,24 @@ add_channel_mpi_test(
 )
 
 add_channel_mpi_test(
+    NAME regression_test_pipelined_lu_npy2_2rank
+    TARGET test_regression
+    NPROCS 2
+    PROCESSORS 2
+    ARGS tests/data/dns_test_npy2.in
+    ENVIRONMENT CHANNEL_NPY=2 CHANNEL_Y_SOLVER=pipelined_lu
+)
+
+add_channel_mpi_test(
+    NAME regression_test_pipelined_lu_npy3_3rank
+    TARGET test_regression
+    NPROCS 3
+    PROCESSORS 3
+    ARGS tests/data/dns_test.in
+    ENVIRONMENT CHANNEL_NPY=3 CHANNEL_Y_SOLVER=pipelined_lu
+)
+
+add_channel_mpi_test(
     NAME pressure_dpdy_1rank
     TARGET test_pressure_dpdy
     NPROCS 1
@@ -167,6 +185,15 @@ add_channel_mpi_test(
 )
 
 add_channel_mpi_test(
+    NAME regression_test_scalar_pipelined_lu_npy3
+    TARGET test_regression_scalar
+    NPROCS 6
+    PROCESSORS 8
+    ARGS tests/data/dns_test_scalar_npy3.in
+    ENVIRONMENT CHANNEL_NPY=3 CHANNEL_Y_SOLVER=pipelined_lu
+)
+
+add_channel_mpi_test(
     NAME regression_test_scalar_npy4_1rank
     TARGET test_regression_scalar
     NPROCS 1
@@ -196,6 +223,16 @@ add_test(NAME post_convvelo_1rank
 )
 set_tests_properties(post_convvelo_1rank PROPERTIES PROCESSORS 1)
 
+set(CONVVELO_MPI_IO_NPROCS 4)
+set(TEST_CONVVELO_MPI_IO_EXE ${CMAKE_CURRENT_BINARY_DIR}/test_convvelo_mpi_io)
+configure_file(cmake/run_convvelo_mpi_io_test.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/run_convvelo_mpi_io_test.cmake @ONLY)
+
+add_test(NAME convvelo_mpi_io_npxz2_npy2
+    COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_BINARY_DIR}/run_convvelo_mpi_io_test.cmake
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(convvelo_mpi_io_npxz2_npy2 PROPERTIES PROCESSORS 4)
+
 add_channel_mpi_test(
     NAME reduced_ghost_backend_2rank
     TARGET test_y_pencil_transpose
@@ -208,6 +245,14 @@ add_channel_mpi_test(
     TARGET test_y_pencil_transpose
     NPROCS 2
     PROCESSORS 2
+)
+
+add_channel_mpi_test(
+    NAME reduced_ghost_backend_2rank_pipelined_lu
+    TARGET test_y_pencil_transpose
+    NPROCS 2
+    PROCESSORS 2
+    ENVIRONMENT CHANNEL_Y_SOLVER=pipelined_lu CHANNEL_Y_PIPELINE_BATCHES=2
 )
 
 add_channel_mpi_test(

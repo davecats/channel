@@ -4,14 +4,14 @@ module convvelo
 
   use, intrinsic :: iso_c_binding
   use config, only: ini_config, has_section, get_string, get_real, lower
-  use dnsdata, only: V, nPhi, nz, ny, der, nxd, izd, factor, iproc, D0mat, d240, d24m1, d24n, d24np1, &
-                     apply_complex_derivative_current_layout, has_terminal, &
+  use dnsdata, only: V, nPhi, nz, ny, nxd, izd, factor, iproc, &
+                     apply_complex_derivative_current_layout, apply_complex_second_derivative_current_layout, has_terminal, &
                      time, deltat, overlapping
   use pressure_output, only: compute_poisson, compute_dpdy
   use mpi_transpose, only: ny0, nyN, nx0, nxN, nxB, nzB, nx, has_average, ierr, sendbuf, recvbuf, &
                            pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, nzd, fft_transpose_is_local, &
                            repack_zTOx_local, repack_xTOz_local, roctxPush, roctxPop, &
-                           MPI_Allreduce, MPI_IN_PLACE, MPI_DOUBLE_COMPLEX, MPI_SUM, MPI_COMM_WORLD, &
+                           MPI_DOUBLE_COMPLEX, MPI_COMM_WORLD, &
                            MPI_Request, MPI_Status, MPI_Wait, MPI_File, MPI_Datatype, MPI_OFFSET_KIND, &
                            MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, MPI_INTEGER8, MPI_MODE_WRONLY, MPI_MODE_CREATE, &
                            MPI_INFO_NULL, MPI_Type_create_subarray, MPI_Type_commit, MPI_Type_free, &
@@ -95,6 +95,8 @@ module convvelo
   public :: init_convvelo_runtime, advance_convvelo_runtime, finalize_convvelo_runtime
   public :: get_convvelo_memory_estimate, get_convvelo_workspace_estimate, write_convvelo_raw_stats, write_convvelo_runtime_snapshot
   public :: configure_convvelo
+  public :: copy_convvelo_field_average
+  public :: fill_convvelo_synthetic_state_for_test
 
 contains
 
@@ -138,6 +140,7 @@ contains
     if (convvelo_dt_compute <= 0.0d0) then
       error stop "configure_convvelo: convvelo_dt_compute must be > 0 when convection velocity output is enabled"
     end if
+
   end subroutine configure_convvelo
 
   subroutine get_convvelo_memory_estimate(n_floats)
@@ -313,12 +316,6 @@ contains
       end do
     end if
 
-#ifdef HAVE_MPI
-    call roctxPush("MPI_Allreduce convvelo_component_means")
-    call MPI_Allreduce(MPI_IN_PLACE, snapshot, size(snapshot), MPI_DOUBLE_COMPLEX, MPI_SUM, MPI_COMM_WORLD, ierr)
-    call roctxPop("MPI_Allreduce convvelo_component_means")
-#endif
-
     if (n_mean_samples == 0_C_INT64_T) convvelo_average_start_time = time
     n_mean_samples = n_mean_samples + 1_C_INT64_T
     convvelo_average_end_time = time
@@ -396,7 +393,6 @@ contains
 
     integer(C_INT), intent(in) :: field_index
     integer(C_INT) :: storage_index
-    real(C_DOUBLE) :: old_weight, new_weight
     integer(C_INT) :: ix, iy, iz
 
     if (.not. convvelo_initialized) call init_convvelo()
@@ -407,15 +403,12 @@ contains
     if (storage_index == 0) return
 
     n_field_samples(storage_index) = n_field_samples(storage_index) + 1_C_INT64_T
-    old_weight = dble(n_field_samples(storage_index) - 1_C_INT64_T)/dble(n_field_samples(storage_index))
-    new_weight = 1.0d0/dble(n_field_samples(storage_index))
     !$omp target teams distribute parallel do collapse(3) &
-    !$omp shared(convvelo_stats, convvelo_work, storage_index, old_weight, new_weight, ny0, nyN, nz, nx0, nxN) private(ix, iz, iy)
+    !$omp shared(convvelo_stats, convvelo_work, storage_index, ny0, nyN, nz, nx0, nxN) private(ix, iz, iy)
     do ix = nx0, nxN
       do iz = -nz, nz
         do iy = ny0 - 2, nyN + 2
-          convvelo_stats(iy, iz, ix, storage_index) = old_weight*convvelo_stats(iy, iz, ix, storage_index) + &
-                                                      new_weight*convvelo_work(iy, iz, ix)
+          convvelo_stats(iy, iz, ix, storage_index) = convvelo_stats(iy, iz, ix, storage_index) + convvelo_work(iy, iz, ix)
         end do
       end do
     end do
@@ -447,50 +440,8 @@ contains
   subroutine apply_dyy_to_work(component_index)
     implicit none
     integer(C_INT), intent(in) :: component_index
-    integer(C_INT) :: iy, iz, ix, row_lo, row_hi, upper_bw
 
-    !$omp target teams distribute parallel do collapse(2) &
-    !$omp shared(convvelo_work, V, component_index, d240, d24m1, d24n, d24np1, der, D0mat, ny0, nyN, ny, nx0, nxN, nz) private(ix, iz, iy, row_lo, row_hi, upper_bw)
-    do ix = nx0, nxN
-      do iz = -nz, nz
-        if (ny0 <= 1 .and. nyN >= 3) then
-          convvelo_work(0, iz, ix) = sum(d240(-2:2)*V(-1:3, iz, ix, component_index))
-          convvelo_work(-1, iz, ix) = sum(d24m1(-2:2)*V(-1:3, iz, ix, component_index))
-        end if
-        if (ny0 <= ny - 3 .and. nyN >= ny - 1) then
-          convvelo_work(ny, iz, ix) = sum(d24n(-2:2)*V(ny - 3:ny + 1, iz, ix, component_index))
-          convvelo_work(ny + 1, iz, ix) = sum(d24np1(-2:2)*V(ny - 3:ny + 1, iz, ix, component_index))
-        end if
-        do iy = ny0, nyN
-          convvelo_work(iy, iz, ix) = sum(der(iy, 2, -2:2)*V(iy - 2:iy + 2, iz, ix, component_index))
-        end do
-        if (ny0 <= 1 .and. nyN >= 2) then
-          convvelo_work(1, iz, ix) = convvelo_work(1, iz, ix) - ( &
-                                     der(1, 0, -1)*convvelo_work(0, iz, ix) + &
-                                     der(1, 0, -2)*convvelo_work(-1, iz, ix))
-          convvelo_work(2, iz, ix) = convvelo_work(2, iz, ix) - der(2, 0, -2)*convvelo_work(0, iz, ix)
-        end if
-        if (ny0 <= ny - 2 .and. nyN >= ny - 1) then
-          convvelo_work(ny - 1, iz, ix) = convvelo_work(ny - 1, iz, ix) - ( &
-                                          der(ny - 1, 0, 1)*convvelo_work(ny, iz, ix) + &
-                                          der(ny - 1, 0, 2)*convvelo_work(ny + 1, iz, ix))
-          convvelo_work(ny - 2, iz, ix) = convvelo_work(ny - 2, iz, ix) - &
-                                          der(ny - 2, 0, 2)*convvelo_work(ny, iz, ix)
-        end if
-        row_lo = lbound(D0mat, 1)
-        row_hi = ubound(D0mat, 1)
-        upper_bw = ubound(D0mat, 2)
-        do iy = row_hi - upper_bw, row_lo, -1
-          convvelo_work(iy, iz, ix) = convvelo_work(iy, iz, ix) - &
-                                      (D0mat(iy, 1)*convvelo_work(iy + 1, iz, ix) + D0mat(iy, 2)*convvelo_work(iy + 2, iz, ix))
-          convvelo_work(iy, iz, ix) = convvelo_work(iy, iz, ix)*D0mat(iy, 0)
-        end do
-        do iy = row_lo, row_hi
-          convvelo_work(iy, iz, ix) = convvelo_work(iy, iz, ix) - &
-                                      (D0mat(iy, -2)*convvelo_work(iy - 2, iz, ix) + D0mat(iy, -1)*convvelo_work(iy - 1, iz, ix))
-        end do
-      end do
-    end do
+    call apply_complex_second_derivative_current_layout(V(:, :, :, component_index), convvelo_work)
   end subroutine apply_dyy_to_work
 
   subroutine multiply_work_by_conjugate(component_index)
@@ -772,7 +723,7 @@ contains
     call bind_real_3d(offset, convvelo_real1)
     call bind_real_3d(offset, convvelo_real_prod)
 
-    !$omp target enter data map(to: convvelo_real0, convvelo_real1, convvelo_real_prod)
+    !$omp target enter data map(alloc: convvelo_real0, convvelo_real1, convvelo_real_prod)
     !$omp target
     convvelo_real0(1, 1, ny0 - 2) = 0.0_C_DOUBLE
     convvelo_real1(1, 1, ny0 - 2) = 0.0_C_DOUBLE
@@ -801,11 +752,21 @@ contains
   subroutine apply_dy_to_existing_work()
     implicit none
     complex(C_DOUBLE_COMPLEX), allocatable :: deriv(:, :, :)
+    integer(C_INT) :: ix, iy, iz
 
     allocate (deriv(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
+    !$omp target enter data map(alloc: deriv)
     call apply_complex_derivative_current_layout(convvelo_work, deriv)
-    convvelo_work = deriv
-    !$omp target update to(convvelo_work)
+    !$omp target teams distribute parallel do collapse(3) &
+    !$omp shared(convvelo_work, deriv, ny0, nyN, nz, nx0, nxN) private(ix, iz, iy)
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        do iy = ny0 - 2, nyN + 2
+          convvelo_work(iy, iz, ix) = deriv(iy, iz, ix)
+        end do
+      end do
+    end do
+    !$omp target exit data map(delete: deriv)
     deallocate (deriv)
   end subroutine apply_dy_to_existing_work
 
@@ -911,6 +872,7 @@ contains
     integer(C_INT) :: field_index, iPhi
     real(C_DOUBLE) :: header_times(2)
     integer(C_INT64_T) :: header_sample_count
+    complex(C_DOUBLE_COMPLEX), allocatable :: field_out(:, :, :)
 
 #ifdef HAVE_MPI
     type(MPI_File) :: fh
@@ -921,6 +883,7 @@ contains
     integer, parameter :: ndims_profile = 1
     integer :: sizes(ndims), subsizes(ndims), starts(ndims)
     integer :: profile_sizes(ndims_profile), profile_subsizes(ndims_profile), profile_starts(ndims_profile)
+    integer(C_INT) :: write_y0, write_yN, write_y_count, local_y_count
     integer(MPI_OFFSET_KIND) :: disp, field_bytes, profile_bytes, total_bytes
 #else
     integer :: io
@@ -928,32 +891,41 @@ contains
 
     if (.not. convvelo_initialized) return
 
-    !$omp target update from(component_means, convvelo_stats)
+    call update_convvelo_stats_from_device()
+    !$omp target update from(component_means)
     header_times = [convvelo_average_start_time, convvelo_average_end_time]
     header_sample_count = n_mean_samples
+    allocate (field_out(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
 
 #ifdef HAVE_MPI
+    write_y0 = ny0
+    write_yN = nyN
+    if (ny0 == 1) write_y0 = -1_C_INT
+    if (nyN == ny - 1) write_yN = ny + 1_C_INT
+    write_y_count = write_yN - write_y0 + 1_C_INT
+    local_y_count = nyN - ny0 + 5_C_INT
+
     sizes = [ny + 3, 2*nz + 1, nx + 1]
-    subsizes = [ny + 3, 2*nz + 1, nxN - nx0 + 1]
-    starts = [0, 0, nx0]
+    subsizes = [write_y_count, 2*nz + 1, nxN - nx0 + 1]
+    starts = [write_y0 + 1, 0, nx0]
     call MPI_Type_create_subarray(ndims, sizes, subsizes, starts, MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, file_type, ierror)
     call MPI_Type_commit(file_type, ierror)
 
-    sizes = [ny + 3, 2*nz + 1, nxN - nx0 + 1]
-    subsizes = sizes
-    starts = [0, 0, 0]
+    sizes = [local_y_count, 2*nz + 1, nxN - nx0 + 1]
+    subsizes = [write_y_count, 2*nz + 1, nxN - nx0 + 1]
+    starts = [write_y0 - (ny0 - 2), 0, 0]
     call MPI_Type_create_subarray(ndims, sizes, subsizes, starts, MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, mem_type, ierror)
     call MPI_Type_commit(mem_type, ierror)
 
     profile_sizes = [ny + 3]
-    profile_subsizes = [nyN - ny0 + 5]
-    profile_starts = [ny0 - 1]
+    profile_subsizes = [write_y_count]
+    profile_starts = [write_y0 + 1]
     call MPI_Type_create_subarray(ndims_profile, profile_sizes, profile_subsizes, profile_starts, MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, profile_file_type, ierror)
     call MPI_Type_commit(profile_file_type, ierror)
 
-    profile_sizes = [nyN - ny0 + 5]
-    profile_subsizes = profile_sizes
-    profile_starts = [0]
+    profile_sizes = [local_y_count]
+    profile_subsizes = [write_y_count]
+    profile_starts = [write_y0 - (ny0 - 2)]
     call MPI_Type_create_subarray(ndims_profile, profile_sizes, profile_subsizes, profile_starts, MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, profile_mem_type, ierror)
     call MPI_Type_commit(profile_mem_type, ierror)
 
@@ -976,17 +948,17 @@ contains
     call roctxPush("MPI_File_write_all convvelo_profiles")
     disp = convvelo_file_header_bytes
     call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, profile_file_type, 'native', MPI_INFO_NULL)
-    call MPI_File_write_all(fh, component_means(:, 1), 1, profile_mem_type, status)
+    call write_convvelo_profile_collective(fh, component_means(:, 1), profile_mem_type, status)
     disp = convvelo_file_header_bytes + profile_bytes
     call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, profile_file_type, 'native', MPI_INFO_NULL)
-    call MPI_File_write_all(fh, component_means(:, 2), 1, profile_mem_type, status)
+    call write_convvelo_profile_collective(fh, component_means(:, 2), profile_mem_type, status)
     disp = convvelo_file_header_bytes + 2_MPI_OFFSET_KIND*profile_bytes
     call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, profile_file_type, 'native', MPI_INFO_NULL)
-    call MPI_File_write_all(fh, component_means(:, 3), 1, profile_mem_type, status)
+    call write_convvelo_profile_collective(fh, component_means(:, 3), profile_mem_type, status)
     do iPhi = 1, nPhi
       disp = convvelo_file_header_bytes + int(2 + iPhi, MPI_OFFSET_KIND)*profile_bytes
       call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, profile_file_type, 'native', MPI_INFO_NULL)
-      call MPI_File_write_all(fh, component_means(:, 3 + iPhi), 1, profile_mem_type, status)
+      call write_convvelo_profile_collective(fh, component_means(:, 3 + iPhi), profile_mem_type, status)
     end do
     call roctxPop("MPI_File_write_all convvelo_profiles")
 
@@ -995,7 +967,8 @@ contains
       disp = convvelo_file_header_bytes + int(n_convvelo_profile_slots, MPI_OFFSET_KIND)*profile_bytes + &
              int(field_index - 1, MPI_OFFSET_KIND)*field_bytes
       call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, file_type, 'native', MPI_INFO_NULL)
-      call MPI_File_write_all(fh, convvelo_stats(:, :, :, field_index), 1, mem_type, status)
+      call normalize_convvelo_field_for_output(field_index, field_out)
+      call MPI_File_write_all(fh, field_out, 1, mem_type, status)
     end do
     call roctxPop("MPI_File_write_all convvelo_fields")
 
@@ -1020,11 +993,137 @@ contains
       write (99) component_means(:, 3 + iPhi)
     end do
     do field_index = 1, n_convvelo_fields
-      write (99) convvelo_stats(:, :, :, field_index)
+      call normalize_convvelo_field_for_output(field_index, field_out)
+      write (99) field_out
     end do
     close (99)
 #endif
+    deallocate (field_out)
   end subroutine write_convvelo_raw_stats
+
+  subroutine normalize_convvelo_field_for_output(field_index, field_out)
+    implicit none
+    integer(C_INT), intent(in) :: field_index
+    complex(C_DOUBLE_COMPLEX), intent(out) :: field_out(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    real(C_DOUBLE) :: inv_samples
+    integer(C_INT) :: ix, iy, iz
+
+    if (n_field_samples(field_index) <= 0_C_INT64_T) then
+      field_out = (0.0d0, 0.0d0)
+      return
+    end if
+
+    inv_samples = 1.0d0/dble(n_field_samples(field_index))
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        do iy = ny0 - 2, nyN + 2
+          field_out(iy, iz, ix) = inv_samples*convvelo_stats(iy, iz, ix, field_index)
+        end do
+      end do
+    end do
+  end subroutine normalize_convvelo_field_for_output
+
+  subroutine update_convvelo_stats_from_device()
+    implicit none
+
+    !$omp target update from(convvelo_stats)
+  end subroutine update_convvelo_stats_from_device
+
+  subroutine fill_convvelo_synthetic_state_for_test()
+    implicit none
+    integer(C_INT) :: ix, iy, iz, field_index, component
+    integer(C_INT64_T), parameter :: mean_samples = 7_C_INT64_T
+    integer(C_INT64_T), parameter :: field_samples = 11_C_INT64_T
+
+    if (.not. convvelo_initialized) error stop "fill_convvelo_synthetic_state_for_test requires init_convvelo"
+
+    convvelo_average_start_time = 1.25d0
+    convvelo_average_end_time = 2.50d0
+    n_mean_samples = mean_samples
+    n_field_samples = field_samples
+
+    do component = 1, 3 + nPhi
+      do iy = ny0 - 2, nyN + 2
+        component_means(iy, component) = synthetic_profile_value(iy, component)
+      end do
+    end do
+
+    do field_index = 1, n_convvelo_fields
+      do ix = nx0, nxN
+        do iz = -nz, nz
+          do iy = ny0 - 2, nyN + 2
+            convvelo_stats(iy, iz, ix, field_index) = real(field_samples, C_DOUBLE)* &
+                                                      synthetic_field_value(iy, iz, ix, field_index)
+          end do
+        end do
+      end do
+    end do
+    !$omp target update to(convvelo_stats)
+    !$omp target update to(component_means)
+  end subroutine fill_convvelo_synthetic_state_for_test
+
+  pure complex(C_DOUBLE_COMPLEX) function synthetic_profile_value(iy, component)
+    implicit none
+    integer(C_INT), intent(in) :: iy, component
+
+    synthetic_profile_value = cmplx(100.0d0*real(component, C_DOUBLE) + real(iy, C_DOUBLE), &
+                                    -10.0d0*real(component, C_DOUBLE) + 0.125d0*real(iy, C_DOUBLE), &
+                                    kind=C_DOUBLE)
+  end function synthetic_profile_value
+
+  pure complex(C_DOUBLE_COMPLEX) function synthetic_field_value(iy, iz, ix, field_index)
+    implicit none
+    integer(C_INT), intent(in) :: iy, iz, ix, field_index
+
+    synthetic_field_value = cmplx(1000.0d0*real(field_index, C_DOUBLE) + &
+                                  10.0d0*real(ix, C_DOUBLE) + &
+                                  0.5d0*real(iz, C_DOUBLE) + &
+                                  0.03125d0*real(iy, C_DOUBLE), &
+                                  -200.0d0*real(field_index, C_DOUBLE) + &
+                                  0.25d0*real(ix, C_DOUBLE) - &
+                                  0.0625d0*real(iz, C_DOUBLE) + &
+                                  0.0078125d0*real(iy, C_DOUBLE), &
+                                  kind=C_DOUBLE)
+  end function synthetic_field_value
+
+  subroutine copy_convvelo_field_average(field_index, field)
+    implicit none
+    integer(C_INT), intent(in) :: field_index
+    complex(C_DOUBLE_COMPLEX), intent(out) :: field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    real(C_DOUBLE) :: inv_samples
+    integer(C_INT) :: ix, iy, iz
+
+    call update_convvelo_stats_from_device()
+
+    if (n_field_samples(field_index) <= 0_C_INT64_T) then
+      field = (0.0d0, 0.0d0)
+      return
+    end if
+
+    inv_samples = 1.0d0/dble(n_field_samples(field_index))
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        do iy = ny0 - 2, nyN + 2
+          field(iy, iz, ix) = inv_samples*convvelo_stats(iy, iz, ix, field_index)
+        end do
+      end do
+    end do
+  end subroutine copy_convvelo_field_average
+
+#ifdef HAVE_MPI
+  subroutine write_convvelo_profile_collective(fh, profile, profile_mem_type, status)
+    implicit none
+    type(MPI_File), intent(in) :: fh
+    complex(C_DOUBLE_COMPLEX), intent(in) :: profile(ny0 - 2:nyN + 2)
+    type(MPI_Datatype), intent(in) :: profile_mem_type
+    type(MPI_Status), intent(out) :: status
+    integer :: write_count
+
+    write_count = 0
+    if (has_average) write_count = 1
+    call MPI_File_write_all(fh, profile, write_count, profile_mem_type, status)
+  end subroutine write_convvelo_profile_collective
+#endif
 
   subroutine write_convvelo_field_layout(filename)
     implicit none

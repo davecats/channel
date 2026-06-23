@@ -1,0 +1,37 @@
+set(case_dir "@CMAKE_CURRENT_BINARY_DIR@/convvelo_mpi_io_case")
+file(REMOVE_RECURSE "${case_dir}")
+file(MAKE_DIRECTORY "${case_dir}")
+
+execute_process(
+  COMMAND ${CMAKE_COMMAND} -E env
+          CHANNEL_NPXZ=2
+          CHANNEL_NPY=2
+          CHANNEL_MPI_AUTOTUNE=0
+          CHANNEL_Y_SOLVER=pipelined_lu
+          CHANNEL_DISABLE_RESTART_WRITE=1
+          @MPIEXEC_EXECUTABLE@ @MPIEXEC_NUMPROC_FLAG@ @CONVVELO_MPI_IO_NPROCS@ @MPIEXEC_PREFLAGS@
+          @TEST_CONVVELO_MPI_IO_EXE@
+          "@CMAKE_SOURCE_DIR@/tests/convvelo/dns.in"
+          "@CMAKE_SOURCE_DIR@/tests/convvelo/Dati.cart.out"
+          @MPIEXEC_POSTFLAGS@
+  WORKING_DIRECTORY "${case_dir}"
+  RESULT_VARIABLE mpi_status
+)
+if(NOT mpi_status EQUAL 0)
+  message(FATAL_ERROR "synthetic npxz=2 npy=2 convvelo MPI-IO run failed with status ${mpi_status}")
+endif()
+
+execute_process(
+  COMMAND "@Python3_EXECUTABLE@"
+          "@CMAKE_SOURCE_DIR@/tests/convvelo/verify_synthetic_raw.py"
+          "${case_dir}/convvelo_synthetic.bin"
+          "--nx" "5"
+          "--ny" "16"
+          "--nz" "8"
+          "--nphi" "2"
+          "--atol" "0.0"
+  RESULT_VARIABLE verify_status
+)
+if(NOT verify_status EQUAL 0)
+  message(FATAL_ERROR "synthetic convvelo MPI-IO verification failed with status ${verify_status}")
+endif()

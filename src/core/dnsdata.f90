@@ -38,6 +38,7 @@ MODULE dnsdata
   real(C_DOUBLE) :: alfa0, beta0, ni, a, ymin, ymax, deltat, cflmax, time, time0 = 0, dt_field, dt_save, t_max, gamma
   !$omp declare target(ni)
   real(C_DOUBLE) :: u0, uN, t0, tN
+  !$omp declare target(u0, uN, t0, tN)
   real(C_DOUBLE) :: meanpx, meanpz, meanflowx, meanflowz, meantx, meantb
   real(C_DOUBLE) :: perturbation_amplitude = 5.54d-5
   integer(C_INT), allocatable :: izd(:)
@@ -91,20 +92,22 @@ MODULE dnsdata
   logical :: overlapping
 
   public :: get_solver_memory_estimate, get_solver_workspace_estimate, get_mpi_buffer_memory_estimate
-  public :: sync_velocity_to_device, apply_complex_derivative_current_layout
+  public :: sync_velocity_to_device, apply_complex_derivative_current_layout, apply_complex_second_derivative_current_layout
   public :: eliminate_assembled_boundaries, reconstruct_assembled_boundaries
   abstract interface
-    subroutine compact_component_assembly(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end)
+    subroutine compact_component_assembly(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end, derivative_order)
       use, intrinsic :: iso_c_binding
       complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
       real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
       integer(C_INT), intent(in) :: row_start, row_end
+      integer(C_INT), optional, intent(in) :: derivative_order
     end subroutine compact_component_assembly
-    subroutine compact_boundary_assembly(owner_src, row_start, row_end, has_lower_boundary, has_upper_boundary)
+    subroutine compact_boundary_assembly(owner_src, row_start, row_end, has_lower_boundary, has_upper_boundary, derivative_order)
       use, intrinsic :: iso_c_binding
       complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
       integer(C_INT), intent(in) :: row_start, row_end
       logical, intent(in) :: has_lower_boundary, has_upper_boundary
+      integer(C_INT), optional, intent(in) :: derivative_order
     end subroutine compact_boundary_assembly
   end interface
   real(C_DOUBLE), save :: compact_lower_bc(-2:2), compact_lower_ghost_bc(-2:2), compact_upper_bc(-2:2), compact_upper_ghost_bc(-2:2)
@@ -159,6 +162,7 @@ CONTAINS
     call require_real(cfg, "scalars", "meantb", meantb)
     call require_real(cfg, "scalars", "t0", t0)
     call require_real(cfg, "scalars", "tn", tN)
+    !$omp target update to(u0, uN, t0, tN)
     allocate (pra(nPhi))
     if (nPhi > 0) then
       call require_real_vector(cfg, "scalars", "pr", pra(1:nPhi))
@@ -272,7 +276,10 @@ CONTAINS
   END SUBROUTINE init_memory
 
   subroutine print_schur_configuration()
+    USE mpi_autotune, ONLY: Y_SOLVER_PIPELINED_LU, mpi_autotune_selected_y_solver
     implicit none
+
+    if (mpi_autotune_selected_y_solver == Y_SOLVER_PIPELINED_LU) return
 
     if (size(schur_pass_counts) == 0) then
       print *, "y-Schur pass counts: none"
@@ -523,24 +530,38 @@ CONTAINS
                                      solve_label="compact derivative gpsv", symmetric_operator=.false., transpose_derivative=.true.)
   END SUBROUTINE apply_complex_derivative_current_layout
 
-  subroutine assemble_compact_derivative_interior(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end)
+  SUBROUTINE apply_complex_second_derivative_current_layout(src, dst)
+    IMPLICIT NONE
+    complex(C_DOUBLE_COMPLEX), target, intent(in) :: src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    call solve_compact_component_current_layout(dst, assemble_compact_derivative_interior, &
+                                     assemble_compact_derivative_boundary, 0.0d0, 0.0d0, src, &
+                                     solve_label="compact second derivative gpsv", symmetric_operator=.false., transpose_derivative=.true., &
+                                     derivative_order=2_C_INT)
+  END SUBROUTINE apply_complex_second_derivative_current_layout
+
+  subroutine assemble_compact_derivative_interior(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end, derivative_order)
     use y_line_solvers, only: ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
     real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
     integer(C_INT), intent(in) :: row_start, row_end
+    integer(C_INT), optional, intent(in) :: derivative_order
+    integer(C_INT) :: derivative_order_value
     integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner, nlines_z, nlines, iline
     integer(C_INT64_T) :: p
     complex(C_DOUBLE_COMPLEX) :: src_m2, src_m1, src_0, src_p1, src_p2
     associate (unused_lambda => lambda_coeff, unused_diffusion => diffusion_coeff)
     end associate
+    derivative_order_value = 1_C_INT
+    if (present(derivative_order)) derivative_order_value = derivative_order
     ix0_owner = lbound(owner_src, 3)
     ixN_owner = ubound(owner_src, 3)
     nlines_z = 2_C_INT*nz + 1_C_INT
     nlines = (ixN_owner - ix0_owner + 1_C_INT)*nlines_z
     !$omp target teams distribute parallel do collapse(2) default(none) &
     !$omp shared(owner_src, der, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, &
-    !$omp& row_start, row_end, nz, ix0_owner, ixN_owner, nlines_z, nlines) &
+    !$omp& row_start, row_end, derivative_order_value, nz, ix0_owner, ixN_owner, nlines_z, nlines) &
     !$omp private(ix, iz, iy, iline, p, src_m2, src_m1, src_0, src_p1, src_p2)
     do ix = ix0_owner, ixN_owner
       do iz = -nz, nz
@@ -557,11 +578,11 @@ CONTAINS
           ys_gpsv_d(p) = cmplx(der(iy, 0, 0), 0.0d0, kind=C_DOUBLE)
           ys_gpsv_du(p) = cmplx(der(iy, 0, 1), 0.0d0, kind=C_DOUBLE)
           ys_gpsv_dw(p) = cmplx(der(iy, 0, 2), 0.0d0, kind=C_DOUBLE)
-          ys_gpsv_x(p) = der(iy, 1, -2)*src_m2 + &
-                         der(iy, 1, -1)*src_m1 + &
-                         der(iy, 1, 0)*src_0 + &
-                         der(iy, 1, 1)*src_p1 + &
-                         der(iy, 1, 2)*src_p2
+          ys_gpsv_x(p) = der(iy, derivative_order_value, -2)*src_m2 + &
+                         der(iy, derivative_order_value, -1)*src_m1 + &
+                         der(iy, derivative_order_value, 0)*src_0 + &
+                         der(iy, derivative_order_value, 1)*src_p1 + &
+                         der(iy, derivative_order_value, 2)*src_p2
           if (iy < row_end) then
             src_m2 = src_m1
             src_m1 = src_0
@@ -575,29 +596,36 @@ CONTAINS
     !$omp end target teams distribute parallel do
   end subroutine assemble_compact_derivative_interior
 
-  subroutine assemble_compact_derivative_boundary(owner_src, row_start, row_end, has_lower_boundary, has_upper_boundary)
+  subroutine assemble_compact_derivative_boundary(owner_src, row_start, row_end, has_lower_boundary, has_upper_boundary, derivative_order)
     use y_line_solvers, only: ys_lower_ghost_owner, ys_lower_boundary_owner, ys_upper_boundary_owner, ys_upper_ghost_owner, ys_eqm1_owner, ys_eq0_owner, &
                               ys_eqn_owner, ys_eqnp1_owner
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
     integer(C_INT), intent(in) :: row_start, row_end
+    integer(C_INT), optional, intent(in) :: derivative_order
     logical, intent(in) :: has_lower_boundary, has_upper_boundary
-    integer(C_INT) :: ix, iz, ix0_owner, ixN_owner
-    associate (unused_row_start => row_start, unused_row_end => row_end)
-    end associate
+    integer(C_INT) :: ix, iz, ix0_owner, ixN_owner, derivative_order_value
+    derivative_order_value = 1_C_INT
+    if (present(derivative_order)) derivative_order_value = derivative_order
     ix0_owner = lbound(owner_src, 3)
     ixN_owner = ubound(owner_src, 3)
 
     if (has_lower_boundary) then
       !$omp target teams distribute parallel do collapse(2) default(none) &
-      !$omp shared(owner_src, ys_lower_ghost_owner, ys_lower_boundary_owner, ys_eqm1_owner, ys_eq0_owner, d140, d14m1, nz, ix0_owner, ixN_owner) &
+      !$omp shared(owner_src, ys_lower_ghost_owner, ys_lower_boundary_owner, ys_eqm1_owner, ys_eq0_owner, &
+      !$omp& d140, d14m1, d240, d24m1, derivative_order_value, nz, ix0_owner, ixN_owner) &
       !$omp private(ix, iz)
       do ix = ix0_owner, ixN_owner
         do iz = -nz, nz
           ys_eqm1_owner(:, iz, ix) = 0.0d0
           ys_eq0_owner(:, iz, ix) = 0.0d0
-          ys_lower_boundary_owner(iz, ix) = sum(d140(-2:2)*owner_src(-1:3, iz, ix))
-          ys_lower_ghost_owner(iz, ix) = sum(d14m1(-2:2)*owner_src(-1:3, iz, ix))
+          if (derivative_order_value == 1_C_INT) then
+            ys_lower_boundary_owner(iz, ix) = sum(d140(-2:2)*owner_src(-1:3, iz, ix))
+            ys_lower_ghost_owner(iz, ix) = sum(d14m1(-2:2)*owner_src(-1:3, iz, ix))
+          else
+            ys_lower_boundary_owner(iz, ix) = sum(d240(-2:2)*owner_src(-1:3, iz, ix))
+            ys_lower_ghost_owner(iz, ix) = sum(d24m1(-2:2)*owner_src(-1:3, iz, ix))
+          end if
           ys_eqm1_owner(-2, iz, ix) = 1.0d0
           ys_eq0_owner(-1, iz, ix) = 1.0d0
         end do
@@ -607,14 +635,20 @@ CONTAINS
 
     if (has_upper_boundary) then
       !$omp target teams distribute parallel do collapse(2) default(none) &
-      !$omp shared(owner_src, ys_upper_boundary_owner, ys_upper_ghost_owner, ys_eqn_owner, ys_eqnp1_owner, d14n, d14np1, ny, nz, ix0_owner, ixN_owner) &
+      !$omp shared(owner_src, ys_upper_boundary_owner, ys_upper_ghost_owner, ys_eqn_owner, ys_eqnp1_owner, &
+      !$omp& d14n, d14np1, d24n, d24np1, derivative_order_value, ny, nz, ix0_owner, ixN_owner) &
       !$omp private(ix, iz)
       do ix = ix0_owner, ixN_owner
         do iz = -nz, nz
           ys_eqn_owner(:, iz, ix) = 0.0d0
           ys_eqnp1_owner(:, iz, ix) = 0.0d0
-          ys_upper_boundary_owner(iz, ix) = sum(d14n(-2:2)*owner_src(ny - 3:ny + 1, iz, ix))
-          ys_upper_ghost_owner(iz, ix) = sum(d14np1(-2:2)*owner_src(ny - 3:ny + 1, iz, ix))
+          if (derivative_order_value == 1_C_INT) then
+            ys_upper_boundary_owner(iz, ix) = sum(d14n(-2:2)*owner_src(ny - 3:ny + 1, iz, ix))
+            ys_upper_ghost_owner(iz, ix) = sum(d14np1(-2:2)*owner_src(ny - 3:ny + 1, iz, ix))
+          else
+            ys_upper_boundary_owner(iz, ix) = sum(d24n(-2:2)*owner_src(ny - 3:ny + 1, iz, ix))
+            ys_upper_ghost_owner(iz, ix) = sum(d24np1(-2:2)*owner_src(ny - 3:ny + 1, iz, ix))
+          end if
           ys_eqn_owner(1, iz, ix) = 1.0d0
           ys_eqnp1_owner(2, iz, ix) = 1.0d0
         end do
@@ -640,13 +674,14 @@ CONTAINS
     compact_upper_ghost_rhs => upper_ghost_rhs_values
   end subroutine select_compact_component_boundaries
 
-  subroutine assemble_selected_compact_component_boundaries(owner_src, row_start, row_end, has_lower_boundary, has_upper_boundary)
+  subroutine assemble_selected_compact_component_boundaries(owner_src, row_start, row_end, has_lower_boundary, has_upper_boundary, derivative_order)
     use y_line_solvers, only: ys_lower_ghost_owner, ys_lower_boundary_owner, ys_upper_boundary_owner, ys_upper_ghost_owner, ys_eqm1_owner, ys_eq0_owner, &
                               ys_eqn_owner, ys_eqnp1_owner
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
     integer(C_INT), intent(in) :: row_start, row_end
     logical, intent(in) :: has_lower_boundary, has_upper_boundary
+    integer(C_INT), optional, intent(in) :: derivative_order
     integer(C_INT) :: ix, iz, ix0_owner, ixN_owner
     associate (unused_row_start => row_start, unused_row_end => row_end)
     end associate
@@ -686,12 +721,13 @@ CONTAINS
     end if
   end subroutine assemble_selected_compact_component_boundaries
 
-  subroutine assemble_compact_biharmonic_system(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end)
+  subroutine assemble_compact_biharmonic_system(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end, derivative_order)
     use y_line_solvers, only: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs
     implicit none
     integer(C_INT), intent(in) :: row_start, row_end
     real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
     complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
+    integer(C_INT), optional, intent(in) :: derivative_order
     complex(C_DOUBLE_COMPLEX) :: rhs_value
     real(C_DOUBLE) :: row_coeffs(-2:2)
     integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner
@@ -717,12 +753,13 @@ CONTAINS
     !$omp end target teams distribute parallel do
   end subroutine assemble_compact_biharmonic_system
 
-  subroutine assemble_compact_helmholtz_system(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end)
+  subroutine assemble_compact_helmholtz_system(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end, derivative_order)
     use y_line_solvers, only: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs
     implicit none
     integer(C_INT), intent(in) :: row_start, row_end
     real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
     complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
+    integer(C_INT), optional, intent(in) :: derivative_order
     complex(C_DOUBLE_COMPLEX) :: rhs_value
     real(C_DOUBLE) :: row_coeffs(-2:2)
     integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner
@@ -908,7 +945,7 @@ CONTAINS
   end subroutine reconstruct_assembled_boundaries
 
   SUBROUTINE solve_compact_component_current_layout(field_values, assemble_system, boundary_system, lambda_coeff, diffusion_coeff, source_values, &
-                                                    solve_label, symmetric_operator, transpose_derivative)
+                                                    solve_label, symmetric_operator, transpose_derivative, derivative_order)
     use y_line_solvers, only: ys_prepare_assembled_workspace, ys_release_workspace, ys_solve_endpoint_schur, ys_solve_pipelined_lu
     use mpi_autotune, only: mpi_autotune_selected_y_solver, mpi_autotune_selected_y_batches, &
                             Y_SOLVER_SCHUR, Y_SOLVER_PIPELINED_LU
@@ -923,6 +960,7 @@ CONTAINS
                                                      lbound(field_values, 3):ubound(field_values, 3))
     character(len=*), optional, intent(in) :: solve_label
     logical, optional, intent(in) :: symmetric_operator, transpose_derivative
+    integer(C_INT), optional, intent(in) :: derivative_order
     logical :: has_lower_boundary, has_upper_boundary, symmetric_operator_value
     character(len=32) :: y_solver
     integer :: env_length, env_status
@@ -941,9 +979,10 @@ CONTAINS
     has_lower_boundary = (ny0 == 1)
     has_upper_boundary = (nyN == ny - 1)
     call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, nxB*(2*nz + 1), &
-                                        schur_pass_counts, schur_exchange_mode)
-    call assemble_system(owner_src, lambda_coeff, diffusion_coeff, ny0, nyN)
-    call boundary_system(owner_src, ny0, nyN, has_lower_boundary, has_upper_boundary)
+                                        schur_pass_counts, schur_exchange_mode, &
+                                        prepare_schur=.true.)
+    call assemble_system(owner_src, lambda_coeff, diffusion_coeff, ny0, nyN, derivative_order)
+    call boundary_system(owner_src, ny0, nyN, has_lower_boundary, has_upper_boundary, derivative_order)
     call eliminate_assembled_boundaries(ny0, nyN, has_lower_boundary, has_upper_boundary)
     select case (adjustl(trim(y_solver)))
     case ("auto", "AUTO", "default", "DEFAULT")

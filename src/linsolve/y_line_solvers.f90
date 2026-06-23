@@ -510,16 +510,20 @@ contains
 #endif
   end subroutine ys_get_gpusparse_buffer_bytes
 
-  subroutine ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pass_counts, schur_exchange_mode)
+  subroutine ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pass_counts, schur_exchange_mode, prepare_schur)
     implicit none
     integer(C_INT), intent(in) :: row_start, row_end, line_start, nlines, nz
     integer(C_INT), optional, intent(in) :: schur_pass_counts(:)
     integer(C_INT), intent(in) :: schur_exchange_mode
+    logical, optional, intent(in) :: prepare_schur
     integer(C_INT) :: active_n
     integer(C_INT64_T) :: nx_count
     type(ys_schur_config) :: cfg
+    logical :: prepare_schur_value
 
     active_n = row_end - row_start + 1
+    prepare_schur_value = .true.
+    if (present(prepare_schur)) prepare_schur_value = prepare_schur
 
     if (associated(ys_gpsv_rhs_store)) error stop "ys_allocate_workspace called with core workspace already allocated"
     if (associated(ys_batch_ds)) error stop "ys_allocate_workspace called with batch workspace already allocated"
@@ -528,16 +532,16 @@ contains
 
     call ys_bind_core_views(row_start, row_end, line_start, nlines)
 
-    !$omp target enter data map(to: ys_gpsv_matrix_store, ys_gpsv_rhs_store, &
+    !$omp target enter data map(alloc: ys_gpsv_matrix_store, ys_gpsv_rhs_store, &
     !$omp& ys_lower_ghost_store, ys_lower_boundary_store, ys_upper_boundary_store, ys_upper_ghost_store, &
     !$omp& ys_eqm1_store, ys_eq0_store, ys_eqn_store, ys_eqnp1_store, &
     !$omp& ys_boundary_lower_rhs0_store, ys_boundary_upper_rhsn_store, &
     !$omp& ys_boundary_lower_eq_store, ys_boundary_upper_eq_store)
 
     nx_count = int(nlines/(2*nz + 1), C_INT64_T)
-    !$omp target enter data map(to: ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
+    !$omp target enter data map(alloc: ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
 
-    if (npy_grid > 1) then
+    if (npy_grid > 1 .and. prepare_schur_value) then
       allocate (ys_reduced_pass_counts(size(schur_pass_counts)))
       ys_reduced_pass_counts = schur_pass_counts
       ys_reduced_exchange_mode = schur_exchange_mode
@@ -545,28 +549,32 @@ contains
       call ys_schur_configure(cfg, schur_pass_counts, exchange_mode=schur_exchange_mode)
       call ys_schur_prepare(ys_reduced_schur_ws, cfg, nlines, npy_grid)
 
-      !$omp target enter data map(to: ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values, &
+      !$omp target enter data map(alloc: ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values, &
       !$omp& ys_reduced_rhs)
       ys_workspace_reduced_node_size = 0_C_INT
     end if
   end subroutine ys_allocate_workspace
 
-  subroutine ys_prepare_assembled_workspace(ny, nz, row_start, row_end, line_start, nlines, schur_pass_counts, schur_exchange_mode)
+  subroutine ys_prepare_assembled_workspace(ny, nz, row_start, row_end, line_start, nlines, schur_pass_counts, schur_exchange_mode, prepare_schur)
     implicit none
     integer(C_INT), intent(in) :: ny, nz, row_start, row_end, line_start, nlines
     integer(C_INT), optional, intent(in) :: schur_pass_counts(:)
     integer(C_INT), optional, intent(in) :: schur_exchange_mode
+    logical, optional, intent(in) :: prepare_schur
     integer(C_INT) :: active_n, nlines_z, wanted_exchange_mode
+    logical :: prepare_schur_value
 
     active_n = row_end - row_start + 1
     nlines_z = 2*nz + 1
     wanted_exchange_mode = YS_SCHUR_EXCHANGE_AUTO
     if (present(schur_exchange_mode)) wanted_exchange_mode = schur_exchange_mode
+    prepare_schur_value = .true.
+    if (present(prepare_schur)) prepare_schur_value = prepare_schur
 
     if (active_n < 1) error stop "ys_prepare_assembled_workspace requires at least one row"
     if (mod(line_start - 1, nlines_z) /= 0) error stop "ys_prepare_assembled_workspace requires ix-aligned line_start"
     if (mod(nlines, nlines_z) /= 0) error stop "ys_prepare_assembled_workspace requires full ix columns"
-    if (npy_grid > 1) then
+    if (npy_grid > 1 .and. prepare_schur_value) then
       if (npy_grid > 1 .and. active_n < 4) error stop "ys_solve_ghost_field requires at least four y rows per rank"
       if (active_n < 4) error stop "ys_solve_ghost_field requires at least four active y rows"
       if (.not. present(schur_pass_counts)) error stop "distributed y-Schur requires explicit pass config"
@@ -587,7 +595,7 @@ contains
       error stop "ys_prepare_assembled_workspace should only be called once after ys_release_workspace"
     end if
 
-    call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pass_counts, wanted_exchange_mode)
+    call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pass_counts, wanted_exchange_mode, prepare_schur_value)
   end subroutine ys_prepare_assembled_workspace
 
   subroutine ys_release_workspace(finalize_external)
