@@ -875,7 +875,6 @@
       ycomm_recv_capacity = 0
 
 #ifdef HAVE_MPI
-      call finalize_xcomm_nccl_contexts()
       call MPI_Type_free(writeview_type, ierror)
       call MPI_Type_free(owned2write_type, ierror)
       call MPI_Type_free(vel_read_type, ierror)

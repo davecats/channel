@@ -967,6 +967,7 @@ CONTAINS
     logical :: has_lower_boundary, has_upper_boundary, symmetric_operator_value
     character(len=32) :: y_solver
     integer :: env_length, env_status
+    integer(C_INT) :: selected_y_solver
     complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :), owner_dst(:, :, :)
 
     symmetric_operator_value = .true.
@@ -976,6 +977,16 @@ CONTAINS
     y_solver = "auto"
     call get_environment_variable("CHANNEL_Y_SOLVER", y_solver, env_length, env_status)
     if (env_status /= 0 .or. env_length <= 0) y_solver = "auto"
+    select case (adjustl(trim(y_solver)))
+    case ("auto", "AUTO", "default", "DEFAULT")
+      selected_y_solver = mpi_autotune_selected_y_solver
+    case ("schur", "SCHUR")
+      selected_y_solver = Y_SOLVER_SCHUR
+    case ("pipelined_lu", "PIPELINED_LU", "pipelined-lu", "PIPELINED-LU")
+      selected_y_solver = Y_SOLVER_PIPELINED_LU
+    case default
+      error stop "invalid CHANNEL_Y_SOLVER"
+    end select
 
     owner_src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => source_values
     owner_dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => field_values
@@ -983,26 +994,21 @@ CONTAINS
     has_upper_boundary = (nyN == ny - 1)
     call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, nxB*(2*nz + 1), &
                                         schur_pass_counts, schur_exchange_mode, &
-                                        prepare_schur=.true.)
+                                        prepare_schur=(selected_y_solver == Y_SOLVER_SCHUR))
     call assemble_system(owner_src, lambda_coeff, diffusion_coeff, ny0, nyN, derivative_order)
     call boundary_system(owner_src, ny0, nyN, has_lower_boundary, has_upper_boundary, derivative_order)
     call eliminate_assembled_boundaries(ny0, nyN, has_lower_boundary, has_upper_boundary)
-    select case (adjustl(trim(y_solver)))
-    case ("auto", "AUTO", "default", "DEFAULT")
-      select case (mpi_autotune_selected_y_solver)
-      case (Y_SOLVER_PIPELINED_LU)
+    select case (selected_y_solver)
+    case (Y_SOLVER_PIPELINED_LU)
+      if (mpi_autotune_selected_y_batches > 0_C_INT) then
         call ys_solve_pipelined_lu(field_values, mpi_autotune_selected_y_batches)
-      case (Y_SOLVER_SCHUR)
-        call ys_solve_endpoint_schur(field_values, symmetric_operator_value)
-      case default
-        error stop "invalid autotuned y solver"
-      end select
-    case ("schur", "SCHUR")
+      else
+        call ys_solve_pipelined_lu(field_values)
+      end if
+    case (Y_SOLVER_SCHUR)
       call ys_solve_endpoint_schur(field_values, symmetric_operator_value)
-    case ("pipelined_lu", "PIPELINED_LU", "pipelined-lu", "PIPELINED-LU")
-      call ys_solve_pipelined_lu(field_values)
     case default
-      error stop "invalid CHANNEL_Y_SOLVER"
+      error stop "invalid selected y solver"
     end select
     call reconstruct_assembled_boundaries(owner_dst, ny0, nyN, has_lower_boundary, has_upper_boundary)
     call ys_release_workspace()
