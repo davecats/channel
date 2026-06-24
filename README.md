@@ -1,5 +1,7 @@
 # channel
 
+<img align="left" src=".cover_title.png" width="400"> <br/><br/><br/><br/><br/><br/><br/><br/><br/><br/><br/>
+
 `channel` is a Cartesian channel-flow DNS code for incompressible
 Navier-Stokes equations. It uses Fourier expansions in the periodic streamwise and
 spanwise directions, compact wall-normal operators, MPI decomposition in the
