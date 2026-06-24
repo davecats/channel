@@ -16,9 +16,11 @@ module mpi_autotune
   use y_line_solvers, only: ys_prepare_assembled_workspace, ys_release_workspace, &
                             ys_solve_endpoint_schur, ys_solve_pipelined_lu, ys_gpsv_ds, ys_gpsv_dl, &
                             ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x
-  use y_pipeline_nccl, only: channel_comm_p2p_reset
   use y_schur_solver, only: ys_schur_default_pass_counts, YS_SCHUR_EXCHANGE_AUTO, &
                             YS_SCHUR_EXCHANGE_ALLTOALL, YS_SCHUR_EXCHANGE_ALLGATHER
+  use y_pipeline_nccl, only: CHANNEL_COMM_BACKEND_AUTO, CHANNEL_COMM_BACKEND_MPI, CHANNEL_COMM_BACKEND_NCCL, &
+                             channel_comm_available, channel_comm_backend_from_env, channel_comm_backend_name, &
+                             channel_comm_set_backend_override, channel_comm_clear_backend_override
   use byte_workspace, only: workspace_finalize
   use mpi_f08
   implicit none
@@ -31,6 +33,8 @@ module mpi_autotune
   real(C_DOUBLE), parameter :: Y_SOLVE_CHECK_TOL = 1.0e-6_C_DOUBLE
   integer(C_INT), save, public :: mpi_autotune_selected_y_solver = Y_SOLVER_SCHUR
   integer(C_INT), save, public :: mpi_autotune_selected_y_batches = 0_C_INT
+  integer(C_INT), save, public :: mpi_autotune_selected_comm_backend = CHANNEL_COMM_BACKEND_AUTO
+  integer(C_INT), save :: mpi_autotune_comm_mode = CHANNEL_COMM_BACKEND_AUTO
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
   !$omp declare target(autotune_exact_value)
 #endif
@@ -47,6 +51,7 @@ contains
     character(256) :: text, tmp
     integer :: ierr, rank, nranks, status, length, io, i, mode, nforced
     integer(C_INT) :: env_npy, env_npxz, forced(MAXP), best_pass(MAXP), best_npass, best_npxz, best_npy, best_exchange
+    integer(C_INT) :: best_comm_backend
     integer(C_INT) :: best_y_solver, best_y_batches
     integer(C_INT), allocatable :: node(:)
     logical :: has_npy, has_npxz, has_passes, has_exchange, manual, applied, found, ran_scan
@@ -64,6 +69,8 @@ contains
     call get_environment_variable("CHANNEL_Y_SOLVER", text, length, status); has_y_solver = (status == 0)
     mpi_autotune_selected_y_solver = Y_SOLVER_SCHUR
     mpi_autotune_selected_y_batches = 0_C_INT
+    mpi_autotune_comm_mode = channel_comm_backend_from_env()
+    mpi_autotune_selected_comm_backend = CHANNEL_COMM_BACKEND_AUTO
     if (has_y_solver) then
       select case (adjustl(trim(text(:length))))
       case ("auto", "AUTO", "default", "DEFAULT")
@@ -122,21 +129,26 @@ contains
       select case (adjustl(trim(text(:length))))
       case ("0", "false", "FALSE", "off", "OFF", "no", "NO"); mode = 0
       case ("report", "REPORT"); mode = 2
+      case ("report_only", "REPORT_ONLY", "report-only", "REPORT-ONLY", "scan", "SCAN"); mode = 3
       end select
     end if
     manual = has_npy .or. has_npxz .or. has_passes .or. has_exchange .or. has_y_solver
     found = .false.; applied = .false.; ran_scan = .false.; best_score = huge(0.0_C_DOUBLE)
-    if ((mode == 1 .and. .not. manual) .or. mode == 2) then
+    if ((mode == 1 .and. .not. manual) .or. mode == 2 .or. mode == 3) then
       ran_scan = .true.
       call node_ids(node)
       call scan(int(nranks, C_INT), nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, best_score, &
-                best_npxz, best_npy, best_pass, best_npass, best_exchange, best_y_solver, best_y_batches, found)
+                best_npxz, best_npy, best_pass, best_npass, best_exchange, best_comm_backend, &
+                best_y_solver, best_y_batches, found)
       if (rank == 0 .and. found) &
-        call print_config("MPI autotune recommendation", best_npxz, best_npy, best_pass, best_npass, best_exchange)
-      if (found .and. mode == 1 .and. .not. manual) then
+        call print_config("MPI autotune recommendation", best_npxz, best_npy, best_pass, best_npass, best_exchange, &
+                          best_comm_backend, best_y_solver, best_y_batches)
+      if (found .and. (mode == 1 .or. mode == 2) .and. .not. manual) then
         npxz_out = best_npxz; npy_out = best_npy; exchange = best_exchange
         mpi_autotune_selected_y_solver = best_y_solver
         mpi_autotune_selected_y_batches = best_y_batches
+        mpi_autotune_selected_comm_backend = best_comm_backend
+        call channel_comm_set_backend_override(best_comm_backend)
         applied = .true.
       else if (.not. found .and. rank == 0) then
         print *, "Warning: MPI autotune found no valid candidates; keeping configured decomposition."
@@ -156,45 +168,56 @@ contains
     else
       call ys_schur_default_pass_counts(npy_out, passes)
     end if
+    if (.not. applied) call apply_comm_env_override()
     if (rank == 0 .and. applied) &
-      call print_config("MPI autotune selected", npxz_out, npy_out, passes, int(size(passes), C_INT), exchange)
-    if (rank == 0 .and. .not. applied) &
-      call print_config("MPI decomposition configured", npxz_out, npy_out, passes, int(size(passes), C_INT), exchange)
+      call print_config("MPI autotune selected", npxz_out, npy_out, passes, int(size(passes), C_INT), exchange, &
+                        mpi_autotune_selected_comm_backend)
+    if (rank == 0 .and. .not. applied .and. .not. (ran_scan .and. mode == 3)) then
+      if (ran_scan .and. mode == 2 .and. manual) &
+        print *, "MPI autotune report: manual decomposition/backend settings override the recommendation."
+      call print_config("MPI decomposition retained", npxz_out, npy_out, passes, int(size(passes), C_INT), exchange)
+    end if
   end subroutine configure_mpi_decomposition
 
   subroutine scan(nranks, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, best_score, &
-                  best_npxz, best_npy, best_pass, best_npass, best_exchange, best_y_solver, best_y_batches, found)
+                  best_npxz, best_npy, best_pass, best_npass, best_exchange, best_comm_backend, &
+                  best_y_solver, best_y_batches, found)
     integer(C_INT), intent(in) :: nranks, nxpp, nxd, nzd, nz, ny, nphi, node(0:)
     logical, intent(in) :: overlapping
     real(C_DOUBLE), intent(inout) :: best_score
-    integer(C_INT), intent(out) :: best_npxz, best_npy, best_pass(MAXP), best_npass, best_exchange, best_y_solver, best_y_batches
+    integer(C_INT), intent(out) :: best_npxz, best_npy, best_pass(MAXP), best_npass, best_exchange, best_comm_backend
+    integer(C_INT), intent(out) :: best_y_solver, best_y_batches
     logical, intent(inout) :: found
-    integer(C_INT) :: npxz, path(MAXP)
+    integer(C_INT) :: npxz, path(MAXP), icomm, comm_backend
     path = 1_C_INT
     do npxz = 1_C_INT, nranks
       if (mod(nranks, npxz) == 0_C_INT) then
-        call try_pipelined_candidate(nranks, npxz, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, &
-                                     best_score, best_npxz, best_npy, best_pass, best_npass, best_exchange, &
-                                     best_y_solver, best_y_batches, found)
-        call gen(nranks, npxz, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, &
-                 nranks/npxz, path, 0_C_INT, best_score, best_npxz, best_npy, best_pass, &
-                 best_npass, best_exchange, best_y_solver, best_y_batches, found)
+        if (.not. autotune_npxz_candidate(nranks, npxz, node)) cycle
+        do icomm = 1_C_INT, autotune_comm_candidate_count()
+          comm_backend = autotune_comm_candidate(icomm)
+          call try_pipelined_candidate(nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, &
+                                       best_score, best_npxz, best_npy, best_pass, best_npass, best_exchange, &
+                                       best_comm_backend, best_y_solver, best_y_batches, found)
+          call gen(nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, &
+                   nranks/npxz, path, 0_C_INT, best_score, best_npxz, best_npy, best_pass, &
+                   best_npass, best_exchange, best_comm_backend, best_y_solver, best_y_batches, found)
+        end do
       end if
     end do
   end subroutine scan
 
-  subroutine try_pipelined_candidate(nranks, npxz, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, &
+  subroutine try_pipelined_candidate(nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, &
                                      best_score, best_npxz, best_npy, best_pass, best_npass, best_exchange, &
-                                     best_y_solver, best_y_batches, found)
-    integer(C_INT), intent(in) :: nranks, npxz, nxpp, nxd, nzd, nz, ny, nphi, node(0:)
+                                     best_comm_backend, best_y_solver, best_y_batches, found)
+    integer(C_INT), intent(in) :: nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, node(0:)
     logical, intent(in) :: overlapping
     real(C_DOUBLE), intent(inout) :: best_score
-    integer(C_INT), intent(inout) :: best_npxz, best_npy, best_pass(MAXP), best_npass, best_exchange
+    integer(C_INT), intent(inout) :: best_npxz, best_npy, best_pass(MAXP), best_npass, best_exchange, best_comm_backend
     integer(C_INT), intent(inout) :: best_y_solver, best_y_batches
     logical, intent(inout) :: found
     real(C_DOUBLE) :: xz_forward_cost, xz_back_cost, y_cost, score
     real(C_DOUBLE) :: y_error
-    integer(C_INT) :: ib, batches, npy, nlines, placeholder_path(MAXP), placeholder_npass, batch_candidates(5)
+    integer(C_INT) :: ib, batches, npy, nlines, placeholder_path(MAXP), placeholder_npass, batch_candidates(3)
     integer(C_INT), allocatable :: placeholder_passes(:)
     logical :: y_ok
     integer :: ierr, rank
@@ -204,6 +227,7 @@ contains
     if (npy <= 1_C_INT) return
 
     call MPI_Comm_rank(MPI_COMM_WORLD, rank, ierr)
+    call channel_comm_set_backend_override(comm_backend)
     call time_xz_sweep(nxpp, nxd, nzd, nz, ny, nphi, overlapping, npy, xz_forward_cost, xz_back_cost)
 
     placeholder_path = 1_C_INT
@@ -213,7 +237,7 @@ contains
     if (placeholder_npass > 0_C_INT) placeholder_path(1:placeholder_npass) = placeholder_passes
 
     nlines = (nxpp/npxz)*(2_C_INT*nz + 1_C_INT)
-    batch_candidates = [1_C_INT, 2_C_INT, 4_C_INT, 8_C_INT, 16_C_INT]
+    batch_candidates = [max(1_C_INT, npy/2_C_INT), npy, 2_C_INT*npy]
     do ib = 1_C_INT, int(size(batch_candidates), C_INT)
       batches = batch_candidates(ib)
       if (batches > nlines) cycle
@@ -221,7 +245,8 @@ contains
                       YS_SCHUR_EXCHANGE_AUTO, Y_SOLVER_PIPELINED_LU, batches, y_ok, y_error)
       if (.not. y_ok) then
         if (rank == 0) write (*, '(*(g0,1x))') "MPI autotune rejected: npxz=", npxz, &
-          "npy=", npy, "passes=", trim(pass_string(placeholder_path, placeholder_npass)), &
+          "npy=", npy, "comm=", trim(channel_comm_backend_name(comm_backend)), &
+          "passes=", trim(display_pass_string(placeholder_path, placeholder_npass, Y_SOLVER_PIPELINED_LU)), &
           "exchange= auto y_solver=", trim(y_solver_string(Y_SOLVER_PIPELINED_LU)), &
           "y_batches=", batches, "y_correctness_error=", y_error
         cycle
@@ -230,7 +255,8 @@ contains
                            xz_back_cost*real(6_C_INT + 3_C_INT*nphi, C_DOUBLE) + &
                            y_cost*real(3_C_INT + nphi, C_DOUBLE))
       if (rank == 0) write (*, '(*(g0,1x))') "MPI autotune tested: npxz=", npxz, &
-        "npy=", npy, "passes=", trim(pass_string(placeholder_path, placeholder_npass)), &
+        "npy=", npy, "comm=", trim(channel_comm_backend_name(comm_backend)), &
+        "passes=", trim(display_pass_string(placeholder_path, placeholder_npass, Y_SOLVER_PIPELINED_LU)), &
         "exchange= auto xz_forward_ms=", 1d3*xz_forward_cost, &
         "xz_back_ms=", 1d3*xz_back_cost, "y_solver=", trim(y_solver_string(Y_SOLVER_PIPELINED_LU)), &
         "y_batches=", batches, "y_ms=", 1d3*y_cost, "y_correctness_error=", y_error, &
@@ -238,51 +264,57 @@ contains
       if (.not. found .or. score < best_score) then
         found = .true.; best_score = score; best_npxz = npxz; best_npy = npy
         best_pass = placeholder_path; best_npass = placeholder_npass; best_exchange = YS_SCHUR_EXCHANGE_AUTO
+        best_comm_backend = comm_backend
         best_y_solver = Y_SOLVER_PIPELINED_LU; best_y_batches = batches
       end if
     end do
     if (allocated(placeholder_passes)) deallocate (placeholder_passes)
   end subroutine try_pipelined_candidate
 
-  recursive subroutine gen(nranks, npxz, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, &
+  recursive subroutine gen(nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, &
                            remaining, path, npass, best_score, best_npxz, best_npy, best_pass, &
-                           best_npass, best_exchange, best_y_solver, best_y_batches, found)
-    integer(C_INT), intent(in) :: nranks, npxz, nxpp, nxd, nzd, nz, ny, nphi, node(0:), remaining, path(MAXP), npass
+                           best_npass, best_exchange, best_comm_backend, best_y_solver, best_y_batches, found)
+    integer(C_INT), intent(in) :: nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi
+    integer(C_INT), intent(in) :: node(0:), remaining, path(MAXP), npass
     logical, intent(in) :: overlapping
     real(C_DOUBLE), intent(inout) :: best_score
-    integer(C_INT), intent(inout) :: best_npxz, best_npy, best_pass(MAXP), best_npass, best_exchange
+    integer(C_INT), intent(inout) :: best_npxz, best_npy, best_pass(MAXP), best_npass, best_exchange, best_comm_backend
     integer(C_INT), intent(inout) :: best_y_solver, best_y_batches
     logical, intent(inout) :: found
-    integer(C_INT) :: i, next_path(MAXP)
+    integer(C_INT) :: i, next_path(MAXP), min_arity
     if (remaining == 1_C_INT) then
-      call try_candidate(nranks, npxz, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, path, &
+      call try_candidate(nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, path, &
                          npass, YS_SCHUR_EXCHANGE_ALLTOALL, best_score, best_npxz, best_npy, &
-                         best_pass, best_npass, best_exchange, best_y_solver, best_y_batches, found)
+                         best_pass, best_npass, best_exchange, best_comm_backend, best_y_solver, best_y_batches, found)
       if (npass > 0_C_INT) then
         if (path(npass) < 4_C_INT) &
-          call try_candidate(nranks, npxz, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, path, &
+          call try_candidate(nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, path, &
                              npass, YS_SCHUR_EXCHANGE_ALLGATHER, best_score, best_npxz, best_npy, &
-                             best_pass, best_npass, best_exchange, best_y_solver, best_y_batches, found)
+                             best_pass, best_npass, best_exchange, best_comm_backend, best_y_solver, best_y_batches, found)
       end if
       return
     end if
     if (npass >= MAXP) return
+    min_arity = min_schur_arity(nranks/npxz)
     do i = 1_C_INT, int(size(ARITY), C_INT)
+      if (ARITY(i) < min_arity) cycle
       if (mod(remaining, ARITY(i)) /= 0_C_INT) cycle
       next_path = path; next_path(npass + 1_C_INT) = ARITY(i)
-      call gen(nranks, npxz, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, &
+      if (.not. schur_pass_prefix_has_uniform_lines(nxpp, npxz, nz, next_path, npass + 1_C_INT)) cycle
+      call gen(nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, &
                remaining/ARITY(i), next_path, npass + 1_C_INT, best_score, best_npxz, &
-               best_npy, best_pass, best_npass, best_exchange, best_y_solver, best_y_batches, found)
+               best_npy, best_pass, best_npass, best_exchange, best_comm_backend, best_y_solver, best_y_batches, found)
     end do
   end subroutine gen
 
-  subroutine try_candidate(nranks, npxz, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, path, &
+  subroutine try_candidate(nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, path, &
                            npass, exchange, best_score, best_npxz, best_npy, best_pass, &
-                           best_npass, best_exchange, best_y_solver, best_y_batches, found)
-    integer(C_INT), intent(in) :: nranks, npxz, nxpp, nxd, nzd, nz, ny, nphi, node(0:), path(MAXP), npass, exchange
+                           best_npass, best_exchange, best_comm_backend, best_y_solver, best_y_batches, found)
+    integer(C_INT), intent(in) :: nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi
+    integer(C_INT), intent(in) :: node(0:), path(MAXP), npass, exchange
     logical, intent(in) :: overlapping
     real(C_DOUBLE), intent(inout) :: best_score
-    integer(C_INT), intent(inout) :: best_npxz, best_npy, best_pass(MAXP), best_npass, best_exchange
+    integer(C_INT), intent(inout) :: best_npxz, best_npy, best_pass(MAXP), best_npass, best_exchange, best_comm_backend
     integer(C_INT), intent(inout) :: best_y_solver, best_y_batches
     logical, intent(inout) :: found
     integer :: ierr, rank
@@ -291,6 +323,7 @@ contains
     logical :: y_ok
     if (.not. valid(nranks, npxz, nxpp, nzd, nz, ny, node, path, npass)) return
     call MPI_Comm_rank(MPI_COMM_WORLD, rank, ierr)
+    call channel_comm_set_backend_override(comm_backend)
     call time_xz_sweep(nxpp, nxd, nzd, nz, ny, nphi, overlapping, nranks/npxz, xz_forward_cost, xz_back_cost)
 
     call score_y_backend(Y_SOLVER_SCHUR, 0_C_INT)
@@ -303,7 +336,8 @@ contains
                       y_solver, y_batches, y_ok, y_error)
       if (.not. y_ok) then
         if (rank == 0) write (*, '(*(g0,1x))') "MPI autotune rejected: npxz=", npxz, &
-          "npy=", nranks/npxz, "passes=", trim(pass_string(path, npass)), &
+          "npy=", nranks/npxz, "comm=", trim(channel_comm_backend_name(comm_backend)), &
+          "passes=", trim(display_pass_string(path, npass, y_solver)), &
           "exchange=", trim(exchange_string(exchange)), "y_solver=", trim(y_solver_string(y_solver)), &
           "y_batches=", y_batches, "y_correctness_error=", y_error
         return
@@ -312,7 +346,8 @@ contains
                            xz_back_cost*real(6_C_INT + 3_C_INT*nphi, C_DOUBLE) + &
                            y_cost*real(3_C_INT + nphi, C_DOUBLE))
       if (rank == 0) write (*, '(*(g0,1x))') "MPI autotune tested: npxz=", npxz, &
-        "npy=", nranks/npxz, "passes=", trim(pass_string(path, npass)), &
+        "npy=", nranks/npxz, "comm=", trim(channel_comm_backend_name(comm_backend)), &
+        "passes=", trim(display_pass_string(path, npass, y_solver)), &
         "exchange=", trim(exchange_string(exchange)), "xz_forward_ms=", 1d3*xz_forward_cost, &
         "xz_back_ms=", 1d3*xz_back_cost, "y_solver=", trim(y_solver_string(y_solver)), &
         "y_batches=", y_batches, "y_ms=", 1d3*y_cost, "y_correctness_error=", y_error, &
@@ -320,6 +355,7 @@ contains
       if (.not. found .or. score < best_score) then
         found = .true.; best_score = score; best_npxz = npxz; best_npy = nranks/npxz
         best_pass = path; best_npass = npass; best_exchange = exchange
+        best_comm_backend = comm_backend
         best_y_solver = y_solver; best_y_batches = y_batches
       end if
     end subroutine score_y_backend
@@ -327,14 +363,10 @@ contains
 
   logical function valid(nranks, npxz, nxpp, nzd, nz, ny, node, path, npass)
     integer(C_INT), intent(in) :: nranks, npxz, nxpp, nzd, nz, ny, node(0:), path(MAXP), npass
-    integer(C_INT) :: npy, prev, level
+    integer(C_INT) :: npy
     valid = .false.; npy = nranks/npxz
     if (.not. valid_decomposition(nranks, npxz, nxpp, nzd, ny, node)) return
-    prev = (nxpp/npxz)*(2_C_INT*nz + 1_C_INT)
-    do level = 1_C_INT, npass
-      if (mod(prev, path(level)) /= 0_C_INT) return
-      prev = prev/path(level)
-    end do
+    if (.not. schur_pass_prefix_has_uniform_lines(nxpp, npxz, nz, path, npass)) return
     valid = .true.
   end function valid
 
@@ -402,6 +434,36 @@ contains
         if (node(first + i*stride) == node(first + j*stride)) clean = .false.
       end do; end do
   end function clean
+
+  logical function autotune_npxz_candidate(nranks, npxz, node)
+    integer(C_INT), intent(in) :: nranks, npxz, node(0:)
+    integer(C_INT) :: node_npxz
+
+    node_npxz = autotune_node_size(nranks, node)
+    autotune_npxz_candidate = (npxz == 1_C_INT .or. npxz == node_npxz)
+  end function autotune_npxz_candidate
+
+  integer(C_INT) function autotune_node_size(nranks, node)
+    integer(C_INT), intent(in) :: nranks, node(0:)
+    integer(C_INT) :: i, j, count
+
+    autotune_node_size = 1_C_INT
+    do i = 0_C_INT, nranks - 1_C_INT
+      count = 0_C_INT
+      do j = 0_C_INT, nranks - 1_C_INT
+        if (node(j) == node(i)) count = count + 1_C_INT
+      end do
+      autotune_node_size = max(autotune_node_size, count)
+    end do
+  end function autotune_node_size
+
+  integer(C_INT) function min_schur_arity(npy)
+    integer(C_INT), intent(in) :: npy
+    min_schur_arity = 1_C_INT
+    do while (min_schur_arity*min_schur_arity*min_schur_arity < npy)
+      min_schur_arity = min_schur_arity + 1_C_INT
+    end do
+  end function min_schur_arity
 
   subroutine time_xz_sweep(nxpp, nxd, nzd, nz, ny, nphi, overlapping, npy, forward_cost, back_cost)
     integer(C_INT), intent(in) :: nxpp, nxd, nzd, nz, ny, nphi, npy
@@ -501,17 +563,22 @@ contains
     real(C_DOUBLE), intent(out) :: elapsed
     logical, intent(out) :: ok
     real(C_DOUBLE), intent(out) :: max_error
-    complex(C_DOUBLE_COMPLEX), allocatable :: dst(:, :, :)
-    integer(C_INT) :: active_n, nx_count
+    complex(C_DOUBLE_COMPLEX), allocatable :: dst(:, :, :), expected(:, :, :)
+    integer(C_INT) :: active_n, nlines_z, nx_count
     integer(C_INT64_T) :: t0, t1, rate
     integer :: ierr, iter, bad_local, bad_global
     real(C_DOUBLE) :: local_elapsed, local_error, global_error
 
-    call ys_prepare_assembled_workspace(ny, nz, row_start, row_end, line_start, nlines, passes, exchange)
+    call ys_prepare_assembled_workspace(ny, nz, row_start, row_end, line_start, nlines, passes, exchange, &
+                                        prepare_schur=(y_solver == Y_SOLVER_SCHUR))
     active_n = row_end - row_start + 1_C_INT
-    nx_count = nlines/(2_C_INT*nz + 1_C_INT)
+    nlines_z = 2_C_INT*nz + 1_C_INT
+    nx_count = nlines/nlines_z
     allocate (dst(active_n + 4_C_INT, 2_C_INT*nz + 1_C_INT, nx_count))
+    allocate (expected(active_n, nlines_z, nx_count))
+    call fill_y_endpoint_expected(expected, row_start, nlines)
     !$omp target enter data map(alloc: dst)
+    !$omp target enter data map(to: expected)
 
     call system_clock(count_rate=rate)
     local_elapsed = 0.0_C_DOUBLE
@@ -531,8 +598,7 @@ contains
       end select
       call MPI_Barrier(MPI_COMM_WORLD, ierr)
       call system_clock(t1)
-      !$omp target update from(dst)
-      call check_y_endpoint_solution(dst, row_start, row_end, nlines, local_error, bad_local)
+      call check_y_endpoint_solution_device(dst, expected, local_error, bad_local)
       call MPI_Allreduce(local_error, global_error, 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, ierr)
       call MPI_Allreduce(bad_local, bad_global, 1, MPI_INTEGER, MPI_MAX, MPI_COMM_WORLD, ierr)
       max_error = max(max_error, global_error)
@@ -551,10 +617,30 @@ contains
     end if
 
     !$omp target exit data map(delete: dst)
+    !$omp target exit data map(delete: expected)
     deallocate (dst)
+    deallocate (expected)
     call ys_release_workspace(.true.)
-    call channel_comm_p2p_reset()
   end subroutine time_y_endpoint_solve
+
+  subroutine fill_y_endpoint_expected(expected, row_start, nlines)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: expected(:, :, :)
+    integer(C_INT), intent(in) :: row_start, nlines
+    integer(C_INT) :: active_n, nlines_z, nx_count, ix, iz_index, irow, iline, iy
+
+    active_n = size(expected, 1, kind=C_INT)
+    nlines_z = size(expected, 2, kind=C_INT)
+    nx_count = nlines/nlines_z
+    do ix = 1_C_INT, nx_count
+      do iz_index = 1_C_INT, nlines_z
+        iline = (ix - 1_C_INT)*nlines_z + iz_index
+        do irow = 1_C_INT, active_n
+          iy = row_start + irow - 1_C_INT
+          expected(irow, iz_index, ix) = autotune_exact_value(iy, iline)
+        end do
+      end do
+    end do
+  end subroutine fill_y_endpoint_expected
 
   subroutine seed_y_endpoint_system(ny, row_start, active_n, nlines)
     integer(C_INT), intent(in) :: ny, row_start, active_n, nlines
@@ -591,41 +677,41 @@ contains
     !$omp end target teams distribute parallel do
   end subroutine seed_y_endpoint_system
 
-  subroutine check_y_endpoint_solution(dst, row_start, row_end, nlines, local_error, bad)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: dst(:, :, :)
-    integer(C_INT), intent(in) :: row_start, row_end, nlines
+  subroutine check_y_endpoint_solution_device(dst, expected, local_error, bad)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: dst(:, :, :), expected(:, :, :)
     real(C_DOUBLE), intent(out) :: local_error
     integer, intent(out) :: bad
-    complex(C_DOUBLE_COMPLEX) :: expected, got
-    integer(C_INT) :: active_n, nlines_z, nx_count, ix, iz_index, irow, iline, iy
+    complex(C_DOUBLE_COMPLEX) :: got
+    real(C_DOUBLE) :: got_real, got_imag, err
+    integer(C_INT) :: active_n, nlines_z, nx_count, ix, iz_index, irow
 
-    active_n = row_end - row_start + 1_C_INT
+    active_n = size(expected, 1, kind=C_INT)
     nlines_z = size(dst, 2, kind=C_INT)
-    nx_count = nlines/nlines_z
+    nx_count = size(expected, 3, kind=C_INT)
     local_error = 0.0_C_DOUBLE
     bad = 0
+    !$omp target teams distribute parallel do collapse(3) default(none) &
+    !$omp shared(dst, expected, active_n, nlines_z, nx_count) &
+    !$omp private(ix, iz_index, irow, got, got_real, got_imag, err) reduction(max:local_error, bad)
     do ix = 1_C_INT, nx_count
       do iz_index = 1_C_INT, nlines_z
-        iline = (ix - 1_C_INT)*nlines_z + iz_index
         do irow = 1_C_INT, active_n
-          iy = row_start + irow - 1_C_INT
           got = dst(irow + 2_C_INT, iz_index, ix)
-          if (.not. finite_complex(got)) then
+          got_real = real(got, C_DOUBLE)
+          got_imag = aimag(got)
+          if (got_real /= got_real .or. got_imag /= got_imag .or. &
+              abs(got_real) > huge(0.0_C_DOUBLE) .or. abs(got_imag) > huge(0.0_C_DOUBLE)) then
             bad = 1
             local_error = huge(0.0_C_DOUBLE)
-            return
+          else
+            err = abs(got - expected(irow, iz_index, ix))
+            local_error = max(local_error, err)
           end if
-          expected = autotune_exact_value(iy, iline)
-          local_error = max(local_error, abs(got - expected))
         end do
       end do
     end do
-  end subroutine check_y_endpoint_solution
-
-  pure logical function finite_complex(value)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: value
-    finite_complex = ieee_is_finite(real(value, C_DOUBLE)) .and. ieee_is_finite(aimag(value))
-  end function finite_complex
+    !$omp end target teams distribute parallel do
+  end subroutine check_y_endpoint_solution_device
 
   pure complex(C_DOUBLE_COMPLEX) function autotune_exact_value(iy, iline)
     integer(C_INT), intent(in) :: iy, iline
@@ -676,6 +762,20 @@ contains
     mpi_autotune_has_pass_sequence = (product == npy)
   end function mpi_autotune_has_pass_sequence
 
+  pure logical function schur_pass_prefix_has_uniform_lines(nxpp, npxz, nz, passes, npass)
+    integer(C_INT), intent(in) :: nxpp, npxz, nz, passes(MAXP), npass
+    integer(C_INT) :: level, nlines
+
+    schur_pass_prefix_has_uniform_lines = .false.
+    if (npxz < 1_C_INT .or. mod(nxpp, npxz) /= 0_C_INT) return
+    nlines = (nxpp/npxz)*(2_C_INT*nz + 1_C_INT)
+    do level = 1_C_INT, npass
+      if (mod(nlines, passes(level)) /= 0_C_INT) return
+      nlines = nlines/passes(level)
+    end do
+    schur_pass_prefix_has_uniform_lines = .true.
+  end function schur_pass_prefix_has_uniform_lines
+
   integer function tune_repeats()
     character(64) :: text
     integer :: status, length, io, value
@@ -697,6 +797,16 @@ contains
     do i = 1_C_INT, npass; write (item, '(I0)') passes(i); if (i > 1_C_INT) pass_string = trim(pass_string)//","; pass_string = trim(pass_string)//trim(item); end do
   end function pass_string
 
+  character(128) function display_pass_string(passes, npass, y_solver)
+    integer(C_INT), intent(in) :: passes(:), npass, y_solver
+
+    if (y_solver == Y_SOLVER_PIPELINED_LU) then
+      display_pass_string = "none"
+    else
+      display_pass_string = pass_string(passes, npass)
+    end if
+  end function display_pass_string
+
   character(16) function exchange_string(exchange)
     integer(C_INT), intent(in) :: exchange
     select case (exchange)
@@ -716,10 +826,56 @@ contains
     end select
   end function y_solver_string
 
-  subroutine print_config(label, npxz, npy, passes, npass, exchange)
+  integer(C_INT) function autotune_comm_candidate_count()
+    if (mpi_autotune_comm_mode == CHANNEL_COMM_BACKEND_AUTO .and. channel_comm_available()) then
+      autotune_comm_candidate_count = 2_C_INT
+    else
+      autotune_comm_candidate_count = 1_C_INT
+    end if
+  end function autotune_comm_candidate_count
+
+  integer(C_INT) function autotune_comm_candidate(index)
+    integer(C_INT), intent(in) :: index
+
+    select case (mpi_autotune_comm_mode)
+    case (CHANNEL_COMM_BACKEND_MPI, CHANNEL_COMM_BACKEND_NCCL)
+      autotune_comm_candidate = mpi_autotune_comm_mode
+    case default
+      if (index == 2_C_INT .and. channel_comm_available()) then
+        autotune_comm_candidate = CHANNEL_COMM_BACKEND_NCCL
+      else
+        autotune_comm_candidate = CHANNEL_COMM_BACKEND_MPI
+      end if
+    end select
+  end function autotune_comm_candidate
+
+  subroutine apply_comm_env_override()
+    select case (mpi_autotune_comm_mode)
+    case (CHANNEL_COMM_BACKEND_MPI, CHANNEL_COMM_BACKEND_NCCL)
+      call channel_comm_set_backend_override(mpi_autotune_comm_mode)
+      mpi_autotune_selected_comm_backend = mpi_autotune_comm_mode
+    case default
+      call channel_comm_clear_backend_override()
+      mpi_autotune_selected_comm_backend = CHANNEL_COMM_BACKEND_AUTO
+    end select
+  end subroutine apply_comm_env_override
+
+  subroutine print_config(label, npxz, npy, passes, npass, exchange, comm_backend, y_solver, y_batches)
     character(*), intent(in) :: label
     integer(C_INT), intent(in) :: npxz, npy, passes(:), npass, exchange
-    write (*, '(*(g0,1x))') trim(label)//": npxz=", npxz, "npy=", npy, "passes=", trim(pass_string(passes, npass)), &
-      "exchange=", trim(exchange_string(exchange)), "xz_enabled=", npxz > 1_C_INT
+    integer(C_INT), intent(in), optional :: comm_backend
+    integer(C_INT), intent(in), optional :: y_solver, y_batches
+    integer(C_INT) :: solver, batches, backend
+    solver = mpi_autotune_selected_y_solver
+    batches = mpi_autotune_selected_y_batches
+    backend = mpi_autotune_selected_comm_backend
+    if (present(comm_backend)) backend = comm_backend
+    if (present(y_solver)) solver = y_solver
+    if (present(y_batches)) batches = y_batches
+    write (*, '(*(g0,1x))') trim(label)//": npxz=", npxz, "npy=", npy, &
+      "passes=", trim(display_pass_string(passes, npass, solver)), &
+      "exchange=", trim(exchange_string(exchange)), "comm=", trim(channel_comm_backend_name(backend)), &
+      "xz_enabled=", npxz > 1_C_INT, &
+      "y_solver=", trim(y_solver_string(solver)), "y_batches=", batches
   end subroutine print_config
 end module mpi_autotune

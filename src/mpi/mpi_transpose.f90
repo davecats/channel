@@ -77,7 +77,7 @@
 #ifdef HAVE_MPI
     TYPE(MPI_Datatype), save :: writeview_type, owned2write_type, vel_read_type, vel_field_type
 #endif
-    type(c_ptr), save :: xcomm_nccl_ctx = c_null_ptr
+    type(c_ptr), allocatable, save :: xcomm_nccl_ctx_by_npxz(:)
 
   CONTAINS
 
@@ -564,10 +564,43 @@
       range_name = "channel_comm_alltoall fft_transpose"
       if (present(label)) range_name = "channel_comm_alltoall "//trim(label)
       call roctxPush(range_name)
-      call channel_comm_alltoall_complex(send, recv, sendcount, MPI_COMM_X, xcomm_nccl_ctx, request)
+      call ensure_xcomm_nccl_context_slot()
+      call channel_comm_alltoall_complex(send, recv, sendcount, MPI_COMM_X, xcomm_nccl_ctx_by_npxz(npxz), request)
       call roctxPop(range_name)
 
     END SUBROUTINE alltoall
+
+    subroutine ensure_xcomm_nccl_context_slot()
+      implicit none
+      type(c_ptr), allocatable :: tmp(:)
+      integer :: old_upper, new_upper
+
+      if (.not. allocated(xcomm_nccl_ctx_by_npxz)) then
+        allocate (xcomm_nccl_ctx_by_npxz(0:max(1_C_INT, npxz)))
+        xcomm_nccl_ctx_by_npxz = c_null_ptr
+      else if (ubound(xcomm_nccl_ctx_by_npxz, 1) < npxz) then
+        old_upper = ubound(xcomm_nccl_ctx_by_npxz, 1)
+        new_upper = max(npxz, 2*old_upper)
+        allocate (tmp(0:new_upper))
+        tmp = c_null_ptr
+        tmp(0:old_upper) = xcomm_nccl_ctx_by_npxz(0:old_upper)
+        call move_alloc(tmp, xcomm_nccl_ctx_by_npxz)
+      end if
+    end subroutine ensure_xcomm_nccl_context_slot
+
+    subroutine finalize_xcomm_nccl_contexts()
+      implicit none
+#ifdef HAVE_MPI
+      integer :: i
+
+      if (allocated(xcomm_nccl_ctx_by_npxz)) then
+        do i = lbound(xcomm_nccl_ctx_by_npxz, 1), ubound(xcomm_nccl_ctx_by_npxz, 1)
+          call channel_comm_context_reset(xcomm_nccl_ctx_by_npxz(i))
+        end do
+        deallocate (xcomm_nccl_ctx_by_npxz)
+      end if
+#endif
+    end subroutine finalize_xcomm_nccl_contexts
 
     SUBROUTINE gather_full_y_line(ny, local_line, full_line)
       IMPLICIT NONE
@@ -806,7 +839,6 @@
 #endif
 
       if (.not. mpi_transpose_initialized) return
-      call channel_comm_context_reset(xcomm_nccl_ctx)
 
 #if defined(HAVE_HIP)
       if (c_associated(xcomm_sendptr)) call omp_target_free(xcomm_sendptr, omp_get_default_device())
@@ -843,6 +875,7 @@
       ycomm_recv_capacity = 0
 
 #ifdef HAVE_MPI
+      call finalize_xcomm_nccl_contexts()
       call MPI_Type_free(writeview_type, ierror)
       call MPI_Type_free(owned2write_type, ierror)
       call MPI_Type_free(vel_read_type, ierror)

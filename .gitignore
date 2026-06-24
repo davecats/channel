@@ -111,3 +111,15 @@ tests/convvel/*.fld
 *.bin
 *.bin.fields
 !tests/convvelo/Dati.cart.*.out
+scripts/
+plain_runs_*
+nsys_runs_*
+nsys_*
+bench_*
+bench-*
+channel_comm*
+local_channel_comm*
+local_mpi_*
+local_nccl*
+test_2xa100*
+ncu_runs*

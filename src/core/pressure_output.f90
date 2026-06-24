@@ -676,11 +676,12 @@ CONTAINS
     !$omp end target teams distribute parallel do
   end subroutine assemble_dpdy_rhs
 
-  subroutine assemble_pressure_operator(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end)
+  subroutine assemble_pressure_operator(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end, derivative_order)
     implicit none
     complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
     real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
     integer(C_INT), intent(in) :: row_start, row_end
+    integer(C_INT), optional, intent(in) :: derivative_order
     integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner
     associate (unused_lambda => lambda_coeff, unused_diffusion => diffusion_coeff)
     end associate
@@ -708,11 +709,12 @@ CONTAINS
     !$omp end target teams distribute parallel do
   end subroutine assemble_pressure_operator
 
-  subroutine assemble_dpdy_operator(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end)
+  subroutine assemble_dpdy_operator(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end, derivative_order)
     implicit none
     complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
     real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
     integer(C_INT), intent(in) :: row_start, row_end
+    integer(C_INT), optional, intent(in) :: derivative_order
     integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner
     associate (unused_lambda => lambda_coeff, unused_diffusion => diffusion_coeff)
     end associate
@@ -736,11 +738,12 @@ CONTAINS
     !$omp end target teams distribute parallel do
   end subroutine assemble_dpdy_operator
 
-  subroutine assemble_pressure_boundaries(owner_src, row_start, row_end, has_lower_boundary, has_upper_boundary)
+  subroutine assemble_pressure_boundaries(owner_src, row_start, row_end, has_lower_boundary, has_upper_boundary, derivative_order)
     implicit none
     complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
     integer(C_INT), intent(in) :: row_start, row_end
     logical, intent(in) :: has_lower_boundary, has_upper_boundary
+    integer(C_INT), optional, intent(in) :: derivative_order
     integer(C_INT) :: ix, iz, ix0_owner, ixN_owner
     complex(C_DOUBLE_COMPLEX), pointer :: u_owner(:, :, :), v_owner(:, :, :), w_owner(:, :, :)
     associate (unused_row_start => row_start, unused_row_end => row_end)
@@ -799,11 +802,12 @@ CONTAINS
     end if
   end subroutine assemble_pressure_boundaries
 
-  subroutine assemble_dpdy_boundaries(owner_src, row_start, row_end, has_lower_boundary, has_upper_boundary)
+  subroutine assemble_dpdy_boundaries(owner_src, row_start, row_end, has_lower_boundary, has_upper_boundary, derivative_order)
     implicit none
     complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
     integer(C_INT), intent(in) :: row_start, row_end
     logical, intent(in) :: has_lower_boundary, has_upper_boundary
+    integer(C_INT), optional, intent(in) :: derivative_order
     integer(C_INT) :: ix, iz, ix0_owner, ixN_owner
     complex(C_DOUBLE_COMPLEX), pointer :: u_owner(:, :, :), v_owner(:, :, :), w_owner(:, :, :)
     associate (unused_row_start => row_start, unused_row_end => row_end)

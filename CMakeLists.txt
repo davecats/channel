@@ -135,6 +135,9 @@ add_executable(test_convvelo_runtime
 )
 target_link_libraries(test_convvelo_runtime PRIVATE channel_core)
 
+add_executable(test_convvelo_mpi_io ${CHANNEL_SOURCE_DIR}/test/test_convvelo_mpi_io.f90)
+target_link_libraries(test_convvelo_mpi_io PRIVATE channel_core)
+
 add_executable(test_post_convvelo
     ${CHANNEL_SOURCE_DIR}/test/test_convvelo_utils.f90
     ${CHANNEL_SOURCE_DIR}/test/test_post_convvelo.f90

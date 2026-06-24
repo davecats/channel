@@ -48,7 +48,7 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
     integer(C_SIZE_T) :: workspace_peak_bytes, sparse_external_bytes
     integer :: iPhi
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
-    integer :: num_dev, dev
+    integer :: num_dev, dev, local_rank
 #endif
     integer :: env_status, env_length
     logical :: run_solver
@@ -70,11 +70,16 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
 
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
     num_dev = omp_get_num_devices()
-    dev = mod(iproc, num_dev)
+    local_rank = mpi_local_rank_from_env()
+    if (local_rank >= 0) then
+      dev = mod(local_rank, num_dev)
+    else
+      dev = mod(iproc, num_dev)
+    end if
 
     call omp_set_default_device(dev)
 
-    print *, 'Rank', iproc, 'of', nproc, 'using device', dev, 'out of', num_dev
+    print *, 'Rank', iproc, 'of', nproc, 'local rank', local_rank, 'using device', dev, 'out of', num_dev
 
     !$omp target
     print *, 'Hello from GPU on rank', iproc, 'device', dev
@@ -211,6 +216,22 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
     end if
   END SUBROUTINE initialize
 
+  integer function mpi_local_rank_from_env()
+    implicit none
+    character(len=32) :: text
+    integer :: length, status, io
+
+    mpi_local_rank_from_env = -1
+    call get_environment_variable("OMPI_COMM_WORLD_LOCAL_RANK", text, length, status)
+    if (status /= 0 .or. length <= 0) call get_environment_variable("MPI_LOCALRANKID", text, length, status)
+    if (status /= 0 .or. length <= 0) call get_environment_variable("MV2_COMM_WORLD_LOCAL_RANK", text, length, status)
+    if (status /= 0 .or. length <= 0) call get_environment_variable("SLURM_LOCALID", text, length, status)
+    if (status /= 0 .or. length <= 0) call get_environment_variable("PMI_LOCAL_RANK", text, length, status)
+    if (status /= 0 .or. length <= 0) return
+    read (text(:length), *, iostat=io) mpi_local_rank_from_env
+    if (io /= 0) mpi_local_rank_from_env = -1
+  end function mpi_local_rank_from_env
+
   !==========================================================
   SUBROUTINE timeloop()
     USE dnsdata
@@ -234,8 +255,11 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
       ! apply boundary conditions from input file (Couette-like)
       call roctxPush("boundary_conditions")
       IF (has_average) THEN
+        !$omp target
         bc0(0, 0, 1) = u0; bcn(0, 0, 1) = uN
+        !$omp end target
       END IF
+      !$omp target teams distribute parallel do collapse(3) private(iPhi, ix, iz)
       DO iPhi = 1, nPhi
         DO ix = nx0, nxN
           DO iz = -nz, nz
@@ -249,7 +273,7 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
           END DO
         END DO
       END DO
-      !$omp target update to(bc0, bcn)
+      !$omp end target teams distribute parallel do
       call roctxPop("boundary_conditions")
       ! Increment number of steps
       istep = istep + 1
@@ -327,12 +351,14 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
     USE convvelo, only: finalize_convvelo_runtime
     USE pressure_output, only: free_pressure_output
     USE byte_workspace, only: workspace_finalize
+    USE y_schur_solver, only: ys_schur_finalize_contexts
+    USE y_line_solvers, only: ys_finalize_nccl_contexts
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
     USE ffts, only: free_fft
 #elif defined(HAVE_FFTW)
     USE ffts, only: free_fft
 #endif
-    USE mpi_transpose, only: free_MPI
+    USE mpi_transpose, only: free_MPI, finalize_xcomm_nccl_contexts
     IMPLICIT NONE
     if (disable_restart_write) then
       IF (has_terminal) WRITE (*, *) "End of time/iterations loop: restart write disabled for benchmark profiling at time ", time
@@ -350,6 +376,9 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
 #elif defined(HAVE_FFTW)
     CALL free_fft(VVdz, VVdx, rVVdx)
 #endif
+    call ys_schur_finalize_contexts()
+    call ys_finalize_nccl_contexts()
+    call finalize_xcomm_nccl_contexts()
     CALL free_MPI()
     CALL free_memory(.TRUE.)
     call workspace_finalize()

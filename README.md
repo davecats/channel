@@ -236,6 +236,8 @@ Common controls:
 | `CHANNEL_MPI_AUTOTUNE` | `off`, `false`, or `0` disables autotuning; `report` prints a recommendation without applying it. |
 | `CHANNEL_MPI_AUTOTUNE_REPEATS` | Timed repeats per autotune candidate. |
 | `CHANNEL_Y_SOLVER` | Select y solver path, if manually overriding autotuning. |
+| `CHANNEL_Y_PIPELINE_BATCHES` | Force the pipelined LU y-solver batch count; must be at least `1`. |
+| `CHANNEL_Y_PIPELINE_TIMING` | Print detailed pipelined LU timing when set. |
 | `CHANNEL_Y_SCHUR_PASSES` | Manual y-Schur hierarchy, e.g. `2x4`; product must equal `CHANNEL_NPY`. |
 | `CHANNEL_Y_SCHUR_EXCHANGE` | `auto`, `alltoall`, or `allgather`. |
 | `CHANNEL_OVERLAPPING` | Enable overlap of communication and computation where supported. |

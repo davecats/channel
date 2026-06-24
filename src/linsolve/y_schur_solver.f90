@@ -40,6 +40,7 @@ module y_schur_solver
   public :: ys_schur_default_pass_counts
   public :: ys_schur_prepare
   public :: ys_schur_release
+  public :: ys_schur_finalize_contexts
   public :: ys_schur_solve_from_packed
 
   integer(C_INT), allocatable, save :: s_pass_counts(:)
@@ -60,6 +61,8 @@ module y_schur_solver
   type(MPI_Comm), allocatable, save :: s_level_comm(:)
   logical, allocatable, save :: s_level_comm_active(:)
   type(c_ptr), allocatable, save :: s_level_nccl_ctx(:)
+  integer(C_INT), allocatable, save :: s_level_nccl_key_npy(:), s_level_nccl_key_span(:)
+  integer(C_INT), allocatable, save :: s_level_nccl_key_arity(:), s_level_nccl_key_parent(:)
 #else
   integer(C_INT), parameter :: ipy = 0_C_INT
   complex(C_DOUBLE_COMPLEX), allocatable, save :: ycomm_sendbuf(:), ycomm_recvbuf(:)
@@ -138,7 +141,6 @@ contains
 #ifdef HAVE_MPI
     if (allocated(s_level_comm)) then
       do ilevel = 1, size(s_level_comm)
-        if (allocated(s_level_nccl_ctx)) call channel_comm_context_reset(s_level_nccl_ctx(ilevel))
         if (s_level_comm_active(ilevel)) then
           call MPI_Comm_free(s_level_comm(ilevel), ierr_local)
           if (ierr_local /= MPI_SUCCESS) error stop "MPI_Comm_free y-Schur level communicator failed"
@@ -147,7 +149,6 @@ contains
         end if
       end do
       deallocate (s_level_comm, s_level_comm_active)
-      if (allocated(s_level_nccl_ctx)) deallocate (s_level_nccl_ctx)
     end if
 #endif
 
@@ -174,6 +175,93 @@ contains
     ws%pass_count = 0_C_INT
     ws%prepared = .false.
   end subroutine ys_schur_release
+
+#ifdef HAVE_MPI
+  subroutine ensure_schur_nccl_context_slots(pass_count)
+    implicit none
+    integer(C_INT), intent(in) :: pass_count
+    type(c_ptr), allocatable :: ctx_tmp(:)
+    integer(C_INT), allocatable :: key_tmp(:)
+    integer :: old_count, new_count
+
+    if (.not. allocated(s_level_nccl_ctx)) then
+      allocate (s_level_nccl_ctx(max(1_C_INT, pass_count)))
+      allocate (s_level_nccl_key_npy(max(1_C_INT, pass_count)))
+      allocate (s_level_nccl_key_span(max(1_C_INT, pass_count)))
+      allocate (s_level_nccl_key_arity(max(1_C_INT, pass_count)))
+      allocate (s_level_nccl_key_parent(max(1_C_INT, pass_count)))
+      s_level_nccl_ctx = c_null_ptr
+      s_level_nccl_key_npy = -1_C_INT
+      s_level_nccl_key_span = -1_C_INT
+      s_level_nccl_key_arity = -1_C_INT
+      s_level_nccl_key_parent = -1_C_INT
+    else if (size(s_level_nccl_ctx) < pass_count) then
+      old_count = size(s_level_nccl_ctx)
+      new_count = max(pass_count, 2*old_count)
+
+      allocate (ctx_tmp(new_count))
+      ctx_tmp = c_null_ptr
+      ctx_tmp(1:old_count) = s_level_nccl_ctx
+      call move_alloc(ctx_tmp, s_level_nccl_ctx)
+
+      allocate (key_tmp(new_count))
+      key_tmp = -1_C_INT
+      key_tmp(1:old_count) = s_level_nccl_key_npy
+      call move_alloc(key_tmp, s_level_nccl_key_npy)
+
+      allocate (key_tmp(new_count))
+      key_tmp = -1_C_INT
+      key_tmp(1:old_count) = s_level_nccl_key_span
+      call move_alloc(key_tmp, s_level_nccl_key_span)
+
+      allocate (key_tmp(new_count))
+      key_tmp = -1_C_INT
+      key_tmp(1:old_count) = s_level_nccl_key_arity
+      call move_alloc(key_tmp, s_level_nccl_key_arity)
+
+      allocate (key_tmp(new_count))
+      key_tmp = -1_C_INT
+      key_tmp(1:old_count) = s_level_nccl_key_parent
+      call move_alloc(key_tmp, s_level_nccl_key_parent)
+    end if
+  end subroutine ensure_schur_nccl_context_slots
+
+  subroutine prepare_schur_nccl_context_slot(ilevel, npy_count, span, arity, parent_group)
+    implicit none
+    integer, intent(in) :: ilevel
+    integer(C_INT), intent(in) :: npy_count, span, arity, parent_group
+
+    if (.not. allocated(s_level_nccl_ctx)) return
+    if (s_level_nccl_key_npy(ilevel) == npy_count .and. &
+        s_level_nccl_key_span(ilevel) == span .and. &
+        s_level_nccl_key_arity(ilevel) == arity .and. &
+        s_level_nccl_key_parent(ilevel) == parent_group) return
+
+    call channel_comm_context_reset(s_level_nccl_ctx(ilevel))
+    s_level_nccl_key_npy(ilevel) = npy_count
+    s_level_nccl_key_span(ilevel) = span
+    s_level_nccl_key_arity(ilevel) = arity
+    s_level_nccl_key_parent(ilevel) = parent_group
+  end subroutine prepare_schur_nccl_context_slot
+#endif
+
+  subroutine ys_schur_finalize_contexts()
+    implicit none
+#ifdef HAVE_MPI
+    integer :: ilevel
+
+    if (allocated(s_level_nccl_ctx)) then
+      do ilevel = 1, size(s_level_nccl_ctx)
+        call channel_comm_context_reset(s_level_nccl_ctx(ilevel))
+      end do
+      deallocate (s_level_nccl_ctx)
+    end if
+    if (allocated(s_level_nccl_key_npy)) deallocate (s_level_nccl_key_npy)
+    if (allocated(s_level_nccl_key_span)) deallocate (s_level_nccl_key_span)
+    if (allocated(s_level_nccl_key_arity)) deallocate (s_level_nccl_key_arity)
+    if (allocated(s_level_nccl_key_parent)) deallocate (s_level_nccl_key_parent)
+#endif
+  end subroutine ys_schur_finalize_contexts
 
   subroutine ys_schur_prepare(ws, cfg, nlines, npy_count)
     implicit none
@@ -241,10 +329,10 @@ contains
     s_value_recv_elems = 0_C_INT
 
 #ifdef HAVE_MPI
-    allocate (s_level_comm(ws%pass_count), s_level_comm_active(ws%pass_count), s_level_nccl_ctx(ws%pass_count))
+    allocate (s_level_comm(ws%pass_count), s_level_comm_active(ws%pass_count))
     s_level_comm = MPI_COMM_NULL
     s_level_comm_active = .false.
-    s_level_nccl_ctx = c_null_ptr
+    call ensure_schur_nccl_context_slots(ws%pass_count)
 #else
     error stop "distributed y-Schur requires MPI"
 #endif
@@ -265,6 +353,7 @@ contains
       child_pos = mod(rank_in_parent, child_span)
       parent_group = ipy/span
       s_level_child_id(ilevel) = child_id
+      call prepare_schur_nccl_context_slot(ilevel, npy_count, span, s_level_arity(ilevel), parent_group)
       select case (cfg%exchange_mode)
       case (YS_SCHUR_EXCHANGE_AUTO)
         if (ilevel == ws%pass_count .and. s_level_arity(ilevel) == 2_C_INT) then
@@ -449,6 +538,7 @@ contains
     implicit none
     integer, intent(in) :: ilevel
 #ifdef HAVE_MPI
+    integer :: ierr_local
     real(C_DOUBLE) :: comm_t0, elapsed
 
     comm_t0 = 0.0_C_DOUBLE

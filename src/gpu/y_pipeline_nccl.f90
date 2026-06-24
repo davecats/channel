@@ -6,10 +6,18 @@ module y_pipeline_nccl
   implicit none
   private
 
-  public :: channel_comm_use_nccl
+  integer(c_int), parameter, public :: CHANNEL_COMM_BACKEND_AUTO = 0_c_int
+  integer(c_int), parameter, public :: CHANNEL_COMM_BACKEND_MPI = 1_c_int
+  integer(c_int), parameter, public :: CHANNEL_COMM_BACKEND_NCCL = 2_c_int
+
+  integer(c_int), save :: channel_comm_override = CHANNEL_COMM_BACKEND_AUTO
+
+  public :: channel_comm_use_nccl, channel_comm_available
+  public :: channel_comm_backend_from_env, channel_comm_backend_name
+  public :: channel_comm_set_backend_override, channel_comm_clear_backend_override
   public :: channel_comm_alltoall_complex
   public :: channel_comm_p2p_ensure, channel_comm_send, channel_comm_recv, channel_comm_sendrecv
-  public :: channel_comm_p2p_reset, channel_comm_context_reset
+  public :: channel_comm_context_reset
 
 #ifdef HAVE_NCCL
   interface
@@ -61,6 +69,16 @@ module y_pipeline_nccl
       integer(c_size_t), value :: count_elems
     end function channel_nccl_context_alltoall
 
+    function channel_nccl_context_sendrecv(ctx, sendbuf, send_elems, send_peer, recvbuf, recv_elems, recv_peer) &
+      bind(c, name="channel_nccl_context_sendrecv")
+      use, intrinsic :: iso_c_binding
+      implicit none
+      integer(c_int) :: channel_nccl_context_sendrecv
+      type(c_ptr), value :: ctx, sendbuf, recvbuf
+      integer(c_size_t), value :: send_elems, recv_elems
+      integer(c_int), value :: send_peer, recv_peer
+    end function channel_nccl_context_sendrecv
+
     function channel_nccl_context_destroy(ctx) bind(c, name="channel_nccl_context_destroy")
       use, intrinsic :: iso_c_binding
       implicit none
@@ -68,8 +86,6 @@ module y_pipeline_nccl
       type(c_ptr), value :: ctx
     end function channel_nccl_context_destroy
   end interface
-
-  logical, save :: p2p_initialized = .false.
 #endif
 
 contains
@@ -81,61 +97,85 @@ contains
 #endif
   end function channel_comm_available
 
-  logical function channel_comm_use_nccl()
+  integer(c_int) function channel_comm_backend_from_env()
     integer :: status, length
     character(len=32) :: value
 
-    channel_comm_use_nccl = .false.
+    channel_comm_backend_from_env = CHANNEL_COMM_BACKEND_AUTO
     call get_environment_variable("CHANNEL_COMM", value, length, status)
     if (status /= 0 .or. length <= 0) return
     select case (adjustl(trim(value(:length))))
+    case ("auto", "AUTO")
+      channel_comm_backend_from_env = CHANNEL_COMM_BACKEND_AUTO
+    case ("mpi", "MPI")
+      channel_comm_backend_from_env = CHANNEL_COMM_BACKEND_MPI
     case ("nccl", "NCCL", "rccl", "RCCL")
-      if (.not. channel_comm_available()) &
-        error stop "CHANNEL_COMM=nccl requested, but this build has no NCCL/RCCL support"
-      channel_comm_use_nccl = .true.
-    case ("mpi", "MPI", "auto", "AUTO")
-      channel_comm_use_nccl = .false.
+      channel_comm_backend_from_env = CHANNEL_COMM_BACKEND_NCCL
     case default
       error stop "CHANNEL_COMM must be mpi, auto, or nccl"
     end select
+  end function channel_comm_backend_from_env
+
+  character(8) function channel_comm_backend_name(backend)
+    integer(c_int), intent(in) :: backend
+
+    select case (backend)
+    case (CHANNEL_COMM_BACKEND_MPI)
+      channel_comm_backend_name = "mpi"
+    case (CHANNEL_COMM_BACKEND_NCCL)
+      channel_comm_backend_name = "nccl"
+    case (CHANNEL_COMM_BACKEND_AUTO)
+      channel_comm_backend_name = "auto"
+    case default
+      channel_comm_backend_name = "invalid"
+    end select
+  end function channel_comm_backend_name
+
+  subroutine channel_comm_set_backend_override(backend)
+    integer(c_int), intent(in) :: backend
+
+    select case (backend)
+    case (CHANNEL_COMM_BACKEND_AUTO, CHANNEL_COMM_BACKEND_MPI)
+      channel_comm_override = backend
+    case (CHANNEL_COMM_BACKEND_NCCL)
+      if (.not. channel_comm_available()) &
+        error stop "CHANNEL_COMM=nccl requested, but this build has no NCCL/RCCL support"
+      channel_comm_override = backend
+    case default
+      error stop "invalid CHANNEL_COMM backend override"
+    end select
+  end subroutine channel_comm_set_backend_override
+
+  subroutine channel_comm_clear_backend_override()
+    channel_comm_override = CHANNEL_COMM_BACKEND_AUTO
+  end subroutine channel_comm_clear_backend_override
+
+  logical function channel_comm_use_nccl()
+    integer(c_int) :: backend
+
+    backend = channel_comm_override
+    if (backend == CHANNEL_COMM_BACKEND_AUTO) backend = channel_comm_backend_from_env()
+    select case (backend)
+    case (CHANNEL_COMM_BACKEND_NCCL)
+      if (.not. channel_comm_available()) &
+        error stop "CHANNEL_COMM=nccl requested, but this build has no NCCL/RCCL support"
+      channel_comm_use_nccl = .true.
+    case (CHANNEL_COMM_BACKEND_AUTO, CHANNEL_COMM_BACKEND_MPI)
+      channel_comm_use_nccl = .false.
+    case default
+      error stop "invalid CHANNEL_COMM backend"
+    end select
   end function channel_comm_use_nccl
 
-  subroutine channel_comm_p2p_ensure(comm)
+  subroutine channel_comm_p2p_ensure(comm, comm_ctx)
     type(MPI_Comm), intent(in) :: comm
+    type(c_ptr), intent(inout) :: comm_ctx
 #ifdef HAVE_NCCL
-    integer(c_int8_t), target :: id_bytes(128)
-    integer(c_int) :: nranks, rank, status
-    integer :: ierr
-
-    if (p2p_initialized) return
-
-    call MPI_Comm_rank(comm, rank, ierr)
-    call MPI_Comm_size(comm, nranks, ierr)
-    if (rank == 0_c_int) then
-      status = channel_nccl_get_unique_id(c_loc(id_bytes))
-      if (status /= 0_c_int) error stop "channel_nccl_get_unique_id failed"
-    end if
-    call MPI_Bcast(id_bytes, 128, MPI_BYTE, 0, comm, ierr)
-    status = channel_nccl_init(nranks, rank, c_loc(id_bytes))
-    if (status /= 0_c_int) error stop "channel_nccl_init failed"
-    p2p_initialized = .true.
+    call channel_comm_ensure_context(comm, comm_ctx)
 #else
-    associate (unused_comm => comm)
-    end associate
     error stop "NCCL/RCCL point-to-point backend requested, but this build has no support"
 #endif
   end subroutine channel_comm_p2p_ensure
-
-  subroutine channel_comm_p2p_reset()
-#ifdef HAVE_NCCL
-    integer(c_int) :: status
-
-    if (.not. p2p_initialized) return
-    status = channel_nccl_finalize()
-    if (status /= 0_c_int) error stop "channel_nccl_finalize failed"
-    p2p_initialized = .false.
-#endif
-  end subroutine channel_comm_p2p_reset
 
   subroutine channel_comm_context_reset(ctx)
     type(c_ptr), intent(inout) :: ctx
@@ -151,10 +191,10 @@ contains
 #endif
   end subroutine channel_comm_context_reset
 
-#ifdef HAVE_NCCL
   subroutine channel_comm_ensure_context(comm, ctx)
     type(MPI_Comm), intent(in) :: comm
     type(c_ptr), intent(inout) :: ctx
+#ifdef HAVE_NCCL
     integer(c_int8_t), target :: id_bytes(128)
     integer(c_int) :: nranks, rank, status
     integer :: ierr
@@ -170,8 +210,10 @@ contains
     call MPI_Bcast(id_bytes, 128, MPI_BYTE, 0, comm, ierr)
     status = channel_nccl_context_create(nranks, rank, c_loc(id_bytes), ctx)
     if (status /= 0_c_int) error stop "channel_nccl_context_create failed"
-  end subroutine channel_comm_ensure_context
+#else
+    error stop "NCCL/RCCL collective backend requested, but this build has no support"
 #endif
+  end subroutine channel_comm_ensure_context
 
   subroutine channel_comm_alltoall_complex(sendbuf, recvbuf, count, comm, comm_ctx, request)
     complex(c_double_complex), intent(in), target, contiguous :: sendbuf(:)
@@ -194,8 +236,6 @@ contains
 #endif
       if (present(request)) request = MPI_REQUEST_NULL
 #else
-      associate (unused_comm_ctx => comm_ctx)
-      end associate
       error stop "CHANNEL_COMM=nccl requested, but this build has no NCCL/RCCL support"
 #endif
     else
@@ -216,60 +256,57 @@ contains
     end if
   end subroutine channel_comm_alltoall_complex
 
-#ifdef HAVE_NCCL
   subroutine channel_nccl_alltoall(ctx, sendptr, recvptr, count)
     type(c_ptr), intent(in), value :: ctx, sendptr, recvptr
     integer(c_int), intent(in), value :: count
+#ifdef HAVE_NCCL
     integer(c_int) :: status
 
     status = channel_nccl_context_alltoall(ctx, sendptr, recvptr, int(count, c_size_t))
     if (status /= 0_c_int) error stop "channel_nccl_alltoall failed"
-  end subroutine channel_nccl_alltoall
+#else
+    error stop "NCCL/RCCL collective backend requested, but this build has no support"
 #endif
+  end subroutine channel_nccl_alltoall
 
-  subroutine channel_comm_send(sendptr, count, peer)
-    type(c_ptr), intent(in), value :: sendptr
+  subroutine channel_comm_send(comm_ctx, sendptr, count, peer)
+    type(c_ptr), intent(in), value :: comm_ctx, sendptr
     integer(c_int), intent(in), value :: count, peer
 #ifdef HAVE_NCCL
     integer(c_int) :: status
 
-    status = channel_nccl_sendrecv(sendptr, int(count, c_size_t), peer, c_null_ptr, 0_c_size_t, -1_c_int)
+    status = channel_nccl_context_sendrecv(comm_ctx, sendptr, int(count, c_size_t), peer, &
+                                           c_null_ptr, 0_c_size_t, -1_c_int)
     if (status /= 0_c_int) error stop "channel_comm_send failed"
 #else
-    associate (unused_sendptr => sendptr, unused_count => count, unused_peer => peer)
-    end associate
     error stop "NCCL/RCCL point-to-point backend requested, but this build has no support"
 #endif
   end subroutine channel_comm_send
 
-  subroutine channel_comm_recv(recvptr, count, peer)
-    type(c_ptr), intent(in), value :: recvptr
+  subroutine channel_comm_recv(comm_ctx, recvptr, count, peer)
+    type(c_ptr), intent(in), value :: comm_ctx, recvptr
     integer(c_int), intent(in), value :: count, peer
 #ifdef HAVE_NCCL
     integer(c_int) :: status
 
-    status = channel_nccl_sendrecv(c_null_ptr, 0_c_size_t, -1_c_int, recvptr, int(count, c_size_t), peer)
+    status = channel_nccl_context_sendrecv(comm_ctx, c_null_ptr, 0_c_size_t, -1_c_int, &
+                                           recvptr, int(count, c_size_t), peer)
     if (status /= 0_c_int) error stop "channel_comm_recv failed"
 #else
-    associate (unused_recvptr => recvptr, unused_count => count, unused_peer => peer)
-    end associate
     error stop "NCCL/RCCL point-to-point backend requested, but this build has no support"
 #endif
   end subroutine channel_comm_recv
 
-  subroutine channel_comm_sendrecv(sendptr, send_count, send_peer, recvptr, recv_count, recv_peer)
-    type(c_ptr), intent(in), value :: sendptr, recvptr
+  subroutine channel_comm_sendrecv(comm_ctx, sendptr, send_count, send_peer, recvptr, recv_count, recv_peer)
+    type(c_ptr), intent(in), value :: comm_ctx, sendptr, recvptr
     integer(c_int), intent(in), value :: send_count, send_peer, recv_count, recv_peer
 #ifdef HAVE_NCCL
     integer(c_int) :: status
 
-    status = channel_nccl_sendrecv(sendptr, int(send_count, c_size_t), send_peer, &
-                                   recvptr, int(recv_count, c_size_t), recv_peer)
+    status = channel_nccl_context_sendrecv(comm_ctx, sendptr, int(send_count, c_size_t), send_peer, &
+                                           recvptr, int(recv_count, c_size_t), recv_peer)
     if (status /= 0_c_int) error stop "channel_comm_sendrecv failed"
 #else
-    associate (unused_sendptr => sendptr, unused_send_count => send_count, unused_send_peer => send_peer, &
-               unused_recvptr => recvptr, unused_recv_count => recv_count, unused_recv_peer => recv_peer)
-    end associate
     error stop "NCCL/RCCL point-to-point backend requested, but this build has no support"
 #endif
   end subroutine channel_comm_sendrecv
