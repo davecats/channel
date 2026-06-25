@@ -7,12 +7,16 @@ import argparse
 import configparser
 from pathlib import Path
 
+import dask
 import numpy as np
+from dask.diagnostics import ProgressBar
 from scipy.interpolate import interp1d
 
 
 NOISE_AMPLITUDE = 5.0e-6
 OUTPUT_NAME = "Dati.cart.interp"
+HEADER_BYTES = 3 * np.dtype(np.int32).itemsize + 7 * np.dtype(np.float64).itemsize
+COMPLEX_BYTES = np.dtype(np.complex128).itemsize
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,10 +33,16 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="1-based scalar index from the input file to duplicate into all output scalar fields.",
     )
+    parser.add_argument(
+        "--chunks-x",
+        type=int,
+        default=16,
+        help="Number of kx planes per dask task. Use <=0 for one full-width chunk.",
+    )
     return parser.parse_args()
 
 
-def read_restart(path: Path) -> tuple[dict[str, float | int], np.ndarray]:
+def read_restart_header(path: Path) -> tuple[dict[str, float | int], int]:
     with path.open("rb") as handle:
         header = {
             "nx": np.fromfile(handle, dtype=np.int32, count=1)[0],
@@ -47,17 +57,11 @@ def read_restart(path: Path) -> tuple[dict[str, float | int], np.ndarray]:
             "time": np.fromfile(handle, dtype=np.float64, count=1)[0],
         }
 
-        remaining = np.fromfile(handle, dtype=np.complex128)
-
-    base_points = (header["nx"] + 1) * (2 * header["nz"] + 1) * (header["ny"] + 3)
-    if base_points == 0 or remaining.size % base_points != 0:
+    base_points = (int(header["nx"]) + 1) * (2 * int(header["nz"]) + 1) * (int(header["ny"]) + 3)
+    payload_bytes = path.stat().st_size - HEADER_BYTES
+    if base_points == 0 or payload_bytes <= 0 or payload_bytes % (base_points * COMPLEX_BYTES) != 0:
         raise ValueError(f"{path} does not contain a valid restart payload")
-
-    n_components = remaining.size // base_points
-    field = remaining.reshape(
-        (n_components, header["nx"] + 1, 2 * header["nz"] + 1, header["ny"] + 3)
-    )
-    return header, field
+    return header, payload_bytes // (base_points * COMPLEX_BYTES)
 
 
 def read_target_config() -> dict[str, float | int]:
@@ -89,14 +93,29 @@ def make_noise(shape: tuple[int, ...]) -> np.ndarray:
     return NOISE_AMPLITUDE * np.exp(1.0j * phase)
 
 
-def interpolate_field(
+def resolve_input_scalar(nphi_in: int, nphi_out: int, input_scalar: int | None) -> int | None:
+    if nphi_in > 0 and nphi_out > 0 and input_scalar is None:
+        input_scalar = int(input(f"Input file contains {nphi_in} scalar(s). Select one to use [1-{nphi_in}]: "))
+
+    if nphi_in == 0:
+        return None
+    if input_scalar is not None and not (1 <= input_scalar <= nphi_in):
+        raise ValueError(f"--input-scalar must be between 1 and {nphi_in}")
+    return input_scalar
+
+
+def interpolate_restart_dask(
+    source_path: Path,
     source_header: dict[str, float | int],
-    source_field: np.ndarray,
+    n_components_in: int,
     target: dict[str, float | int],
+    output_path: Path,
     input_scalar: int | None,
-) -> np.ndarray:
+    chunks_x: int,
+) -> None:
+    nphi_in = n_components_in - 3
     nphi_out = int(target["nphi"])
-    out = make_noise((3 + nphi_out, int(target["nx"]) + 1, 2 * int(target["nz"]) + 1, int(target["ny"]) + 3))
+    input_scalar = resolve_input_scalar(nphi_in, nphi_out, input_scalar)
 
     y_old = build_y_grid(
         int(source_header["ny"]),
@@ -110,57 +129,84 @@ def interpolate_field(
         float(target["ymax"]),
         float(target["a"]),
     )
+    nxf_out = int(target["nx"]) + 1
+    if chunks_x <= 0:
+        chunks_x = nxf_out
 
-    nx_common = min(int(source_header["nx"]), int(target["nx"]))
-    nz_common = min(int(source_header["nz"]), int(target["nz"]))
-    nphi_in = source_field.shape[0] - 3
-    src_nz = int(source_header["nz"])
-    dst_nz = int(target["nz"])
+    @dask.delayed
+    def _write_header() -> None:
+        with output_path.open("wb") as handle:
+            np.array(target["nx"], dtype=np.int32).tofile(handle)
+            np.array(target["ny"], dtype=np.int32).tofile(handle)
+            np.array(target["nz"], dtype=np.int32).tofile(handle)
+            np.array(target["alfa0"], dtype=np.float64).tofile(handle)
+            np.array(target["beta0"], dtype=np.float64).tofile(handle)
+            np.array(1 / target["ni"], dtype=np.float64).tofile(handle)
+            np.array(target["a"], dtype=np.float64).tofile(handle)
+            np.array(target["ymin"], dtype=np.float64).tofile(handle)
+            np.array(target["ymax"], dtype=np.float64).tofile(handle)
+            np.array(0, dtype=np.float64).tofile(handle)
 
-    if nphi_in > 0 and nphi_out > 0 and input_scalar is None:
-        input_scalar = int(input(f"Input file contains {nphi_in} scalar(s). Select one to use [1-{nphi_in}]: "))
+    @dask.delayed
+    def _interpolate_and_write_component(component_out: int, x_start: int, x_stop: int, _header_done: object) -> None:
+        src_nxf = int(source_header["nx"]) + 1
+        src_nzf = 2 * int(source_header["nz"]) + 1
+        src_nyf = int(source_header["ny"]) + 3
+        dst_nxf = int(target["nx"]) + 1
+        dst_nzf = 2 * int(target["nz"]) + 1
+        dst_nyf = int(target["ny"]) + 3
 
-    if nphi_in == 0:
-        input_scalar = None
-    elif input_scalar is not None and not (1 <= input_scalar <= nphi_in):
-        raise ValueError(f"--input-scalar must be between 1 and {nphi_in}")
+        slab = make_noise((x_stop - x_start, dst_nzf, dst_nyf))
+        nx_common = min(int(source_header["nx"]), int(target["nx"]))
 
-    src_slice = np.s_[:, : nx_common + 1, src_nz - nz_common:src_nz + nz_common + 1, :]
-    dst_slice = np.s_[:, : nx_common + 1, dst_nz - nz_common:dst_nz + nz_common + 1, :]
-    interp = interp1d(y_old, source_field[src_slice], axis=-1)
-    interp_values = interp(y_new)
+        if x_start <= nx_common and (component_out < 3 or nphi_in > 0):
+            x_common_stop = min(x_stop, nx_common + 1)
+            src_nz = int(source_header["nz"])
+            dst_nz = int(target["nz"])
+            nz_common = min(src_nz, dst_nz)
+            component_in = component_out if component_out < 3 else 2 + int(input_scalar)
+            source_plane_bytes = src_nzf * src_nyf * COMPLEX_BYTES
+            source_offset = HEADER_BYTES + (component_in * src_nxf + x_start) * source_plane_bytes
+            source_count = (x_common_stop - x_start) * src_nzf * src_nyf
 
-    out[dst_slice][0:3] = interp_values[0:3]
+            with source_path.open("rb") as handle:
+                handle.seek(source_offset)
+                source_slab = np.fromfile(handle, dtype=np.complex128, count=source_count)
 
-    if nphi_in > 0 and nphi_out > 0:
-        comp_in = 2 + input_scalar
-        scalar_block = interp_values[comp_in]
-        out[3:3 + nphi_out, : nx_common + 1, dst_nz - nz_common:dst_nz + nz_common + 1, :] = scalar_block[None, ...]
+            source_slab = source_slab.reshape((x_common_stop - x_start, src_nzf, src_nyf))
+            interp_values = interp1d(y_old, source_slab[:, src_nz - nz_common:src_nz + nz_common + 1, :], axis=-1)(y_new)
+            slab[: x_common_stop - x_start, dst_nz - nz_common:dst_nz + nz_common + 1, :] = interp_values
 
-    return out
+        dest_plane_bytes = dst_nzf * dst_nyf * COMPLEX_BYTES
+        dest_offset = HEADER_BYTES + (component_out * dst_nxf + x_start) * dest_plane_bytes
+        with output_path.open("r+b") as handle:
+            handle.seek(dest_offset)
+            np.ascontiguousarray(slab).tofile(handle)
 
+    header_task = _write_header()
+    write_tasks = []
+    for x_start in range(0, nxf_out, chunks_x):
+        x_stop = min(x_start + chunks_x, nxf_out)
+        for component_out in range(3 + nphi_out):
+            write_tasks.append(_interpolate_and_write_component(component_out, x_start, x_stop, header_task))
 
-def write_restart(path: Path, target: dict[str, float | int], time: float, field: np.ndarray) -> None:
-    with path.open("wb") as handle:
-        np.array(target["nx"], dtype=np.int32).tofile(handle)
-        np.array(target["ny"], dtype=np.int32).tofile(handle)
-        np.array(target["nz"], dtype=np.int32).tofile(handle)
-        np.array(target["alfa0"], dtype=np.float64).tofile(handle)
-        np.array(target["beta0"], dtype=np.float64).tofile(handle)
-        np.array(1 / target["ni"], dtype=np.float64).tofile(handle)
-        np.array(target["a"], dtype=np.float64).tofile(handle)
-        np.array(target["ymin"], dtype=np.float64).tofile(handle)
-        np.array(target["ymax"], dtype=np.float64).tofile(handle)
-        np.array(time, dtype=np.float64).tofile(handle)
-        field.tofile(handle)
+    with ProgressBar():
+        dask.compute(*write_tasks)
 
 
 def main() -> None:
     args = parse_args()
-    source_header, source_field = read_restart(args.restart_file)
+    source_header, n_components_in = read_restart_header(args.restart_file)
     target = read_target_config()
-    out_field = interpolate_field(source_header, source_field, target, args.input_scalar)
-    write_restart(Path.cwd() / OUTPUT_NAME, target, 0, out_field)
+    interpolate_restart_dask(
+        args.restart_file,
+        source_header,
+        n_components_in,
+        target,
+        Path.cwd() / OUTPUT_NAME,
+        args.input_scalar,
+        args.chunks_x,
+    )
 
 
 if __name__ == "__main__":
