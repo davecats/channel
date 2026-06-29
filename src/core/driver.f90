@@ -48,7 +48,11 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
     integer(C_SIZE_T) :: workspace_peak_bytes, sparse_external_bytes
     integer :: iPhi
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
+#ifdef HAVE_MPI
+    integer :: num_dev, dev, local_rank, num_dev_min, num_dev_max
+#else
     integer :: num_dev, dev, local_rank
+#endif
 #endif
     integer :: env_status, env_length
     logical :: run_solver
@@ -70,6 +74,25 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
 
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
     num_dev = omp_get_num_devices()
+#ifdef HAVE_MPI
+    call MPI_Allreduce(num_dev, num_dev_min, 1, MPI_INTEGER, MPI_MIN, MPI_COMM_WORLD, ierr)
+    call MPI_Allreduce(num_dev, num_dev_max, 1, MPI_INTEGER, MPI_MAX, MPI_COMM_WORLD, ierr)
+    if (num_dev_min < 1 .or. num_dev_min /= num_dev_max) then
+      if (num_dev < 1 .or. num_dev == num_dev_min) then
+        print *, 'ERROR: rank', iproc, 'sees', num_dev, 'OpenMP target devices'
+      end if
+      if (iproc == 0) then
+        print *, 'ERROR: inconsistent OpenMP target device count across ranks.'
+        print *, '       Minimum devices =', num_dev_min, ' maximum devices =', num_dev_max
+      end if
+      call MPI_Abort(MPI_COMM_WORLD, 1, ierr)
+    end if
+#else
+    if (num_dev < 1) then
+      print *, 'ERROR: no OpenMP target devices are available'
+      error stop 'No OpenMP target devices are available'
+    end if
+#endif
     local_rank = mpi_local_rank_from_env()
     if (local_rank >= 0) then
       dev = mod(local_rank, num_dev)
