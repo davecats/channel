@@ -56,8 +56,6 @@ MODULE dnsdata
   real(C_DOUBLE), allocatable :: der(:, :, :)
   real(C_DOUBLE), dimension(-2:2) :: d040, d140, d240, d14m1, d24m1, d04n, d14n, d24n, d14np1, d24np1
   !$omp declare target(d14np1, d14n, d14m1, d140)
-  real(C_DOUBLE), allocatable :: D0mat(:, :), eta00mat(:, :)
-  real(C_DOUBLE), target, allocatable ::  ws(:)
   complex(C_DOUBLE_COMPLEX), pointer :: memrhs(:, :, :, :)
 #if !(defined(HAVE_CUDA) || defined(HAVE_HIP))
   !Fourier-transformable arrays (allocated in src/fft/ffts.f90)
@@ -225,9 +223,7 @@ CONTAINS
       oldrhs = 0.0
       !$omp target enter data map(to: memrhs, oldrhs)
     END IF
-    ALLOCATE (der(1:ny - 1, 0:3, -2:2), d0mat(ny0:nyN + 2, -2:2))
-    ALLOCATE (eta00mat(ny0:nyN + 2, -2:2))
-    der = 0.0; d0mat = 0.0; eta00mat = 0.0
+    ALLOCATE (der(1:ny - 1, 0:3, -2:2)); der = 0.0
     allocate (corrtx(1:nPhi)); corrtx = 0.0d0
     allocate (ucor(ny0 - 2:nyN + 2), tcor(ny0 - 2:nyN + 2, 1:nPhi))
     ALLOCATE (y(-1:ny + 1), dy(1:ny - 1))
@@ -328,13 +324,13 @@ CONTAINS
     use y_schur_solver, only: ys_schur_finalize_contexts
     IMPLICIT NONE
     LOGICAL, intent(IN) :: solveNS
-    !$omp target exit data map(delete: d240, d24m1, d04n, d24n, d24np1, D0mat)
+    !$omp target exit data map(delete: d240, d24m1, d04n, d24n, d24np1)
     !$omp target exit data map(delete: V)
     !$omp target exit data map(delete: izd, ialfa, ibeta, k2, ucor, tcor)
 #ifdef bodyforce
     !$omp target exit data map(delete: F)
 #endif
-    DEALLOCATE (V, der, d0mat, y, dy)
+    DEALLOCATE (V, der, y, dy)
     !$omp target exit data map(delete: bc0, bcn, zero_bc)
     DEALLOCATE (bc0, bcn, zero_bc)
     IF (solveNS) THEN
@@ -359,7 +355,6 @@ CONTAINS
   !--------------------------------------------------------------!
   !--------------- Set-up the compact derivatives ---------------!
   SUBROUTINE setup_derivatives()
-    use compact_line_solvers, only: compact_lu5decomp
     IMPLICIT NONE
     real(C_DOUBLE)    :: M(0:4, 0:4), t(0:4)
     integer(C_INT)    :: iy, i, j
@@ -390,11 +385,8 @@ CONTAINS
     t = 0; t(3) = 1; d14np1(-2:2) = M.bs.t
     t = 0; t(2) = 2; d24np1(-2:2) = M.bs.t
     d04n = 0; d04n(1) = 1; 
-    D0mat = 0.0d0
-    FORALL (iy=max(1_C_INT, ny0):min(ny - 1, nyN)) D0mat(iy, -2:2) = der(iy, 0, -2:2)
-    call compact_lu5decomp(D0mat)
     !$omp target update to(d14np1, d14n, d14m1, d140)
-    !$omp target enter data map(to: d240, d24m1, d04n, d14n, d24n, d24np1, D0mat, der)
+    !$omp target enter data map(to: d240, d24m1, d04n, d14n, d24n, d24np1, der)
   END SUBROUTINE setup_derivatives
 
   !--------------------------------------------------------------!
@@ -476,9 +468,6 @@ CONTAINS
       II = II + a1*dreal(f(iy - 1)) + a2*dreal(f(iy)) + a3*dreal(f(iy + 1))
     END DO
   END FUNCTION yintegr
-
-
-
 
   SUBROUTINE apply_complex_derivative_current_layout(src, dst)
     IMPLICIT NONE
@@ -722,7 +711,7 @@ CONTAINS
         do iy = row_start, row_end
           rhs_value = owner_src(iy, iz, ix)
           ! v equation, implicit half:  lambda*(D^2 - k^2) - ni*(D^2 - k^2)^2
-          row_coeffs = lambda_coeff*${helmholtz_op('iy', '-2:2')}$ - &
+          row_coeffs = lambda_coeff*${helmholtz_op('iy', '-2:2')}$- &
                        ni*${biharmonic_op('iy', '-2:2')}$
           ys_gpsv_owner_matrix(iz, ix, iy, -2:2) = cmplx(row_coeffs(-2:2), 0.0d0, kind=C_DOUBLE)
           ys_gpsv_owner_rhs(iz, ix, iy) = rhs_value
@@ -929,7 +918,7 @@ CONTAINS
 
   SUBROUTINE solve_compact_component_current_layout(field_values, assemble_system, boundary_system, lambda_coeff, diffusion_coeff, source_values, &
                                                     symmetric_operator, derivative_order, boundaries)
-    use y_line_solvers, only: ys_prepare_assembled_workspace, ys_release_workspace, ys_solve_endpoint_schur, ys_solve_pipelined_lu, &
+   use y_line_solvers, only: ys_prepare_assembled_workspace, ys_release_workspace, ys_solve_endpoint_schur, ys_solve_pipelined_lu, &
                               Y_SOLVER_SCHUR, Y_SOLVER_PIPELINED_LU, ys_selected_solver, ys_selected_batches
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), target, intent(inout) :: field_values(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
@@ -1023,7 +1012,6 @@ CONTAINS
     call solve_full_line_compact(x, mat, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
                                  (0.0d0, 0.0d0), (0.0d0, 0.0d0), (0.0d0, 0.0d0), (0.0d0, 0.0d0), ny)
   END SUBROUTINE solve_mean_correction_line
-
 
   SUBROUTINE linsolve(lambda)
     IMPLICIT NONE
@@ -1355,7 +1343,6 @@ CONTAINS
   ! (u,v,w) = (1,2,3)
   ! (uu,vv,ww,uv,vw,uw) = (1,2,3,4,5,6)
 
-
   SUBROUTINE buildrhs_prepare(ODE)
     IMPLICIT NONE
     real(C_DOUBLE), intent(in) :: ODE(1:3)
@@ -1399,7 +1386,7 @@ CONTAINS
     DO iz = -nz, nz
       DO ix = nx0, nxN
         DO iy = y_first, y_last
-          unkn = ${apply_d('V', '2', 2)}$ - k2(iz, ix)*${apply_d('V', '2', 0)}$
+          unkn = ${apply_d('V', '2', 2)}$-k2(iz, ix)*${apply_d('V', '2', 0)}$
           tmp = 0.0
           DO k = -2, 2
             tmp = tmp + ni*${biharmonic_op('iy', 'k')}$*V(iy + k, iz, ix, 2)
@@ -1415,7 +1402,7 @@ CONTAINS
             DO k = -2, 2
               tmp = tmp + ni*${helmholtz_op('iy', 'k')}$*(ibeta(iz)*V(iy + k, iz, ix, 1) - ialfa(ix)*V(iy + k, iz, ix, 3))
             END DO
-            unkn = ibeta(iz)*${apply_d('V', '1', 0)}$ - ialfa(ix)*${apply_d('V', '3', 0)}$
+            unkn = ibeta(iz)*${apply_d('V', '1', 0)}$-ialfa(ix)*${apply_d('V', '3', 0)}$
           END IF
           memrhs(iy, iz, ix, 1) = ODE(1)*unkn/deltat + tmp - ODE(3)*oldrhs(iy, iz, ix, 1)
           oldrhs(iy, iz, ix, 1) = 0.0
@@ -1533,7 +1520,7 @@ CONTAINS
           DO iy = y_first, y_last
 
             rhsu = -${apply_d_vvdz(1, 'from')}$; rhsw = 0.0
-            expl = ialfa(ix)*${apply_d_vvdz(2, 'from')}$ + ialfa(ix)*${apply_d_vvdz(0, 'from')}$*k2(iz, ix)
+            expl = ialfa(ix)*${apply_d_vvdz(2, 'from')}$+ialfa(ix)*${apply_d_vvdz(0, 'from')}$*k2(iz, ix)
 
             $:accum_d2v('V', 'expl')
             $:accum_eta_uw('V', 'rhsu', 'rhsw')
@@ -1551,7 +1538,7 @@ CONTAINS
 
             ! contribution from VVdz(:,:,:,5)
             rhsw = -${apply_d_vvdz(1, 'from')}$; rhsu = 0.0
-            expl = ibeta(iz)*${apply_d_vvdz(2, 'from')}$ + ibeta(iz)*${apply_d_vvdz(0, 'from')}$*k2(iz, ix)
+            expl = ibeta(iz)*${apply_d_vvdz(2, 'from')}$+ibeta(iz)*${apply_d_vvdz(0, 'from')}$*k2(iz, ix)
 
             $:accum_d2v('V', 'expl')
             $:accum_eta_uw('V', 'rhsu', 'rhsw')
