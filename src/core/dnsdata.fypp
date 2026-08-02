@@ -27,6 +27,7 @@ MODULE dnsdata
   USE env_options, only: env_flag
   USE rbmat
   USE channel_grid
+  USE channel_state
   USE restart_io, ONLY: restart_read, restart_write
   USE mpi_transpose
   USE roctx, only: roctxPush, roctxPop
@@ -41,53 +42,24 @@ MODULE dnsdata
   ! nx, ny, nz, nxd, nzd, nPhi, alfa0, beta0, ymin, ymax, a and the derived
   ! grid arrays are declared in channel_grid; read_dnsin and init_memory below
   ! fill them in.
-  real(C_DOUBLE) :: ni, deltat, cflmax, time, time0 = 0, dt_field, dt_save, t_max, gamma
-  !$omp declare target(ni)
-  real(C_DOUBLE) :: u0, uN, t0, tN
-  !$omp declare target(u0, uN, t0, tN)
-  real(C_DOUBLE) :: meanpx, meanpz, meanflowx, meanflowz, meantx, meantb
-  real(C_DOUBLE) :: perturbation_amplitude = 5.54d-5
+  ! The run state -- fields, boundary planes, physical parameters and clock --
+  ! is declared in channel_state; read_dnsin and init_memory below fill it in.
   integer(C_INT) :: npy = 1
   integer(C_INT), allocatable :: schur_pass_counts(:)
   integer(C_INT) :: schur_exchange_mode = YS_SCHUR_EXCHANGE_AUTO
-  logical :: time_from_restart
-  logical :: disable_restart_write = .false.
   !Derivatives
   real(C_DOUBLE), allocatable :: der(:, :, :)
   real(C_DOUBLE), dimension(-2:2) :: d040, d140, d240, d14m1, d24m1, d04n, d14n, d24n, d14np1, d24np1
   !$omp declare target(d14np1, d14n, d14m1, d140)
-  complex(C_DOUBLE_COMPLEX), pointer :: memrhs(:, :, :, :)
 #if !(defined(HAVE_CUDA) || defined(HAVE_HIP))
   !Fourier-transformable arrays (allocated in src/fft/ffts.f90)
   complex(C_DOUBLE_COMPLEX), pointer, dimension(:, :, :, :) :: VVdx, VVdz
   real(C_DOUBLE), pointer, dimension(:, :, :, :) :: rVVdx
 #endif
-  !Solution
-  complex(C_DOUBLE_COMPLEX), allocatable :: oldrhs(:, :, :, :)
-  complex(C_DOUBLE_COMPLEX), allocatable, target :: V(:, :, :, :)
-#ifdef bodyforce
-  complex(C_DOUBLE_COMPLEX), allocatable :: F(:, :, :, :)
-#endif
   !Boundary conditions
   real(C_DOUBLE), dimension(-2:2) :: v0bc, v0m1bc, vnbc, vnp1bc, eta0bc, eta0m1bc, etanbc, etanp1bc,phi0bc,phi0m1bc,phinbc,phinp1bc
-  complex(C_DOUBLE_COMPLEX), allocatable, target :: bc0(:, :, :), bcn(:, :, :), zero_bc(:, :)
-  !Mean pressure correction
-  real(C_DOUBLE), private :: corrpx = 0.d0, corrpz = 0.d0
-  complex(C_DOUBLE_COMPLEX), allocatable :: ucor(:), tcor(:, :)
-  real(C_DOUBLE), dimension(:), allocatable :: corrtx, pra
-  !ODE Library
-  real(C_DOUBLE), dimension(3, 3) :: RK_rai = reshape( &
-                                     (/120.0d0/32.0d0, 2.0d0, 0.0d0, &
-                                       120.0d0/8.0d0, 50.0d0/8.0d0, 34.0d0/8.0d0, &
-                                       120.0d0/20.0d0, 90.0d0/20.0d0, 50.0d0/20.0d0/), &
-                                     shape=(/3, 3/))
-  !Outstats
-  real(C_DOUBLE) :: cfl = 0.0d0
-  integer(C_SIZE_T) :: istep, nstep, ifield
-  real(C_DOUBLE), dimension(:), allocatable :: fr
   !Restart file
   character(len=40) :: fname
-  logical :: overlapping
 
   public :: get_solver_memory_estimate, get_solver_workspace_estimate, get_mpi_buffer_memory_estimate
   public :: sync_velocity_to_device, apply_complex_derivative_current_layout, apply_complex_second_derivative_current_layout
