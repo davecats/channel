@@ -105,6 +105,7 @@ channel_fypp_generate(CHANNEL_GENERATED_SOURCES
 
 add_library(channel_core
     ${CHANNEL_SOURCE_DIR}/core/channel_grid.f90
+    ${CHANNEL_SOURCE_DIR}/core/compact_stencils.f90
     ${CHANNEL_SOURCE_DIR}/core/channel_state.f90
     ${CHANNEL_SOURCE_DIR}/core/env_options.f90
     ${CHANNEL_SOURCE_DIR}/core/config.f90

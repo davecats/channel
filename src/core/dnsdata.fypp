@@ -28,6 +28,7 @@ MODULE dnsdata
   USE rbmat
   USE channel_grid
   USE channel_state
+  USE compact_stencils
   USE restart_io, ONLY: restart_read, restart_write
   USE mpi_transpose
   USE roctx, only: roctxPush, roctxPop
@@ -47,10 +48,6 @@ MODULE dnsdata
   integer(C_INT) :: npy = 1
   integer(C_INT), allocatable :: schur_pass_counts(:)
   integer(C_INT) :: schur_exchange_mode = YS_SCHUR_EXCHANGE_AUTO
-  !Derivatives
-  real(C_DOUBLE), allocatable :: der(:, :, :)
-  real(C_DOUBLE), dimension(-2:2) :: d040, d140, d240, d14m1, d24m1, d04n, d14n, d24n, d14np1, d24np1
-  !$omp declare target(d14np1, d14n, d14m1, d140)
 #if !(defined(HAVE_CUDA) || defined(HAVE_HIP))
   !Fourier-transformable arrays (allocated in src/fft/ffts.f90)
   complex(C_DOUBLE_COMPLEX), pointer, dimension(:, :, :, :) :: VVdx, VVdz
