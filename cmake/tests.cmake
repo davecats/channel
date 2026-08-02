@@ -21,9 +21,15 @@ function(add_channel_mpi_test)
         COMMAND ${test_command}
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     )
+    # These all run in the source tree and write fixed output names
+    # (Runtimedata, Dati.cart.out, ...), and the test programs also default to
+    # relative input paths, so they cannot run concurrently with each other.
+    # The lock keeps "ctest -j" correct; giving each test its own directory
+    # would need the hardcoded defaults in src/test/*.f90 to go first.
     set_tests_properties(${TEST_NAME} PROPERTIES
         PROCESSORS ${TEST_PROCESSORS}
         ENVIRONMENT "${TEST_ENVIRONMENT}"
+        RESOURCE_LOCK channel_source_tree_workdir
     )
 endfunction()
 

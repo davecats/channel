@@ -1,0 +1,40 @@
+#! ===========================================================================
+#!  Wall-normal differential operators of the channel formulation.
+#!
+#!  The code solves the incompressible Navier-Stokes equations in the
+#!  velocity-vorticity (v, eta) form.  In each Fourier mode (alfa, beta) the
+#!  wall-parallel derivatives are algebraic, so every operator below reduces to
+#!  a wall-normal stencil at fixed k^2 = alfa^2 + beta^2:
+#!
+#!      D^n u  ->  sum_j der(iy, n, j) * u(iy+j)        j = -2..2
+#!
+#!  with der(:, 0, :) = D^0 (interpolation), der(:, 1, :) = D^1,
+#!  der(:, 2, :) = D^2 and der(:, 3, :) = D^4.
+#!
+#!  Each operator is defined once here and used by BOTH halves of its
+#!  equation: the implicit half, which is assembled into the banded matrix as
+#!  an array slice j = -2:2, and the explicit half, which is applied to the
+#!  field at a single offset j = k.  That is the point of this file -- these
+#!  expressions used to be written twice, ~300 lines apart and in different
+#!  notations, so a change to the viscous model could be applied to one half
+#!  and silently not the other.
+#!
+#!  The operators are unscaled: the caller supplies the coefficient, so that
+#!  the multiplication order at each call site is preserved exactly.  (Floating
+#!  point multiplication is not associative; a*b*(X) and a*(b*X) do not agree
+#!  bit-for-bit.)
+#!
+#!  In scope at every call site: der, k2, iz, ix.
+#! ===========================================================================
+
+#! Helmholtz operator  (D^2 - k^2).
+#! Viscous operator of the Squire (eta) equation and of the passive scalars.
+#:def helmholtz_op(iy, j)
+(der(${iy}$, 2, ${j}$) - k2(iz, ix)*der(${iy}$, 0, ${j}$))
+#:enddef
+
+#! Squared Helmholtz operator  (D^2 - k^2)^2 = D^4 - 2 k^2 D^2 + k^4.
+#! Viscous operator of the Orr-Sommerfeld (v) equation.
+#:def biharmonic_op(iy, j)
+(der(${iy}$, 3, ${j}$) - 2.0d0*k2(iz, ix)*der(${iy}$, 2, ${j}$) + k2(iz, ix)*k2(iz, ix)*der(${iy}$, 0, ${j}$))
+#:enddef

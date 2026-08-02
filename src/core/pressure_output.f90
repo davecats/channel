@@ -5,19 +5,21 @@ MODULE pressure_output
   USE, intrinsic :: iso_c_binding
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
   USE dnsdata, ONLY: V, der, k2, ialfa, ibeta, d140, d240, d24n, ni, alfa0, beta0, factor, &
-                     ny, nz, nxd, nPhi, izd, d040, zero_bc, overlapping, solve_compact_component_current_layout
+                     ny, nz, nxd, nPhi, izd, d040, zero_bc, overlapping, solve_compact_component_current_layout, &
+                     compact_assembly_context
   USE ffts, ONLY: FFT, IFT, RFT, HFT, VVdz, VVdx, get_fft_workspace_bytes, get_fft_workspace_bytes_for_dims, &
                   bind_fft_workspace, unbind_fft_workspace
 #else
   USE dnsdata, ONLY: V, der, k2, ialfa, ibeta, d140, d240, d24n, ni, alfa0, beta0, factor, &
-                     ny, nz, nxd, nPhi, izd, VVdz, VVdx, d040, zero_bc, overlapping, solve_compact_component_current_layout
+                     ny, nz, nxd, nPhi, izd, VVdz, VVdx, d040, zero_bc, overlapping, solve_compact_component_current_layout, &
+                     compact_assembly_context
   USE ffts, ONLY: FFT, IFT, RFT, HFT
 #endif
-  USE byte_workspace, ONLY: workspace_request, workspace_release, workspace_slice, workspace_align_offset
-  USE mpi_transpose, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, npy_grid, ipy, iproc, ierr, &
-                           sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, &
-                           fft_transpose_is_local, repack_zTOx_local, repack_xTOz_local, &
-                           roctxPush, roctxPop, &
+  USE byte_workspace, ONLY: workspace_request, workspace_release, workspace_align_offset, &
+                            workspace_layout, layout_begin, layout_bytes, layout_real_3d, layout_complex_3d
+  USE channel_grid, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, npy_grid, ipy, iproc
+  USE mpi_transpose, ONLY: ierr, sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, &
+                           fft_transpose_is_local, repack_zTOx_local, repack_xTOz_local, roctxPush, roctxPop, &
                            MPI_Request, MPI_Status, MPI_Wait
   USE y_line_solvers, ONLY: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, ys_lower_ghost_owner, ys_lower_boundary_owner, &
                             ys_upper_boundary_owner, ys_upper_ghost_owner, ys_eqm1_owner, ys_eq0_owner, &
@@ -33,12 +35,12 @@ MODULE pressure_output
 
   logical, save :: pressure_initialized = .false.
 
-  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: pressure_src0(:, :, :)
-  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: pressure_src1(:, :, :)
-  real(C_DOUBLE), pointer, contiguous, save :: pressure_real0(:, :, :)
-  real(C_DOUBLE), pointer, contiguous, save :: pressure_real1(:, :, :)
-  real(C_DOUBLE), pointer, contiguous, save :: pressure_h0(:, :, :)
-  real(C_DOUBLE), pointer, contiguous, save :: pressure_h1(:, :, :)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: pressure_src0(:, :, :) => null()
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: pressure_src1(:, :, :) => null()
+  real(C_DOUBLE), pointer, contiguous, save :: pressure_real0(:, :, :) => null()
+  real(C_DOUBLE), pointer, contiguous, save :: pressure_real1(:, :, :) => null()
+  real(C_DOUBLE), pointer, contiguous, save :: pressure_h0(:, :, :) => null()
+  real(C_DOUBLE), pointer, contiguous, save :: pressure_h1(:, :, :) => null()
 
   public :: init_pressure_output, free_pressure_output
   public :: compute_pressure_output, compute_poisson, compute_dpdy
@@ -125,14 +127,11 @@ CONTAINS
 
     if (present(p_out)) then
       call solve_compact_component_current_layout(p_out, assemble_pressure_operator, assemble_pressure_boundaries, &
-                                                  0.0d0, 0.0d0, p_out, &
-                                                  solve_label="pressure current-layout gpsv", &
-                                                  symmetric_operator=.true., transpose_derivative=.true.)
+                                                  0.0d0, 0.0d0, p_out, symmetric_operator=.true.)
     end if
     if (present(dpdy_out)) then
       call solve_compact_component_current_layout(dpdy_out, assemble_dpdy_operator, assemble_dpdy_boundaries, &
-                                                  0.0d0, 0.0d0, dpdy_out, &
-                                                  solve_label="pressure current-layout gpsv", symmetric_operator=.true.)
+                                                  0.0d0, 0.0d0, dpdy_out, symmetric_operator=.true.)
     end if
   END SUBROUTINE compute_pressure_output
 
@@ -155,21 +154,28 @@ CONTAINS
 #endif
   end subroutine get_pressure_workspace_bytes
 
+  ! Single description of the pressure workspace; see workspace_layout.
+  subroutine pressure_workspace_layout(bind, nbytes)
+    implicit none
+    logical, intent(in) :: bind
+    integer(C_SIZE_T), intent(out) :: nbytes
+    type(workspace_layout) :: lay
+
+    call layout_begin(lay, bind)
+    call layout_complex_3d(lay, ny0 - 2, nyN + 2, -nz, nz, nx0, nxN, pressure_src0)
+    call layout_complex_3d(lay, ny0 - 2, nyN + 2, -nz, nz, nx0, nxN, pressure_src1)
+    call layout_real_3d(lay, 1, 2*(nxd + 1), 1, nzB, ny0 - 2, nyN + 2, pressure_real0)
+    call layout_real_3d(lay, 1, 2*(nxd + 1), 1, nzB, ny0 - 2, nyN + 2, pressure_real1)
+    call layout_real_3d(lay, 1, 2*(nxd + 1), 1, nzB, ny0 - 2, nyN + 2, pressure_h0)
+    call layout_real_3d(lay, 1, 2*(nxd + 1), 1, nzB, ny0 - 2, nyN + 2, pressure_h1)
+    nbytes = layout_bytes(lay)
+  end subroutine pressure_workspace_layout
+
   subroutine get_pressure_local_workspace_bytes(nbytes)
     implicit none
     integer(C_SIZE_T), intent(out) :: nbytes
-    integer(C_SIZE_T) :: offset, n_src, n_real
 
-    n_src = int(nyN - ny0 + 5, C_SIZE_T)*int(2*nz + 1, C_SIZE_T)*int(nxN - nx0 + 1, C_SIZE_T)
-    n_real = int(2*(nxd + 1), C_SIZE_T)*int(nzB, C_SIZE_T)*int(nyN - ny0 + 5, C_SIZE_T)
-
-    offset = 0_C_SIZE_T
-    offset = workspace_align_offset(offset + n_src*int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T))
-    offset = workspace_align_offset(offset + n_src*int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T))
-    offset = workspace_align_offset(offset + n_real*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
-    offset = workspace_align_offset(offset + n_real*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
-    offset = workspace_align_offset(offset + n_real*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
-    nbytes = workspace_align_offset(offset + n_real*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
+    call pressure_workspace_layout(.false., nbytes)
   end subroutine get_pressure_local_workspace_bytes
 
   subroutine acquire_pressure_workspace(owner)
@@ -199,43 +205,9 @@ CONTAINS
 
   subroutine bind_pressure_workspace()
     implicit none
-    type(C_PTR) :: ptr
-    complex(C_DOUBLE_COMPLEX), pointer :: cbuf(:)
-    real(C_DOUBLE), pointer :: rbuf(:)
-    integer(C_SIZE_T) :: offset, n_src, n_real
+    integer(C_SIZE_T) :: nbytes
 
-    n_src = int(nyN - ny0 + 5, C_SIZE_T)*int(2*nz + 1, C_SIZE_T)*int(nxN - nx0 + 1, C_SIZE_T)
-    n_real = int(2*(nxd + 1), C_SIZE_T)*int(nzB, C_SIZE_T)*int(nyN - ny0 + 5, C_SIZE_T)
-
-    offset = 0_C_SIZE_T
-    call workspace_slice(offset, ptr)
-    call c_f_pointer(ptr, cbuf, [int(n_src)])
-    pressure_src0(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => cbuf
-    offset = workspace_align_offset(offset + n_src*int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T))
-
-    call workspace_slice(offset, ptr)
-    call c_f_pointer(ptr, cbuf, [int(n_src)])
-    pressure_src1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => cbuf
-    offset = workspace_align_offset(offset + n_src*int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T))
-
-    call workspace_slice(offset, ptr)
-    call c_f_pointer(ptr, rbuf, [int(n_real)])
-    pressure_real0(1:2*(nxd + 1), 1:nzB, ny0 - 2:nyN + 2) => rbuf
-    offset = workspace_align_offset(offset + n_real*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
-
-    call workspace_slice(offset, ptr)
-    call c_f_pointer(ptr, rbuf, [int(n_real)])
-    pressure_real1(1:2*(nxd + 1), 1:nzB, ny0 - 2:nyN + 2) => rbuf
-    offset = workspace_align_offset(offset + n_real*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
-
-    call workspace_slice(offset, ptr)
-    call c_f_pointer(ptr, rbuf, [int(n_real)])
-    pressure_h0(1:2*(nxd + 1), 1:nzB, ny0 - 2:nyN + 2) => rbuf
-    offset = workspace_align_offset(offset + n_real*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
-
-    call workspace_slice(offset, ptr)
-    call c_f_pointer(ptr, rbuf, [int(n_real)])
-    pressure_h1(1:2*(nxd + 1), 1:nzB, ny0 - 2:nyN + 2) => rbuf
+    call pressure_workspace_layout(.true., nbytes)
 
     !$omp target enter data map(to: pressure_src0, pressure_src1, pressure_real0, pressure_real1, pressure_h0, pressure_h1)
     !$omp target
@@ -676,16 +648,17 @@ CONTAINS
     !$omp end target teams distribute parallel do
   end subroutine assemble_dpdy_rhs
 
-  subroutine assemble_pressure_operator(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end, derivative_order)
+  subroutine assemble_pressure_operator(ctx)
     implicit none
-    complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
-    real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
-    integer(C_INT), intent(in) :: row_start, row_end
-    integer(C_INT), optional, intent(in) :: derivative_order
+    type(compact_assembly_context), intent(in) :: ctx
     integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner
-    associate (unused_lambda => lambda_coeff, unused_diffusion => diffusion_coeff)
-    end associate
 
+    complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
+    integer(C_INT) :: row_start, row_end
+
+    owner_src => ctx%src
+    row_start = ctx%row_start
+    row_end = ctx%row_end
     ix0_owner = lbound(owner_src, 3)
     ixN_owner = ubound(owner_src, 3)
 
@@ -709,16 +682,17 @@ CONTAINS
     !$omp end target teams distribute parallel do
   end subroutine assemble_pressure_operator
 
-  subroutine assemble_dpdy_operator(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end, derivative_order)
+  subroutine assemble_dpdy_operator(ctx)
     implicit none
-    complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
-    real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
-    integer(C_INT), intent(in) :: row_start, row_end
-    integer(C_INT), optional, intent(in) :: derivative_order
+    type(compact_assembly_context), intent(in) :: ctx
     integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner
-    associate (unused_lambda => lambda_coeff, unused_diffusion => diffusion_coeff)
-    end associate
 
+    complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
+    integer(C_INT) :: row_start, row_end
+
+    owner_src => ctx%src
+    row_start = ctx%row_start
+    row_end = ctx%row_end
     ix0_owner = lbound(owner_src, 3)
     ixN_owner = ubound(owner_src, 3)
 
@@ -738,16 +712,17 @@ CONTAINS
     !$omp end target teams distribute parallel do
   end subroutine assemble_dpdy_operator
 
-  subroutine assemble_pressure_boundaries(owner_src, row_start, row_end, has_lower_boundary, has_upper_boundary, derivative_order)
+  subroutine assemble_pressure_boundaries(ctx)
     implicit none
-    complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
-    integer(C_INT), intent(in) :: row_start, row_end
-    logical, intent(in) :: has_lower_boundary, has_upper_boundary
-    integer(C_INT), optional, intent(in) :: derivative_order
+    type(compact_assembly_context), intent(in) :: ctx
+    complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
+    logical :: has_lower_boundary, has_upper_boundary
     integer(C_INT) :: ix, iz, ix0_owner, ixN_owner
     complex(C_DOUBLE_COMPLEX), pointer :: u_owner(:, :, :), v_owner(:, :, :), w_owner(:, :, :)
-    associate (unused_row_start => row_start, unused_row_end => row_end)
-    end associate
+
+    owner_src => ctx%src
+    has_lower_boundary = ctx%has_lower_boundary
+    has_upper_boundary = ctx%has_upper_boundary
 
     call pressure_velocity_view(owner_src, u_owner, v_owner, w_owner, ix0_owner, ixN_owner)
 
@@ -802,16 +777,17 @@ CONTAINS
     end if
   end subroutine assemble_pressure_boundaries
 
-  subroutine assemble_dpdy_boundaries(owner_src, row_start, row_end, has_lower_boundary, has_upper_boundary, derivative_order)
+  subroutine assemble_dpdy_boundaries(ctx)
     implicit none
-    complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
-    integer(C_INT), intent(in) :: row_start, row_end
-    logical, intent(in) :: has_lower_boundary, has_upper_boundary
-    integer(C_INT), optional, intent(in) :: derivative_order
+    type(compact_assembly_context), intent(in) :: ctx
+    complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
+    logical :: has_lower_boundary, has_upper_boundary
     integer(C_INT) :: ix, iz, ix0_owner, ixN_owner
     complex(C_DOUBLE_COMPLEX), pointer :: u_owner(:, :, :), v_owner(:, :, :), w_owner(:, :, :)
-    associate (unused_row_start => row_start, unused_row_end => row_end)
-    end associate
+
+    owner_src => ctx%src
+    has_lower_boundary = ctx%has_lower_boundary
+    has_upper_boundary = ctx%has_upper_boundary
 
     call pressure_velocity_view(owner_src, u_owner, v_owner, w_owner, ix0_owner, ixN_owner)
 

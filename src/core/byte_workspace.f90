@@ -17,9 +17,23 @@ module byte_workspace
   logical, save :: workspace_owned = .false.
   character(len=64), save :: workspace_owner = ""
 
+  ! Cursor for describing an owner's slice layout.
+  !
+  ! An owner has to answer two questions about the same layout: how many bytes
+  ! to request, and where each view lands once the request is granted.  Written
+  ! as two routines those answers drift apart silently, so each owner instead
+  ! writes the layout once and runs it twice -- with bind = .false. to size it,
+  ! then with bind = .true. to point the views at the granted slices.
+  type, public :: workspace_layout
+    integer(C_SIZE_T) :: offset = 0_C_SIZE_T
+    logical :: bind = .false.
+  end type workspace_layout
+
   public :: workspace_reserve, workspace_request, workspace_release, workspace_slice
   public :: workspace_capacity_bytes, workspace_high_water_bytes
   public :: workspace_finalize, workspace_align_offset, WORKSPACE_ALIGNMENT
+  public :: layout_begin, layout_bytes, layout_real_3d, layout_complex_3d
+  public :: layout_real_4d, layout_complex_4d
 
 contains
 
@@ -125,6 +139,92 @@ contains
     call release_storage()
     workspace_capacity = 0_C_SIZE_T
   end subroutine workspace_finalize
+
+  subroutine layout_begin(lay, bind, offset0)
+    type(workspace_layout), intent(out) :: lay
+    logical, intent(in) :: bind
+    integer(C_SIZE_T), intent(in), optional :: offset0
+
+    lay%offset = 0_C_SIZE_T
+    if (present(offset0)) lay%offset = offset0
+    lay%bind = bind
+  end subroutine layout_begin
+
+  integer(C_SIZE_T) function layout_bytes(lay)
+    type(workspace_layout), intent(in) :: lay
+
+    layout_bytes = lay%offset
+  end function layout_bytes
+
+  subroutine layout_real_3d(lay, l1, u1, l2, u2, l3, u3, view)
+    type(workspace_layout), intent(inout) :: lay
+    integer(C_INT), intent(in) :: l1, u1, l2, u2, l3, u3
+    real(C_DOUBLE), pointer, contiguous, intent(inout) :: view(:, :, :)
+    real(C_DOUBLE), pointer :: buf(:)
+    type(C_PTR) :: ptr
+    integer(C_SIZE_T) :: count
+
+    count = int(u1 - l1 + 1, C_SIZE_T)*int(u2 - l2 + 1, C_SIZE_T)*int(u3 - l3 + 1, C_SIZE_T)
+    if (lay%bind) then
+      call workspace_slice(lay%offset, ptr)
+      call c_f_pointer(ptr, buf, [int(count)])
+      view(l1:u1, l2:u2, l3:u3) => buf
+    end if
+    lay%offset = workspace_align_offset(lay%offset + count*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
+  end subroutine layout_real_3d
+
+  subroutine layout_complex_3d(lay, l1, u1, l2, u2, l3, u3, view)
+    type(workspace_layout), intent(inout) :: lay
+    integer(C_INT), intent(in) :: l1, u1, l2, u2, l3, u3
+    complex(C_DOUBLE_COMPLEX), pointer, contiguous, intent(inout) :: view(:, :, :)
+    complex(C_DOUBLE_COMPLEX), pointer :: buf(:)
+    type(C_PTR) :: ptr
+    integer(C_SIZE_T) :: count
+
+    count = int(u1 - l1 + 1, C_SIZE_T)*int(u2 - l2 + 1, C_SIZE_T)*int(u3 - l3 + 1, C_SIZE_T)
+    if (lay%bind) then
+      call workspace_slice(lay%offset, ptr)
+      call c_f_pointer(ptr, buf, [int(count)])
+      view(l1:u1, l2:u2, l3:u3) => buf
+    end if
+    lay%offset = workspace_align_offset(lay%offset + count*int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T))
+  end subroutine layout_complex_3d
+
+  subroutine layout_real_4d(lay, l1, u1, l2, u2, l3, u3, l4, u4, view)
+    type(workspace_layout), intent(inout) :: lay
+    integer(C_INT), intent(in) :: l1, u1, l2, u2, l3, u3, l4, u4
+    real(C_DOUBLE), pointer, contiguous, intent(inout) :: view(:, :, :, :)
+    real(C_DOUBLE), pointer :: buf(:)
+    type(C_PTR) :: ptr
+    integer(C_SIZE_T) :: count
+
+    count = int(u1 - l1 + 1, C_SIZE_T)*int(u2 - l2 + 1, C_SIZE_T)* &
+            int(u3 - l3 + 1, C_SIZE_T)*int(u4 - l4 + 1, C_SIZE_T)
+    if (lay%bind) then
+      call workspace_slice(lay%offset, ptr)
+      call c_f_pointer(ptr, buf, [int(count)])
+      view(l1:u1, l2:u2, l3:u3, l4:u4) => buf
+    end if
+    lay%offset = workspace_align_offset(lay%offset + count*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
+  end subroutine layout_real_4d
+
+  subroutine layout_complex_4d(lay, l1, u1, l2, u2, l3, u3, l4, u4, view)
+    type(workspace_layout), intent(inout) :: lay
+    integer(C_INT), intent(in) :: l1, u1, l2, u2, l3, u3, l4, u4
+    complex(C_DOUBLE_COMPLEX), pointer, contiguous, intent(inout) :: view(:, :, :, :)
+    complex(C_DOUBLE_COMPLEX), pointer :: buf(:)
+    type(C_PTR) :: ptr
+    integer(C_SIZE_T) :: count
+
+    count = int(u1 - l1 + 1, C_SIZE_T)*int(u2 - l2 + 1, C_SIZE_T)* &
+            int(u3 - l3 + 1, C_SIZE_T)*int(u4 - l4 + 1, C_SIZE_T)
+    if (lay%bind) then
+      call workspace_slice(lay%offset, ptr)
+      call c_f_pointer(ptr, buf, [int(count)])
+      view(l1:u1, l2:u2, l3:u3, l4:u4) => buf
+    end if
+    lay%offset = workspace_align_offset(lay%offset + count*int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T))
+  end subroutine layout_complex_4d
 
   subroutine choose_base_index()
     integer(C_INTPTR_T) :: addr

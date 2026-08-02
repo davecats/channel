@@ -12,6 +12,8 @@
 !
 
 #include "header.h"
+#:include "channel_operators.fypph"
+#:include "channel_stencils.fypph"
 
 MODULE dnsdata
 
@@ -22,7 +24,9 @@ MODULE dnsdata
 
   USE, intrinsic :: iso_c_binding
   USE config
+  USE env_options, only: env_flag
   USE rbmat
+  USE channel_grid
   USE mpi_transpose
   USE roctx, only: roctxPush, roctxPop
   USE ffts
@@ -33,25 +37,20 @@ MODULE dnsdata
 
   !Simulation parameters
   real(C_DOUBLE) :: PI = 3.1415926535897932384626433832795028841971
-  integer(C_INT) :: ny, nz, nxd, nPhi
-  !$omp declare target(ny)
-  real(C_DOUBLE) :: alfa0, beta0, ni, a, ymin, ymax, deltat, cflmax, time, time0 = 0, dt_field, dt_save, t_max, gamma
+  ! nx, ny, nz, nxd, nzd, nPhi, alfa0, beta0, ymin, ymax, a and the derived
+  ! grid arrays are declared in channel_grid; read_dnsin and init_memory below
+  ! fill them in.
+  real(C_DOUBLE) :: ni, deltat, cflmax, time, time0 = 0, dt_field, dt_save, t_max, gamma
   !$omp declare target(ni)
   real(C_DOUBLE) :: u0, uN, t0, tN
   !$omp declare target(u0, uN, t0, tN)
   real(C_DOUBLE) :: meanpx, meanpz, meanflowx, meanflowz, meantx, meantb
   real(C_DOUBLE) :: perturbation_amplitude = 5.54d-5
-  integer(C_INT), allocatable :: izd(:)
-  complex(C_DOUBLE_COMPLEX), allocatable :: ialfa(:), ibeta(:)
-  real(C_DOUBLE), allocatable :: k2(:, :)
   integer(C_INT) :: npy = 1
   integer(C_INT), allocatable :: schur_pass_counts(:)
   integer(C_INT) :: schur_exchange_mode = YS_SCHUR_EXCHANGE_AUTO
   logical :: time_from_restart
   logical :: disable_restart_write = .false.
-  !Grid
-  real(C_DOUBLE), allocatable :: y(:), dy(:)
-  real(C_DOUBLE) :: dx, dz, factor
   !Derivatives
   real(C_DOUBLE), allocatable :: der(:, :, :)
   real(C_DOUBLE), dimension(-2:2) :: d040, d140, d240, d14m1, d24m1, d04n, d14n, d24n, d14np1, d24np1
@@ -94,25 +93,35 @@ MODULE dnsdata
   public :: get_solver_memory_estimate, get_solver_workspace_estimate, get_mpi_buffer_memory_estimate
   public :: sync_velocity_to_device, apply_complex_derivative_current_layout, apply_complex_second_derivative_current_layout
   public :: eliminate_assembled_boundaries, reconstruct_assembled_boundaries
+  ! Everything an assembly step may need, in one place.
+  !
+  ! The interior and boundary callbacks used to take the union of every
+  ! parameter any implementation might want, so most of them ignored most of
+  ! their arguments; the boundary values were worse still, reaching the
+  ! callback through module variables that a separate call had to set first.
+  ! Both now travel in this context, which is filled once per solve.
+  !
+  ! Implementations must copy what they need into locals *before* their target
+  ! region -- a derived type with pointer components cannot be mapped to the
+  ! device -- so the kernels themselves stay exactly as they were.
+  type, public :: compact_assembly_context
+    complex(C_DOUBLE_COMPLEX), pointer :: src(:, :, :) => null()
+    integer(C_INT) :: row_start = 0_C_INT, row_end = 0_C_INT
+    integer(C_INT) :: derivative_order = 1_C_INT
+    real(C_DOUBLE) :: lambda = 0.0d0, diffusion = 0.0d0
+    logical :: has_lower_boundary = .false., has_upper_boundary = .false.
+    real(C_DOUBLE) :: lower_bc(-2:2) = 0.0d0, lower_ghost_bc(-2:2) = 0.0d0
+    real(C_DOUBLE) :: upper_bc(-2:2) = 0.0d0, upper_ghost_bc(-2:2) = 0.0d0
+    complex(C_DOUBLE_COMPLEX), pointer :: lower_rhs(:, :) => null(), lower_ghost_rhs(:, :) => null()
+    complex(C_DOUBLE_COMPLEX), pointer :: upper_rhs(:, :) => null(), upper_ghost_rhs(:, :) => null()
+  end type compact_assembly_context
+
   abstract interface
-    subroutine compact_component_assembly(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end, derivative_order)
-      use, intrinsic :: iso_c_binding
-      complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
-      real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
-      integer(C_INT), intent(in) :: row_start, row_end
-      integer(C_INT), optional, intent(in) :: derivative_order
-    end subroutine compact_component_assembly
-    subroutine compact_boundary_assembly(owner_src, row_start, row_end, has_lower_boundary, has_upper_boundary, derivative_order)
-      use, intrinsic :: iso_c_binding
-      complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
-      integer(C_INT), intent(in) :: row_start, row_end
-      logical, intent(in) :: has_lower_boundary, has_upper_boundary
-      integer(C_INT), optional, intent(in) :: derivative_order
-    end subroutine compact_boundary_assembly
+    subroutine compact_assembly_step(ctx)
+      import :: compact_assembly_context
+      type(compact_assembly_context), intent(in) :: ctx
+    end subroutine compact_assembly_step
   end interface
-  real(C_DOUBLE), save :: compact_lower_bc(-2:2), compact_lower_ghost_bc(-2:2), compact_upper_bc(-2:2), compact_upper_ghost_bc(-2:2)
-  complex(C_DOUBLE_COMPLEX), pointer, save :: compact_lower_rhs(:, :) => null(), compact_lower_ghost_rhs(:, :) => null()
-  complex(C_DOUBLE_COMPLEX), pointer, save :: compact_upper_rhs(:, :) => null(), compact_upper_ghost_rhs(:, :) => null()
 
 CONTAINS
 
@@ -124,10 +133,8 @@ CONTAINS
     logical :: i
     integer :: iPhi
     type(ini_config), intent(in) :: cfg
-    character(len=16) :: env_value
     integer(C_INT) :: nstep_in
     integer(C_INT) :: npxz_tuned
-    integer :: status, length
     logical :: found
 
     call require_integer(cfg, "mesh", "nx", nx)
@@ -172,18 +179,8 @@ CONTAINS
     end if
     !$omp target enter data map(to: pra)
 
-    call get_environment_variable("CHANNEL_OVERLAPPING", env_value, length, status)
     overlapping = .false.
-    if (status == 0) then
-      select case (adjustl(trim(env_value(:length))))
-      case ("1", "true", "TRUE", "yes", "YES", "on", "ON")
-        overlapping = .true.
-      case ("0", "false", "FALSE", "no", "NO", "off", "OFF")
-        overlapping = .false.
-      case default
-        print *, "Warning: invalid value for CHANNEL_OVERLAPPING:", trim(env_value(:length))
-      end select
-    end if
+    call env_flag("CHANNEL_OVERLAPPING", overlapping)
 
     if (allocated(schur_pass_counts)) deallocate (schur_pass_counts)
     call configure_mpi_decomposition(nx + 1, nxd, nzd, nz, ny, nPhi, overlapping, 1_C_INT, &
@@ -200,27 +197,9 @@ CONTAINS
     nstep = int(nstep_in, C_SIZE_T)
 
     dx = PI/(alfa0*nxd); dz = 2.0d0*PI/(beta0*nzd); factor = 1.0d0/(2.0d0*nxd*nzd)
-    call get_environment_variable("CHANNEL_DISABLE_RESTART_WRITE", env_value, length, status)
     disable_restart_write = .false.
-    if (status == 0) then
-      select case (adjustl(trim(env_value(:length))))
-      case ("1", "true", "TRUE", "yes", "YES", "on", "ON")
-        disable_restart_write = .true.
-      case ("0", "false", "FALSE", "no", "NO", "off", "OFF")
-        disable_restart_write = .false.
-      case default
-        print *, "Warning: invalid value for CHANNEL_DISABLE_RESTART_WRITE:", trim(env_value(:length))
-      end select
-    end if
+    call env_flag("CHANNEL_DISABLE_RESTART_WRITE", disable_restart_write)
   END SUBROUTINE read_dnsin
-
-  function itoa(i) result(str)
-    implicit none
-    integer(C_INT), intent(in) :: i
-    character(len=16) :: str
-
-    write (str, '(I0)') i
-  end function itoa
 
   !--------------------------------------------------------------!
   !---------------- Allocate memory for solution ----------------!
@@ -248,8 +227,6 @@ CONTAINS
       oldrhs = 0.0
       !$omp target enter data map(to: memrhs, oldrhs)
     END IF
-#define newrhs(iy,iz,ix,i) memrhs(iy,iz,ix,i)
-#define imod(iy) MOD(iy+1000,5)
     ALLOCATE (der(1:ny - 1, 0:3, -2:2), d0mat(ny0:nyN + 2, -2:2))
     ALLOCATE (eta00mat(ny0:nyN + 2, -2:2))
     der = 0.0; d0mat = 0.0; eta00mat = 0.0
@@ -502,35 +479,15 @@ CONTAINS
     END DO
   END FUNCTION yintegr
 
-#define RD_MASTER(f,g,k,ord) ( \
-  der(iy, ord, -2)*dcmplx(dreal(f(iy - 2, iz, ix, g)), dreal(f(iy - 2, iz, ix, k))) + \
-  der(iy, ord, -1)*dcmplx(dreal(f(iy - 1, iz, ix, g)), dreal(f(iy - 1, iz, ix, k))) + \
-  der(iy, ord, 0)*dcmplx(dreal(f(iy, iz, ix, g)), dreal(f(iy, iz, ix, k))) + \
-  der(iy, ord, 1)*dcmplx(dreal(f(iy + 1, iz, ix, g)), dreal(f(iy + 1, iz, ix, k))) + \
-  der(iy, ord, 2)*dcmplx(dreal(f(iy + 2, iz, ix, g)), dreal(f(iy + 2, iz, ix, k))))
 
-#define rD0(f,g,k) RD_MASTER(f,g,k,0)
-#define rD1(f,g,k) RD_MASTER(f,g,k,1)
-#define rD2(f,g,k) RD_MASTER(f,g,k,2)
-#define rD4(f,g,k) RD_MASTER(f,g,k,3)
 
-#define D_MASTER(f,g,ord) ( \
-  der(iy, ord, -2)*f(iy - 2, iz, ix, g) + \
-  der(iy, ord, -1)*f(iy - 1, iz, ix, g) + \
-  der(iy, ord, 0)*f(iy, iz, ix, g) + \
-  der(iy, ord, 1)*f(iy + 1, iz, ix, g) + \
-  der(iy, ord, 2)*f(iy + 2, iz, ix, g))
 
-#define D0(f,g) D_MASTER(f,g,0)
-#define D1(f,g) D_MASTER(f,g,1)
-#define D2(f,g) D_MASTER(f,g,2)
-#define D4(f,g) D_MASTER(f,g,3)
   SUBROUTINE apply_complex_derivative_current_layout(src, dst)
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), target, intent(in) :: src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     call solve_compact_component_current_layout(dst, assemble_compact_derivative_interior, assemble_compact_derivative_boundary, 0.0d0, 0.0d0, src, &
-                                     solve_label="compact derivative gpsv", symmetric_operator=.false., transpose_derivative=.true.)
+                                                symmetric_operator=.false.)
   END SUBROUTINE apply_complex_derivative_current_layout
 
   SUBROUTINE apply_complex_second_derivative_current_layout(src, dst)
@@ -538,26 +495,24 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), target, intent(in) :: src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     call solve_compact_component_current_layout(dst, assemble_compact_derivative_interior, &
-                                     assemble_compact_derivative_boundary, 0.0d0, 0.0d0, src, &
-                                     solve_label="compact second derivative gpsv", symmetric_operator=.false., transpose_derivative=.true., &
-                                     derivative_order=2_C_INT)
+                                                assemble_compact_derivative_boundary, 0.0d0, 0.0d0, src, &
+                                                symmetric_operator=.false., derivative_order=2_C_INT)
   END SUBROUTINE apply_complex_second_derivative_current_layout
 
-  subroutine assemble_compact_derivative_interior(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end, derivative_order)
+  subroutine assemble_compact_derivative_interior(ctx)
     use y_line_solvers, only: ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x
     IMPLICIT NONE
-    complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
-    real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
-    integer(C_INT), intent(in) :: row_start, row_end
-    integer(C_INT), optional, intent(in) :: derivative_order
-    integer(C_INT) :: derivative_order_value
+    type(compact_assembly_context), intent(in) :: ctx
+    complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
+    integer(C_INT) :: derivative_order_value, row_start, row_end
     integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner, nlines_z, nlines, iline
     integer(C_INT64_T) :: p
     complex(C_DOUBLE_COMPLEX) :: src_m2, src_m1, src_0, src_p1, src_p2
-    associate (unused_lambda => lambda_coeff, unused_diffusion => diffusion_coeff)
-    end associate
-    derivative_order_value = 1_C_INT
-    if (present(derivative_order)) derivative_order_value = derivative_order
+
+    owner_src => ctx%src
+    row_start = ctx%row_start
+    row_end = ctx%row_end
+    derivative_order_value = ctx%derivative_order
     ix0_owner = lbound(owner_src, 3)
     ixN_owner = ubound(owner_src, 3)
     nlines_z = 2_C_INT*nz + 1_C_INT
@@ -599,17 +554,19 @@ CONTAINS
     !$omp end target teams distribute parallel do
   end subroutine assemble_compact_derivative_interior
 
-  subroutine assemble_compact_derivative_boundary(owner_src, row_start, row_end, has_lower_boundary, has_upper_boundary, derivative_order)
+  subroutine assemble_compact_derivative_boundary(ctx)
     use y_line_solvers, only: ys_lower_ghost_owner, ys_lower_boundary_owner, ys_upper_boundary_owner, ys_upper_ghost_owner, ys_eqm1_owner, ys_eq0_owner, &
                               ys_eqn_owner, ys_eqnp1_owner
     IMPLICIT NONE
-    complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
-    integer(C_INT), intent(in) :: row_start, row_end
-    integer(C_INT), optional, intent(in) :: derivative_order
-    logical, intent(in) :: has_lower_boundary, has_upper_boundary
+    type(compact_assembly_context), intent(in) :: ctx
+    complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
+    logical :: has_lower_boundary, has_upper_boundary
     integer(C_INT) :: ix, iz, ix0_owner, ixN_owner, derivative_order_value
-    derivative_order_value = 1_C_INT
-    if (present(derivative_order)) derivative_order_value = derivative_order
+
+    owner_src => ctx%src
+    has_lower_boundary = ctx%has_lower_boundary
+    has_upper_boundary = ctx%has_upper_boundary
+    derivative_order_value = ctx%derivative_order
     ix0_owner = lbound(owner_src, 3)
     ixN_owner = ubound(owner_src, 3)
 
@@ -660,34 +617,51 @@ CONTAINS
     end if
   end subroutine assemble_compact_derivative_boundary
 
-  subroutine select_compact_component_boundaries(lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
-                                                 lower_rhs_values, lower_ghost_rhs_values, upper_rhs_values, upper_ghost_rhs_values)
+  ! Packs the wall coefficients and their right-hand sides for a component into
+  ! a context, replacing the module state that a separate call used to set.
+  function compact_component_boundaries(lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
+                                        lower_rhs_values, lower_ghost_rhs_values, &
+                                        upper_rhs_values, upper_ghost_rhs_values) result(ctx)
     implicit none
     real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
     complex(C_DOUBLE_COMPLEX), target, intent(in) :: lower_rhs_values(-nz:, nx0:), lower_ghost_rhs_values(-nz:, nx0:)
     complex(C_DOUBLE_COMPLEX), target, intent(in) :: upper_rhs_values(-nz:, nx0:), upper_ghost_rhs_values(-nz:, nx0:)
+    type(compact_assembly_context) :: ctx
 
-    compact_lower_bc = lower_bc
-    compact_lower_ghost_bc = lower_ghost_bc
-    compact_upper_bc = upper_bc
-    compact_upper_ghost_bc = upper_ghost_bc
-    compact_lower_rhs => lower_rhs_values
-    compact_lower_ghost_rhs => lower_ghost_rhs_values
-    compact_upper_rhs => upper_rhs_values
-    compact_upper_ghost_rhs => upper_ghost_rhs_values
-  end subroutine select_compact_component_boundaries
+    ctx%lower_bc = lower_bc
+    ctx%lower_ghost_bc = lower_ghost_bc
+    ctx%upper_bc = upper_bc
+    ctx%upper_ghost_bc = upper_ghost_bc
+    ctx%lower_rhs => lower_rhs_values
+    ctx%lower_ghost_rhs => lower_ghost_rhs_values
+    ctx%upper_rhs => upper_rhs_values
+    ctx%upper_ghost_rhs => upper_ghost_rhs_values
+  end function compact_component_boundaries
 
-  subroutine assemble_selected_compact_component_boundaries(owner_src, row_start, row_end, has_lower_boundary, has_upper_boundary, derivative_order)
+  subroutine assemble_selected_compact_component_boundaries(ctx)
     use y_line_solvers, only: ys_lower_ghost_owner, ys_lower_boundary_owner, ys_upper_boundary_owner, ys_upper_ghost_owner, ys_eqm1_owner, ys_eq0_owner, &
                               ys_eqn_owner, ys_eqnp1_owner
     IMPLICIT NONE
-    complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
-    integer(C_INT), intent(in) :: row_start, row_end
-    logical, intent(in) :: has_lower_boundary, has_upper_boundary
-    integer(C_INT), optional, intent(in) :: derivative_order
+    type(compact_assembly_context), intent(in) :: ctx
+    complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
+    complex(C_DOUBLE_COMPLEX), pointer :: compact_lower_rhs(:, :), compact_lower_ghost_rhs(:, :)
+    complex(C_DOUBLE_COMPLEX), pointer :: compact_upper_rhs(:, :), compact_upper_ghost_rhs(:, :)
+    real(C_DOUBLE) :: compact_lower_bc(-2:2), compact_lower_ghost_bc(-2:2)
+    real(C_DOUBLE) :: compact_upper_bc(-2:2), compact_upper_ghost_bc(-2:2)
+    logical :: has_lower_boundary, has_upper_boundary
     integer(C_INT) :: ix, iz, ix0_owner, ixN_owner
-    associate (unused_row_start => row_start, unused_row_end => row_end)
-    end associate
+
+    owner_src => ctx%src
+    has_lower_boundary = ctx%has_lower_boundary
+    has_upper_boundary = ctx%has_upper_boundary
+    compact_lower_bc = ctx%lower_bc
+    compact_lower_ghost_bc = ctx%lower_ghost_bc
+    compact_upper_bc = ctx%upper_bc
+    compact_upper_ghost_bc = ctx%upper_ghost_bc
+    compact_lower_rhs => ctx%lower_rhs
+    compact_lower_ghost_rhs => ctx%lower_ghost_rhs
+    compact_upper_rhs => ctx%upper_rhs
+    compact_upper_ghost_rhs => ctx%upper_ghost_rhs
     ix0_owner = lbound(owner_src, 3)
     ixN_owner = ubound(owner_src, 3)
 
@@ -724,18 +698,21 @@ CONTAINS
     end if
   end subroutine assemble_selected_compact_component_boundaries
 
-  subroutine assemble_compact_biharmonic_system(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end, derivative_order)
+  subroutine assemble_compact_biharmonic_system(ctx)
     use y_line_solvers, only: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs
     implicit none
-    integer(C_INT), intent(in) :: row_start, row_end
-    real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
-    complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
-    integer(C_INT), optional, intent(in) :: derivative_order
+    type(compact_assembly_context), intent(in) :: ctx
     complex(C_DOUBLE_COMPLEX) :: rhs_value
     real(C_DOUBLE) :: row_coeffs(-2:2)
     integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner
-    associate (unused_diffusion => diffusion_coeff)
-    end associate
+    complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
+    integer(C_INT) :: row_start, row_end
+    real(C_DOUBLE) :: lambda_coeff
+
+    owner_src => ctx%src
+    row_start = ctx%row_start
+    row_end = ctx%row_end
+    lambda_coeff = ctx%lambda
     ix0_owner = lbound(owner_src, 3)
     ixN_owner = ubound(owner_src, 3)
 
@@ -746,8 +723,9 @@ CONTAINS
       do iz = -nz, nz
         do iy = row_start, row_end
           rhs_value = owner_src(iy, iz, ix)
-          row_coeffs = lambda_coeff*(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2)) - &
-                       ni*(der(iy, 3, -2:2) - 2.0d0*k2(iz, ix)*der(iy, 2, -2:2) + k2(iz, ix)*k2(iz, ix)*der(iy, 0, -2:2))
+          ! v equation, implicit half:  lambda*(D^2 - k^2) - ni*(D^2 - k^2)^2
+          row_coeffs = lambda_coeff*${helmholtz_op('iy', '-2:2')}$ - &
+                       ni*${biharmonic_op('iy', '-2:2')}$
           ys_gpsv_owner_matrix(iz, ix, iy, -2:2) = cmplx(row_coeffs(-2:2), 0.0d0, kind=C_DOUBLE)
           ys_gpsv_owner_rhs(iz, ix, iy) = rhs_value
         end do
@@ -756,16 +734,22 @@ CONTAINS
     !$omp end target teams distribute parallel do
   end subroutine assemble_compact_biharmonic_system
 
-  subroutine assemble_compact_helmholtz_system(owner_src, lambda_coeff, diffusion_coeff, row_start, row_end, derivative_order)
+  subroutine assemble_compact_helmholtz_system(ctx)
     use y_line_solvers, only: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs
     implicit none
-    integer(C_INT), intent(in) :: row_start, row_end
-    real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
-    complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
-    integer(C_INT), optional, intent(in) :: derivative_order
+    type(compact_assembly_context), intent(in) :: ctx
     complex(C_DOUBLE_COMPLEX) :: rhs_value
     real(C_DOUBLE) :: row_coeffs(-2:2)
     integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner
+    complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
+    integer(C_INT) :: row_start, row_end
+    real(C_DOUBLE) :: lambda_coeff, diffusion_coeff
+
+    owner_src => ctx%src
+    row_start = ctx%row_start
+    row_end = ctx%row_end
+    lambda_coeff = ctx%lambda
+    diffusion_coeff = ctx%diffusion
     ix0_owner = lbound(owner_src, 3)
     ixN_owner = ubound(owner_src, 3)
 
@@ -776,7 +760,8 @@ CONTAINS
       do iz = -nz, nz
         do iy = row_start, row_end
           rhs_value = owner_src(iy, iz, ix)
-          row_coeffs = lambda_coeff*der(iy, 0, -2:2) - diffusion_coeff*ni*(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2))
+          ! eta / scalar equation, implicit half:  lambda - diffusion*ni*(D^2 - k^2)
+          row_coeffs = lambda_coeff*der(iy, 0, -2:2) - diffusion_coeff*ni*${helmholtz_op('iy', '-2:2')}$
           ys_gpsv_owner_matrix(iz, ix, iy, -2:2) = cmplx(row_coeffs(-2:2), 0.0d0, kind=C_DOUBLE)
           ys_gpsv_owner_rhs(iz, ix, iy) = rhs_value
         end do
@@ -887,18 +872,15 @@ CONTAINS
     end if
   end subroutine eliminate_assembled_boundaries
 
-  subroutine reconstruct_assembled_boundaries(line_values, row_start, row_end, has_lower_boundary, has_upper_boundary, ix_start, ix_end)
+  subroutine reconstruct_assembled_boundaries(line_values, row_start, has_lower_boundary, has_upper_boundary, ix_start, ix_end)
     use y_line_solvers, only: ys_lower_ghost_owner, ys_upper_ghost_owner, ys_eqm1_owner, ys_eqnp1_owner, &
                   ys_boundary_lower_rhs0_owner, ys_boundary_upper_rhsn_owner, ys_boundary_lower_eq_owner, ys_boundary_upper_eq_owner
     implicit none
-    integer(C_INT), intent(in) :: row_start, row_end
+    integer(C_INT), intent(in) :: row_start
     complex(C_DOUBLE_COMPLEX), intent(inout) :: line_values(row_start - 2:, -nz:, :)
     logical, intent(in) :: has_lower_boundary, has_upper_boundary
     integer(C_INT), optional, intent(in) :: ix_start, ix_end
     integer(C_INT) :: ix, iz, jx, ix0_owner, ixN_owner
-    associate (unused_row_end => row_end)
-    end associate
-
     if (.not. has_lower_boundary .and. .not. has_upper_boundary) return
 
     ix0_owner = nx0
@@ -948,63 +930,67 @@ CONTAINS
   end subroutine reconstruct_assembled_boundaries
 
   SUBROUTINE solve_compact_component_current_layout(field_values, assemble_system, boundary_system, lambda_coeff, diffusion_coeff, source_values, &
-                                                    solve_label, symmetric_operator, transpose_derivative, derivative_order)
+                                                    symmetric_operator, derivative_order, boundaries)
     use y_line_solvers, only: ys_prepare_assembled_workspace, ys_release_workspace, ys_solve_endpoint_schur, ys_solve_pipelined_lu
     use mpi_autotune, only: mpi_autotune_selected_y_solver, mpi_autotune_selected_y_batches, &
                             Y_SOLVER_SCHUR, Y_SOLVER_PIPELINED_LU
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), target, intent(inout) :: field_values(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    procedure(compact_component_assembly) :: assemble_system
-    procedure(compact_boundary_assembly) :: boundary_system
+    procedure(compact_assembly_step) :: assemble_system
+    procedure(compact_assembly_step) :: boundary_system
     real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
     complex(C_DOUBLE_COMPLEX), target, intent(in) :: source_values( &
                                                      lbound(field_values, 1):ubound(field_values, 1), &
                                                      lbound(field_values, 2):ubound(field_values, 2), &
                                                      lbound(field_values, 3):ubound(field_values, 3))
-    character(len=*), optional, intent(in) :: solve_label
-    logical, optional, intent(in) :: symmetric_operator, transpose_derivative
+    logical, optional, intent(in) :: symmetric_operator
     integer(C_INT), optional, intent(in) :: derivative_order
+    type(compact_assembly_context), optional, intent(in) :: boundaries
     logical :: has_lower_boundary, has_upper_boundary, symmetric_operator_value
-    character(len=32) :: y_solver
-    integer :: env_length, env_status
     complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :), owner_dst(:, :, :)
+    type(compact_assembly_context) :: ctx
 
     symmetric_operator_value = .true.
     if (present(symmetric_operator)) symmetric_operator_value = symmetric_operator
-    if (present(solve_label)) continue
-    if (present(transpose_derivative)) continue
-    y_solver = "auto"
-    call get_environment_variable("CHANNEL_Y_SOLVER", y_solver, env_length, env_status)
-    if (env_status /= 0 .or. env_length <= 0) y_solver = "auto"
 
     owner_src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => source_values
     owner_dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => field_values
     has_lower_boundary = (ny0 == 1)
     has_upper_boundary = (nyN == ny - 1)
+
+    ! Boundary coefficients, when the chosen boundary step needs them, come in
+    ! from the caller rather than from module state set by an earlier call.
+    if (present(boundaries)) ctx = boundaries
+    ctx%src => owner_src
+    ctx%row_start = ny0
+    ctx%row_end = nyN
+    ctx%lambda = lambda_coeff
+    ctx%diffusion = diffusion_coeff
+    ctx%has_lower_boundary = has_lower_boundary
+    ctx%has_upper_boundary = has_upper_boundary
+    if (present(derivative_order)) ctx%derivative_order = derivative_order
     call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, nxB*(2*nz + 1), &
                                         schur_pass_counts, schur_exchange_mode, &
                                         prepare_schur=.true.)
-    call assemble_system(owner_src, lambda_coeff, diffusion_coeff, ny0, nyN, derivative_order)
-    call boundary_system(owner_src, ny0, nyN, has_lower_boundary, has_upper_boundary, derivative_order)
+    call assemble_system(ctx)
+    call boundary_system(ctx)
     call eliminate_assembled_boundaries(ny0, nyN, has_lower_boundary, has_upper_boundary)
-    select case (adjustl(trim(y_solver)))
-    case ("auto", "AUTO", "default", "DEFAULT")
-      select case (mpi_autotune_selected_y_solver)
-      case (Y_SOLVER_PIPELINED_LU)
-        call ys_solve_pipelined_lu(field_values, mpi_autotune_selected_y_batches)
-      case (Y_SOLVER_SCHUR)
-        call ys_solve_endpoint_schur(field_values, symmetric_operator_value)
-      case default
-        error stop "invalid autotuned y solver"
-      end select
-    case ("schur", "SCHUR")
+    ! configure_mpi_decomposition already resolved CHANNEL_Y_SOLVER against the
+    ! autotune result at startup, so the choice is just read here.  A batch count
+    ! is only available when the autotuner picked the pipelined solver itself.
+    select case (mpi_autotune_selected_y_solver)
+    case (Y_SOLVER_SCHUR)
       call ys_solve_endpoint_schur(field_values, symmetric_operator_value)
-    case ("pipelined_lu", "PIPELINED_LU", "pipelined-lu", "PIPELINED-LU")
-      call ys_solve_pipelined_lu(field_values)
+    case (Y_SOLVER_PIPELINED_LU)
+      if (mpi_autotune_selected_y_batches >= 1_C_INT) then
+        call ys_solve_pipelined_lu(field_values, mpi_autotune_selected_y_batches)
+      else
+        call ys_solve_pipelined_lu(field_values)
+      end if
     case default
-      error stop "invalid CHANNEL_Y_SOLVER"
+      error stop "invalid y solver selection"
     end select
-    call reconstruct_assembled_boundaries(owner_dst, ny0, nyN, has_lower_boundary, has_upper_boundary)
+    call reconstruct_assembled_boundaries(owner_dst, ny0, has_lower_boundary, has_upper_boundary)
     call ys_release_workspace()
   END SUBROUTINE solve_compact_component_current_layout
 
@@ -1041,9 +1027,6 @@ CONTAINS
                                  (0.0d0, 0.0d0), (0.0d0, 0.0d0), (0.0d0, 0.0d0), (0.0d0, 0.0d0), ny)
   END SUBROUTINE solve_mean_correction_line
 
-! Orr-Sommerfeld and Squire opearators
-#define OS(iy,j) (ni*(der(iy,3,j)-2.0d0*k2(iz,ix)*der(iy,2,j)+k2(iz,ix)*k2(iz,ix)*der(iy,0,j)))
-#define SQ(iy,j) (ni*(der(iy,2,j)-k2(iz,ix)*der(iy,0,j)))
 
   SUBROUTINE linsolve(lambda)
     IMPLICIT NONE
@@ -1053,14 +1036,18 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX) :: zero_mode_u(-1:ny + 1), zero_mode_w(-1:ny + 1), zero_mode_ucor(-1:ny + 1)
 
     call roctxPush("linsolve solve_v")
-    call select_compact_component_boundaries(v0bc, v0m1bc, vnbc, vnp1bc, bc0(:, :, 2), bc0(:, :, 4), bcn(:, :, 2), bcn(:, :, 4))
     call solve_compact_component_current_layout(V(:, :, :, 2), assemble_compact_biharmonic_system, assemble_selected_compact_component_boundaries, &
-                                                lambda, 1.0d0, V(:, :, :, 2))
+                                                lambda, 1.0d0, V(:, :, :, 2), &
+                                                boundaries=compact_component_boundaries(v0bc, v0m1bc, vnbc, vnp1bc, &
+                                                                                        bc0(:, :, 2), bc0(:, :, 4), &
+                                                                                        bcn(:, :, 2), bcn(:, :, 4)))
     call roctxPop("linsolve solve_v")
     call roctxPush("linsolve solve_eta")
-    call select_compact_component_boundaries(eta0bc, eta0m1bc, etanbc, etanp1bc, bc0(:, :, 5), zero_bc, bcn(:, :, 5), zero_bc)
     call solve_compact_component_current_layout(V(:, :, :, 1), assemble_compact_helmholtz_system, assemble_selected_compact_component_boundaries, &
-                                                lambda, 1.0d0, V(:, :, :, 1))
+                                                lambda, 1.0d0, V(:, :, :, 1), &
+                                                boundaries=compact_component_boundaries(eta0bc, eta0m1bc, etanbc, etanp1bc, &
+                                                                                        bc0(:, :, 5), zero_bc, &
+                                                                                        bcn(:, :, 5), zero_bc))
     call roctxPop("linsolve solve_eta")
     call roctxPush("linsolve d_v_dy")
     call apply_complex_derivative_current_layout(V(:, :, :, 2), V(:, :, :, 3))
@@ -1117,9 +1104,11 @@ CONTAINS
     integer(C_INT), intent(in) :: iPhi
     real(C_DOUBLE), intent(in) :: lambda
     complex(C_DOUBLE_COMPLEX) :: zero_mode_scalar(-1:ny + 1), zero_mode_tcor(-1:ny + 1)
-    call select_compact_component_boundaries(phi0bc, phi0m1bc, phinbc, phinp1bc, bc0(:, :, 5 + iPhi), zero_bc, bcn(:, :, 5 + iPhi), zero_bc)
     call solve_compact_component_current_layout(V(:, :, :, 3 + iPhi), assemble_compact_helmholtz_system, assemble_selected_compact_component_boundaries, &
-                                                lambda, pra(iPhi), V(:, :, :, 3 + iPhi))
+                                                lambda, pra(iPhi), V(:, :, :, 3 + iPhi), &
+                                                boundaries=compact_component_boundaries(phi0bc, phi0m1bc, phinbc, phinp1bc, &
+                                                                                        bc0(:, :, 5 + iPhi), zero_bc, &
+                                                                                        bcn(:, :, 5 + iPhi), zero_bc))
 
     if (nx0 == 0) then
       !$omp target update from(V(:, 0, 0, 3 + iPhi))
@@ -1368,25 +1357,8 @@ CONTAINS
   !-------------------------- buildRHS --------------------------!
   ! (u,v,w) = (1,2,3)
   ! (uu,vv,ww,uv,vw,uw) = (1,2,3,4,5,6)
-#define timescheme(rhs,old,unkn,impl,expl) rhs=ODE(1)*(unkn)/deltat+(impl)+ODE(2)*(expl)-ODE(3)*(old); old=expl
-#define timescheme_accum(rhs,old,expl) rhs = rhs + ODE(2)*(expl); old = old + expl
-#define DD(f,k) ( der(iy,f,-2)*VVdz(izd(iz)+1,ix+1-nx0,iy-2,k)+ \
-  der(iy, f, -1)*VVdz(izd(iz) + 1, ix + 1 - nx0, iy - 1, k) + \
-  der(iy, f, 0)*VVdz(izd(iz) + 1, ix + 1 - nx0, iy, k) + \
-  der(iy, f, 1)*VVdz(izd(iz) + 1, ix + 1 - nx0, iy + 1, k) + \
-  der(iy, f, 2)*VVdz(izd(iz) + 1, ix + 1 - nx0, iy + 2, k))
-#define ACCUM_D2V(new, expl) \
-  timescheme_accum(new(iy, iz, ix, 2), oldrhs(iy, iz, ix, 2), (expl))
 
-#define ACCUM_ETA_UW(new, rhsu, rhsw) \
-  ACCUM_ETA_UW2(new, ibeta(iz)*(rhsu) - ialfa(ix)*(rhsw), dcmplx(dreal((rhsu)), dreal((rhsw))))
 
-#define ACCUM_ETA_UW2(new, expl_general, expl_mean) \
-  if (ix == 0 .AND. iz == 0) then; \
-    timescheme_accum(new(iy, iz, ix, 1), oldrhs(iy, iz, ix, 1), (expl_mean)); \
-  else; \
-    timescheme_accum(new(iy, iz, ix, 1), oldrhs(iy, iz, ix, 1), (expl_general)); \
-  end if
   SUBROUTINE buildrhs_prepare(ODE)
     IMPLICIT NONE
     real(C_DOUBLE), intent(in) :: ODE(1:3)
@@ -1402,7 +1374,7 @@ CONTAINS
     DO iz = -nz, nz
       DO ix = nx0, nxN
         DO i = 1, 3
-          F(-1, iz, ix, i) = -D4(F, i)/der(iy, 3, -2)
+          F(-1, iz, ix, i) = -${apply_d('F', 'i', 3)}$/der(iy, 3, -2)
         END DO
       END DO
     END DO
@@ -1410,13 +1382,19 @@ CONTAINS
     DO iz = -nz, nz
       DO ix = nx0, nxN
         DO i = 1, 3
-          F(ny + 1, iz, ix, i) = -D4(F, i)/der(iy, 3, 2)
+          F(ny + 1, iz, ix, i) = -${apply_d('F', 'i', 3)}$/der(iy, 3, 2)
         END DO
       END DO
     END DO
 #endif
 
-    ! contribution known a-priori
+    ! Contributions known a priori.
+    !
+    ! d2v, eta and the mean-pressure drive used to be three separate target
+    ! regions over the identical (iz, ix, iy) space with identical clause
+    ! lists.  Each element is touched by exactly one iteration in all three, so
+    ! fusing them is safe and saves two kernel launches per substep plus a
+    ! re-read of V and der.
     !$omp target teams distribute parallel do collapse(3) default(none)  &
     !$omp private(iz, ix, iy, tmp, k, unkn) &
     !$omp shared(nz, nx0, nxN, ny, y_first, y_last) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) &
@@ -1424,61 +1402,37 @@ CONTAINS
     DO iz = -nz, nz
       DO ix = nx0, nxN
         DO iy = y_first, y_last
-          unkn = D2(V, 2) - k2(iz, ix)*D0(V, 2)
+          unkn = ${apply_d('V', '2', 2)}$ - k2(iz, ix)*${apply_d('V', '2', 0)}$
           tmp = 0.0
           DO k = -2, 2
-            tmp = tmp + OS(iy, k)*V(iy + k, iz, ix, 2)
+            tmp = tmp + ni*${biharmonic_op('iy', 'k')}$*V(iy + k, iz, ix, 2)
           END DO
-
-          !initialize D2v
-          newrhs(iy, iz, ix, 2) = ODE(1)*unkn/deltat + tmp - ODE(3)*oldrhs(iy, iz, ix, 2)
+          memrhs(iy, iz, ix, 2) = ODE(1)*unkn/deltat + tmp - ODE(3)*oldrhs(iy, iz, ix, 2)
           oldrhs(iy, iz, ix, 2) = 0.0
-        END DO
-      END DO
-    END DO
 
-    !$omp target teams distribute parallel do collapse(3) default(none)  &
-    !$omp private(iz, ix, iy, tmp, k, unkn) &
-    !$omp shared(nz, nx0, nxN, ny, y_first, y_last) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) &
-    !$omp shared(meanpx, meanpz, ni, deltat, ode) shared(vvdz, v, pra)
-    DO iz = -nz, nz
-      DO ix = nx0, nxN
-        DO iy = y_first, y_last
           IF (ix == 0 .AND. iz == 0) THEN
-            unkn = rD0(V, 1, 3)
-            tmp = ni*rD2(V, 1, 3)
+            unkn = ${apply_d_real_pair('V', '1', '3', 0)}$
+            tmp = ni*${apply_d_real_pair('V', '1', '3', 2)}$
           ELSE
             tmp = 0.0
             DO k = -2, 2
-              tmp = tmp + SQ(iy, k)*(ibeta(iz)*V(iy + k, iz, ix, 1) - ialfa(ix)*V(iy + k, iz, ix, 3))
+              tmp = tmp + ni*${helmholtz_op('iy', 'k')}$*(ibeta(iz)*V(iy + k, iz, ix, 1) - ialfa(ix)*V(iy + k, iz, ix, 3))
             END DO
-            unkn = ibeta(iz)*D0(V, 1) - ialfa(ix)*D0(V, 3)
+            unkn = ibeta(iz)*${apply_d('V', '1', 0)}$ - ialfa(ix)*${apply_d('V', '3', 0)}$
           END IF
-          !initialize eta
-          newrhs(iy, iz, ix, 1) = ODE(1)*unkn/deltat + tmp - ODE(3)*oldrhs(iy, iz, ix, 1)
+          memrhs(iy, iz, ix, 1) = ODE(1)*unkn/deltat + tmp - ODE(3)*oldrhs(iy, iz, ix, 1)
           oldrhs(iy, iz, ix, 1) = 0.0
+
+          if (ix == 0 .AND. iz == 0) then
+            $:rk_accum('memrhs(iy, iz, ix, 1)', 'oldrhs(iy, iz, ix, 1)', 'dcmplx(meanpx, meanpz)')
+          end if
+#ifdef bodyforce
+          $:accum_d2v('memrhs', '-k2(iz, ix)*' + apply_d('F', '2', 0) + ' - ialfa(ix)*' + apply_d('F', '1', 1) + ' - ibeta(iz)*' + apply_d('F', '3', 1))
+          $:accum_eta('memrhs', 'ibeta(iz)*' + apply_d('F', '1', 0) + ' - ialfa(ix)*' + apply_d('F', '3', 0), apply_d_real_pair('F', '1', '3', 0))
+#endif
         END DO
       END DO
     END DO
-
-    !$omp target teams distribute parallel do collapse(3) default(none)  &
-    !$omp private(iz, ix, iy, tmp, k, unkn) &
-    !$omp shared(nz, nx0, nxN, ny, y_first, y_last) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) &
-    !$omp shared(meanpx, meanpz, ni, deltat, ode) shared(vvdz, v, pra)
-    DO iz = -nz, nz
-      DO ix = nx0, nxN
-        DO iy = y_first, y_last
-
-          if (ix == 0 .AND. iz == 0) then
-            timescheme_accum(newrhs(iy, iz, ix, 1), oldrhs(iy, iz, ix, 1), dcmplx(meanpx, meanpz))
-          end if
-#ifdef bodyforce
-          ACCUM_D2V(newrhs, -k2(iz, ix)*D0(F, 2) - ialfa(ix)*D1(F, 1) - ibeta(iz)*D1(F, 3))
-          ACCUM_ETA_UW2(newrhs, ibeta(iz)*D0(F, 1) - ialfa(ix)*D0(F, 3), rD0(F, 1, 3))
-#endif
-        end do
-      end do
-    end do
 
     !initialize phi
     DO iPhi = 1, nPhi
@@ -1490,10 +1444,10 @@ CONTAINS
           DO iy = y_first, y_last
             tmp = 0.0
             DO k = -2, 2
-              tmp = tmp + SQ(iy, k)*V(iy + k, iz, ix, 3 + iPhi)
+              tmp = tmp + ni*${helmholtz_op('iy', 'k')}$*V(iy + k, iz, ix, 3 + iPhi)
             END DO
-            unkn = D0(V, 3 + iPhi)
-            newrhs(iy, iz, ix, 2 + iPhi) = ODE(1)*unkn/deltat + tmp*pra(iPhi) - ODE(3)*oldrhs(iy, iz, ix, 2 + iPhi)
+            unkn = ${apply_d('V', '3 + iPhi', 0)}$
+            memrhs(iy, iz, ix, 2 + iPhi) = ODE(1)*unkn/deltat + tmp*pra(iPhi) - ODE(3)*oldrhs(iy, iz, ix, 2 + iPhi)
             oldrhs(iy, iz, ix, 2 + iPhi) = 0.0
           END DO
         END DO
@@ -1505,10 +1459,10 @@ CONTAINS
     DO iz = -nz, nz
     DO ix = nx0, nxN
     DO iy = y_first, y_last
-      V(iy, iz, ix, 1) = newrhs(iy, iz, ix, 1)
-      V(iy, iz, ix, 2) = newrhs(iy, iz, ix, 2)
+      V(iy, iz, ix, 1) = memrhs(iy, iz, ix, 1)
+      V(iy, iz, ix, 2) = memrhs(iy, iz, ix, 2)
       DO iPhi = 1, nPhi
-        V(iy, iz, ix, 3 + iPhi) = newrhs(iy, iz, ix, 2 + iPhi)
+        V(iy, iz, ix, 3 + iPhi) = memrhs(iy, iz, ix, 2 + iPhi)
       END DO
     END DO
     END DO
@@ -1534,11 +1488,11 @@ CONTAINS
         DO ix = nx0, nxN
           DO iy = y_first, y_last
 
-            rhsu = -ialfa(ix)*DD(0, from); rhsw = 0.0
-            expl = ialfa(ix)*ialfa(ix)*DD(1, from)
+            rhsu = -ialfa(ix)*${apply_d_vvdz(0, 'from')}$; rhsw = 0.0
+            expl = ialfa(ix)*ialfa(ix)*${apply_d_vvdz(1, 'from')}$
 
-            ACCUM_D2V(V, expl)
-            ACCUM_ETA_UW(V, rhsu, rhsw)
+            $:accum_d2v('V', 'expl')
+            $:accum_eta_uw('V', 'rhsu', 'rhsw')
           END DO
         END DO
       END DO
@@ -1551,8 +1505,8 @@ CONTAINS
         DO ix = nx0, nxN
           DO iy = y_first, y_last
 
-            expl = DD(1, from)*k2(iz, ix)
-            ACCUM_D2V(V, expl)
+            expl = ${apply_d_vvdz(1, 'from')}$*k2(iz, ix)
+            $:accum_d2v('V', 'expl')
           END DO
         END DO
       END DO
@@ -1564,11 +1518,11 @@ CONTAINS
       DO iz = -nz, nz
         DO ix = nx0, nxN
           DO iy = y_first, y_last
-            rhsw = -ibeta(iz)*DD(0, from); rhsu = 0.0
-            expl = ibeta(iz)*ibeta(iz)*DD(1, from)
+            rhsw = -ibeta(iz)*${apply_d_vvdz(0, 'from')}$; rhsu = 0.0
+            expl = ibeta(iz)*ibeta(iz)*${apply_d_vvdz(1, 'from')}$
 
-            ACCUM_D2V(V, expl)
-            ACCUM_ETA_UW(V, rhsu, rhsw)
+            $:accum_d2v('V', 'expl')
+            $:accum_eta_uw('V', 'rhsu', 'rhsw')
           END DO
         END DO
       END DO
@@ -1581,11 +1535,11 @@ CONTAINS
         DO ix = nx0, nxN
           DO iy = y_first, y_last
 
-            rhsu = -DD(1, from); rhsw = 0.0
-            expl = ialfa(ix)*DD(2, from) + ialfa(ix)*DD(0, from)*k2(iz, ix)
+            rhsu = -${apply_d_vvdz(1, 'from')}$; rhsw = 0.0
+            expl = ialfa(ix)*${apply_d_vvdz(2, 'from')}$ + ialfa(ix)*${apply_d_vvdz(0, 'from')}$*k2(iz, ix)
 
-            ACCUM_D2V(V, expl)
-            ACCUM_ETA_UW(V, rhsu, rhsw)
+            $:accum_d2v('V', 'expl')
+            $:accum_eta_uw('V', 'rhsu', 'rhsw')
           END DO
         END DO
       END DO
@@ -1599,11 +1553,11 @@ CONTAINS
           DO iy = y_first, y_last
 
             ! contribution from VVdz(:,:,:,5)
-            rhsw = -DD(1, from); rhsu = 0.0
-            expl = ibeta(iz)*DD(2, from) + ibeta(iz)*DD(0, from)*k2(iz, ix)
+            rhsw = -${apply_d_vvdz(1, 'from')}$; rhsu = 0.0
+            expl = ibeta(iz)*${apply_d_vvdz(2, 'from')}$ + ibeta(iz)*${apply_d_vvdz(0, 'from')}$*k2(iz, ix)
 
-            ACCUM_D2V(V, expl)
-            ACCUM_ETA_UW(V, rhsu, rhsw)
+            $:accum_d2v('V', 'expl')
+            $:accum_eta_uw('V', 'rhsu', 'rhsw')
           END DO
         END DO
       END DO
@@ -1616,12 +1570,12 @@ CONTAINS
         DO ix = nx0, nxN
           DO iy = y_first, y_last
 
-            rhsu = -ibeta(iz)*DD(0, from)
-            rhsw = -ialfa(ix)*DD(0, from)
-            expl = 2*ialfa(ix)*ibeta(iz)*DD(1, from)
+            rhsu = -ibeta(iz)*${apply_d_vvdz(0, 'from')}$
+            rhsw = -ialfa(ix)*${apply_d_vvdz(0, 'from')}$
+            expl = 2*ialfa(ix)*ibeta(iz)*${apply_d_vvdz(1, 'from')}$
 
-            ACCUM_D2V(V, expl)
-            ACCUM_ETA_UW(V, rhsu, rhsw)
+            $:accum_d2v('V', 'expl')
+            $:accum_eta_uw('V', 'rhsu', 'rhsw')
 
           END DO
         END DO
@@ -1636,8 +1590,8 @@ CONTAINS
         DO iz = -nz, nz
           DO ix = nx0, nxN
             DO iy = y_first, y_last
-              rhst = -ialfa(ix)*DD(0, from)
-              timescheme_accum(V(iy, iz, ix, 3 + iPhi), oldrhs(iy, iz, ix, 2 + iPhi), rhst)
+              rhst = -ialfa(ix)*${apply_d_vvdz(0, 'from')}$
+              $:rk_accum('V(iy, iz, ix, 3 + iPhi)', 'oldrhs(iy, iz, ix, 2 + iPhi)', 'rhst')
             END DO
           END DO
         END DO
@@ -1649,8 +1603,8 @@ CONTAINS
           DO ix = nx0, nxN
             DO iy = y_first, y_last
 
-              rhst = -DD(1, from)
-              timescheme_accum(V(iy, iz, ix, 3 + iPhi), oldrhs(iy, iz, ix, 2 + iPhi), rhst)
+              rhst = -${apply_d_vvdz(1, 'from')}$
+              $:rk_accum('V(iy, iz, ix, 3 + iPhi)', 'oldrhs(iy, iz, ix, 2 + iPhi)', 'rhst')
             END DO
           END DO
         END DO
@@ -1661,8 +1615,8 @@ CONTAINS
         DO iz = -nz, nz
           DO ix = nx0, nxN
             DO iy = y_first, y_last
-              rhst = -ibeta(iz)*DD(0, from)
-              timescheme_accum(V(iy, iz, ix, 3 + iPhi), oldrhs(iy, iz, ix, 2 + iPhi), rhst)
+              rhst = -ibeta(iz)*${apply_d_vvdz(0, 'from')}$
+              $:rk_accum('V(iy, iz, ix, 3 + iPhi)', 'oldrhs(iy, iz, ix, 2 + iPhi)', 'rhst')
             END DO
           END DO
         END DO
@@ -1696,11 +1650,13 @@ CONTAINS
       call roctxPop("MPI_File_read_all restart")
       call MPI_file_close(fh)
       IF (r_nx /= nx .OR. r_ny /= ny .OR. r_nz /= nz .OR. r_alfa0 /= alfa0 .OR. r_beta0 /= beta0 .OR. r_ni /= ni .OR. r_a /= a .OR. r_ymin /= ymin .OR. r_ymax /= ymax) THEN
-        IF (has_terminal) PRINT *, "ERROR: mismatch in metadata between restart file and dns.in. Stopping."
-        IF (has_terminal) PRINT *, "From .out file:"
-        IF (has_terminal) PRINT *, r_nx, r_ny, r_nz, r_alfa0, r_beta0, r_ni, r_a, r_ymin, r_ymax
-        IF (has_terminal) PRINT *, "From dns.in:"
-        IF (has_terminal) PRINT *, nx, ny, nz, alfa0, beta0, ni, a, ymin, ymax
+        IF (has_terminal) THEN
+          PRINT *, "ERROR: mismatch in metadata between restart file and dns.in. Stopping."
+          PRINT *, "From .out file:"
+          PRINT *, r_nx, r_ny, r_nz, r_alfa0, r_beta0, r_ni, r_a, r_ymin, r_ymax
+          PRINT *, "From dns.in:"
+          PRINT *, nx, ny, nz, alfa0, beta0, ni, a, ymin, ymax
+        END IF
         STOP
       END IF
     ELSE

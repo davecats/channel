@@ -3,20 +3,19 @@
 module convvelo
 
   use, intrinsic :: iso_c_binding
-  use config, only: ini_config, has_section, get_string, get_real, lower
+  use config, only: ini_config, has_section, get_string, get_real
   use dnsdata, only: V, nPhi, nz, ny, nxd, izd, factor, iproc, &
                      apply_complex_derivative_current_layout, apply_complex_second_derivative_current_layout, has_terminal, &
                      time, deltat, overlapping
   use pressure_output, only: compute_poisson, compute_dpdy
-  use mpi_transpose, only: ny0, nyN, nx0, nxN, nxB, nzB, nx, has_average, ierr, sendbuf, recvbuf, &
-                           pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, nzd, fft_transpose_is_local, &
-                           repack_zTOx_local, repack_xTOz_local, roctxPush, roctxPop, &
-                           MPI_DOUBLE_COMPLEX, MPI_COMM_WORLD, &
-                           MPI_Request, MPI_Status, MPI_Wait, MPI_File, MPI_Datatype, MPI_OFFSET_KIND, &
-                           MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, MPI_INTEGER8, MPI_MODE_WRONLY, MPI_MODE_CREATE, &
-                           MPI_INFO_NULL, MPI_Type_create_subarray, MPI_Type_commit, MPI_Type_free, &
-                           MPI_File_open, MPI_File_set_size, MPI_File_write_at, MPI_File_set_view, &
-                           MPI_File_write_all, MPI_File_close
+  use channel_grid, only: ny0, nyN, nx0, nxN, nxB, nzB, nx, has_average, nzd
+  use mpi_transpose, only: ierr, sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, &
+                           fft_transpose_is_local, repack_zTOx_local, repack_xTOz_local, roctxPush, roctxPop, &
+                           MPI_DOUBLE_COMPLEX, MPI_COMM_WORLD, MPI_Request, MPI_Status, MPI_Wait, MPI_File, &
+                           MPI_Datatype, MPI_OFFSET_KIND, MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, MPI_INTEGER8, &
+                           MPI_MODE_WRONLY, MPI_MODE_CREATE, MPI_INFO_NULL, MPI_Type_create_subarray, &
+                           MPI_Type_commit, MPI_Type_free, MPI_File_open, MPI_File_set_size, MPI_File_write_at, &
+                           MPI_File_set_view, MPI_File_write_all, MPI_File_close
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
   use ffts, only: IFT, RFT, HFT, FFT, VVdx, VVdz, get_fft_workspace_bytes, get_fft_workspace_bytes_for_dims, &
                   bind_fft_workspace, unbind_fft_workspace
@@ -24,7 +23,9 @@ module convvelo
   use dnsdata, only: VVdx, VVdz
   use ffts, only: IFT, RFT, HFT, FFT
 #endif
-  use byte_workspace, only: workspace_request, workspace_release, workspace_slice, workspace_align_offset
+  use byte_workspace, only: workspace_request, workspace_release, workspace_align_offset, &
+                            workspace_layout, layout_begin, layout_bytes, layout_real_3d
+  use env_options, only: lowercase
 
   implicit none
 
@@ -84,9 +85,9 @@ module convvelo
   complex(C_DOUBLE_COMPLEX), allocatable, save, public :: convvelo_stats(:, :, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable, save, public :: convvelo_work(:, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable, save, public :: component_means(:, :)
-  real(C_DOUBLE), pointer, contiguous, save :: convvelo_real0(:, :, :)
-  real(C_DOUBLE), pointer, contiguous, save :: convvelo_real1(:, :, :)
-  real(C_DOUBLE), pointer, contiguous, save :: convvelo_real_prod(:, :, :)
+  real(C_DOUBLE), pointer, contiguous, save :: convvelo_real0(:, :, :) => null()
+  real(C_DOUBLE), pointer, contiguous, save :: convvelo_real1(:, :, :) => null()
+  real(C_DOUBLE), pointer, contiguous, save :: convvelo_real_prod(:, :, :) => null()
   integer(C_INT64_T), allocatable, save :: n_field_samples(:)
 
   public :: init_convvelo, reset_convvelo_stats, update_convvelo_component_means, free_convvelo
@@ -126,7 +127,7 @@ contains
     call get_real(cfg, "convvelo", "dt_compute", convvelo_dt_compute, found)
     call get_real(cfg, "convvelo", "dt_write", convvelo_dt_write, found)
 
-    select case (lower(adjustl(trim(convvelo_output_mode))))
+    select case (lowercase(adjustl(trim(convvelo_output_mode))))
     case ("full")
       convvelo_write_full_fields = .true.
       convvelo_output_mode = "full"
@@ -430,20 +431,6 @@ contains
     end do
   end subroutine load_component_to_work
 
-  subroutine apply_dy_to_work(component_index)
-    implicit none
-    integer(C_INT), intent(in) :: component_index
-
-    call apply_complex_derivative_current_layout(V(:, :, :, component_index), convvelo_work)
-  end subroutine apply_dy_to_work
-
-  subroutine apply_dyy_to_work(component_index)
-    implicit none
-    integer(C_INT), intent(in) :: component_index
-
-    call apply_complex_second_derivative_current_layout(V(:, :, :, component_index), convvelo_work)
-  end subroutine apply_dyy_to_work
-
   subroutine multiply_work_by_conjugate(component_index)
     implicit none
     integer(C_INT), intent(in) :: component_index
@@ -586,9 +573,9 @@ contains
     if (.not. convvelo_field_requested(field_index)) return
     select case (derivative_order)
     case (1)
-      call apply_dy_to_work(rhs_component)
+      call apply_complex_derivative_current_layout(V(:, :, :, rhs_component), convvelo_work)
     case (2)
-      call apply_dyy_to_work(rhs_component)
+      call apply_complex_second_derivative_current_layout(V(:, :, :, rhs_component), convvelo_work)
     case default
       error stop "accumulate_cross_derivative: unsupported derivative order"
     end select
@@ -674,16 +661,25 @@ contains
 #endif
   end subroutine get_convvelo_real_workspace_bytes
 
+  ! Single description of the convvelo real-space slabs; see workspace_layout.
+  subroutine convvelo_real_layout(bind, nbytes)
+    implicit none
+    logical, intent(in) :: bind
+    integer(C_SIZE_T), intent(out) :: nbytes
+    type(workspace_layout) :: lay
+
+    call layout_begin(lay, bind)
+    call layout_real_3d(lay, 1, 2*(nxd + 1), 1, nzB, ny0 - 2, nyN + 2, convvelo_real0)
+    call layout_real_3d(lay, 1, 2*(nxd + 1), 1, nzB, ny0 - 2, nyN + 2, convvelo_real1)
+    call layout_real_3d(lay, 1, 2*(nxd + 1), 1, nzB, ny0 - 2, nyN + 2, convvelo_real_prod)
+    nbytes = layout_bytes(lay)
+  end subroutine convvelo_real_layout
+
   subroutine get_convvelo_local_real_workspace_bytes(nbytes)
     implicit none
     integer(C_SIZE_T), intent(out) :: nbytes
-    integer(C_SIZE_T) :: real_count, offset
 
-    real_count = int(2*(nxd + 1), C_SIZE_T)*int(nzB, C_SIZE_T)*int(nyN - ny0 + 5, C_SIZE_T)
-    offset = 0_C_SIZE_T
-    offset = workspace_align_offset(offset + real_count*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
-    offset = workspace_align_offset(offset + real_count*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
-    nbytes = workspace_align_offset(offset + real_count*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
+    call convvelo_real_layout(.false., nbytes)
   end subroutine get_convvelo_local_real_workspace_bytes
 
   subroutine acquire_convvelo_real_workspace(owner)
@@ -713,15 +709,9 @@ contains
 
   subroutine bind_convvelo_real_workspace()
     implicit none
-    type(C_PTR) :: ptr
-    real(C_DOUBLE), pointer :: rbuf(:)
-    integer(C_SIZE_T) :: offset, real_count
+    integer(C_SIZE_T) :: nbytes
 
-    real_count = int(2*(nxd + 1), C_SIZE_T)*int(nzB, C_SIZE_T)*int(nyN - ny0 + 5, C_SIZE_T)
-    offset = 0_C_SIZE_T
-    call bind_real_3d(offset, convvelo_real0)
-    call bind_real_3d(offset, convvelo_real1)
-    call bind_real_3d(offset, convvelo_real_prod)
+    call convvelo_real_layout(.true., nbytes)
 
     !$omp target enter data map(alloc: convvelo_real0, convvelo_real1, convvelo_real_prod)
     !$omp target
@@ -729,17 +719,6 @@ contains
     convvelo_real1(1, 1, ny0 - 2) = 0.0_C_DOUBLE
     convvelo_real_prod(1, 1, ny0 - 2) = 0.0_C_DOUBLE
     !$omp end target
-
-  contains
-    subroutine bind_real_3d(offset_bytes, target)
-      integer(C_SIZE_T), intent(inout) :: offset_bytes
-      real(C_DOUBLE), pointer, contiguous, intent(out) :: target(:, :, :)
-
-      call workspace_slice(offset_bytes, ptr)
-      call c_f_pointer(ptr, rbuf, [int(real_count)])
-      target(1:2*(nxd + 1), 1:nzB, ny0 - 2:nyN + 2) => rbuf
-      offset_bytes = workspace_align_offset(offset_bytes + real_count*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
-    end subroutine bind_real_3d
   end subroutine bind_convvelo_real_workspace
 
   subroutine unbind_convvelo_real_workspace()

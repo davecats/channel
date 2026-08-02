@@ -5,7 +5,8 @@ module y_schur_solver
   use, intrinsic :: iso_c_binding
   use roctx, only: roctxPush, roctxPop
 #ifdef HAVE_MPI
-  use mpi_transpose, only: MPI_COMM_Y, ensure_ycomm_buffers, ycomm_sendbuf, ycomm_recvbuf, ipy
+  use channel_grid, only: ipy
+  use mpi_transpose, only: MPI_COMM_Y, ensure_ycomm_buffers, ycomm_sendbuf, ycomm_recvbuf
   use y_pipeline_nccl, only: channel_comm_alltoall_complex, channel_comm_context_reset
   use mpi_f08
 #endif
@@ -56,6 +57,15 @@ module y_schur_solver
   complex(C_DOUBLE_COMPLEX), allocatable, save :: s_recover_basis(:, :, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable, save :: s_values(:, :, :)
   logical, save :: s_comm_stats_enabled = .false.
+
+  ! Signature of the currently prepared level hierarchy.  ys_schur_prepare is
+  ! called once per component solve, but everything it builds (level
+  ! communicators, split ranges, staging buffers) depends only on these values,
+  ! so an unchanged signature lets us skip the whole rebuild -- most importantly
+  ! the per-level MPI_Comm_split/MPI_Comm_free pair.
+  integer(C_INT), save :: s_prepared_ipy = -1_C_INT
+  integer(C_INT), save :: s_prepared_exchange_mode = -1_C_INT
+  logical, save :: s_prepared_comm_stats = .false.
 
 #ifdef HAVE_MPI
   type(MPI_Comm), allocatable, save :: s_level_comm(:)
@@ -170,11 +180,41 @@ contains
     end if
 
     s_comm_stats_enabled = .false.
+    s_prepared_ipy = -1_C_INT
+    s_prepared_exchange_mode = -1_C_INT
+    s_prepared_comm_stats = .false.
     ws%npy_count = 1_C_INT
     ws%nlines = 0_C_INT
     ws%pass_count = 0_C_INT
     ws%prepared = .false.
   end subroutine ys_schur_release
+
+  ! .true. when the prepared hierarchy already matches the requested one, so
+  ! ys_schur_prepare can return without tearing anything down and rebuilding it.
+  logical function schur_prepared_matches(ws, cfg, nlines, npy_count)
+    implicit none
+    type(ys_schur_workspace), intent(in) :: ws
+    type(ys_schur_config), intent(in) :: cfg
+    integer(C_INT), intent(in) :: nlines, npy_count
+
+    schur_prepared_matches = .false.
+    if (.not. ws%prepared) return
+    if (ws%npy_count /= npy_count .or. ws%nlines /= nlines) return
+    if (s_prepared_ipy /= ipy) return
+    if (s_prepared_exchange_mode /= cfg%exchange_mode) return
+    if (s_prepared_comm_stats .neqv. cfg%comm_stats_enabled) return
+
+    ! A single-rank y communicator prepares no levels at all.
+    if (npy_count == 1_C_INT) then
+      schur_prepared_matches = (size(cfg%pass_node_counts) == 0)
+      return
+    end if
+
+    if (.not. allocated(s_pass_counts)) return
+    if (size(s_pass_counts) /= size(cfg%pass_node_counts)) return
+    if (any(s_pass_counts /= cfg%pass_node_counts)) return
+    schur_prepared_matches = .true.
+  end function schur_prepared_matches
 
 #ifdef HAVE_MPI
   subroutine ensure_schur_nccl_context_slots(pass_count)
@@ -274,15 +314,20 @@ contains
     integer(C_INT) :: rel_first, line_count
     integer :: ilevel, irank, ierr_local, comm_size
 
-    call ys_schur_release(ws)
     if (npy_count < 1_C_INT) error stop "y-Schur requires at least one y rank"
     if (nlines < 1_C_INT) error stop "y-Schur requires at least one line"
+    if (schur_prepared_matches(ws, cfg, nlines, npy_count)) return
+
+    call ys_schur_release(ws)
 
     ws%npy_count = npy_count
     ws%nlines = nlines
     ws%pass_count = int(size(cfg%pass_node_counts), C_INT)
     ws%prepared = .true.
     s_comm_stats_enabled = cfg%comm_stats_enabled
+    s_prepared_ipy = ipy
+    s_prepared_exchange_mode = cfg%exchange_mode
+    s_prepared_comm_stats = cfg%comm_stats_enabled
 
     if (npy_count == 1_C_INT) then
       if (size(cfg%pass_node_counts) /= 0) error stop "single-rank y-Schur config must not contain passes"

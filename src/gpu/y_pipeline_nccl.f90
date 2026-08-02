@@ -3,6 +3,7 @@
 module y_pipeline_nccl
   use, intrinsic :: iso_c_binding
   use mpi_f08
+  use env_options, only: env_text, lowercase
   implicit none
   private
 
@@ -12,6 +13,15 @@ module y_pipeline_nccl
 
   integer(c_int), save :: channel_comm_override = CHANNEL_COMM_BACKEND_AUTO
 
+  ! Cache of communication contexts keyed by communicator size.  Both the x
+  ! transpose and the y pipeline need one, and the autotuner walks several
+  ! decompositions within a single run, so contexts are kept per size rather
+  ! than rebuilt each time a size comes back into use.
+  type, public :: channel_comm_cache
+    type(c_ptr), allocatable :: by_size(:)
+  end type channel_comm_cache
+
+  public :: channel_comm_cache_reserve, channel_comm_cache_finalize
   public :: channel_comm_use_nccl, channel_comm_available
   public :: channel_comm_backend_from_env, channel_comm_backend_name
   public :: channel_comm_set_backend_override, channel_comm_clear_backend_override
@@ -98,18 +108,16 @@ contains
   end function channel_comm_available
 
   integer(c_int) function channel_comm_backend_from_env()
-    integer :: status, length
     character(len=32) :: value
 
     channel_comm_backend_from_env = CHANNEL_COMM_BACKEND_AUTO
-    call get_environment_variable("CHANNEL_COMM", value, length, status)
-    if (status /= 0 .or. length <= 0) return
-    select case (adjustl(trim(value(:length))))
-    case ("auto", "AUTO")
+    if (.not. env_text("CHANNEL_COMM", value)) return
+    select case (lowercase(trim(value)))
+    case ("auto")
       channel_comm_backend_from_env = CHANNEL_COMM_BACKEND_AUTO
-    case ("mpi", "MPI")
+    case ("mpi")
       channel_comm_backend_from_env = CHANNEL_COMM_BACKEND_MPI
-    case ("nccl", "NCCL", "rccl", "RCCL")
+    case ("nccl", "rccl")
       channel_comm_backend_from_env = CHANNEL_COMM_BACKEND_NCCL
     case default
       error stop "CHANNEL_COMM must be mpi, auto, or nccl"
@@ -166,6 +174,40 @@ contains
       error stop "invalid CHANNEL_COMM backend"
     end select
   end function channel_comm_use_nccl
+
+  ! Makes sure cache%by_size(comm_size) exists; the slot itself starts null and
+  ! is filled in lazily by whoever first needs a live context for it.
+  subroutine channel_comm_cache_reserve(cache, comm_size)
+    type(channel_comm_cache), intent(inout) :: cache
+    integer(c_int), intent(in) :: comm_size
+    type(c_ptr), allocatable :: grown(:)
+    integer :: old_upper, new_upper
+
+    if (.not. allocated(cache%by_size)) then
+      allocate (cache%by_size(0:max(1_c_int, comm_size)))
+      cache%by_size = c_null_ptr
+      return
+    end if
+    if (ubound(cache%by_size, 1) >= comm_size) return
+
+    old_upper = ubound(cache%by_size, 1)
+    new_upper = max(int(comm_size), 2*old_upper)
+    allocate (grown(0:new_upper))
+    grown = c_null_ptr
+    grown(0:old_upper) = cache%by_size(0:old_upper)
+    call move_alloc(grown, cache%by_size)
+  end subroutine channel_comm_cache_reserve
+
+  subroutine channel_comm_cache_finalize(cache)
+    type(channel_comm_cache), intent(inout) :: cache
+    integer :: i
+
+    if (.not. allocated(cache%by_size)) return
+    do i = lbound(cache%by_size, 1), ubound(cache%by_size, 1)
+      call channel_comm_context_reset(cache%by_size(i))
+    end do
+    deallocate (cache%by_size)
+  end subroutine channel_comm_cache_finalize
 
   subroutine channel_comm_p2p_ensure(comm, comm_ctx)
     type(MPI_Comm), intent(in) :: comm

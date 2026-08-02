@@ -66,7 +66,46 @@ endfunction()
 set(CHANNEL_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 set(CHANNEL_NCCL_P2P_SOURCE "${CHANNEL_SOURCE_DIR}/gpu/channel_nccl_p2p.c")
 
+# --------------------------------------------------------------------
+# fypp preprocessing
+# --------------------------------------------------------------------
+# Sources ending in .fypp are expanded to .f90 in the build tree.  fypp leaves
+# cpp directives (#include, #ifdef) untouched, so the usual -cpp pass still
+# runs afterwards on the generated file.
+find_program(FYPP_EXECUTABLE fypp HINTS "$ENV{HOME}/ibmc/bin" "$ENV{HOME}/.local/bin")
+if(NOT FYPP_EXECUTABLE)
+    message(FATAL_ERROR "fypp not found. Install it (pip install fypp) or pass -DFYPP_EXECUTABLE=/path/to/fypp")
+endif()
+
+# Re-expand whenever any shared definition file changes, not just the .fypp itself.
+file(GLOB CHANNEL_FYPP_INCLUDES "${CHANNEL_SOURCE_DIR}/core/*.fypph")
+
+function(channel_fypp_generate out_var)
+    set(generated)
+    foreach(infile IN LISTS ARGN)
+        get_filename_component(base "${infile}" NAME_WE)
+        set(outfile "${CMAKE_CURRENT_BINARY_DIR}/generated/${base}.f90")
+        add_custom_command(
+            OUTPUT "${outfile}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/generated"
+            COMMAND ${FYPP_EXECUTABLE} -I "${CHANNEL_SOURCE_DIR}/core"
+                    --line-length=132 --folding-mode=smart
+                    "${infile}" "${outfile}"
+            DEPENDS "${infile}" ${CHANNEL_FYPP_INCLUDES}
+            COMMENT "fypp: ${base}.fypp -> ${base}.f90"
+            VERBATIM)
+        list(APPEND generated "${outfile}")
+    endforeach()
+    set(${out_var} "${generated}" PARENT_SCOPE)
+endfunction()
+
+channel_fypp_generate(CHANNEL_GENERATED_SOURCES
+    ${CHANNEL_SOURCE_DIR}/core/dnsdata.fypp
+)
+
 add_library(channel_core
+    ${CHANNEL_SOURCE_DIR}/core/channel_grid.f90
+    ${CHANNEL_SOURCE_DIR}/core/env_options.f90
     ${CHANNEL_SOURCE_DIR}/core/config.f90
     ${CHANNEL_SOURCE_DIR}/core/rbmat.f90
     ${CHANNEL_SOURCE_DIR}/core/roctx.f90
@@ -78,7 +117,7 @@ add_library(channel_core
     ${CHANNEL_SOURCE_DIR}/mpi/mpi_transpose.f90
     ${CHANNEL_SOURCE_DIR}/fft/ffts.f90
     ${CHANNEL_SOURCE_DIR}/mpi/mpi_autotune.f90
-    ${CHANNEL_SOURCE_DIR}/core/dnsdata.f90
+    ${CHANNEL_GENERATED_SOURCES}
     ${CHANNEL_SOURCE_DIR}/core/convvelo.f90
     ${CHANNEL_SOURCE_DIR}/core/pressure_output.f90
     ${CHANNEL_SOURCE_DIR}/core/driver.f90
@@ -123,26 +162,22 @@ target_link_libraries(test_regression_scalar PRIVATE channel_core)
 add_executable(test_pressure_dpdy ${CHANNEL_SOURCE_DIR}/test/test_pressure_dpdy.f90)
 target_link_libraries(test_pressure_dpdy PRIVATE channel_core)
 
-add_executable(test_convvelo_stats
-    ${CHANNEL_SOURCE_DIR}/test/test_convvelo_utils.f90
-    ${CHANNEL_SOURCE_DIR}/test/test_convvelo_stats.f90
-)
-target_link_libraries(test_convvelo_stats PRIVATE channel_core)
+# Shared by three test executables.  Compiling it once as its own target keeps
+# parallel builds from racing to write the same Fortran module file.
+add_library(test_convvelo_utils STATIC ${CHANNEL_SOURCE_DIR}/test/test_convvelo_utils.f90)
+target_link_libraries(test_convvelo_utils PUBLIC channel_core)
 
-add_executable(test_convvelo_runtime
-    ${CHANNEL_SOURCE_DIR}/test/test_convvelo_utils.f90
-    ${CHANNEL_SOURCE_DIR}/test/test_convvelo_runtime.f90
-)
-target_link_libraries(test_convvelo_runtime PRIVATE channel_core)
+add_executable(test_convvelo_stats ${CHANNEL_SOURCE_DIR}/test/test_convvelo_stats.f90)
+target_link_libraries(test_convvelo_stats PRIVATE test_convvelo_utils)
+
+add_executable(test_convvelo_runtime ${CHANNEL_SOURCE_DIR}/test/test_convvelo_runtime.f90)
+target_link_libraries(test_convvelo_runtime PRIVATE test_convvelo_utils)
 
 add_executable(test_convvelo_mpi_io ${CHANNEL_SOURCE_DIR}/test/test_convvelo_mpi_io.f90)
 target_link_libraries(test_convvelo_mpi_io PRIVATE channel_core)
 
-add_executable(test_post_convvelo
-    ${CHANNEL_SOURCE_DIR}/test/test_convvelo_utils.f90
-    ${CHANNEL_SOURCE_DIR}/test/test_post_convvelo.f90
-)
-target_link_libraries(test_post_convvelo PRIVATE channel_core)
+add_executable(test_post_convvelo ${CHANNEL_SOURCE_DIR}/test/test_post_convvelo.f90)
+target_link_libraries(test_post_convvelo PRIVATE test_convvelo_utils)
 
 add_executable(test_y_pencil_transpose ${CHANNEL_SOURCE_DIR}/test/test_y_pencil_transpose.f90)
 target_link_libraries(test_y_pencil_transpose PRIVATE channel_core)
@@ -284,10 +319,32 @@ elseif (CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
     else()
         message(STATUS "NCCL not found; y-pipeline NCCL backend disabled")
     endif()
+    # roctx.f90 binds to the NVTX v2 entry points (nvtxRangePushA/nvtxRangePop).
+    # Up to CUDA 12.8 those lived in libnvToolsExt; from 12.9 on NVTX v3 is
+    # header-only and the v2 ABI is provided by libnvtx3interop instead, which
+    # FindCUDAToolkit does not report. Look for either, and fall back to
+    # compiling the ranges out rather than failing to link.
     if(TARGET CUDA::nvToolsExt)
         target_link_libraries(channel_core PUBLIC CUDA::nvToolsExt)
+        set(CHANNEL_HAVE_NVTX ON)
     elseif(CUDA_nvToolsExt_LIBRARY)
         target_link_libraries(channel_core PUBLIC ${CUDA_nvToolsExt_LIBRARY})
+        set(CHANNEL_HAVE_NVTX ON)
+    else()
+        find_library(CUDA_nvtx3interop_LIBRARY
+            NAMES nvtx3interop
+            HINTS ${CUDAToolkit_LIBRARY_DIR} ${CUDAToolkit_LIBRARY_ROOT}
+            PATH_SUFFIXES lib lib64 targets/x86_64-linux/lib)
+        if(CUDA_nvtx3interop_LIBRARY)
+            target_link_libraries(channel_core PUBLIC ${CUDA_nvtx3interop_LIBRARY})
+            set(CHANNEL_HAVE_NVTX ON)
+        endif()
+    endif()
+    if(CHANNEL_HAVE_NVTX)
+        target_compile_definitions(channel_core PRIVATE HAVE_NVTX)
+        message(STATUS "NVTX profiling ranges enabled")
+    else()
+        message(STATUS "NVTX library not found; roctx ranges compiled out")
     endif()
 
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cpp -O3 -mp -mp=gpu -Minfo=mp -Mcache_align -cuda") #

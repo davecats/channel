@@ -15,6 +15,7 @@
 
 MODULE driver
   USE roctx, ONLY: roctxPush, roctxPop
+  USE env_options, ONLY: env_flag, env_int
 
 CONTAINS
   !==========================================================
@@ -54,9 +55,7 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
     integer :: num_dev, dev, local_rank
 #endif
 #endif
-    integer :: env_status, env_length
-    logical :: run_solver
-    character(len=32) :: env_value
+    logical :: run_solver, exit_after_autotune
     complex(C_DOUBLE_COMPLEX), allocatable :: zero_mode(:)
 
     run_solver = .true.
@@ -111,16 +110,14 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
 
     call read_ini_file(config_file, cfg)
     CALL read_dnsin(cfg)
-    call get_environment_variable("CHANNEL_EXIT_AFTER_MPI_AUTOTUNE", env_value, env_length, env_status)
-    if (env_status == 0) then
-      select case (adjustl(trim(env_value(:env_length))))
-      case ("1", "true", "TRUE", "yes", "YES", "on", "ON")
-        if (iproc == 0) print *, "CHANNEL_EXIT_AFTER_MPI_AUTOTUNE set; exiting after MPI autotune/configuration."
+    exit_after_autotune = .false.
+    call env_flag("CHANNEL_EXIT_AFTER_MPI_AUTOTUNE", exit_after_autotune)
+    if (exit_after_autotune) then
+      if (iproc == 0) print *, "CHANNEL_EXIT_AFTER_MPI_AUTOTUNE set; exiting after MPI autotune/configuration."
 #ifdef HAVE_MPI
-        CALL MPI_FINALIZE(ierr)
+      CALL MPI_FINALIZE(ierr)
 #endif
-        stop
-      end select
+      stop
     end if
     call configure_convvelo(cfg)
     deltat_from_dnsin = deltat
@@ -226,7 +223,9 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
       call release_fft_workspace("init_fft")
 #endif
-      print *, "CFL", deltat, cfl
+      ! cfl is still the rank-local maximum here (outstats reduces it), so
+      ! print it from one rank only rather than once per rank.
+      IF (has_terminal) print *, "CFL", deltat, cfl
       ! Compute flow rate
       IF (has_average) THEN
         call gather_full_y_line(ny, V(:, 0, 0, 1), zero_mode); fr(1) = yintegr(zero_mode, y); 
@@ -239,20 +238,27 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
     end if
   END SUBROUTINE initialize
 
+  ! Node-local rank as published by whichever launcher started us; -1 when none
+  ! of them did, in which case the caller falls back to the global rank.
   integer function mpi_local_rank_from_env()
+    use, intrinsic :: iso_c_binding, only: C_INT
     implicit none
-    character(len=32) :: text
-    integer :: length, status, io
+    character(len=*), parameter :: LAUNCHER_VARS(5) = [character(len=26) :: &
+                                                       "OMPI_COMM_WORLD_LOCAL_RANK", &
+                                                       "MPI_LOCALRANKID", &
+                                                       "MV2_COMM_WORLD_LOCAL_RANK", &
+                                                       "SLURM_LOCALID", &
+                                                       "PMI_LOCAL_RANK"]
+    integer(C_INT) :: parsed
+    integer :: i
 
+    do i = 1, size(LAUNCHER_VARS)
+      if (env_int(trim(LAUNCHER_VARS(i)), parsed)) then
+        mpi_local_rank_from_env = int(parsed)
+        return
+      end if
+    end do
     mpi_local_rank_from_env = -1
-    call get_environment_variable("OMPI_COMM_WORLD_LOCAL_RANK", text, length, status)
-    if (status /= 0 .or. length <= 0) call get_environment_variable("MPI_LOCALRANKID", text, length, status)
-    if (status /= 0 .or. length <= 0) call get_environment_variable("MV2_COMM_WORLD_LOCAL_RANK", text, length, status)
-    if (status /= 0 .or. length <= 0) call get_environment_variable("SLURM_LOCALID", text, length, status)
-    if (status /= 0 .or. length <= 0) call get_environment_variable("PMI_LOCAL_RANK", text, length, status)
-    if (status /= 0 .or. length <= 0) return
-    read (text(:length), *, iostat=io) mpi_local_rank_from_env
-    if (io /= 0) mpi_local_rank_from_env = -1
   end function mpi_local_rank_from_env
 
   !==========================================================

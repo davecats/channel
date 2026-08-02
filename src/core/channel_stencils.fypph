@@ -1,0 +1,75 @@
+#! ===========================================================================
+#!  Wall-normal compact stencils and the time-integration vocabulary.
+#!
+#!  These are discretisation, not physics: they say how a wall-normal
+#!  derivative is applied and how one Runge-Kutta substep accumulates, not
+#!  what equation is being solved.  The operators of the channel formulation
+#!  live in channel_operators.fypph.
+#!
+#!  Everything expands inline.  That is deliberate: these appear inside
+#!  !$omp target regions, and a declare-target procedure called across a
+#!  module boundary does not survive nvlink.
+#! ===========================================================================
+
+#! The five-point wall-normal stencil, as (offset, index expression) pairs.
+#:set YOFF = [(-2, 'iy - 2'), (-1, 'iy - 1'), (0, 'iy'), (1, 'iy + 1'), (2, 'iy + 2')]
+
+#! order: 0 -> D^0, 1 -> D^1, 2 -> D^2, 3 -> D^4  (the der() third index).
+
+#! D^order applied to component `comp` of the spectral field `field`.
+#:def apply_d(field, comp, order)
+(${' + '.join('der(iy, {}, {})*{}({}, iz, ix, {})'.format(order, j, field, yt, comp) for j, yt in YOFF)}$)
+#:enddef
+
+#! D^order applied to two real components at once, packed as one complex
+#! number: real part from `comp_re`, imaginary part from `comp_im`.  Used for
+#! the (0,0) mean mode, where u and w are carried in one complex field.
+#:def apply_d_real_pair(field, comp_re, comp_im, order)
+(${' + '.join('der(iy, {}, {})*dcmplx(dreal({}({}, iz, ix, {})), dreal({}({}, iz, ix, {})))'.format(order, j, field, yt, comp_re, field, yt, comp_im) for j, yt in YOFF)}$)
+#:enddef
+
+#! D^order applied to the transposed convolution buffer VVdz, whose layout is
+#! (iz, ix, iy, component) with wrapped z indexing.
+#:def apply_d_vvdz(order, comp)
+(${' + '.join('der(iy, {}, {})*VVdz(izd(iz) + 1, ix + 1 - nx0, {}, {})'.format(order, j, yt, comp) for j, yt in YOFF)}$)
+#:enddef
+
+#! ---------------------------------------------------------------------------
+#!  Runge-Kutta substep accumulation.
+#!
+#!  ODE(1:3) are the coefficients of the current substep.  `old` carries the
+#!  explicit term of the previous substep, which the scheme subtracts and then
+#!  replaces.
+#! ---------------------------------------------------------------------------
+
+#! Open a substep: implicit part, plus this substep's explicit part, minus the
+#! previous one; then store the explicit part for the next substep.
+#:def rk_open(rhs, old, unkn, impl, expl)
+${rhs}$ = ODE(1)*(${unkn}$)/deltat + (${impl}$) + ODE(2)*(${expl}$) - ODE(3)*(${old}$); ${old}$ = ${expl}$
+#:enddef
+
+#! Add a further explicit contribution to a substep already opened.
+#:def rk_accum(rhs, old, expl)
+${rhs}$ = ${rhs}$ + ODE(2)*(${expl}$); ${old}$ = ${old}$ + (${expl}$)
+#:enddef
+
+#! Accumulate into the d2v (component 2) equation.
+#:def accum_d2v(field, expl)
+$:rk_accum('{}(iy, iz, ix, 2)'.format(field), 'oldrhs(iy, iz, ix, 2)', expl)
+#:enddef
+
+#! Accumulate into the eta (component 1) equation.  The (0,0) mean mode carries
+#! u and w packed in one complex number, so it takes a different expression
+#! from the general mode.
+#:def accum_eta(field, expl_general, expl_mean)
+if (ix == 0 .AND. iz == 0) then
+  $:rk_accum('{}(iy, iz, ix, 1)'.format(field), 'oldrhs(iy, iz, ix, 1)', expl_mean)
+else
+  $:rk_accum('{}(iy, iz, ix, 1)'.format(field), 'oldrhs(iy, iz, ix, 1)', expl_general)
+end if
+#:enddef
+
+#! Accumulate into eta from a (u, w) right-hand-side pair.
+#:def accum_eta_uw(field, rhsu, rhsw)
+$:accum_eta(field, 'ibeta(iz)*({}) - ialfa(ix)*({})'.format(rhsu, rhsw), 'dcmplx(dreal({}), dreal({}))'.format(rhsu, rhsw))
+#:enddef

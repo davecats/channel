@@ -10,7 +10,7 @@ module roctx
 
   public :: roctxpush, roctxpop
 
-#if defined(HAVE_CUDA)
+#if defined(HAVE_CUDA) && defined(HAVE_NVTX)
   interface
     integer(c_int) function nvtxrangepush(message) bind(c, name="nvtxRangePushA")
       use iso_c_binding, only: c_char, c_int
@@ -41,23 +41,28 @@ contains
 
   subroutine roctxPush(name)
     character(len=*), intent(in) :: name
+#if (defined(HAVE_CUDA) && defined(HAVE_NVTX)) || defined(HAVE_HIP)
+    ! Only built on profiled builds: the null-terminated copy is an automatic
+    ! character temporary, and these calls sit in the y-solve inner loop.
     character(kind=c_char, len=len_trim(name) + 1) :: cname
-#if defined(HAVE_CUDA)
+#endif
+#if defined(HAVE_CUDA) && defined(HAVE_NVTX)
     integer(c_int) :: ignored
 #endif
 
-    cname = trim(name)//c_null_char
     n = n + 1
-#if defined(HAVE_CUDA)
+#if defined(HAVE_CUDA) && defined(HAVE_NVTX)
+    cname = trim(name)//c_null_char
     ignored = nvtxRangePush(cname)
 #elif defined(HAVE_HIP)
+    cname = trim(name)//c_null_char
     call roctxRangePush(cname)
 #endif
   end subroutine roctxPush
 
   subroutine roctxPop(name)
     character(len=*), intent(in) :: name
-#if defined(HAVE_CUDA)
+#if defined(HAVE_CUDA) && defined(HAVE_NVTX)
     integer(c_int) :: ignored
 #endif
 
@@ -66,7 +71,7 @@ contains
       print *, "invalid pop for: ", name
       return
     end if
-#if defined(HAVE_CUDA)
+#if defined(HAVE_CUDA) && defined(HAVE_NVTX)
     ignored = nvtxRangePop()
 #elif defined(HAVE_HIP)
     call roctxRangePop()

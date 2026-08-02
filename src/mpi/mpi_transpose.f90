@@ -39,7 +39,9 @@
     use omp_lib
 #endif
     use roctx
-    use y_pipeline_nccl, only: channel_comm_alltoall_complex, channel_comm_context_reset
+    use channel_grid
+    use y_pipeline_nccl, only: channel_comm_alltoall_complex, channel_comm_cache, &
+                               channel_comm_cache_reserve, channel_comm_cache_finalize
 
     IMPLICIT NONE
 
@@ -67,17 +69,18 @@
     integer, allocatable, target, save :: yslab_send_displs(:), yslab_recv_displs(:)
     integer(C_INT), save :: yslab_owned_first_line = 1
     integer(C_INT), save :: yslab_owned_line_count = 0
-    integer(C_INT), save :: nproc, iproc, ierr, nzd, nx
-    integer(C_INT), save :: npy_grid = 1, npxz = 1, ipy = 0, ipxz = 0
-    integer(C_INT), save :: nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN, sendcount
-    !$omp declare target(npy_grid, npxz, ipy, ipxz, nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN, sendcount)
+    ! The mesh and the decomposition itself live in channel_grid; init_MPI
+    ! below fills them in.  Only the quantities specific to the transposes are
+    ! declared here.
+    integer(C_INT), save :: ierr, sendcount
+    !$omp declare target(sendcount)
 
-    logical, save :: has_terminal, has_average, fft_transpose_is_local
+    logical, save :: fft_transpose_is_local
     logical, save :: mpi_transpose_initialized = .false.
 #ifdef HAVE_MPI
     TYPE(MPI_Datatype), save :: writeview_type, owned2write_type, vel_read_type, vel_field_type
 #endif
-    type(c_ptr), allocatable, save :: xcomm_nccl_ctx_by_npxz(:)
+    type(channel_comm_cache), save :: xcomm_nccl_contexts
 
   CONTAINS
 
@@ -564,42 +567,16 @@
       range_name = "channel_comm_alltoall fft_transpose"
       if (present(label)) range_name = "channel_comm_alltoall "//trim(label)
       call roctxPush(range_name)
-      call ensure_xcomm_nccl_context_slot()
-      call channel_comm_alltoall_complex(send, recv, sendcount, MPI_COMM_X, xcomm_nccl_ctx_by_npxz(npxz), request)
+      call channel_comm_cache_reserve(xcomm_nccl_contexts, npxz)
+      call channel_comm_alltoall_complex(send, recv, sendcount, MPI_COMM_X, xcomm_nccl_contexts%by_size(npxz), request)
       call roctxPop(range_name)
 
     END SUBROUTINE alltoall
 
-    subroutine ensure_xcomm_nccl_context_slot()
-      implicit none
-      type(c_ptr), allocatable :: tmp(:)
-      integer :: old_upper, new_upper
-
-      if (.not. allocated(xcomm_nccl_ctx_by_npxz)) then
-        allocate (xcomm_nccl_ctx_by_npxz(0:max(1_C_INT, npxz)))
-        xcomm_nccl_ctx_by_npxz = c_null_ptr
-      else if (ubound(xcomm_nccl_ctx_by_npxz, 1) < npxz) then
-        old_upper = ubound(xcomm_nccl_ctx_by_npxz, 1)
-        new_upper = max(npxz, 2*old_upper)
-        allocate (tmp(0:new_upper))
-        tmp = c_null_ptr
-        tmp(0:old_upper) = xcomm_nccl_ctx_by_npxz(0:old_upper)
-        call move_alloc(tmp, xcomm_nccl_ctx_by_npxz)
-      end if
-    end subroutine ensure_xcomm_nccl_context_slot
-
     subroutine finalize_xcomm_nccl_contexts()
       implicit none
-#ifdef HAVE_MPI
-      integer :: i
 
-      if (allocated(xcomm_nccl_ctx_by_npxz)) then
-        do i = lbound(xcomm_nccl_ctx_by_npxz, 1), ubound(xcomm_nccl_ctx_by_npxz, 1)
-          call channel_comm_context_reset(xcomm_nccl_ctx_by_npxz(i))
-        end do
-        deallocate (xcomm_nccl_ctx_by_npxz)
-      end if
-#endif
+      call channel_comm_cache_finalize(xcomm_nccl_contexts)
     end subroutine finalize_xcomm_nccl_contexts
 
     SUBROUTINE gather_full_y_line(ny, local_line, full_line)

@@ -26,8 +26,9 @@ MODULE ffts
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
   use omp_lib, only: omp_get_default_device, omp_get_mapped_ptr
 #endif
-  use byte_workspace, only: workspace_request, workspace_release, workspace_slice, workspace_align_offset
-  use mpi_transpose, only: ny0, nyN
+  use byte_workspace, only: workspace_request, workspace_release, workspace_align_offset, &
+                            workspace_layout, layout_begin, layout_bytes, layout_real_4d, layout_complex_4d
+  use channel_grid, only: ny0, nyN
   IMPLICIT NONE
 
 #ifdef HAVE_CUDA
@@ -58,8 +59,8 @@ MODULE ffts
 #endif
 
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
-  complex(C_DOUBLE_COMPLEX), dimension(:, :, :, :), pointer, contiguous :: VVdz, VVdx
-  real(C_DOUBLE), dimension(:, :, :, :), pointer, contiguous :: rVVdx, products
+  complex(C_DOUBLE_COMPLEX), dimension(:, :, :, :), pointer, contiguous :: VVdz => null(), VVdx => null()
+  real(C_DOUBLE), dimension(:, :, :, :), pointer, contiguous :: rVVdx => null(), products => null()
 #elif defined(HAVE_FFTW)
   INCLUDE 'fftw3.f03'
   integer, save        :: plan_type = FFTW_PATIENT
@@ -97,26 +98,33 @@ CONTAINS
   end subroutine get_fft_memory_estimate
 
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
+  ! Single description of the FFT workspace; see workspace_layout.  The sizing
+  ! caller runs before the fft_* module state exists, so the dimensions come in
+  ! as arguments rather than being read from it.
+  subroutine fft_workspace_layout(bind, nxd, nxB, nzd, nzB, nPhi, nflds, y0, yN, base_offset, nbytes)
+    implicit none
+    logical, intent(in) :: bind
+    integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, nPhi, nflds, y0, yN
+    integer(C_SIZE_T), intent(in) :: base_offset
+    integer(C_SIZE_T), intent(out) :: nbytes
+    type(workspace_layout) :: lay
+
+    call layout_begin(lay, bind, base_offset)
+    call layout_complex_4d(lay, 1, nzd, 1, nxB, y0, yN, 1, nflds, VVdz)
+    call layout_complex_4d(lay, 1, nxd + 1, 1, nzB, y0, yN, 1, nflds, VVdx)
+    call layout_real_4d(lay, 1, 2*(nxd + 1), 1, nzB, y0, yN, 1, 3 + nPhi, rVVdx)
+    call layout_real_4d(lay, 1, 2*(nxd + 1), 1, nzB, y0, yN, 1, nflds, products)
+    nbytes = layout_bytes(lay)
+  end subroutine fft_workspace_layout
+
   subroutine get_fft_workspace_bytes_for_dims(nxd, nxB, nzd, nzB, nPhi, overlapping, nbytes)
     implicit none
     integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, nPhi
     logical, intent(in) :: overlapping
     integer(C_SIZE_T), intent(out) :: nbytes
-    integer(C_SIZE_T) :: offset, local_y, nflds
 
-    local_y = int(nyN - ny0 + 5, C_SIZE_T)
-    nflds = int(merge(2, 1, overlapping), C_SIZE_T)
-
-    offset = 0_C_SIZE_T
-    offset = workspace_align_offset(offset + int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T)* &
-                                    int(nzd, C_SIZE_T)*int(nxB, C_SIZE_T)*local_y*nflds)
-    offset = workspace_align_offset(offset + int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T)* &
-                                    int(nxd + 1, C_SIZE_T)*int(nzB, C_SIZE_T)*local_y*nflds)
-    offset = workspace_align_offset(offset + int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T)* &
-                                    int(2*(nxd + 1), C_SIZE_T)*int(nzB, C_SIZE_T)*local_y* &
-                                    int(3 + nPhi, C_SIZE_T))
-    nbytes = workspace_align_offset(offset + int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T)* &
-                                    int(2*(nxd + 1), C_SIZE_T)*int(nzB, C_SIZE_T)*local_y*nflds)
+    call fft_workspace_layout(.false., nxd, nxB, nzd, nzB, nPhi, merge(2_C_INT, 1_C_INT, overlapping), &
+                              ny0 - 2, nyN + 2, 0_C_SIZE_T, nbytes)
   end subroutine get_fft_workspace_bytes_for_dims
 
   subroutine get_fft_workspace_bytes(nbytes)
@@ -148,39 +156,14 @@ CONTAINS
   subroutine bind_fft_workspace(offset0)
     implicit none
     integer(C_SIZE_T), intent(in), optional :: offset0
-    type(C_PTR) :: ptr
-    complex(C_DOUBLE_COMPLEX), pointer :: cbuf(:)
-    real(C_DOUBLE), pointer :: rbuf(:)
-    integer(C_SIZE_T) :: offset, base_offset
-    integer(C_SIZE_T) :: n_vvdz, n_vvdx, n_rvvdx, n_products
+    integer(C_SIZE_T) :: base_offset, nbytes
 
     if (fft_workspace_bound) error stop "bind_fft_workspace: FFT workspace already bound"
     base_offset = 0_C_SIZE_T
     if (present(offset0)) base_offset = offset0
-    n_vvdz = int(fft_nzd, C_SIZE_T)*int(fft_nxB, C_SIZE_T)*int(fft_ny, C_SIZE_T)*int(fft_nflds, C_SIZE_T)
-    n_vvdx = int(fft_nxd + 1, C_SIZE_T)*int(fft_nzB, C_SIZE_T)*int(fft_ny, C_SIZE_T)*int(fft_nflds, C_SIZE_T)
-    n_rvvdx = int(2*(fft_nxd + 1), C_SIZE_T)*int(fft_nzB, C_SIZE_T)*int(fft_ny, C_SIZE_T)*int(3 + fft_nPhi, C_SIZE_T)
-    n_products = int(2*(fft_nxd + 1), C_SIZE_T)*int(fft_nzB, C_SIZE_T)*int(fft_ny, C_SIZE_T)*int(fft_nflds, C_SIZE_T)
 
-    offset = base_offset
-    call workspace_slice(offset, ptr)
-    call c_f_pointer(ptr, cbuf, [int(n_vvdz)])
-    VVdz(1:fft_nzd, 1:fft_nxB, fft_y0:fft_yN, 1:fft_nflds) => cbuf
-    offset = workspace_align_offset(offset + n_vvdz*int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T))
-
-    call workspace_slice(offset, ptr)
-    call c_f_pointer(ptr, cbuf, [int(n_vvdx)])
-    VVdx(1:fft_nxd + 1, 1:fft_nzB, fft_y0:fft_yN, 1:fft_nflds) => cbuf
-    offset = workspace_align_offset(offset + n_vvdx*int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T))
-
-    call workspace_slice(offset, ptr)
-    call c_f_pointer(ptr, rbuf, [int(n_rvvdx)])
-    rVVdx(1:2*(fft_nxd + 1), 1:fft_nzB, fft_y0:fft_yN, 1:3 + fft_nPhi) => rbuf
-    offset = workspace_align_offset(offset + n_rvvdx*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
-
-    call workspace_slice(offset, ptr)
-    call c_f_pointer(ptr, rbuf, [int(n_products)])
-    products(1:2*(fft_nxd + 1), 1:fft_nzB, fft_y0:fft_yN, 1:fft_nflds) => rbuf
+    call fft_workspace_layout(.true., fft_nxd, fft_nxB, fft_nzd, fft_nzB, fft_nPhi, fft_nflds, &
+                              fft_y0, fft_yN, base_offset, nbytes)
 
     !$omp target enter data map(to: VVdz, VVdx, rVVdx, products)
     !$omp target
@@ -407,7 +390,6 @@ CONTAINS
     integer :: y0
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
     integer :: istat
-    type(C_PTR) :: xptr
 #elif defined(HAVE_FFTW)
     integer :: i
 #endif
@@ -442,7 +424,6 @@ CONTAINS
     integer :: y0
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
     integer :: istat
-    type(C_PTR) :: xptr
 #elif defined(HAVE_FFTW)
     integer :: i
 #endif
@@ -486,7 +467,6 @@ CONTAINS
 #endif
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
     integer :: istat
-    type(C_PTR) :: xptr, rxptr
 #endif
     x_y0 = lbound(x, 3)
     rx_y0 = lbound(rx, 3)
@@ -534,7 +514,6 @@ CONTAINS
     integer :: x_y0, rx_y0
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
     integer :: istat
-    type(C_PTR) :: xptr, rxptr
 #elif defined(HAVE_FFTW)
     integer :: i
 #endif

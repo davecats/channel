@@ -3,18 +3,25 @@
 module y_line_solvers
 
   use, intrinsic :: iso_c_binding
-  use mpi_transpose, only: ny0, nyN, nx0, nxN, nxB, npy_grid, ipy, iproc
+  use channel_grid, only: ny0, nyN, nx0, nxN, nxB, npy_grid, ipy, iproc
+  ! ycomm_* and ensure_ycomm_buffers exist in every build; only MPI_COMM_Y is
+  ! MPI-specific.  This use must stay outside the #ifdef below: with it inside,
+  ! nvfortran rejects ycomm_sendbuf/ycomm_recvbuf in the shared() clauses of the
+  ! target regions further down ("must appear in a SHARED or PRIVATE clause"),
+  ! while gfortran accepts the same source.
+  use mpi_transpose, only: ycomm_sendbuf, ycomm_recvbuf, ensure_ycomm_buffers
   use y_schur_solver, only: ys_schur_config, ys_schur_workspace, ys_schur_configure, &
                             ys_schur_prepare, ys_schur_release, ys_schur_solve_from_packed, &
                             YS_SCHUR_EXCHANGE_AUTO
 #ifdef HAVE_MPI
-  use mpi_transpose, only: MPI_COMM_Y, ensure_ycomm_buffers, ycomm_sendbuf, ycomm_recvbuf
+  use mpi_transpose, only: MPI_COMM_Y
   use y_pipeline_nccl, only: channel_comm_use_nccl, channel_comm_p2p_ensure, &
                              channel_comm_send, channel_comm_recv, channel_comm_sendrecv, &
-                             channel_comm_context_reset
+                             channel_comm_cache, channel_comm_cache_reserve, channel_comm_cache_finalize
 #endif
   use roctx, only: roctxPush, roctxPop
   use byte_workspace, only: workspace_request, workspace_release, workspace_slice, workspace_align_offset
+  use env_options, only: env_flag, env_int, env_int64
 #ifdef HAVE_MPI
   use mpi_f08
 #endif
@@ -102,36 +109,37 @@ module y_line_solvers
   logical, save :: ys_batch_complex_cap_initialized = .false.
   integer(C_INT), save :: ys_pipeline_timing_solve_id = 0_C_INT
 #ifdef HAVE_MPI
-  type(c_ptr), allocatable, save :: ys_pipeline_nccl_ctx_by_npy(:)
+  type(channel_comm_cache), save :: ys_pipeline_nccl_contexts
 #endif
 
-  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_gpsv_matrix_store(:), ys_gpsv_rhs_store(:)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_gpsv_matrix_store(:) => null(), ys_gpsv_rhs_store(:) => null()
   complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_gpsv_ds(:), ys_gpsv_dl(:), ys_gpsv_d(:), ys_gpsv_du(:), ys_gpsv_dw(:), ys_gpsv_x(:)
   complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_gpsv_matrix(:, :, :, :), ys_gpsv_rhs(:, :, :)
   complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_gpsv_line_matrix(:, :, :), ys_gpsv_line_rhs(:, :)
   complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_gpsv_owner_matrix(:, :, :, :), ys_gpsv_owner_rhs(:, :, :)
 
-  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_lower_ghost_store(:), ys_lower_boundary_store(:)
-  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_upper_boundary_store(:), ys_upper_ghost_store(:)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_lower_ghost_store(:) => null(), ys_lower_boundary_store(:) => null()
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_upper_boundary_store(:) => null(), ys_upper_ghost_store(:) => null()
   complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_lower_ghost_rhs(:), ys_lower_boundary_rhs(:)
   complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_upper_boundary_rhs(:), ys_upper_ghost_rhs(:)
   complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_lower_ghost_owner(:, :), ys_lower_boundary_owner(:, :)
   complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_upper_boundary_owner(:, :), ys_upper_ghost_owner(:, :)
 
-  real(C_DOUBLE), pointer, contiguous, save :: ys_eqm1_store(:), ys_eq0_store(:), ys_eqn_store(:), ys_eqnp1_store(:)
+  real(C_DOUBLE), pointer, contiguous, save :: ys_eqm1_store(:) => null(), ys_eq0_store(:) => null()
+  real(C_DOUBLE), pointer, contiguous, save :: ys_eqn_store(:) => null(), ys_eqnp1_store(:) => null()
   real(C_DOUBLE), pointer, contiguous, save :: ys_eqm1(:, :), ys_eq0(:, :), ys_eqn(:, :), ys_eqnp1(:, :)
   real(C_DOUBLE), pointer, contiguous, save :: ys_eqm1_owner(:, :, :), ys_eq0_owner(:, :, :), ys_eqn_owner(:, :, :), ys_eqnp1_owner(:, :, :)
 
-  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_boundary_lower_rhs0_store(:), ys_boundary_upper_rhsn_store(:)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_boundary_lower_rhs0_store(:) => null(), ys_boundary_upper_rhsn_store(:) => null()
   complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_boundary_lower_rhs0(:), ys_boundary_upper_rhsn(:)
-  real(C_DOUBLE), pointer, contiguous, save :: ys_boundary_lower_eq_store(:), ys_boundary_upper_eq_store(:)
+  real(C_DOUBLE), pointer, contiguous, save :: ys_boundary_lower_eq_store(:) => null(), ys_boundary_upper_eq_store(:) => null()
   real(C_DOUBLE), pointer, contiguous, save :: ys_boundary_lower_eq(:, :), ys_boundary_upper_eq(:, :)
   complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_boundary_lower_rhs0_owner(:, :), ys_boundary_upper_rhsn_owner(:, :)
   real(C_DOUBLE), pointer, contiguous, save :: ys_boundary_lower_eq_owner(:, :, :), ys_boundary_upper_eq_owner(:, :, :)
 
-  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_reduced_rows_send(:, :)
-  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_left_interface_values(:, :), ys_right_interface_values(:, :)
-  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_reduced_rhs(:, :)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_reduced_rows_send(:, :) => null()
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_left_interface_values(:, :) => null(), ys_right_interface_values(:, :) => null()
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_reduced_rhs(:, :) => null()
   integer(C_INT), allocatable, save :: ys_reduced_pass_counts(:)
   integer(C_INT), save :: ys_reduced_exchange_mode = YS_SCHUR_EXCHANGE_AUTO
   type(ys_schur_workspace), save :: ys_reduced_schur_ws
@@ -156,12 +164,14 @@ module y_line_solvers
   integer(C_SIZE_T), save :: ys_gpsv_buffer_size = 0_C_SIZE_T
   integer(C_SIZE_T), save :: ys_gpsv_buffer_capacity = 0_C_SIZE_T
 #endif
-  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_batch_ds(:), ys_batch_dl(:), ys_batch_d(:)
-  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_batch_du(:), ys_batch_dw(:), ys_batch_x(:)
+ complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_batch_ds(:) => null(), ys_batch_dl(:) => null(), ys_batch_d(:) => null()
+ complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_batch_du(:) => null(), ys_batch_dw(:) => null(), ys_batch_x(:) => null()
 #if defined(HAVE_CUDA)
   character(c_char), allocatable, target, save :: ys_gpsv_buffer(:)
+  ! Keep these in this translation unit: nvlink does not resolve device-side
+  ! calls to declare-target routines pulled from another archive member, so
+  ! moving the kernels into their own module breaks the NVHPC GPU link.
   !$omp declare target(ys_factor_penta_interleaved)
-  !$omp declare target(ys_factor_penta_interleaved_open_right)
   !$omp declare target(ys_factor_penta_interleaved_continue)
   !$omp declare target(ys_forward_substitute_penta_interleaved)
   !$omp declare target(ys_forward_substitute_penta_interleaved_continue)
@@ -272,17 +282,11 @@ contains
 
   integer(C_SIZE_T) function ys_get_batch_complex_cap()
     implicit none
-    character(len=64) :: text
-    integer :: length, status, io
     integer(C_INT64_T) :: parsed
 
     if (.not. ys_batch_complex_cap_initialized) then
-      call get_environment_variable("CHANNEL_YS_BATCH_MAX_COMPLEX", text, length, status)
-      if (status == 0 .and. length > 0) then
-        read (text(:length), *, iostat=io) parsed
-        if (io == 0 .and. parsed > 0_C_INT64_T) then
-          ys_batch_complex_cap = min(int(parsed, C_SIZE_T), int(huge(0), C_SIZE_T))
-        end if
+      if (env_int64("CHANNEL_YS_BATCH_MAX_COMPLEX", parsed)) then
+        if (parsed > 0_C_INT64_T) ys_batch_complex_cap = min(int(parsed, C_SIZE_T), int(huge(0), C_SIZE_T))
       end if
       ys_batch_complex_cap_initialized = .true.
     end if
@@ -291,15 +295,11 @@ contains
 
   integer(C_INT) function ys_get_forced_chunk_nx()
     implicit none
-    character(len=32) :: text
-    integer :: length, status, io
     integer(C_INT) :: parsed
 
     if (.not. ys_forced_chunk_nx_initialized) then
-      call get_environment_variable("CHANNEL_YS_CHUNK_NX", text, length, status)
-      if (status == 0 .and. length > 0) then
-        read (text(:length), *, iostat=io) parsed
-        if (io == 0 .and. parsed > 0_C_INT) ys_forced_chunk_nx = parsed
+      if (env_int("CHANNEL_YS_CHUNK_NX", parsed)) then
+        if (parsed > 0_C_INT) ys_forced_chunk_nx = parsed
       end if
       ys_forced_chunk_nx_initialized = .true.
     end if
@@ -323,170 +323,127 @@ contains
 
   logical function ys_use_custom_gpsv()
     implicit none
-    character(len=32) :: text
-    integer :: length, status, io, parsed
 
     if (.not. ys_force_custom_gpsv_initialized) then
-      call get_environment_variable("CHANNEL_YS_FORCE_CUSTOM_GPSV", text, length, status)
-      if (status == 0 .and. length > 0) then
-        read (text(:length), *, iostat=io) parsed
-        ys_force_custom_gpsv = (io == 0 .and. parsed /= 0)
-      end if
+      call env_flag("CHANNEL_YS_FORCE_CUSTOM_GPSV", ys_force_custom_gpsv)
       ys_force_custom_gpsv_initialized = .true.
     end if
     ys_use_custom_gpsv = ys_force_custom_gpsv
   end function ys_use_custom_gpsv
 
-  subroutine ys_bind_workspace_storage(active_n, nlines, nz)
+  ! Single description of the y-solver workspace layout.
+  !
+  ! With bind = .false. the walk only accumulates the byte count; with
+  ! bind = .true. it additionally points every view at its slice of the arena
+  ! that workspace_request has already handed back.  Both passes run the same
+  ! list of slots, which is what keeps the reported size and the actual
+  ! bindings from drifting apart.
+  subroutine ys_workspace_layout(active_n, nlines, nz, bind, nbytes)
     implicit none
     integer(C_INT), intent(in) :: active_n, nlines, nz
-    type(C_PTR) :: base, ptr
+    logical, intent(in) :: bind
+    integer(C_SIZE_T), intent(out) :: nbytes
+    type(C_PTR) :: ptr
     complex(C_DOUBLE_COMPLEX), pointer :: cbuf(:)
     real(C_DOUBLE), pointer :: rbuf(:)
-    integer(C_SIZE_T) :: offset, nall, n_complex, n_real
-    integer(C_SIZE_T) :: total_bytes
-
-    nall = int(nlines, C_SIZE_T)*int(active_n, C_SIZE_T)
-    ys_batch_capacity = int(ys_endpoint_batch_capacity(active_n, nlines, nz), C_INT64_T)
-
-    call ys_workspace_bytes(active_n, nlines, nz, total_bytes)
-    call workspace_request(total_bytes, "y_line_solver", base)
-
-    offset = 0_C_SIZE_T
-    n_complex = 5_C_SIZE_T*nall
-    call bind_complex_1d(offset, n_complex, ys_gpsv_matrix_store)
-    n_complex = nall
-    call bind_complex_1d(offset, n_complex, ys_gpsv_rhs_store)
-    n_complex = int(nlines, C_SIZE_T)
-    call bind_complex_1d(offset, n_complex, ys_lower_ghost_store)
-    call bind_complex_1d(offset, n_complex, ys_lower_boundary_store)
-    call bind_complex_1d(offset, n_complex, ys_upper_boundary_store)
-    call bind_complex_1d(offset, n_complex, ys_upper_ghost_store)
-
-    n_real = 5_C_SIZE_T*int(nlines, C_SIZE_T)
-    call bind_real_1d(offset, n_real, ys_eqm1_store)
-    call bind_real_1d(offset, n_real, ys_eq0_store)
-    call bind_real_1d(offset, n_real, ys_eqn_store)
-    call bind_real_1d(offset, n_real, ys_eqnp1_store)
-
-    n_complex = int(nlines, C_SIZE_T)
-    call bind_complex_1d(offset, n_complex, ys_boundary_lower_rhs0_store)
-    call bind_complex_1d(offset, n_complex, ys_boundary_upper_rhsn_store)
-    n_real = 4_C_SIZE_T*int(nlines, C_SIZE_T)
-    call bind_real_1d(offset, n_real, ys_boundary_lower_eq_store)
-    call bind_real_1d(offset, n_real, ys_boundary_upper_eq_store)
-
-    n_complex = int(ys_batch_capacity, C_SIZE_T)
-    call bind_complex_1d(offset, n_complex, ys_batch_ds)
-    call bind_complex_1d(offset, n_complex, ys_batch_dl)
-    call bind_complex_1d(offset, n_complex, ys_batch_d)
-    call bind_complex_1d(offset, n_complex, ys_batch_du)
-    call bind_complex_1d(offset, n_complex, ys_batch_dw)
-    call bind_complex_1d(offset, n_complex, ys_batch_x)
-
-    if (npy_grid > 1) then
-      n_complex = 20_C_SIZE_T*int(nlines, C_SIZE_T)
-      call workspace_slice(offset, ptr)
-      call c_f_pointer(ptr, cbuf, [int(n_complex)])
-      ys_reduced_rows_send(1:20, 1:nlines) => cbuf
-      offset = workspace_align_offset(offset + n_complex*int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T))
-
-      n_complex = 2_C_SIZE_T*int(nlines, C_SIZE_T)
-      call workspace_slice(offset, ptr)
-      call c_f_pointer(ptr, cbuf, [int(n_complex)])
-      ys_left_interface_values(1:2, 1:nlines) => cbuf
-      offset = workspace_align_offset(offset + n_complex*int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T))
-
-      call workspace_slice(offset, ptr)
-      call c_f_pointer(ptr, cbuf, [int(n_complex)])
-      ys_right_interface_values(1:2, 1:nlines) => cbuf
-      offset = workspace_align_offset(offset + n_complex*int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T))
-
-      n_complex = 4_C_SIZE_T*int(npy_grid, C_SIZE_T)*int(nlines, C_SIZE_T)
-      call workspace_slice(offset, ptr)
-      call c_f_pointer(ptr, cbuf, [int(n_complex)])
-      ys_reduced_rhs(1:4*npy_grid, 1:nlines) => cbuf
-    end if
-
-  contains
-    subroutine bind_complex_1d(offset_bytes, count, target)
-      integer(C_SIZE_T), intent(inout) :: offset_bytes
-      integer(C_SIZE_T), intent(in) :: count
-      complex(C_DOUBLE_COMPLEX), pointer, contiguous, intent(out) :: target(:)
-
-      call workspace_slice(offset_bytes, ptr)
-      call c_f_pointer(ptr, cbuf, [int(count)])
-      target(1:int(count)) => cbuf
-      offset_bytes = workspace_align_offset(offset_bytes + count*int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T))
-    end subroutine bind_complex_1d
-
-    subroutine bind_real_1d(offset_bytes, count, target)
-      integer(C_SIZE_T), intent(inout) :: offset_bytes
-      integer(C_SIZE_T), intent(in) :: count
-      real(C_DOUBLE), pointer, contiguous, intent(out) :: target(:)
-
-      call workspace_slice(offset_bytes, ptr)
-      call c_f_pointer(ptr, rbuf, [int(count)])
-      target(1:int(count)) => rbuf
-      offset_bytes = workspace_align_offset(offset_bytes + count*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
-    end subroutine bind_real_1d
-  end subroutine ys_bind_workspace_storage
-
-  subroutine ys_workspace_bytes(active_n, nlines, nz, nbytes)
-    implicit none
-    integer(C_INT), intent(in) :: active_n, nlines, nz
-    integer(C_SIZE_T), intent(out) :: nbytes
     integer(C_SIZE_T) :: offset, nall, batch_capacity, n_complex, n_real
+    integer(C_SIZE_T) :: complex_bytes, real_bytes
 
+    complex_bytes = int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T)
+    real_bytes = int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T)
     nall = int(nlines, C_SIZE_T)*int(active_n, C_SIZE_T)
     batch_capacity = ys_endpoint_batch_capacity(active_n, nlines, nz)
-
     offset = 0_C_SIZE_T
-    call add_complex(5_C_SIZE_T*nall)
-    call add_complex(nall)
+
+    call slot_complex(5_C_SIZE_T*nall, ys_gpsv_matrix_store)
+    call slot_complex(nall, ys_gpsv_rhs_store)
+
     n_complex = int(nlines, C_SIZE_T)
-    call add_complex(n_complex)
-    call add_complex(n_complex)
-    call add_complex(n_complex)
-    call add_complex(n_complex)
+    call slot_complex(n_complex, ys_lower_ghost_store)
+    call slot_complex(n_complex, ys_lower_boundary_store)
+    call slot_complex(n_complex, ys_upper_boundary_store)
+    call slot_complex(n_complex, ys_upper_ghost_store)
+
     n_real = 5_C_SIZE_T*int(nlines, C_SIZE_T)
-    call add_real(n_real)
-    call add_real(n_real)
-    call add_real(n_real)
-    call add_real(n_real)
-    n_complex = int(nlines, C_SIZE_T)
-    call add_complex(n_complex)
-    call add_complex(n_complex)
+    call slot_real(n_real, ys_eqm1_store)
+    call slot_real(n_real, ys_eq0_store)
+    call slot_real(n_real, ys_eqn_store)
+    call slot_real(n_real, ys_eqnp1_store)
+
+    call slot_complex(n_complex, ys_boundary_lower_rhs0_store)
+    call slot_complex(n_complex, ys_boundary_upper_rhsn_store)
     n_real = 4_C_SIZE_T*int(nlines, C_SIZE_T)
-    call add_real(n_real)
-    call add_real(n_real)
-    n_complex = batch_capacity
-    call add_complex(n_complex)
-    call add_complex(n_complex)
-    call add_complex(n_complex)
-    call add_complex(n_complex)
-    call add_complex(n_complex)
-    call add_complex(n_complex)
+    call slot_real(n_real, ys_boundary_lower_eq_store)
+    call slot_real(n_real, ys_boundary_upper_eq_store)
+
+    call slot_complex(batch_capacity, ys_batch_ds)
+    call slot_complex(batch_capacity, ys_batch_dl)
+    call slot_complex(batch_capacity, ys_batch_d)
+    call slot_complex(batch_capacity, ys_batch_du)
+    call slot_complex(batch_capacity, ys_batch_dw)
+    call slot_complex(batch_capacity, ys_batch_x)
 
     if (npy_grid > 1) then
-      call add_complex(20_C_SIZE_T*int(nlines, C_SIZE_T))
-      call add_complex(2_C_SIZE_T*int(nlines, C_SIZE_T))
-      call add_complex(2_C_SIZE_T*int(nlines, C_SIZE_T))
-      call add_complex(4_C_SIZE_T*int(npy_grid, C_SIZE_T)*int(nlines, C_SIZE_T))
+      call slot_complex_2d(20_C_INT, nlines, ys_reduced_rows_send)
+      call slot_complex_2d(2_C_INT, nlines, ys_left_interface_values)
+      call slot_complex_2d(2_C_INT, nlines, ys_right_interface_values)
+      call slot_complex_2d(4_C_INT*npy_grid, nlines, ys_reduced_rhs)
     end if
+
     nbytes = offset
 
   contains
-    subroutine add_complex(count)
+    subroutine slot_complex(count, view)
       integer(C_SIZE_T), intent(in) :: count
-      offset = workspace_align_offset(offset + count*int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T))
-    end subroutine add_complex
+      complex(C_DOUBLE_COMPLEX), pointer, contiguous, intent(inout) :: view(:)
 
-    subroutine add_real(count)
+      if (bind) then
+        call workspace_slice(offset, ptr)
+        call c_f_pointer(ptr, cbuf, [int(count)])
+        view(1:int(count)) => cbuf
+      end if
+      offset = workspace_align_offset(offset + count*complex_bytes)
+    end subroutine slot_complex
+
+    subroutine slot_real(count, view)
       integer(C_SIZE_T), intent(in) :: count
-      offset = workspace_align_offset(offset + count*int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T))
-    end subroutine add_real
-  end subroutine ys_workspace_bytes
+      real(C_DOUBLE), pointer, contiguous, intent(inout) :: view(:)
+
+      if (bind) then
+        call workspace_slice(offset, ptr)
+        call c_f_pointer(ptr, rbuf, [int(count)])
+        view(1:int(count)) => rbuf
+      end if
+      offset = workspace_align_offset(offset + count*real_bytes)
+    end subroutine slot_real
+
+    subroutine slot_complex_2d(nrows, ncols, view)
+      integer(C_INT), intent(in) :: nrows, ncols
+      complex(C_DOUBLE_COMPLEX), pointer, contiguous, intent(inout) :: view(:, :)
+      integer(C_SIZE_T) :: count
+
+      count = int(nrows, C_SIZE_T)*int(ncols, C_SIZE_T)
+      if (bind) then
+        call workspace_slice(offset, ptr)
+        call c_f_pointer(ptr, cbuf, [int(count)])
+        view(1:nrows, 1:ncols) => cbuf
+      end if
+      offset = workspace_align_offset(offset + count*complex_bytes)
+    end subroutine slot_complex_2d
+  end subroutine ys_workspace_layout
+
+  subroutine ys_bind_workspace_storage(active_n, nlines, nz)
+    implicit none
+    integer(C_INT), intent(in) :: active_n, nlines, nz
+    type(C_PTR) :: base
+    integer(C_SIZE_T) :: total_bytes
+
+    ys_batch_capacity = int(ys_endpoint_batch_capacity(active_n, nlines, nz), C_INT64_T)
+
+    call ys_workspace_layout(active_n, nlines, nz, .false., total_bytes)
+    call workspace_request(total_bytes, "y_line_solver", base)
+    call ys_workspace_layout(active_n, nlines, nz, .true., total_bytes)
+  end subroutine ys_bind_workspace_storage
 
   subroutine ys_get_workspace_bytes(ny, nz, row_start, row_end, line_start, nlines, nbytes)
     implicit none
@@ -501,7 +458,7 @@ contains
     if (mod(line_start - 1, nlines_z) /= 0) error stop "ys_get_workspace_bytes requires ix-aligned line_start"
     if (mod(nlines, nlines_z) /= 0) error stop "ys_get_workspace_bytes requires full ix columns"
 
-    call ys_workspace_bytes(active_n, nlines, nz, nbytes)
+    call ys_workspace_layout(active_n, nlines, nz, .false., nbytes)
   end subroutine ys_get_workspace_bytes
 
   subroutine ys_get_gpusparse_buffer_bytes(nbytes)
@@ -515,14 +472,13 @@ contains
 #endif
   end subroutine ys_get_gpusparse_buffer_bytes
 
-  subroutine ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pass_counts, schur_exchange_mode, prepare_schur)
+ subroutine ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pass_counts, schur_exchange_mode, prepare_schur)
     implicit none
     integer(C_INT), intent(in) :: row_start, row_end, line_start, nlines, nz
     integer(C_INT), optional, intent(in) :: schur_pass_counts(:)
     integer(C_INT), intent(in) :: schur_exchange_mode
     logical, optional, intent(in) :: prepare_schur
     integer(C_INT) :: active_n
-    integer(C_INT64_T) :: nx_count
     type(ys_schur_config) :: cfg
     logical :: prepare_schur_value
 
@@ -543,10 +499,10 @@ contains
     !$omp& ys_boundary_lower_rhs0_store, ys_boundary_upper_rhsn_store, &
     !$omp& ys_boundary_lower_eq_store, ys_boundary_upper_eq_store)
 
-    nx_count = int(nlines/(2*nz + 1), C_INT64_T)
     !$omp target enter data map(alloc: ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
 
     if (npy_grid > 1 .and. prepare_schur_value) then
+      if (allocated(ys_reduced_pass_counts)) deallocate (ys_reduced_pass_counts)
       allocate (ys_reduced_pass_counts(size(schur_pass_counts)))
       ys_reduced_pass_counts = schur_pass_counts
       ys_reduced_exchange_mode = schur_exchange_mode
@@ -600,7 +556,7 @@ contains
       error stop "ys_prepare_assembled_workspace should only be called once after ys_release_workspace"
     end if
 
-    call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pass_counts, wanted_exchange_mode, prepare_schur_value)
+call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pass_counts, wanted_exchange_mode, prepare_schur_value)
   end subroutine ys_prepare_assembled_workspace
 
   subroutine ys_release_workspace(finalize_external)
@@ -630,16 +586,20 @@ contains
                ys_boundary_lower_eq_store, ys_boundary_upper_eq_store)
     end if
 
-    call ys_schur_release(ys_reduced_schur_ws)
+    ! The reduced-system views live in the shared byte workspace, so they must be
+    ! dropped whenever it is handed back.  The Schur level hierarchy behind them
+    ! does not: it is rebuilt only when the decomposition actually changes, which
+    ! is why it is torn down for finalization alone.
     if (associated(ys_reduced_rows_send)) then
       !$omp target exit data map(release: ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values, &
       !$omp& ys_reduced_rhs)
       nullify (ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values, ys_reduced_rhs)
     end if
-    if (allocated(ys_reduced_pass_counts)) then
-      deallocate (ys_reduced_pass_counts)
+    if (release_external) then
+      call ys_schur_release(ys_reduced_schur_ws)
+      if (allocated(ys_reduced_pass_counts)) deallocate (ys_reduced_pass_counts)
+      ys_reduced_exchange_mode = YS_SCHUR_EXCHANGE_AUTO
     end if
-    ys_reduced_exchange_mode = YS_SCHUR_EXCHANGE_AUTO
     ys_workspace_reduced_node_size = -1
 
     if (associated(ys_batch_ds)) then
@@ -650,8 +610,10 @@ contains
       call workspace_release("y_line_solver")
     end if
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
-    if (release_external) call ys_release_gpusparse_external()
-    if (release_external) call ys_destroy_gpusparse_handle()
+    if (release_external) then
+      call ys_release_gpusparse_external()
+      call ys_destroy_gpusparse_handle()
+    end if
 #endif
     ys_batch_capacity = 0_C_INT64_T
     if (release_external) then
@@ -934,7 +896,7 @@ contains
     !$omp target teams distribute parallel do default(none) &
     !$omp shared(ds, dl, d, du, dw, x, n, batch_count) private(iline)
     do iline = 1, batch_count
-      call ys_factor_penta_interleaved(ds, dl, d, du, dw, batch_count, iline, n)
+      call ys_factor_penta_interleaved(ds, dl, d, du, dw, batch_count, iline, n, .false.)
       call ys_solve_factored_penta_interleaved(x, ds, dl, d, du, dw, batch_count, iline, n)
     end do
     !$omp end target teams distribute parallel do
@@ -978,15 +940,6 @@ contains
     interior_base = left_count
     nI = active_n - exposed_n
     if (nI <= 0) error stop "endpoint Schur solve needs at least one interior row"
-
-    select case (response_mode)
-    case (YS_ENDPOINT_RESPONSE_CONST)
-      continue
-    case (YS_ENDPOINT_RESPONSE_EVEN_Z)
-      continue
-    case default
-      error stop "unknown endpoint Schur response mode"
-    end select
 
     max_batch_count = int(min(int(huge(0_C_INT), C_INT64_T), ys_batch_capacity/int(nI, C_INT64_T)), C_INT)
     select case (response_mode)
@@ -1369,22 +1322,20 @@ contains
   integer(C_INT) function ys_pipeline_batch_count(nlines)
     implicit none
     integer(C_INT), intent(in) :: nlines
-    character(len=32) :: text
-    integer :: length, status, io
-    integer(C_INT) :: parsed
-    integer(C_INT), parameter :: candidates(5) = [1_C_INT, 2_C_INT, 4_C_INT, 8_C_INT, 16_C_INT]
+    integer(C_INT), parameter :: CANDIDATES(5) = [1_C_INT, 2_C_INT, 4_C_INT, 8_C_INT, 16_C_INT]
+    integer(C_INT) :: requested
+    integer :: i
 
-    call get_environment_variable("CHANNEL_Y_PIPELINE_BATCHES", text, length, status)
-    if (status == 0 .and. length > 0) then
-      read (text(:length), *, iostat=io) parsed
-      if (io /= 0 .or. parsed < 1_C_INT) error stop "CHANNEL_Y_PIPELINE_BATCHES must be >= 1"
-      ys_pipeline_batch_count = min(parsed, nlines)
+    if (env_int("CHANNEL_Y_PIPELINE_BATCHES", requested)) then
+      if (requested < 1_C_INT) error stop "CHANNEL_Y_PIPELINE_BATCHES must be >= 1"
+      ys_pipeline_batch_count = min(requested, nlines)
       return
     end if
 
+    ! Otherwise take the largest candidate that still gives every batch a line.
     ys_pipeline_batch_count = 1_C_INT
-    do parsed = 1_C_INT, int(size(candidates), C_INT)
-      if (candidates(parsed) <= nlines) ys_pipeline_batch_count = candidates(parsed)
+    do i = 1, size(CANDIDATES)
+      if (CANDIDATES(i) <= nlines) ys_pipeline_batch_count = CANDIDATES(i)
     end do
   end function ys_pipeline_batch_count
 
@@ -1402,13 +1353,13 @@ contains
   end subroutine ys_pipeline_batch_range
 
 #ifdef HAVE_MPI
-  logical function ys_pipeline_use_nccl()
-    ys_pipeline_use_nccl = channel_comm_use_nccl()
-  end function ys_pipeline_use_nccl
-
   subroutine ys_solve_pipelined_lu_distributed(active_n, nlines, nbatches, batch_max_lines)
     implicit none
     integer(C_INT), intent(in) :: active_n, nlines, nbatches, batch_max_lines
+    ! Buckets of the timing array, in the order of the CSV header below.
+    integer, parameter :: T_TOTAL = 1, T_FACTOR_WAIT = 2, T_FORWARD_WAIT = 3, T_BACKWARD_WAIT = 4
+    integer, parameter :: T_FACTOR_KERNEL = 5, T_FORWARD_KERNEL = 6, T_BACKWARD_KERNEL = 7
+    integer, parameter :: T_PACK = 8, T_COMM_POST = 9, T_HALO = 10
     integer(C_INT), parameter :: TAG_FACTOR = 8410_C_INT
     integer(C_INT), parameter :: TAG_FORWARD = 8510_C_INT
     integer(C_INT), parameter :: TAG_BACKWARD = 8610_C_INT
@@ -1416,28 +1367,21 @@ contains
     integer(C_INT) :: batch, first_line, line_count, factor_count, solve_count
     integer(C_INT) :: factor_offset, forward_offset, backward_offset
     integer(C_INT) :: next_backward
-    integer :: ierr, env_status, env_length
+    integer :: ierr
     type(MPI_Request), allocatable :: factor_send_req(:), forward_send_req(:), backward_recv_req(:), backward_send_req(:)
     type(MPI_Request) :: factor_recv_req, forward_recv_req
     type(MPI_Status) :: status
-    character(len=32) :: env_value
     logical :: timing_enabled
-    real(C_DOUBLE) :: timing(10), time_start, time_t0, time_t1
+    real(C_DOUBLE) :: timing(10), time_start, time_t0
 
     if (active_n < 2_C_INT) error stop "pipelined LU distributed solve requires at least two local rows"
-    if (ys_pipeline_use_nccl()) then
+    if (channel_comm_use_nccl()) then
       call ys_solve_pipelined_lu_nccl_distributed(active_n, nlines, nbatches, batch_max_lines)
       return
     end if
 
     timing_enabled = .false.
-    call get_environment_variable("CHANNEL_Y_PIPELINE_TIMING", env_value, env_length, env_status)
-    if (env_status == 0) then
-      select case (adjustl(trim(env_value(:env_length))))
-      case ("1", "true", "TRUE", "yes", "YES", "on", "ON")
-        timing_enabled = .true.
-      end select
-    end if
+    call env_flag("CHANNEL_Y_PIPELINE_TIMING", timing_enabled)
     timing = 0.0_C_DOUBLE
     if (timing_enabled) then
       ys_pipeline_timing_solve_id = ys_pipeline_timing_solve_id + 1_C_INT
@@ -1465,13 +1409,10 @@ contains
         solve_count = 2_C_INT*line_count
         backward_offset = factor_total + solve_total + (batch - 1_C_INT)*solve_stride
         !$omp target data use_device_addr(ycomm_recvbuf)
-        if (timing_enabled) time_t0 = MPI_Wtime()
+        call tic()
         call MPI_Irecv(ycomm_recvbuf(backward_offset + 1), solve_count, &
                        MPI_DOUBLE_COMPLEX, ipy + 1_C_INT, TAG_BACKWARD + batch, MPI_COMM_Y, backward_recv_req(batch), ierr)
-        if (timing_enabled) then
-          time_t1 = MPI_Wtime()
-          timing(9) = timing(9) + (time_t1 - time_t0)
-        end if
+        call toc(T_COMM_POST)
         !$omp end target data
       end do
       call roctxPop("ys_pipeline post_backward_recvs")
@@ -1488,107 +1429,74 @@ contains
       forward_offset = factor_total + (batch - 1_C_INT)*solve_stride
       if (ipy > 0_C_INT) then
         !$omp target data use_device_addr(ycomm_recvbuf)
-        if (timing_enabled) time_t0 = MPI_Wtime()
+        call tic()
         call MPI_Irecv(ycomm_recvbuf(factor_offset + 1), factor_count, &
                        MPI_DOUBLE_COMPLEX, ipy - 1_C_INT, TAG_FACTOR + batch, MPI_COMM_Y, factor_recv_req, ierr)
         call MPI_Irecv(ycomm_recvbuf(forward_offset + 1), solve_count, &
                        MPI_DOUBLE_COMPLEX, ipy - 1_C_INT, TAG_FORWARD + batch, MPI_COMM_Y, forward_recv_req, ierr)
-        if (timing_enabled) then
-          time_t1 = MPI_Wtime()
-          timing(9) = timing(9) + (time_t1 - time_t0)
-        end if
+        call toc(T_COMM_POST)
         !$omp end target data
         call roctxPush("ys_pipeline MPI_Wait factor_recv")
-        if (timing_enabled) time_t0 = MPI_Wtime()
+        call tic()
         call MPI_Wait(factor_recv_req, status, ierr)
-        if (timing_enabled) then
-          time_t1 = MPI_Wtime()
-          timing(2) = timing(2) + (time_t1 - time_t0)
-        end if
+        call toc(T_FACTOR_WAIT)
         call roctxPop("ys_pipeline MPI_Wait factor_recv")
         call roctxPush("ys_pipeline apply_factor_continuation")
-        if (timing_enabled) time_t0 = MPI_Wtime()
+        call tic()
         call ys_apply_factor_continuation(first_line, line_count, active_n, factor_offset)
-        if (timing_enabled) then
-          time_t1 = MPI_Wtime()
-          timing(5) = timing(5) + (time_t1 - time_t0)
-        end if
+        call toc(T_FACTOR_KERNEL)
         call roctxPop("ys_pipeline apply_factor_continuation")
       end if
       call roctxPush("ys_pipeline factor_batch")
-      if (timing_enabled) time_t0 = MPI_Wtime()
+      call tic()
       call ys_factor_pipelined_batch(first_line, line_count, active_n, ipy < npy_grid - 1_C_INT)
-      if (timing_enabled) then
-        time_t1 = MPI_Wtime()
-        timing(5) = timing(5) + (time_t1 - time_t0)
-      end if
+      call toc(T_FACTOR_KERNEL)
       call roctxPop("ys_pipeline factor_batch")
       if (ipy < npy_grid - 1_C_INT) then
         call roctxPush("ys_pipeline pack_factor_state")
-        if (timing_enabled) time_t0 = MPI_Wtime()
+        call tic()
         call ys_pack_factor_state(first_line, line_count, active_n, factor_offset)
-        if (timing_enabled) then
-          time_t1 = MPI_Wtime()
-          timing(8) = timing(8) + (time_t1 - time_t0)
-        end if
+        call toc(T_PACK)
         call roctxPop("ys_pipeline pack_factor_state")
         call roctxPush("ys_pipeline MPI_Isend factor_state")
         !$omp target data use_device_addr(ycomm_sendbuf)
-        if (timing_enabled) time_t0 = MPI_Wtime()
+        call tic()
         call MPI_Isend(ycomm_sendbuf(factor_offset + 1), factor_count, &
                        MPI_DOUBLE_COMPLEX, ipy + 1_C_INT, TAG_FACTOR + batch, MPI_COMM_Y, factor_send_req(batch), ierr)
-        if (timing_enabled) then
-          time_t1 = MPI_Wtime()
-          timing(9) = timing(9) + (time_t1 - time_t0)
-        end if
+        call toc(T_COMM_POST)
         !$omp end target data
         call roctxPop("ys_pipeline MPI_Isend factor_state")
       end if
       if (ipy > 0_C_INT) then
         call roctxPush("ys_pipeline MPI_Wait forward_recv")
-        if (timing_enabled) time_t0 = MPI_Wtime()
+        call tic()
         call MPI_Wait(forward_recv_req, status, ierr)
-        if (timing_enabled) then
-          time_t1 = MPI_Wtime()
-          timing(3) = timing(3) + (time_t1 - time_t0)
-        end if
+        call toc(T_FORWARD_WAIT)
         call roctxPop("ys_pipeline MPI_Wait forward_recv")
         call roctxPush("ys_pipeline forward_continue")
-        if (timing_enabled) time_t0 = MPI_Wtime()
+        call tic()
         call ys_forward_pipelined_batch_continue(first_line, line_count, active_n, forward_offset)
-        if (timing_enabled) then
-          time_t1 = MPI_Wtime()
-          timing(6) = timing(6) + (time_t1 - time_t0)
-        end if
+        call toc(T_FORWARD_KERNEL)
         call roctxPop("ys_pipeline forward_continue")
       else
         call roctxPush("ys_pipeline forward_first_rank")
-        if (timing_enabled) time_t0 = MPI_Wtime()
+        call tic()
         call ys_forward_pipelined_batch(first_line, line_count, active_n)
-        if (timing_enabled) then
-          time_t1 = MPI_Wtime()
-          timing(6) = timing(6) + (time_t1 - time_t0)
-        end if
+        call toc(T_FORWARD_KERNEL)
         call roctxPop("ys_pipeline forward_first_rank")
       end if
       if (ipy < npy_grid - 1_C_INT) then
         call roctxPush("ys_pipeline pack_forward_state")
-        if (timing_enabled) time_t0 = MPI_Wtime()
+        call tic()
         call ys_pack_forward_state(first_line, line_count, active_n, forward_offset)
-        if (timing_enabled) then
-          time_t1 = MPI_Wtime()
-          timing(8) = timing(8) + (time_t1 - time_t0)
-        end if
+        call toc(T_PACK)
         call roctxPop("ys_pipeline pack_forward_state")
         call roctxPush("ys_pipeline MPI_Isend forward_state")
         !$omp target data use_device_addr(ycomm_sendbuf)
-        if (timing_enabled) time_t0 = MPI_Wtime()
+        call tic()
         call MPI_Isend(ycomm_sendbuf(forward_offset + 1), solve_count, &
                        MPI_DOUBLE_COMPLEX, ipy + 1_C_INT, TAG_FORWARD + batch, MPI_COMM_Y, forward_send_req(batch), ierr)
-        if (timing_enabled) then
-          time_t1 = MPI_Wtime()
-          timing(9) = timing(9) + (time_t1 - time_t0)
-        end if
+        call toc(T_COMM_POST)
         !$omp end target data
         call roctxPop("ys_pipeline MPI_Isend forward_state")
       end if
@@ -1604,40 +1512,30 @@ contains
 
     if (ipy < npy_grid - 1_C_INT) then
       call roctxPush("ys_pipeline MPI_Waitall factor_sends")
-      if (timing_enabled) time_t0 = MPI_Wtime()
+      call tic()
       call MPI_Waitall(nbatches, factor_send_req, MPI_STATUSES_IGNORE, ierr)
-      if (timing_enabled) then
-        time_t1 = MPI_Wtime()
-        timing(9) = timing(9) + (time_t1 - time_t0)
-      end if
+      call toc(T_COMM_POST)
       call roctxPop("ys_pipeline MPI_Waitall factor_sends")
       call roctxPush("ys_pipeline MPI_Waitall forward_sends")
-      if (timing_enabled) time_t0 = MPI_Wtime()
+      call tic()
       call MPI_Waitall(nbatches, forward_send_req, MPI_STATUSES_IGNORE, ierr)
-      if (timing_enabled) then
-        time_t1 = MPI_Wtime()
-        timing(9) = timing(9) + (time_t1 - time_t0)
-      end if
+      call toc(T_COMM_POST)
       call roctxPop("ys_pipeline MPI_Waitall forward_sends")
     end if
     if (ipy > 0_C_INT) then
       call roctxPush("ys_pipeline MPI_Waitall backward_sends")
-      if (timing_enabled) time_t0 = MPI_Wtime()
+      call tic()
       call MPI_Waitall(nbatches, backward_send_req, MPI_STATUSES_IGNORE, ierr)
-      if (timing_enabled) then
-        time_t1 = MPI_Wtime()
-        timing(9) = timing(9) + (time_t1 - time_t0)
-      end if
+      call toc(T_COMM_POST)
       call roctxPop("ys_pipeline MPI_Waitall backward_sends")
     end if
 
     call roctxPush("ys_pipeline exchange_solution_halos")
-    if (timing_enabled) time_t0 = MPI_Wtime()
+    call tic()
     call ys_exchange_pipelined_solution_halos(active_n, nlines)
+    call toc(T_HALO)
     if (timing_enabled) then
-      time_t1 = MPI_Wtime()
-      timing(10) = timing(10) + (time_t1 - time_t0)
-      timing(1) = time_t1 - time_start
+      timing(T_TOTAL) = MPI_Wtime() - time_start
       call ys_print_pipeline_timing(ys_pipeline_timing_solve_id, active_n, nlines, nbatches, timing)
     end if
     call roctxPop("ys_pipeline exchange_solution_halos")
@@ -1645,6 +1543,17 @@ contains
     deallocate (factor_send_req, forward_send_req, backward_recv_req, backward_send_req)
 
   contains
+    ! Timed regions never nest here, so one start stamp is enough.
+    subroutine tic()
+      if (timing_enabled) time_t0 = MPI_Wtime()
+    end subroutine tic
+
+    subroutine toc(bucket)
+      integer, intent(in) :: bucket
+
+      if (timing_enabled) timing(bucket) = timing(bucket) + (MPI_Wtime() - time_t0)
+    end subroutine toc
+
     subroutine ys_print_pipeline_timing(solve_id, active_n_value, nlines_value, nbatches_value, timing_value)
       integer(C_INT), intent(in) :: solve_id, active_n_value, nlines_value, nbatches_value
       real(C_DOUBLE), intent(in) :: timing_value(10)
@@ -1682,12 +1591,9 @@ contains
         if (ipy < npy_grid - 1_C_INT) then
           if (blocking) then
             call roctxPush("ys_pipeline MPI_Wait backward_recv")
-            if (timing_enabled) time_t0 = MPI_Wtime()
+            call tic()
             call MPI_Wait(backward_recv_req(next_backward), status, ierr)
-            if (timing_enabled) then
-              time_t1 = MPI_Wtime()
-              timing(4) = timing(4) + (time_t1 - time_t0)
-            end if
+            call toc(T_BACKWARD_WAIT)
             call roctxPop("ys_pipeline MPI_Wait backward_recv")
             ready = .true.
           else
@@ -1697,53 +1603,38 @@ contains
           end if
           if (.not. ready) exit
           call roctxPush("ys_pipeline backward_continue")
-          if (timing_enabled) time_t0 = MPI_Wtime()
+          call tic()
           call ys_backward_pipelined_batch_continue(first_line, line_count, active_n, backward_offset)
-          if (timing_enabled) then
-            time_t1 = MPI_Wtime()
-            timing(7) = timing(7) + (time_t1 - time_t0)
-          end if
+          call toc(T_BACKWARD_KERNEL)
           call roctxPop("ys_pipeline backward_continue")
         else
           call roctxPush("ys_pipeline backward_top_rank")
-          if (timing_enabled) time_t0 = MPI_Wtime()
+          call tic()
           call ys_backward_pipelined_batch(first_line, line_count, active_n)
-          if (timing_enabled) then
-            time_t1 = MPI_Wtime()
-            timing(7) = timing(7) + (time_t1 - time_t0)
-          end if
+          call toc(T_BACKWARD_KERNEL)
           call roctxPop("ys_pipeline backward_top_rank")
         end if
 
         if (ipy > 0_C_INT) then
           if (ipy < npy_grid - 1_C_INT) then
             call roctxPush("ys_pipeline MPI_Wait forward_send_reuse")
-            if (timing_enabled) time_t0 = MPI_Wtime()
+            call tic()
             call MPI_Wait(forward_send_req(next_backward), status, ierr)
-            if (timing_enabled) then
-              time_t1 = MPI_Wtime()
-              timing(9) = timing(9) + (time_t1 - time_t0)
-            end if
+            call toc(T_COMM_POST)
             call roctxPop("ys_pipeline MPI_Wait forward_send_reuse")
           end if
           call roctxPush("ys_pipeline pack_backward_state")
-          if (timing_enabled) time_t0 = MPI_Wtime()
+          call tic()
           call ys_pack_backward_state(first_line, line_count, forward_offset)
-          if (timing_enabled) then
-            time_t1 = MPI_Wtime()
-            timing(8) = timing(8) + (time_t1 - time_t0)
-          end if
+          call toc(T_PACK)
           call roctxPop("ys_pipeline pack_backward_state")
           call roctxPush("ys_pipeline MPI_Isend backward_state")
           !$omp target data use_device_addr(ycomm_sendbuf)
-          if (timing_enabled) time_t0 = MPI_Wtime()
+          call tic()
           call MPI_Isend(ycomm_sendbuf(forward_offset + 1), solve_count, &
                          MPI_DOUBLE_COMPLEX, ipy - 1_C_INT, TAG_BACKWARD + next_backward, &
                          MPI_COMM_Y, backward_send_req(next_backward), ierr)
-          if (timing_enabled) then
-            time_t1 = MPI_Wtime()
-            timing(9) = timing(9) + (time_t1 - time_t0)
-          end if
+          call toc(T_COMM_POST)
           !$omp end target data
           call roctxPop("ys_pipeline MPI_Isend backward_state")
         end if
@@ -1874,36 +1765,17 @@ contains
   subroutine ys_pipeline_nccl_context(nccl_ctx)
     implicit none
     type(c_ptr), intent(out) :: nccl_ctx
-    type(c_ptr), allocatable :: tmp(:)
-    integer :: old_upper, new_upper
 
-    if (.not. allocated(ys_pipeline_nccl_ctx_by_npy)) then
-      allocate (ys_pipeline_nccl_ctx_by_npy(0:max(1_C_INT, npy_grid)))
-      ys_pipeline_nccl_ctx_by_npy = c_null_ptr
-    else if (ubound(ys_pipeline_nccl_ctx_by_npy, 1) < npy_grid) then
-      old_upper = ubound(ys_pipeline_nccl_ctx_by_npy, 1)
-      new_upper = max(npy_grid, 2*old_upper)
-      allocate (tmp(0:new_upper))
-      tmp = c_null_ptr
-      tmp(0:old_upper) = ys_pipeline_nccl_ctx_by_npy(0:old_upper)
-      call move_alloc(tmp, ys_pipeline_nccl_ctx_by_npy)
-    end if
-
-    call channel_comm_p2p_ensure(MPI_COMM_Y, ys_pipeline_nccl_ctx_by_npy(npy_grid))
-    nccl_ctx = ys_pipeline_nccl_ctx_by_npy(npy_grid)
+    call channel_comm_cache_reserve(ys_pipeline_nccl_contexts, npy_grid)
+    call channel_comm_p2p_ensure(MPI_COMM_Y, ys_pipeline_nccl_contexts%by_size(npy_grid))
+    nccl_ctx = ys_pipeline_nccl_contexts%by_size(npy_grid)
   end subroutine ys_pipeline_nccl_context
 
   subroutine ys_finalize_nccl_contexts()
     implicit none
 #ifdef HAVE_MPI
-    integer :: i
 
-    if (allocated(ys_pipeline_nccl_ctx_by_npy)) then
-      do i = lbound(ys_pipeline_nccl_ctx_by_npy, 1), ubound(ys_pipeline_nccl_ctx_by_npy, 1)
-        call channel_comm_context_reset(ys_pipeline_nccl_ctx_by_npy(i))
-      end do
-      deallocate (ys_pipeline_nccl_ctx_by_npy)
-    end if
+    call channel_comm_cache_finalize(ys_pipeline_nccl_contexts)
 #endif
   end subroutine ys_finalize_nccl_contexts
 
@@ -2091,12 +1963,8 @@ contains
     !$omp private(local_line, iline)
     do local_line = 1_C_INT, line_count
       iline = first_line + local_line - 1_C_INT
-      if (open_right) then
-        call ys_factor_penta_interleaved_open_right(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, &
-                                                    stride, iline, active_n)
-      else
-        call ys_factor_penta_interleaved(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, stride, iline, active_n)
-      end if
+      call ys_factor_penta_interleaved(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, &
+                                       stride, iline, active_n, open_right)
     end do
     !$omp end target teams distribute parallel do
   end subroutine ys_factor_pipelined_batch
@@ -2374,10 +2242,17 @@ contains
 #endif
   end subroutine ys_unpack_reduced_leaf_values
 
-  subroutine ys_factor_penta_interleaved(ds, dl, d, du, dw, stride, first, n)
+  ! Pentadiagonal LU factorization of one interleaved line.
+  !
+  ! open_right = .true. leaves the trailing row coupled to the rows owned by the
+  ! next y rank, so its upper diagonal is carried forward as well; that is the
+  ! only difference between the local and the pipelined-continuation variants.
+
+  subroutine ys_factor_penta_interleaved(ds, dl, d, du, dw, stride, first, n, open_right)
     implicit none
     complex(C_DOUBLE_COMPLEX), intent(inout) :: ds(:), dl(:), d(:), du(:), dw(:)
     integer(C_INT), intent(in) :: stride, first, n
+    logical, intent(in) :: open_right
     integer(C_INT) :: i
     integer(C_INT64_T) :: p, p1, p2
     complex(C_DOUBLE_COMPLEX) :: factor
@@ -2411,51 +2286,10 @@ contains
     factor = dl(p1)*d(p)
     dl(p1) = factor
     d(p1) = d(p1) - factor*du(p)
+    if (open_right) du(p1) = du(p1) - factor*dw(p)
 
     d(p1) = 1.0d0/d(p1)
   end subroutine ys_factor_penta_interleaved
-
-  subroutine ys_factor_penta_interleaved_open_right(ds, dl, d, du, dw, stride, first, n)
-    implicit none
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: ds(:), dl(:), d(:), du(:), dw(:)
-    integer(C_INT), intent(in) :: stride, first, n
-    integer(C_INT) :: i
-    integer(C_INT64_T) :: p, p1, p2
-    complex(C_DOUBLE_COMPLEX) :: factor
-
-    if (n <= 0) return
-    if (n == 1) then
-      d(first) = 1.0d0/d(first)
-      return
-    end if
-
-    do i = 0, n - 3
-      p = int(first, C_INT64_T) + int(i, C_INT64_T)*int(stride, C_INT64_T)
-      d(p) = 1.0d0/d(p)
-
-      p1 = p + int(stride, C_INT64_T)
-      factor = dl(p1)*d(p)
-      dl(p1) = factor
-      d(p1) = d(p1) - factor*du(p)
-      du(p1) = du(p1) - factor*dw(p)
-
-      p2 = p + 2_C_INT64_T*int(stride, C_INT64_T)
-      factor = ds(p2)*d(p)
-      ds(p2) = factor
-      dl(p2) = dl(p2) - factor*du(p)
-      d(p2) = d(p2) - factor*dw(p)
-    end do
-
-    p = int(first, C_INT64_T) + int(n - 2, C_INT64_T)*int(stride, C_INT64_T)
-    d(p) = 1.0d0/d(p)
-    p1 = p + int(stride, C_INT64_T)
-    factor = dl(p1)*d(p)
-    dl(p1) = factor
-    d(p1) = d(p1) - factor*du(p)
-    du(p1) = du(p1) - factor*dw(p)
-
-    d(p1) = 1.0d0/d(p1)
-  end subroutine ys_factor_penta_interleaved_open_right
 
   subroutine ys_factor_penta_interleaved_continue(ds, dl, d, du, stride, first, n, &
                                                   prev0_d, prev0_du, prev0_dw, prev1_d, prev1_du, prev1_dw)

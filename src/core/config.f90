@@ -1,6 +1,12 @@
 module config
   use, intrinsic :: iso_c_binding, only: C_DOUBLE, C_INT
+  use env_options, only: lowercase
   implicit none
+  private
+
+  public :: ini_config, config_entry, read_ini_file, has_section
+  public :: require_integer, require_real, require_logical, require_real_vector
+  public :: get_integer, get_real, get_logical, get_string, get_real_vector
 
   type :: config_entry
     character(len=64) :: section = ""
@@ -54,7 +60,7 @@ contains
 
       call split_key_value(line, key, value)
       if (len_trim(key) == 0) cycle
-      call append_entry(cfg, lower(trim(section)), lower(trim(key)), trim(value))
+      call append_entry(cfg, lowercase(trim(section)), lowercase(trim(key)), trim(value))
     end do
 
     close (unit)
@@ -110,10 +116,10 @@ contains
     integer(C_INT), intent(inout) :: target
     logical, intent(out) :: found
 
-    integer :: idx, stat, parsed
+    integer :: stat, parsed
     character(len=256) :: value
 
-    call lookup_value(cfg, section, key, value, found, idx)
+    call lookup_value(cfg, section, key, value, found)
     if (.not. found) return
 
     read (value, *, iostat=stat) parsed
@@ -130,10 +136,10 @@ contains
     real(C_DOUBLE), intent(inout) :: target
     logical, intent(out) :: found
 
-    integer :: idx, stat
+    integer :: stat
     character(len=256) :: value
 
-    call lookup_value(cfg, section, key, value, found, idx)
+    call lookup_value(cfg, section, key, value, found)
     if (.not. found) return
 
     read (value, *, iostat=stat) target
@@ -149,10 +155,9 @@ contains
     logical, intent(inout) :: target
     logical, intent(out) :: found
 
-    integer :: idx
     character(len=256) :: value
 
-    call lookup_value(cfg, section, key, value, found, idx)
+    call lookup_value(cfg, section, key, value, found)
     if (.not. found) return
 
     call parse_logical_value(value, target)
@@ -164,10 +169,9 @@ contains
     character(len=*), intent(inout) :: target
     logical, intent(out) :: found
 
-    integer :: idx
     character(len=256) :: value
 
-    call lookup_value(cfg, section, key, value, found, idx)
+    call lookup_value(cfg, section, key, value, found)
     if (.not. found) return
 
     call clean_string(value, target)
@@ -179,10 +183,10 @@ contains
     real(C_DOUBLE), intent(inout) :: target(:)
     logical, intent(out) :: found
 
-    integer :: idx, stat
+    integer :: stat
     character(len=256) :: value
 
-    call lookup_value(cfg, section, key, value, found, idx)
+    call lookup_value(cfg, section, key, value, found)
     if (.not. found) return
 
     if (size(target) == 0) return
@@ -204,7 +208,7 @@ contains
     has_section = .false.
     if (.not. allocated(cfg%entries)) return
 
-    section_l = lower(trim(section))
+    section_l = lowercase(trim(section))
     do i = 1, size(cfg%entries)
       if (trim(cfg%entries(i)%section) == trim(section_l)) then
         has_section = .true.
@@ -217,46 +221,36 @@ contains
     type(ini_config), intent(inout) :: cfg
     character(len=*), intent(in) :: section, key, value
 
-    type(config_entry), allocatable :: tmp(:)
+    type(config_entry), allocatable :: grown(:)
     integer :: n
 
-    if (.not. allocated(cfg%entries)) then
-      allocate (cfg%entries(1))
-      n = 0
-    else
-      n = size(cfg%entries)
-      allocate (tmp(n))
-      tmp = cfg%entries
-      deallocate (cfg%entries)
-      allocate (cfg%entries(n + 1))
-      cfg%entries(1:n) = tmp
-      deallocate (tmp)
-    end if
+    n = 0
+    if (allocated(cfg%entries)) n = size(cfg%entries)
 
-    cfg%entries(n + 1)%section = ""
-    cfg%entries(n + 1)%key = ""
-    cfg%entries(n + 1)%value = ""
-    cfg%entries(n + 1)%section = trim(section)
-    cfg%entries(n + 1)%key = trim(key)
-    cfg%entries(n + 1)%value = trim(value)
+    allocate (grown(n + 1))
+    if (n > 0) grown(1:n) = cfg%entries
+    grown(n + 1)%section = trim(section)
+    grown(n + 1)%key = trim(key)
+    grown(n + 1)%value = trim(value)
+    call move_alloc(grown, cfg%entries)
   end subroutine append_entry
 
-  subroutine lookup_value(cfg, section, key, value, found, idx)
+  ! Last entry wins, so the search runs backwards.
+  subroutine lookup_value(cfg, section, key, value, found)
     type(ini_config), intent(in) :: cfg
     character(len=*), intent(in) :: section, key
     character(len=*), intent(out) :: value
     logical, intent(out) :: found
-    integer, intent(out) :: idx
 
     character(len=64) :: section_l, key_l
+    integer :: idx
 
     value = ""
     found = .false.
-    idx = 0
     if (.not. allocated(cfg%entries)) return
 
-    section_l = lower(trim(section))
-    key_l = lower(trim(key))
+    section_l = lowercase(trim(section))
+    key_l = lowercase(trim(key))
 
     do idx = size(cfg%entries), 1, -1
       if (trim(cfg%entries(idx)%section) == trim(section_l) .and. &
@@ -275,7 +269,7 @@ contains
 
     section = ""
     last = index(line, "]")
-    if (last > 2) section = lower(trim(line(2:last - 1)))
+    if (last > 2) section = lowercase(trim(line(2:last - 1)))
   end subroutine parse_section
 
   subroutine split_key_value(line, key, value)
@@ -314,7 +308,7 @@ contains
     character(len=256) :: cleaned
 
     call clean_string(text, cleaned)
-    cleaned = lower(trim(cleaned))
+    cleaned = lowercase(trim(cleaned))
 
     select case (trim(cleaned))
     case ("true", ".true.", "1", "yes", "on")
@@ -349,22 +343,6 @@ contains
 
     out = tmp(:min(len(out), n))
   end subroutine clean_string
-
-  function lower(text) result(out)
-    character(len=*), intent(in) :: text
-    character(len=len(text)) :: out
-
-    integer :: i, c
-
-    do i = 1, len(text)
-      c = iachar(text(i:i))
-      if (c >= iachar("A") .and. c <= iachar("Z")) then
-        out(i:i) = achar(c + iachar("a") - iachar("A"))
-      else
-        out(i:i) = text(i:i)
-      end if
-    end do
-  end function lower
 
   subroutine missing_key(section, key)
     character(len=*), intent(in) :: section, key
