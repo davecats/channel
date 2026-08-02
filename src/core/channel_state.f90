@@ -39,6 +39,13 @@ module channel_state
   !-------------------------------------------------------------------------
   complex(C_DOUBLE_COMPLEX), allocatable, target :: bc0(:, :, :), bcn(:, :, :), zero_bc(:, :)
 
+  ! Wall coefficient rows for each component: the row enforcing the condition
+  ! at the wall, and the row for the ghost node just outside it.  Computed by
+  ! setup_boundary_conditions from the compact stencils.
+  real(C_DOUBLE), dimension(-2:2) :: v0bc, v0m1bc, vnbc, vnp1bc
+  real(C_DOUBLE), dimension(-2:2) :: eta0bc, eta0m1bc, etanbc, etanp1bc
+  real(C_DOUBLE), dimension(-2:2) :: phi0bc, phi0m1bc, phinbc, phinp1bc
+
   !-------------------------------------------------------------------------
   ! Physical parameters.  ni is the inverse Reynolds number; pra holds the
   ! inverse Prandtl number of each scalar.  u0/uN and t0/tN are the wall

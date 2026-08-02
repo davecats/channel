@@ -57,7 +57,7 @@ program post_convvelo
   call free_convvelo()
   call free_pressure_output()
 #ifdef HAVE_FFTW
-  call free_fft(VVdz, VVdx, rVVdx)
+  call free_fft()
 #endif
   call free_memory(.false.)
 #ifdef HAVE_MPI

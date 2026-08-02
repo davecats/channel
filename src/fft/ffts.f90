@@ -64,6 +64,10 @@ MODULE ffts
 #elif defined(HAVE_FFTW)
   INCLUDE 'fftw3.f03'
   integer, save        :: plan_type = FFTW_PATIENT
+  ! Declared here on both paths so consumers say `use ffts` either way; on the
+  ! FFTW path these used to live in dnsdata and be threaded through init_fft.
+  complex(C_DOUBLE_COMPLEX), dimension(:, :, :, :), pointer :: VVdz => null(), VVdx => null()
+  real(C_DOUBLE), dimension(:, :, :, :), pointer :: rVVdx => null()
   real(C_DOUBLE), dimension(:, :, :, :), pointer :: products
   TYPE(C_PTR), save    :: pFFT, pIFT, pRFT, pHFT
   complex(C_DOUBLE_COMPLEX), target, allocatable, save :: fftw_VVdz(:, :, :, :), fftw_VVdx(:, :, :, :)
@@ -203,10 +207,8 @@ CONTAINS
 #endif
 
 #ifdef HAVE_FFTW
-  SUBROUTINE init_fft(VVdz, VVdx, rVVdx, nxd, nxB, nzd, nzB, nPhi, overlapping, odd_n_real, s)
+  SUBROUTINE init_fft(nxd, nxB, nzd, nzB, nPhi, overlapping, odd_n_real, s)
     integer(C_INT), intent(in) :: nxd, nxB, nzd, nzB, nPhi
-    complex(C_DOUBLE_COMPLEX), pointer, dimension(:, :, :, :), intent(out) :: VVdx, VVdz
-    real(C_DOUBLE), pointer, dimension(:, :, :, :), intent(out) :: rVVdx
     logical, intent(in) :: overlapping
     logical, optional, intent(in) :: odd_n_real
     integer, dimension(2), optional :: s
@@ -541,9 +543,7 @@ CONTAINS
   END SUBROUTINE HFT
 
 #if defined(HAVE_FFTW)
-  SUBROUTINE free_fft(VVdz, VVdx, rVVdx)
-    complex(C_DOUBLE_COMPLEX), pointer, dimension(:, :, :, :), intent(out) :: VVdx, VVdz
-    real(C_DOUBLE), pointer, dimension(:, :, :, :), intent(out) :: rVVdx
+  SUBROUTINE free_fft()
 
     !$omp target exit data map(from: VVdz)
     call fftw_destroy_plan(pFFT)

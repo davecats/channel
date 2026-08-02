@@ -175,7 +175,7 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
 #elif defined(HAVE_HIP)
     CALL init_hipfft(nxd, nxB, nzd, nzB, nPhi, overlapping)
 #elif defined(HAVE_FFTW)
-    CALL init_fft(VVdz, VVdx, rVVdx, nxd, nxB, nzd, nzB, nPhi, overlapping)
+    CALL init_fft(nxd, nxB, nzd, nzB, nPhi, overlapping)
 #endif
     CALL setup_derivatives()
     CALL setup_boundary_conditions()
@@ -412,7 +412,7 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
     CALL free_fft()
 #elif defined(HAVE_FFTW)
-    CALL free_fft(VVdz, VVdx, rVVdx)
+    CALL free_fft()
 #endif
     call ys_schur_finalize_contexts()
     call ys_finalize_nccl_contexts()

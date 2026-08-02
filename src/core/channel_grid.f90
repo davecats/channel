@@ -71,6 +71,15 @@ module channel_grid
   !$omp declare target(nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN)
 
   !-------------------------------------------------------------------------
+  ! y-Schur decomposition chosen at startup.  configure_mpi_decomposition sets
+  ! all three (its arguments are intent(out)), so they need no initialiser --
+  ! which also keeps this module free of any `use`.
+  !-------------------------------------------------------------------------
+  integer(C_INT), save :: npy = 1
+  integer(C_INT), allocatable, save :: schur_pass_counts(:)
+  integer(C_INT), save :: schur_exchange_mode
+
+  !-------------------------------------------------------------------------
   ! has_terminal : this rank writes the human-readable diagnostics.
   ! has_average  : this rank owns the (0,0) mode, i.e. the mean profile.
   !-------------------------------------------------------------------------

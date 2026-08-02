@@ -100,6 +100,7 @@ function(channel_fypp_generate out_var)
 endfunction()
 
 channel_fypp_generate(CHANNEL_GENERATED_SOURCES
+    ${CHANNEL_SOURCE_DIR}/core/channel_equations.fypp
     ${CHANNEL_SOURCE_DIR}/core/dnsdata.fypp
 )
 

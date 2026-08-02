@@ -56,7 +56,7 @@ PROGRAM post_pressure
 
   call free_pressure_output()
 #ifdef HAVE_FFTW
-  call free_fft(VVdz, VVdx, rVVdx)
+  call free_fft()
 #endif
   call free_memory(.FALSE.)
 #ifdef HAVE_MPI

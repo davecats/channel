@@ -11,7 +11,7 @@ module mpi_autotune
 #elif defined(HAVE_HIP)
   use ffts, only: init_hipfft, free_fft, VVdz, VVdx, rVVdx
 #elif defined(HAVE_FFTW)
-  use ffts, only: init_fft, free_fft
+  use ffts, only: init_fft, free_fft, VVdz, VVdx, rVVdx
 #endif
   use y_line_solvers, only: Y_SOLVER_SCHUR, Y_SOLVER_PIPELINED_LU, &
                             ys_selected_solver, ys_selected_batches, &
@@ -441,8 +441,6 @@ contains
     logical, intent(in) :: overlapping
     real(C_DOUBLE), intent(out) :: forward_cost, back_cost
 #ifdef HAVE_FFTW
-    complex(C_DOUBLE_COMPLEX), pointer :: VVdz(:, :, :, :), VVdx(:, :, :, :)
-    real(C_DOUBLE), pointer :: rVVdx(:, :, :, :)
 #endif
     type(MPI_Request) :: request
     type(MPI_Status) :: status
@@ -455,7 +453,7 @@ contains
 #elif defined(HAVE_HIP)
     call init_hipfft(nxd, nxB, nzd, nzB, nphi, overlapping)
 #elif defined(HAVE_FFTW)
-    call init_fft(VVdz, VVdx, rVVdx, nxd, nxB, nzd, nzB, nphi, overlapping)
+    call init_fft(nxd, nxB, nzd, nzB, nphi, overlapping)
 #endif
 
     nrepeat = tune_repeats()
@@ -500,7 +498,7 @@ contains
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
     call free_fft()
 #elif defined(HAVE_FFTW)
-    call free_fft(VVdz, VVdx, rVVdx)
+    call free_fft()
 #endif
     call free_MPI()
   end subroutine time_xz_sweep
