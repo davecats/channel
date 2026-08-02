@@ -1,0 +1,86 @@
+#include "header.h"
+
+! Runtime diagnostics and periodic field output.
+!
+! Once per step: reduce the CFL number across ranks and adapt the timestep,
+! take the wall gradients of the mean profiles, write the Runtimedata lines,
+! and save a restart or a numbered field when the configured intervals are
+! crossed.
+module statistics
+
+  use, intrinsic :: iso_c_binding
+  use channel_grid
+  use channel_state
+  use compact_stencils
+  use mpi_transpose
+  use restart_io, only: restart_write
+  use roctx, only: roctxPush, roctxPop
+
+  implicit none
+
+  public :: outstats
+
+contains
+
+  SUBROUTINE outstats()
+    IMPLICIT NONE
+    real(C_DOUBLE) :: runtime_global, dudy(1:2 + nPhi, 1:2)   !cfl
+    character(len=40) :: istring, filename
+    integer :: iPhi
+    complex(C_DOUBLE_COMPLEX) :: mean_line_u(-1:ny + 1), mean_line_w(-1:ny + 1), mean_line_scalar(-1:ny + 1)
+
+    if (has_average) then
+      !$omp target update from(V(ny0 - 2:nyN + 2, 0, 0, 1))
+      !$omp target update from(V(ny0 - 2:nyN + 2, 0, 0, 3))
+      call gather_full_y_line(ny, V(:, 0, 0, 1), mean_line_u)
+      call gather_full_y_line(ny, V(:, 0, 0, 3), mean_line_w)
+    end if
+#ifdef HAVE_MPI
+    call roctxPush("MPI_Allreduce outstats_cfl")
+    CALL MPI_Allreduce(cfl, runtime_global, 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD); cfl = 0; 
+    call roctxPop("MPI_Allreduce outstats_cfl")
+#else
+    runtime_global = cfl
+#endif
+    IF (cflmax > 0) deltat = cflmax/runtime_global
+    IF (has_average) THEN
+      dudy(1, 2) = -sum(d14n(-2:2)*dreal(mean_line_u(ny - 3:ny + 1)))
+      dudy(2, 2) = -sum(d14n(-2:2)*dreal(mean_line_w(ny - 3:ny + 1)))
+      DO iPhi = 1, nPhi
+        !$omp target update from(V(ny0 - 2:nyN + 2, 0, 0, 3 + iPhi))
+        call gather_full_y_line(ny, V(:, 0, 0, 3 + iPhi), mean_line_scalar)
+        dudy(2 + iPhi, 2) = sum(d14n(-2:2)*dreal(mean_line_scalar(ny - 3:ny + 1)))
+        dudy(2 + iPhi, 1) = sum(d140(-2:2)*dreal(mean_line_scalar(-1:3)))
+      END DO
+      dudy(1, 1) = sum(d140(-2:2)*dreal(mean_line_u(-1:3)))
+      dudy(2, 1) = sum(d140(-2:2)*dreal(mean_line_w(-1:3)))
+    END IF
+    IF (has_terminal) THEN
+      !$omp target update from(fr)
+      WRITE (*, "(F10.4,3X,4(F11.6,3X),4(F9.4,3X),2(F9.6,3X))") &
+           time,dudy(1,1),dudy(1,2),dudy(2,1),dudy(2,2),fr(1)+corrpx*fr(3),meanpx+corrpx,fr(2)+corrpz*fr(3),meanpz+corrpz,runtime_global*deltat,deltat
+      WRITE(121,*) time,dudy(1,1),dudy(1,2),dudy(2,1),dudy(2,2),fr(1)+corrpx*fr(3),meanpx+corrpx,fr(2)+corrpz*fr(3),meanpz+corrpz,runtime_global*deltat,deltat
+      WRITE (195, *) time, dudy(3:, 1), dudy(3:, 2), fr(4:3 + nPhi) + corrtx(:)*fr(3 + nPhi + 1:3 + 2*nPhi), corrtx + meantx
+      FLUSH (121); FLUSH (195)
+    END IF
+    runtime_global = 0
+    !Save Dati.cart.out
+    IF (.not. disable_restart_write .and. &
+        (((FLOOR((time + 0.5*deltat)/dt_save) > FLOOR((time - 0.5*deltat)/dt_save)) .AND. (istep > 1)) .OR. istep == nstep)) THEN
+      IF (has_terminal) WRITE (*, *) "Writing Dati.cart.out at time ", time
+      filename = "Dati.cart.out"
+      !$omp target update from(V)
+      call restart_write(filename, V, ni, time)
+    END IF
+    !Save Dati.cart.i.out
+    IF ((FLOOR((time + 0.5*deltat)/dt_field) > FLOOR((time - 0.5*deltat)/dt_field)) .AND. (istep > 1)) THEN
+      ifield = ifield + 1; WRITE (istring, *) ifield
+      IF (has_terminal) WRITE (*, *) "Writing Dati.cart."//TRIM(ADJUSTL(istring))//".out at time ", time
+      filename = "Dati.cart."//TRIM(ADJUSTL(istring))//".out"
+      !$omp target update from(V)
+      call restart_write(filename, V, ni, time)
+    END IF
+
+  END SUBROUTINE outstats
+
+end module statistics

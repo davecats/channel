@@ -100,6 +100,7 @@ function(channel_fypp_generate out_var)
 endfunction()
 
 channel_fypp_generate(CHANNEL_GENERATED_SOURCES
+    ${CHANNEL_SOURCE_DIR}/core/byte_workspace.fypp
     ${CHANNEL_SOURCE_DIR}/core/channel_equations.fypp
     ${CHANNEL_SOURCE_DIR}/core/dnsdata.fypp
 )
@@ -112,7 +113,6 @@ add_library(channel_core
     ${CHANNEL_SOURCE_DIR}/core/config.f90
     ${CHANNEL_SOURCE_DIR}/core/rbmat.f90
     ${CHANNEL_SOURCE_DIR}/core/roctx.f90
-    ${CHANNEL_SOURCE_DIR}/core/byte_workspace.f90
     ${CHANNEL_SOURCE_DIR}/gpu/y_pipeline_nccl.f90
     ${CHANNEL_SOURCE_DIR}/linsolve/y_schur_solver.f90
     ${CHANNEL_SOURCE_DIR}/linsolve/y_line_solvers.f90
@@ -121,7 +121,9 @@ add_library(channel_core
     ${CHANNEL_SOURCE_DIR}/core/restart_io.f90
     ${CHANNEL_SOURCE_DIR}/fft/ffts.f90
     ${CHANNEL_SOURCE_DIR}/mpi/mpi_autotune.f90
+    ${CHANNEL_SOURCE_DIR}/core/channel_bcs.f90
     ${CHANNEL_GENERATED_SOURCES}
+    ${CHANNEL_SOURCE_DIR}/core/statistics.f90
     ${CHANNEL_SOURCE_DIR}/core/convvelo.f90
     ${CHANNEL_SOURCE_DIR}/core/pressure_output.f90
     ${CHANNEL_SOURCE_DIR}/core/driver.f90
