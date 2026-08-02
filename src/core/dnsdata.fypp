@@ -127,14 +127,15 @@ CONTAINS
 
   !--------------------------------------------------------------!
   !---------------------- Read input files ----------------------!
+  ! Parses the input deck only.  Configuring the MPI decomposition (which may
+  ! run a timing scan) is the driver's job, so that reading a file does not
+  ! also benchmark the machine.
   SUBROUTINE read_dnsin(cfg)
-    USE mpi_autotune, ONLY: configure_mpi_decomposition
     IMPLICIT NONE
     logical :: i
     integer :: iPhi
     type(ini_config), intent(in) :: cfg
     integer(C_INT) :: nstep_in
-    integer(C_INT) :: npxz_tuned
     logical :: found
 
     call require_integer(cfg, "mesh", "nx", nx)
@@ -181,10 +182,6 @@ CONTAINS
 
     overlapping = .false.
     call env_flag("CHANNEL_OVERLAPPING", overlapping)
-
-    if (allocated(schur_pass_counts)) deallocate (schur_pass_counts)
-    call configure_mpi_decomposition(nx + 1, nxd, nzd, nz, ny, nPhi, overlapping, 1_C_INT, &
-                                     npy, npxz_tuned, schur_pass_counts, schur_exchange_mode)
 
     call require_real(cfg, "timestepping", "deltat", deltat)
     call require_real(cfg, "timestepping", "cflmax", cflmax)
@@ -253,10 +250,10 @@ CONTAINS
   END SUBROUTINE init_memory
 
   subroutine print_schur_configuration()
-    USE mpi_autotune, ONLY: Y_SOLVER_PIPELINED_LU, mpi_autotune_selected_y_solver
+    USE y_line_solvers, ONLY: Y_SOLVER_PIPELINED_LU, ys_selected_solver
     implicit none
 
-    if (mpi_autotune_selected_y_solver == Y_SOLVER_PIPELINED_LU) return
+    if (ys_selected_solver == Y_SOLVER_PIPELINED_LU) return
 
     if (size(schur_pass_counts) == 0) then
       print *, "y-Schur pass counts: none"
@@ -931,9 +928,8 @@ CONTAINS
 
   SUBROUTINE solve_compact_component_current_layout(field_values, assemble_system, boundary_system, lambda_coeff, diffusion_coeff, source_values, &
                                                     symmetric_operator, derivative_order, boundaries)
-    use y_line_solvers, only: ys_prepare_assembled_workspace, ys_release_workspace, ys_solve_endpoint_schur, ys_solve_pipelined_lu
-    use mpi_autotune, only: mpi_autotune_selected_y_solver, mpi_autotune_selected_y_batches, &
-                            Y_SOLVER_SCHUR, Y_SOLVER_PIPELINED_LU
+    use y_line_solvers, only: ys_prepare_assembled_workspace, ys_release_workspace, ys_solve_endpoint_schur, ys_solve_pipelined_lu, &
+                              Y_SOLVER_SCHUR, Y_SOLVER_PIPELINED_LU, ys_selected_solver, ys_selected_batches
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), target, intent(inout) :: field_values(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     procedure(compact_assembly_step) :: assemble_system
@@ -978,12 +974,12 @@ CONTAINS
     ! configure_mpi_decomposition already resolved CHANNEL_Y_SOLVER against the
     ! autotune result at startup, so the choice is just read here.  A batch count
     ! is only available when the autotuner picked the pipelined solver itself.
-    select case (mpi_autotune_selected_y_solver)
+    select case (ys_selected_solver)
     case (Y_SOLVER_SCHUR)
       call ys_solve_endpoint_schur(field_values, symmetric_operator_value)
     case (Y_SOLVER_PIPELINED_LU)
-      if (mpi_autotune_selected_y_batches >= 1_C_INT) then
-        call ys_solve_pipelined_lu(field_values, mpi_autotune_selected_y_batches)
+      if (ys_selected_batches >= 1_C_INT) then
+        call ys_solve_pipelined_lu(field_values, ys_selected_batches)
       else
         call ys_solve_pipelined_lu(field_values)
       end if

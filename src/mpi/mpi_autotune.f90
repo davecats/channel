@@ -13,7 +13,9 @@ module mpi_autotune
 #elif defined(HAVE_FFTW)
   use ffts, only: init_fft, free_fft
 #endif
-  use y_line_solvers, only: ys_prepare_assembled_workspace, ys_release_workspace, &
+  use y_line_solvers, only: Y_SOLVER_SCHUR, Y_SOLVER_PIPELINED_LU, &
+                            ys_selected_solver, ys_selected_batches, &
+                            ys_prepare_assembled_workspace, ys_release_workspace, &
                             ys_solve_endpoint_schur, ys_solve_pipelined_lu, ys_gpsv_ds, ys_gpsv_dl, &
                             ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x
   use y_schur_solver, only: ys_schur_default_pass_counts, YS_SCHUR_EXCHANGE_AUTO, &
@@ -28,8 +30,6 @@ module mpi_autotune
   private
   integer(C_INT), parameter :: MAXP = 16_C_INT
   integer(C_INT), parameter :: ARITY(5) = [2_C_INT, 3_C_INT, 4_C_INT, 6_C_INT, 8_C_INT]
-  integer(C_INT), parameter, public :: Y_SOLVER_SCHUR = 1_C_INT
-  integer(C_INT), parameter, public :: Y_SOLVER_PIPELINED_LU = 2_C_INT
   ! Best decomposition seen so far.  Every try_* routine narrows this one
   ! object; it used to travel as nine separate inout arguments through four
   ! nested routines, where a single misordered call site would have been silent.
@@ -44,8 +44,6 @@ module mpi_autotune
 
   real(C_DOUBLE), parameter :: RK_SUBSTEPS = 3.0_C_DOUBLE
   real(C_DOUBLE), parameter :: Y_SOLVE_CHECK_TOL = 1.0e-6_C_DOUBLE
-  integer(C_INT), save, public :: mpi_autotune_selected_y_solver = Y_SOLVER_SCHUR
-  integer(C_INT), save, public :: mpi_autotune_selected_y_batches = 0_C_INT
   integer(C_INT), save, public :: mpi_autotune_selected_comm_backend = CHANNEL_COMM_BACKEND_AUTO
   integer(C_INT), save :: mpi_autotune_comm_mode = CHANNEL_COMM_BACKEND_AUTO
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
@@ -76,8 +74,8 @@ contains
     has_npy = env_int("CHANNEL_NPY", env_npy)
     has_npxz = env_int("CHANNEL_NPXZ", env_npxz)
     has_y_solver = env_text("CHANNEL_Y_SOLVER", text)
-    mpi_autotune_selected_y_solver = Y_SOLVER_SCHUR
-    mpi_autotune_selected_y_batches = 0_C_INT
+    ys_selected_solver = Y_SOLVER_SCHUR
+    ys_selected_batches = 0_C_INT
     mpi_autotune_comm_mode = channel_comm_backend_from_env()
     mpi_autotune_selected_comm_backend = CHANNEL_COMM_BACKEND_AUTO
     if (has_y_solver) then
@@ -85,9 +83,9 @@ contains
       case ("auto", "default")
         has_y_solver = .false.
       case ("schur")
-        mpi_autotune_selected_y_solver = Y_SOLVER_SCHUR
+        ys_selected_solver = Y_SOLVER_SCHUR
       case ("pipelined_lu", "pipelined-lu")
-        mpi_autotune_selected_y_solver = Y_SOLVER_PIPELINED_LU
+        ys_selected_solver = Y_SOLVER_PIPELINED_LU
       case default
         call abort_msg(rank, "invalid CHANNEL_Y_SOLVER")
       end select
@@ -141,8 +139,8 @@ contains
                           best%comm_backend, best%y_solver, best%y_batches)
       if (best%found .and. (mode == 1 .or. mode == 2) .and. .not. manual) then
         npxz_out = best%npxz; npy_out = best%npy; exchange = best%exchange
-        mpi_autotune_selected_y_solver = best%y_solver
-        mpi_autotune_selected_y_batches = best%y_batches
+        ys_selected_solver = best%y_solver
+        ys_selected_batches = best%y_batches
         mpi_autotune_selected_comm_backend = best%comm_backend
         call channel_comm_set_backend_override(best%comm_backend)
         applied = .true.
@@ -835,8 +833,8 @@ contains
     integer(C_INT), intent(in), optional :: comm_backend
     integer(C_INT), intent(in), optional :: y_solver, y_batches
     integer(C_INT) :: solver, batches, backend
-    solver = mpi_autotune_selected_y_solver
-    batches = mpi_autotune_selected_y_batches
+    solver = ys_selected_solver
+    batches = ys_selected_batches
     backend = mpi_autotune_selected_comm_backend
     if (present(comm_backend)) backend = comm_backend
     if (present(y_solver)) solver = y_solver

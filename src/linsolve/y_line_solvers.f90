@@ -74,6 +74,17 @@ module y_line_solvers
 
 #endif
 
+  ! Which wall-normal solver to use, and how many pipeline batches.
+  !
+  ! mpi_autotune decides this at startup and writes it here; the compact solve
+  ! driver reads it.  It lives with the solver rather than with the autotuner
+  ! so that the DNS state module does not have to depend on the autotuner just
+  ! to learn which solver was chosen.
+  integer(C_INT), parameter, public :: Y_SOLVER_SCHUR = 1_C_INT
+  integer(C_INT), parameter, public :: Y_SOLVER_PIPELINED_LU = 2_C_INT
+  integer(C_INT), save, public :: ys_selected_solver = Y_SOLVER_SCHUR
+  integer(C_INT), save, public :: ys_selected_batches = 0_C_INT
+
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_CONST = 1_C_INT
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_EVEN_Z = 2_C_INT
 

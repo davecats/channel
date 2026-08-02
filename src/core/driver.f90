@@ -23,6 +23,7 @@ CONTAINS
     use config, only: ini_config, read_ini_file
     USE dnsdata
     USE mpi_transpose, only: init_MPI
+    USE mpi_autotune, only: configure_mpi_decomposition
     USE convvelo, only: init_convvelo_runtime, get_convvelo_memory_estimate, get_convvelo_workspace_estimate, configure_convvelo
     USE ffts, only: get_fft_memory_estimate
 #ifdef HAVE_CUDA
@@ -48,6 +49,7 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
     integer(C_SIZE_T) :: solver_workspace_bytes, fft_workspace_bytes, pressure_workspace_bytes, convvelo_workspace_bytes
     integer(C_SIZE_T) :: workspace_peak_bytes, sparse_external_bytes
     integer :: iPhi
+    integer(C_INT) :: npxz_tuned
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
 #ifdef HAVE_MPI
     integer :: num_dev, dev, local_rank, num_dev_min, num_dev_max
@@ -110,6 +112,13 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
 
     call read_ini_file(config_file, cfg)
     CALL read_dnsin(cfg)
+
+    ! Choose the rank decomposition and the y-Schur pass hierarchy.  This may
+    ! run a timing scan, so it is driven from here rather than from read_dnsin.
+    if (allocated(schur_pass_counts)) deallocate (schur_pass_counts)
+    call configure_mpi_decomposition(nx + 1, nxd, nzd, nz, ny, nPhi, overlapping, 1_C_INT, &
+                                     npy, npxz_tuned, schur_pass_counts, schur_exchange_mode)
+
     exit_after_autotune = .false.
     call env_flag("CHANNEL_EXIT_AFTER_MPI_AUTOTUNE", exit_after_autotune)
     if (exit_after_autotune) then
