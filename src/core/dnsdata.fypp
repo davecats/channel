@@ -137,10 +137,6 @@ CONTAINS
     logical, intent(IN) :: solveNS
     ALLOCATE (V(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3 + nPhi)); V = 0
     !$omp target enter data map(to: V)
-#ifdef bodyforce
-    ALLOCATE (F(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3)); F = 0
-    !$omp target enter data map(to: F)
-#endif
     ALLOCATE (bc0(-nz:nz, nx0:nxN, 1:5 + nPhi), &
               bcn(-nz:nz, nx0:nxN, 1:5 + nPhi), &
               zero_bc(-nz:nz, nx0:nxN))
@@ -212,9 +208,6 @@ CONTAINS
 
     n_floats = 0_C_INT64_T
     n_floats = n_floats + 2_C_INT64_T*spectral_planes*int(3 + nPhi, C_INT64_T)
-#ifdef bodyforce
-    n_floats = n_floats + 2_C_INT64_T*spectral_planes*3_C_INT64_T
-#endif
     n_floats = n_floats + 4_C_INT64_T*bc_planes
     if (solveNS) then
       n_floats = n_floats + 4_C_INT64_T*linear_planes
@@ -259,9 +252,6 @@ CONTAINS
     !$omp target exit data map(delete: d240, d24m1, d04n, d24n, d24np1)
     !$omp target exit data map(delete: V)
     !$omp target exit data map(delete: izd, ialfa, ibeta, k2, ucor, tcor)
-#ifdef bodyforce
-    !$omp target exit data map(delete: F)
-#endif
     DEALLOCATE (V, der, y, dy)
     !$omp target exit data map(delete: bc0, bcn, zero_bc)
     DEALLOCATE (bc0, bcn, zero_bc)

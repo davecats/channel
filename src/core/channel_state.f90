@@ -28,9 +28,6 @@ module channel_state
   complex(C_DOUBLE_COMPLEX), allocatable, target :: V(:, :, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable :: oldrhs(:, :, :, :)
   complex(C_DOUBLE_COMPLEX), pointer :: memrhs(:, :, :, :)
-#ifdef bodyforce
-  complex(C_DOUBLE_COMPLEX), allocatable :: F(:, :, :, :)
-#endif
 
   !-------------------------------------------------------------------------
   ! Boundary planes.  bc0/bcn(iz,ix,i) with i = 1:u, 2:v, 3:w, 4:vy, 5:eta,

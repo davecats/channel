@@ -9,9 +9,6 @@
 ! half or full channel
 !#define halfchannel
 
-! Add a bodyforce 
-!#define bodyforce
-
 ! Measure per timestep execution time
 #define chron
 

@@ -763,30 +763,9 @@ contains
     IMPLICIT NONE
     real(C_DOUBLE), intent(in) :: ODE(1:3)
     integer(C_INT) :: iy, iz, ix, k, iPhi, y_first, y_last
-#ifdef bodyforce
-    integer(C_INT) :: i
-#endif
     complex(C_DOUBLE_COMPLEX) :: tmp, unkn
     y_first = ny0
     y_last = nyN
-#ifdef bodyforce
-    iy = 1; F(-1:0, :, :, :) = 0
-    DO iz = -nz, nz
-      DO ix = nx0, nxN
-        DO i = 1, 3
-          F(-1, iz, ix, i) = -${apply_d('F', 'i', 3)}$/der(iy, 3, -2)
-        END DO
-      END DO
-    END DO
-    iy = ny - 1; F(ny:ny + 1, :, :, :) = 0
-    DO iz = -nz, nz
-      DO ix = nx0, nxN
-        DO i = 1, 3
-          F(ny + 1, iz, ix, i) = -${apply_d('F', 'i', 3)}$/der(iy, 3, 2)
-        END DO
-      END DO
-    END DO
-#endif
 
     ! Contributions known a priori.
     !
@@ -826,10 +805,6 @@ contains
           if (ix == 0 .AND. iz == 0) then
             $:rk_accum('memrhs(iy, iz, ix, 1)', 'oldrhs(iy, iz, ix, 1)', 'dcmplx(meanpx, meanpz)')
           end if
-#ifdef bodyforce
-          $:accum_d2v('memrhs', '-k2(iz, ix)*' + apply_d('F', '2', 0) + ' - ialfa(ix)*' + apply_d('F', '1', 1) + ' - ibeta(iz)*' + apply_d('F', '3', 1))
-          $:accum_eta('memrhs', 'ibeta(iz)*' + apply_d('F', '1', 0) + ' - ialfa(ix)*' + apply_d('F', '3', 0), apply_d_real_pair('F', '1', '3', 0))
-#endif
         END DO
       END DO
     END DO
