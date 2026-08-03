@@ -1811,7 +1811,7 @@ call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pas
       call MPI_Irecv(ycomm_recvbuf(lower_offset + 1), count, MPI_DOUBLE_COMPLEX, &
                      ipy - 1_C_INT, TAG_HALO_HIGH, MPI_COMM_Y, req(nreq), ierr)
       !$omp end target data
-      call ys_pack_lower_solution_halo(nlines, lower_offset)
+      call ys_pack_solution_rows(nlines, first_row=1_C_INT, send_offset=lower_offset)
       nreq = nreq + 1
       !$omp target data use_device_addr(ycomm_sendbuf)
       call MPI_Isend(ycomm_sendbuf(lower_offset + 1), count, MPI_DOUBLE_COMPLEX, &
@@ -1825,7 +1825,7 @@ call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pas
       call MPI_Irecv(ycomm_recvbuf(upper_offset + 1), count, MPI_DOUBLE_COMPLEX, &
                      ipy + 1_C_INT, TAG_HALO_LOW, MPI_COMM_Y, req(nreq), ierr)
       !$omp end target data
-      call ys_pack_upper_solution_halo(active_n, nlines, upper_offset)
+      call ys_pack_solution_rows(nlines, first_row=active_n - 1_C_INT, send_offset=upper_offset)
       nreq = nreq + 1
       !$omp target data use_device_addr(ycomm_sendbuf)
       call MPI_Isend(ycomm_sendbuf(upper_offset + 1), count, MPI_DOUBLE_COMPLEX, &
@@ -1848,8 +1848,8 @@ call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pas
     lower_offset = 0_C_INT
     upper_offset = count
 
-    if (ipy > 0_C_INT) call ys_pack_lower_solution_halo(nlines, lower_offset)
-    if (ipy < npy_grid - 1_C_INT) call ys_pack_upper_solution_halo(active_n, nlines, upper_offset)
+    if (ipy > 0_C_INT) call ys_pack_solution_rows(nlines, first_row=1_C_INT, send_offset=lower_offset)
+    if (ipy < npy_grid - 1_C_INT) call ys_pack_solution_rows(nlines, first_row=active_n - 1_C_INT, send_offset=upper_offset)
 
     if (ipy > 0_C_INT) then
       call roctxPush("ys_pipeline_nccl halo_lower")
@@ -1872,40 +1872,32 @@ call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pas
     end if
   end subroutine ys_exchange_pipelined_solution_halos_nccl
 
-  subroutine ys_pack_lower_solution_halo(nlines, send_offset)
+  ! Copy the pair of solution rows starting at first_row into the halo send
+  ! buffer.  The lower halo sends rows 1 and 2, the upper rows active_n-1 and
+  ! active_n; the row the pair starts at is the only difference between them.
+  subroutine ys_pack_solution_rows(nlines, first_row, send_offset)
     implicit none
-    integer(C_INT), intent(in) :: nlines, send_offset
-    integer(C_INT) :: iline
-    integer(C_INT64_T) :: q
-
-    !$omp target teams distribute parallel do default(none) &
-    !$omp shared(ys_gpsv_x, ycomm_sendbuf, nlines, send_offset) private(iline, q)
-    do iline = 1_C_INT, nlines
-      q = int(send_offset + 2_C_INT*(iline - 1_C_INT), C_INT64_T)
-      ycomm_sendbuf(q + 1_C_INT64_T) = ys_gpsv_x(iline)
-      ycomm_sendbuf(q + 2_C_INT64_T) = ys_gpsv_x(iline + nlines)
-    end do
-    !$omp end target teams distribute parallel do
-  end subroutine ys_pack_lower_solution_halo
-
-  subroutine ys_pack_upper_solution_halo(active_n, nlines, send_offset)
-    implicit none
-    integer(C_INT), intent(in) :: active_n, nlines, send_offset
+    integer(C_INT), intent(in) :: nlines, first_row, send_offset
     integer(C_INT) :: iline
     integer(C_INT64_T) :: p0, p1, q
 
     !$omp target teams distribute parallel do default(none) &
-    !$omp shared(ys_gpsv_x, ycomm_sendbuf, active_n, nlines, send_offset) private(iline, p0, p1, q)
+    !$omp shared(ys_gpsv_x, ycomm_sendbuf, nlines, first_row, send_offset) private(iline, p0, p1, q)
     do iline = 1_C_INT, nlines
-      p0 = int(iline, C_INT64_T) + int(active_n - 2_C_INT, C_INT64_T)*int(nlines, C_INT64_T)
+      p0 = int(iline, C_INT64_T) + int(first_row - 1_C_INT, C_INT64_T)*int(nlines, C_INT64_T)
       p1 = p0 + int(nlines, C_INT64_T)
       q = int(send_offset + 2_C_INT*(iline - 1_C_INT), C_INT64_T)
       ycomm_sendbuf(q + 1_C_INT64_T) = ys_gpsv_x(p0)
       ycomm_sendbuf(q + 2_C_INT64_T) = ys_gpsv_x(p1)
     end do
     !$omp end target teams distribute parallel do
-  end subroutine ys_pack_upper_solution_halo
+  end subroutine ys_pack_solution_rows
 
+  ! The unpack pair stays written twice on purpose: the two halves differ by
+  ! their destination array, not by an index, and ys_left/right_interface_values
+  ! are named separately everywhere else they are read.  Parameterising them
+  ! would mean either an array dummy inside a target region or a branch in the
+  ! kernel, and neither reads better than these two.
   subroutine ys_unpack_lower_solution_halo(nlines, recv_offset)
     implicit none
     integer(C_INT), intent(in) :: nlines, recv_offset
