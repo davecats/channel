@@ -168,6 +168,15 @@ module y_line_solvers
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_CONST = 1_C_INT
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_EVEN_Z = 2_C_INT
 
+  ! How many complex values each pipelined-LU line contributes to a message:
+  ! six for the factor state of a batch, two for a solve state (forward or
+  ! backward).  They also set the per-batch strides in the ycomm buffers, so
+  ! the MPI and NCCL transports must agree on them -- see
+  ! ys_ensure_pipeline_buffers and ys_pipeline_batch_slice, which are the only
+  ! places either number appears.
+  integer(C_INT), parameter :: YS_PIPELINE_FACTOR_ELEMS = 6_C_INT
+  integer(C_INT), parameter :: YS_PIPELINE_SOLVE_ELEMS = 2_C_INT
+
   public :: ys_prepare_assembled_workspace, ys_release_workspace, ys_get_workspace_bytes
   public :: ys_get_gpusparse_buffer_bytes
   public :: ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs
@@ -1365,6 +1374,41 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     first_line = (batch - 1_C_INT)*base_count + min(batch - 1_C_INT, remainder) + 1_C_INT
   end subroutine ys_pipeline_batch_range
 
+  ! Both transports lay the pipeline buffers out the same way: the factor
+  ! state of every batch first, then the forward solve states, then the
+  ! backward ones.  Sizing them is the same computation as locating a batch
+  ! inside them, so the two live together.
+  subroutine ys_ensure_pipeline_buffers(nbatches, batch_max_lines)
+    implicit none
+    integer(C_INT), intent(in) :: nbatches, batch_max_lines
+    integer(C_INT) :: factor_total, solve_total
+
+    factor_total = YS_PIPELINE_FACTOR_ELEMS*batch_max_lines*nbatches
+    solve_total = YS_PIPELINE_SOLVE_ELEMS*batch_max_lines*nbatches
+    ! The send buffer holds one factor and one solve block; the receive buffer
+    ! keeps the forward and backward solve states apart.
+    call ensure_ycomm_buffers(factor_total + solve_total, factor_total + 2_C_INT*solve_total)
+  end subroutine ys_ensure_pipeline_buffers
+
+  ! The lines of one batch and where its three messages sit in the buffers.
+  subroutine ys_pipeline_batch_slice(batch, nbatches, nlines, batch_max_lines, first_line, line_count, &
+                                     factor_count, solve_count, factor_offset, forward_offset, backward_offset)
+    implicit none
+    integer(C_INT), intent(in) :: batch, nbatches, nlines, batch_max_lines
+    integer(C_INT), intent(out) :: first_line, line_count, factor_count, solve_count
+    integer(C_INT), intent(out) :: factor_offset, forward_offset, backward_offset
+    integer(C_INT) :: factor_total, solve_total
+
+    call ys_pipeline_batch_range(batch, nbatches, nlines, first_line, line_count)
+    factor_count = YS_PIPELINE_FACTOR_ELEMS*line_count
+    solve_count = YS_PIPELINE_SOLVE_ELEMS*line_count
+    factor_total = YS_PIPELINE_FACTOR_ELEMS*batch_max_lines*nbatches
+    solve_total = YS_PIPELINE_SOLVE_ELEMS*batch_max_lines*nbatches
+    factor_offset = YS_PIPELINE_FACTOR_ELEMS*batch_max_lines*(batch - 1_C_INT)
+    forward_offset = factor_total + YS_PIPELINE_SOLVE_ELEMS*batch_max_lines*(batch - 1_C_INT)
+    backward_offset = forward_offset + solve_total
+  end subroutine ys_pipeline_batch_slice
+
   subroutine ys_solve_pipelined_lu_distributed(active_n, nlines, nbatches, batch_max_lines)
     implicit none
     integer(C_INT), intent(in) :: active_n, nlines, nbatches, batch_max_lines
@@ -1375,7 +1419,6 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     integer(C_INT), parameter :: TAG_FACTOR = 8410_C_INT
     integer(C_INT), parameter :: TAG_FORWARD = 8510_C_INT
     integer(C_INT), parameter :: TAG_BACKWARD = 8610_C_INT
-    integer(C_INT) :: factor_stride, solve_stride, factor_total, solve_total, send_elems, recv_elems
     integer(C_INT) :: batch, first_line, line_count, factor_count, solve_count
     integer(C_INT) :: factor_offset, forward_offset, backward_offset
     integer(C_INT) :: next_backward
@@ -1400,13 +1443,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       time_start = MPI_Wtime()
     end if
 
-    factor_stride = 6_C_INT*batch_max_lines
-    solve_stride = 2_C_INT*batch_max_lines
-    factor_total = factor_stride*nbatches
-    solve_total = solve_stride*nbatches
-    send_elems = factor_total + solve_total
-    recv_elems = factor_total + 2_C_INT*solve_total
-    call ensure_ycomm_buffers(send_elems, recv_elems)
+    call ys_ensure_pipeline_buffers(nbatches, batch_max_lines)
     allocate (factor_send_req(nbatches), forward_send_req(nbatches), backward_recv_req(nbatches), backward_send_req(nbatches))
 
     factor_send_req = MPI_REQUEST_NULL
@@ -1417,9 +1454,8 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     if (ipy < npy_grid - 1_C_INT) then
       call roctxPush("ys_pipeline post_backward_recvs")
       do batch = 1_C_INT, nbatches
-        call ys_pipeline_batch_range(batch, nbatches, nlines, first_line, line_count)
-        solve_count = 2_C_INT*line_count
-        backward_offset = factor_total + solve_total + (batch - 1_C_INT)*solve_stride
+        call ys_pipeline_batch_slice(batch, nbatches, nlines, batch_max_lines, first_line, line_count, &
+                                     factor_count, solve_count, factor_offset, forward_offset, backward_offset)
         !$omp target data use_device_addr(ycomm_recvbuf)
         call tic()
         call MPI_Irecv(ycomm_recvbuf(backward_offset + 1), solve_count, &
@@ -1434,11 +1470,8 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     call roctxPush("ys_pipeline forward_sweep")
     do batch = 1_C_INT, nbatches
       call roctxPush("ys_pipeline forward_batch")
-      call ys_pipeline_batch_range(batch, nbatches, nlines, first_line, line_count)
-      factor_count = 6_C_INT*line_count
-      solve_count = 2_C_INT*line_count
-      factor_offset = (batch - 1_C_INT)*factor_stride
-      forward_offset = factor_total + (batch - 1_C_INT)*solve_stride
+      call ys_pipeline_batch_slice(batch, nbatches, nlines, batch_max_lines, first_line, line_count, &
+                                   factor_count, solve_count, factor_offset, forward_offset, backward_offset)
       if (ipy > 0_C_INT) then
         !$omp target data use_device_addr(ycomm_recvbuf)
         call tic()
@@ -1595,10 +1628,10 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       logical :: ready
 
       do while (next_backward <= completed_batch)
-        call ys_pipeline_batch_range(next_backward, nbatches, nlines, first_line, line_count)
-        solve_count = 2_C_INT*line_count
-        forward_offset = factor_total + (next_backward - 1_C_INT)*solve_stride
-        backward_offset = factor_total + solve_total + (next_backward - 1_C_INT)*solve_stride
+        ! Overwrites the forward sweep's slice variables; it runs at the end of
+        ! a forward batch, which recomputes them at the top of the next one.
+        call ys_pipeline_batch_slice(next_backward, nbatches, nlines, batch_max_lines, first_line, line_count, &
+                                     factor_count, solve_count, factor_offset, forward_offset, backward_offset)
 
         if (ipy < npy_grid - 1_C_INT) then
           if (blocking) then
@@ -1658,27 +1691,17 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
   subroutine ys_solve_pipelined_lu_nccl_distributed(active_n, nlines, nbatches, batch_max_lines)
     implicit none
     integer(C_INT), intent(in) :: active_n, nlines, nbatches, batch_max_lines
-    integer(C_INT) :: factor_stride, solve_stride, factor_total, solve_total, send_elems, recv_elems
     integer(C_INT) :: batch, first_line, line_count, factor_count, solve_count
     integer(C_INT) :: factor_offset, forward_offset, backward_offset
     type(c_ptr) :: nccl_ctx
 
-    factor_stride = 6_C_INT*batch_max_lines
-    solve_stride = 2_C_INT*batch_max_lines
-    factor_total = factor_stride*nbatches
-    solve_total = solve_stride*nbatches
-    send_elems = factor_total + solve_total
-    recv_elems = factor_total + 2_C_INT*solve_total
-    call ensure_ycomm_buffers(send_elems, recv_elems)
+    call ys_ensure_pipeline_buffers(nbatches, batch_max_lines)
     call ys_pipeline_nccl_context(nccl_ctx)
 
     call roctxPush("ys_pipeline_nccl forward_sweep")
     do batch = 1_C_INT, nbatches
-      call ys_pipeline_batch_range(batch, nbatches, nlines, first_line, line_count)
-      factor_count = 6_C_INT*line_count
-      solve_count = 2_C_INT*line_count
-      factor_offset = (batch - 1_C_INT)*factor_stride
-      forward_offset = factor_total + (batch - 1_C_INT)*solve_stride
+      call ys_pipeline_batch_slice(batch, nbatches, nlines, batch_max_lines, first_line, line_count, &
+                                   factor_count, solve_count, factor_offset, forward_offset, backward_offset)
 
       if (ipy > 0_C_INT) then
         call roctxPush("ys_pipeline_nccl recv_factor")
@@ -1736,10 +1759,8 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
 
     call roctxPush("ys_pipeline_nccl backward_sweep")
     do batch = nbatches, 1_C_INT, -1_C_INT
-      call ys_pipeline_batch_range(batch, nbatches, nlines, first_line, line_count)
-      solve_count = 2_C_INT*line_count
-      forward_offset = factor_total + (batch - 1_C_INT)*solve_stride
-      backward_offset = factor_total + solve_total + (batch - 1_C_INT)*solve_stride
+      call ys_pipeline_batch_slice(batch, nbatches, nlines, batch_max_lines, first_line, line_count, &
+                                   factor_count, solve_count, factor_offset, forward_offset, backward_offset)
 
       if (ipy < npy_grid - 1_C_INT) then
         call roctxPush("ys_pipeline_nccl recv_backward")
