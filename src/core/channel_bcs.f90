@@ -3,13 +3,15 @@
 ! Wall boundary conditions.
 !
 ! Each component needs two rows at each wall: one enforcing the physical
-! condition and one for the ghost node just outside it.  They are built from
-! the compact stencils and then combined so the ghost unknown is eliminated,
-! which is what leaves a banded system the wall-normal solver can take.
+! condition and one for the ghost node just outside it.  This module only
+! builds them from the compact stencils; folding the ghost row into the wall
+! row -- what leaves a banded system the wall-normal solver can take -- is
+! done once at solve time, by the solver, for every component alike.  Doing it
+! here as well would apply it twice.
 !
 !   v    : Dirichlet on v and on dv/dy (no-slip, impermeable)
 !   eta  : Dirichlet on the wall-normal vorticity
-!   phi  : Dirichlet by default, Neumann under -Dphi Neumann
+!   phi  : Dirichlet by default, Neumann under -DphiNeumann
 !
 ! Half-channel and body-force variants are selected by the cpp switches, as
 ! before.
@@ -36,9 +38,6 @@ contains
 #ifdef phiNeumann
     phi0bc = d140; phi0m1bc = der(1, 3, :)        ! Neumann
 #endif
-    v0bc(-1:2) = v0bc(-1:2) - v0bc(-2)*v0m1bc(-1:2)/v0m1bc(-2)
-    eta0bc(-1:2) = eta0bc(-1:2) - eta0bc(-2)*eta0m1bc(-1:2)/eta0m1bc(-2)
-    phi0bc(-1:2) = phi0bc(-1:2) - phi0bc(-2)*phi0m1bc(-1:2)/phi0m1bc(-2)
     ! Top wall
 #ifdef halfchannel
     vnbc = d04n; vnp1bc = d24n; etanbc = d14n
@@ -50,9 +49,6 @@ contains
 #ifdef phiNeumann
     phinbc = d14n; phinp1bc = d04n
 #endif
-    vnbc(-2:1) = vnbc(-2:1) - vnbc(2)*vnp1bc(-2:1)/vnp1bc(2)
-    etanbc(-2:1) = etanbc(-2:1) - etanbc(2)*etanp1bc(-2:1)/etanp1bc(2)
-    phinbc(-2:1) = phinbc(-2:1) - phinbc(2)*phinp1bc(-2:1)/phinp1bc(2)
     !$omp target enter data map(to: v0bc, v0m1bc, vnbc, vnp1bc, eta0bc, eta0m1bc, etanbc, etanp1bc, phinbc, phi0bc, phi0m1bc, phinp1bc)
 
     !precompute bc0 and bcn
@@ -68,7 +64,6 @@ contains
         ELSE
           bc0(iz, ix, 4) = -ialfa(ix)*bc0(iz, ix, 1) - ibeta(iz)*bc0(iz, ix, 3); bc0(iz, ix, 5) = ibeta(iz)*bc0(iz, ix, 1) - ialfa(ix)*bc0(iz, ix, 3)
         END IF
-        bc0(iz, ix, 2) = bc0(iz, ix, 2) - v0bc(-2)*bc0(iz, ix, 4)/v0m1bc(-2)
 
         IF (ix == 0 .AND. iz == 0) THEN
           bcn(iz, ix, 2) = 0
@@ -77,7 +72,6 @@ contains
         ELSE
           bcn(iz, ix, 4) = -ialfa(ix)*bcn(iz, ix, 1) - ibeta(iz)*bcn(iz, ix, 3); bcn(iz, ix, 5) = ibeta(iz)*bcn(iz, ix, 1) - ialfa(ix)*bcn(iz, ix, 3)
         END IF
-        bcn(iz, ix, 2) = bcn(iz, ix, 2) - vnbc(2)*bcn(iz, ix, 4)/vnp1bc(2)
       END DO
     END DO
     !$omp target update from(bc0, bcn)
