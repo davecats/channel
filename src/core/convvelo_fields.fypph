@@ -1,0 +1,84 @@
+#! ===================================================================
+#! The convection-velocity field catalogue, defined once.
+#!
+#! Order is load-bearing: it is the order fields appear in the raw
+#! statistics file, so the reference data and the post-processing tools
+#! read it positionally.  Append to the end; never reorder or insert.
+#!
+#! The minimal lists are subsets of the full ones.  fypp resolves each
+#! minimal entry to its index in the full list at expansion time, which
+#! is what the module used to do with a runtime string scan.
+#! ===================================================================
+
+#:set CONVVELO_VELOCITY_FIELDS = [                                    &
+    'u_cross_u', 'u_cross_dyu', 'u_cross_v', 'u_cross_dyv',           &
+    'u_cross_w', 'u_cross_dyw', 'u_cross_dyyu',                       &
+    'v_cross_u', 'v_cross_dyu', 'v_cross_v', 'v_cross_dyv',           &
+    'v_cross_w', 'v_cross_dyw', 'v_cross_dyyv',                       &
+    'w_cross_u', 'w_cross_dyu', 'w_cross_v', 'w_cross_dyv',           &
+    'w_cross_w', 'w_cross_dyw', 'w_cross_dyyw',                       &
+    'u_cross_p', 'v_cross_dpdy', 'w_cross_p',                         &
+    'u_cross_uu', 'u_cross_uw', 'v_cross_uv', 'v_cross_vw',           &
+    'w_cross_uw', 'w_cross_ww',                                       &
+    'u_cross_dyuv', 'v_cross_dyvv', 'w_cross_dyvw']
+
+#:set CONVVELO_SCALAR_FIELDS = [                                      &
+    't_cross_t', 't_cross_u', 't_cross_v', 't_cross_w', 't_cross_tu', &
+    't_cross_tw', 't_cross_dyyt', 't_cross_dytv', 't_cross_dyt',      &
+    't_cross_dyv']
+
+#! Minimal mode stores only the reduced zero-crossflow subset.
+#:set CONVVELO_MINIMAL_VELOCITY_FIELDS = [                            &
+    'u_cross_u', 'u_cross_v', 'u_cross_w', 'v_cross_v', 'w_cross_w',  &
+    'u_cross_p', 'v_cross_dpdy', 'w_cross_p',                         &
+    'u_cross_uu', 'u_cross_uw', 'v_cross_uv', 'v_cross_vw',           &
+    'w_cross_uw', 'w_cross_ww',                                       &
+    'u_cross_dyyu', 'v_cross_dyyv', 'w_cross_dyyw',                   &
+    'u_cross_dyuv', 'v_cross_dyvv', 'w_cross_dyvw', 'u_cross_dyv']
+
+#:set CONVVELO_MINIMAL_SCALAR_FIELDS = [                              &
+    't_cross_t', 't_cross_u', 't_cross_v', 't_cross_w', 't_cross_tu', &
+    't_cross_tw', 't_cross_dyyt', 't_cross_dytv', 't_cross_dyv']
+
+#:set CONVVELO_PROFILE_FIELDS = ['mean_u', 'mean_v', 'mean_w', 'mean_t']
+
+#:set CONVVELO_NAME_WIDTH = 32
+
+#! Fail the build, not the run, if a minimal entry is not in the full list.
+#:def convvelo_check_subset(subset, full, label)
+#:for nm in subset
+#:assert nm in full
+#:endfor
+#:enddef
+
+#! character(len=W), parameter[, public] :: <array>(N) = [...]
+#:def convvelo_name_array(array_name, names, attrs='', width=CONVVELO_NAME_WIDTH)
+character(len=${width}$), parameter${attrs}$ :: ${array_name}$(${len(names)}$) = [character(len=${width}$) :: &
+#:for i, nm in enumerate(names)
+#:if i < len(names) - 1
+   "${nm}$", &
+#:else
+   "${nm}$"]
+#:endif
+#:endfor
+#:enddef
+
+#! One named integer parameter per field, numbered by position.
+#:def convvelo_field_ids(prefix, names, attrs='')
+#:for i, nm in enumerate(names)
+integer(C_INT), parameter${attrs}$ :: ${prefix}$${nm}$ = ${i + 1}$_C_INT
+#:endfor
+#:enddef
+
+#! The positions a subset occupies in the full list, as a parameter array.
+#:def convvelo_subset_ids(array_name, subset, full, attrs='')
+$:convvelo_check_subset(subset, full, array_name)
+integer(C_INT), parameter${attrs}$ :: ${array_name}$(${len(subset)}$) = [ &
+#:for i, nm in enumerate(subset)
+#:if i < len(subset) - 1
+   ${full.index(nm) + 1}$_C_INT, &
+#:else
+   ${full.index(nm) + 1}$_C_INT]
+#:endif
+#:endfor
+#:enddef

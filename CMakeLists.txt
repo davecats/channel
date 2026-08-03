@@ -108,7 +108,12 @@ channel_fypp_generate(CHANNEL_GENERATED_SOURCES
     ${CHANNEL_SOURCE_DIR}/core/dnsdata.fypp
     ${CHANNEL_SOURCE_DIR}/core/pressure_output.fypp
     ${CHANNEL_SOURCE_DIR}/core/statistics.fypp
+    ${CHANNEL_SOURCE_DIR}/core/convvelo.fypp
     ${CHANNEL_SOURCE_DIR}/linsolve/compact_line_solvers.fypp
+)
+
+channel_fypp_generate(CHANNEL_GENERATED_TEST_SOURCES
+    ${CHANNEL_SOURCE_DIR}/test/test_convvelo_utils.fypp
 )
 
 add_library(channel_core
@@ -128,7 +133,6 @@ add_library(channel_core
     ${CHANNEL_SOURCE_DIR}/mpi/mpi_autotune.f90
     ${CHANNEL_SOURCE_DIR}/core/channel_bcs.f90
     ${CHANNEL_GENERATED_SOURCES}
-    ${CHANNEL_SOURCE_DIR}/core/convvelo.f90
     ${CHANNEL_SOURCE_DIR}/core/driver.f90
 )
 target_include_directories(channel_core PUBLIC "${CHANNEL_SOURCE_DIR}/core")
@@ -168,7 +172,7 @@ target_link_libraries(test_pressure_dpdy PRIVATE channel_core)
 
 # Shared by three test executables.  Compiling it once as its own target keeps
 # parallel builds from racing to write the same Fortran module file.
-add_library(test_convvelo_utils STATIC ${CHANNEL_SOURCE_DIR}/test/test_convvelo_utils.f90)
+add_library(test_convvelo_utils STATIC ${CHANNEL_GENERATED_TEST_SOURCES})
 target_link_libraries(test_convvelo_utils PUBLIC channel_core)
 
 add_executable(test_convvelo_stats ${CHANNEL_SOURCE_DIR}/test/test_convvelo_stats.f90)

@@ -1,4 +1,5 @@
 #include "header.h"
+#:include "convvelo_fields.fypph"
 
 module convvelo
 
@@ -31,36 +32,27 @@ module convvelo
 
   private
 
-  integer(C_INT), parameter :: n_convvelo_velocity_fields_total = 33
-  integer(C_INT), parameter :: n_convvelo_scalar_fields_total = 10
-  integer(C_INT), parameter :: n_convvelo_velocity_fields_minimal_total = 21
-  integer(C_INT), parameter :: n_convvelo_scalar_fields_minimal_total = 9
-  integer(C_INT), parameter :: n_convvelo_profile_fields = 4
+  integer(C_INT), parameter :: n_convvelo_velocity_fields_total = ${len(CONVVELO_VELOCITY_FIELDS)}$
+  integer(C_INT), parameter :: n_convvelo_scalar_fields_total = ${len(CONVVELO_SCALAR_FIELDS)}$
+  integer(C_INT), parameter :: n_convvelo_velocity_fields_minimal_total = ${len(CONVVELO_MINIMAL_VELOCITY_FIELDS)}$
+  integer(C_INT), parameter :: n_convvelo_scalar_fields_minimal_total = ${len(CONVVELO_MINIMAL_SCALAR_FIELDS)}$
+  integer(C_INT), parameter :: n_convvelo_profile_fields = ${len(CONVVELO_PROFILE_FIELDS)}$
   integer(C_INT), parameter :: i_u = 1
   integer(C_INT), parameter :: i_v = 2
   integer(C_INT), parameter :: i_w = 3
   integer(C_INT64_T), parameter :: convvelo_file_header_bytes = 2_C_INT64_T*8_C_INT64_T + 8_C_INT64_T
   character(len=*), parameter :: convvelo_runtime_filename = "convvelo.bin"
-  character(len=32), parameter :: velocity_field_names(n_convvelo_velocity_fields_total) = [character(len=32) :: &
-                               "u_cross_u", "u_cross_dyu", "u_cross_v", "u_cross_dyv", "u_cross_w", "u_cross_dyw", "u_cross_dyyu", &
-                               "v_cross_u", "v_cross_dyu", "v_cross_v", "v_cross_dyv", "v_cross_w", "v_cross_dyw", "v_cross_dyyv", &
-                               "w_cross_u", "w_cross_dyu", "w_cross_v", "w_cross_dyv", "w_cross_w", "w_cross_dyw", "w_cross_dyyw", &
-                                 "u_cross_p", "v_cross_dpdy", "w_cross_p", "u_cross_uu", "u_cross_uw", "v_cross_uv", "v_cross_vw", &
-                                                         "w_cross_uw", "w_cross_ww", "u_cross_dyuv", "v_cross_dyvv", "w_cross_dyvw"]
-  character(len=32), parameter :: scalar_field_names(n_convvelo_scalar_fields_total) = [character(len=32) :: &
-                                                                 "t_cross_t", "t_cross_u", "t_cross_v", "t_cross_w", "t_cross_tu", &
-                                                         "t_cross_tw", "t_cross_dyyt", "t_cross_dytv", "t_cross_dyt", "t_cross_dyv"]
-  character(len=32), parameter :: minimal_velocity_field_names(n_convvelo_velocity_fields_minimal_total) = [character(len=32) :: &
-                                                                  "u_cross_u", "u_cross_v", "u_cross_w", "v_cross_v", "w_cross_w", &
-                                                                                         "u_cross_p", "v_cross_dpdy", "w_cross_p", &
-                                               "u_cross_uu", "u_cross_uw", "v_cross_uv", "v_cross_vw", "w_cross_uw", "w_cross_ww", &
-                                                                                   "u_cross_dyyu", "v_cross_dyyv", "w_cross_dyyw", &
-                                                                      "u_cross_dyuv", "v_cross_dyvv", "w_cross_dyvw", "u_cross_dyv"]
-  character(len=32), parameter :: minimal_scalar_field_names(n_convvelo_scalar_fields_minimal_total) = [character(len=32) :: &
-                                                                               "t_cross_t", "t_cross_u", "t_cross_v", "t_cross_w", &
-                                                          "t_cross_tu", "t_cross_tw", "t_cross_dyyt", "t_cross_dytv", "t_cross_dyv"]
-  character(len=16), parameter :: convvelo_profile_field_names(n_convvelo_profile_fields) = [character(len=16) :: &
-                                                                                             "mean_u", "mean_v", "mean_w", "mean_t"]
+
+  ! The catalogue lives in convvelo_fields.fypph.  The name arrays below feed
+  ! the .fields layout file; the iv_/is_ constants name the same fields for
+  ! acc_convvelo_stats, which used to look each one up by string at runtime.
+  $:convvelo_name_array('velocity_field_names', CONVVELO_VELOCITY_FIELDS)
+  $:convvelo_name_array('scalar_field_names', CONVVELO_SCALAR_FIELDS)
+  $:convvelo_name_array('convvelo_profile_field_names', CONVVELO_PROFILE_FIELDS, width=16)
+  $:convvelo_field_ids('iv_', CONVVELO_VELOCITY_FIELDS)
+  $:convvelo_field_ids('is_', CONVVELO_SCALAR_FIELDS)
+  $:convvelo_subset_ids('minimal_velocity_field_ids', CONVVELO_MINIMAL_VELOCITY_FIELDS, CONVVELO_VELOCITY_FIELDS)
+  $:convvelo_subset_ids('minimal_scalar_field_ids', CONVVELO_MINIMAL_SCALAR_FIELDS, CONVVELO_SCALAR_FIELDS)
 
   logical, save :: convvelo_initialized = .false.
   logical, save :: convvelo_dirty = .false.
@@ -236,12 +228,8 @@ contains
     else
       allocate (convvelo_velocity_field_ids(n_convvelo_velocity_fields_minimal_total))
       allocate (convvelo_scalar_field_ids(n_convvelo_scalar_fields_minimal_total))
-      do i = 1, size(convvelo_velocity_field_ids)
-        convvelo_velocity_field_ids(i) = field_name_index(minimal_velocity_field_names(i), velocity_field_names, "velocity")
-      end do
-      do i = 1, size(convvelo_scalar_field_ids)
-        convvelo_scalar_field_ids(i) = field_name_index(minimal_scalar_field_names(i), scalar_field_names, "scalar")
-      end do
+      convvelo_velocity_field_ids = minimal_velocity_field_ids
+      convvelo_scalar_field_ids = minimal_scalar_field_ids
     end if
 
     n_convvelo_velocity_fields = size(convvelo_velocity_field_ids)
@@ -337,56 +325,56 @@ contains
     integer(C_INT) :: iPhi, scalar_component
 
     if (.not. convvelo_initialized) call init_convvelo()
-    call accumulate_cross_components(field_name_index("u_cross_u", velocity_field_names, "velocity"), i_u, i_u)
-    call accumulate_cross_derivative(field_name_index("u_cross_dyu", velocity_field_names, "velocity"), i_u, i_u, 1)
-    call accumulate_cross_components(field_name_index("u_cross_v", velocity_field_names, "velocity"), i_u, i_v)
-    call accumulate_cross_derivative(field_name_index("u_cross_dyv", velocity_field_names, "velocity"), i_u, i_v, 1)
-    call accumulate_cross_components(field_name_index("u_cross_w", velocity_field_names, "velocity"), i_u, i_w)
-    call accumulate_cross_derivative(field_name_index("u_cross_dyw", velocity_field_names, "velocity"), i_u, i_w, 1)
-    call accumulate_cross_derivative(field_name_index("u_cross_dyyu", velocity_field_names, "velocity"), i_u, i_u, 2)
+    call accumulate_cross_components(iv_u_cross_u, i_u, i_u)
+    call accumulate_cross_derivative(iv_u_cross_dyu, i_u, i_u, 1)
+    call accumulate_cross_components(iv_u_cross_v, i_u, i_v)
+    call accumulate_cross_derivative(iv_u_cross_dyv, i_u, i_v, 1)
+    call accumulate_cross_components(iv_u_cross_w, i_u, i_w)
+    call accumulate_cross_derivative(iv_u_cross_dyw, i_u, i_w, 1)
+    call accumulate_cross_derivative(iv_u_cross_dyyu, i_u, i_u, 2)
 
-    call accumulate_cross_components(field_name_index("v_cross_u", velocity_field_names, "velocity"), i_v, i_u)
-    call accumulate_cross_derivative(field_name_index("v_cross_dyu", velocity_field_names, "velocity"), i_v, i_u, 1)
-    call accumulate_cross_components(field_name_index("v_cross_v", velocity_field_names, "velocity"), i_v, i_v)
-    call accumulate_cross_derivative(field_name_index("v_cross_dyv", velocity_field_names, "velocity"), i_v, i_v, 1)
-    call accumulate_cross_components(field_name_index("v_cross_w", velocity_field_names, "velocity"), i_v, i_w)
-    call accumulate_cross_derivative(field_name_index("v_cross_dyw", velocity_field_names, "velocity"), i_v, i_w, 1)
-    call accumulate_cross_derivative(field_name_index("v_cross_dyyv", velocity_field_names, "velocity"), i_v, i_v, 2)
+    call accumulate_cross_components(iv_v_cross_u, i_v, i_u)
+    call accumulate_cross_derivative(iv_v_cross_dyu, i_v, i_u, 1)
+    call accumulate_cross_components(iv_v_cross_v, i_v, i_v)
+    call accumulate_cross_derivative(iv_v_cross_dyv, i_v, i_v, 1)
+    call accumulate_cross_components(iv_v_cross_w, i_v, i_w)
+    call accumulate_cross_derivative(iv_v_cross_dyw, i_v, i_w, 1)
+    call accumulate_cross_derivative(iv_v_cross_dyyv, i_v, i_v, 2)
 
-    call accumulate_cross_components(field_name_index("w_cross_u", velocity_field_names, "velocity"), i_w, i_u)
-    call accumulate_cross_derivative(field_name_index("w_cross_dyu", velocity_field_names, "velocity"), i_w, i_u, 1)
-    call accumulate_cross_components(field_name_index("w_cross_v", velocity_field_names, "velocity"), i_w, i_v)
-    call accumulate_cross_derivative(field_name_index("w_cross_dyv", velocity_field_names, "velocity"), i_w, i_v, 1)
-    call accumulate_cross_components(field_name_index("w_cross_w", velocity_field_names, "velocity"), i_w, i_w)
-    call accumulate_cross_derivative(field_name_index("w_cross_dyw", velocity_field_names, "velocity"), i_w, i_w, 1)
-    call accumulate_cross_derivative(field_name_index("w_cross_dyyw", velocity_field_names, "velocity"), i_w, i_w, 2)
+    call accumulate_cross_components(iv_w_cross_u, i_w, i_u)
+    call accumulate_cross_derivative(iv_w_cross_dyu, i_w, i_u, 1)
+    call accumulate_cross_components(iv_w_cross_v, i_w, i_v)
+    call accumulate_cross_derivative(iv_w_cross_dyv, i_w, i_v, 1)
+    call accumulate_cross_components(iv_w_cross_w, i_w, i_w)
+    call accumulate_cross_derivative(iv_w_cross_dyw, i_w, i_w, 1)
+    call accumulate_cross_derivative(iv_w_cross_dyyw, i_w, i_w, 2)
 
     do iPhi = 1, nPhi
       scalar_component = i_w + iPhi
-      call accumulate_cross_components(raw_scalar_field_index(iPhi, "t_cross_t"), scalar_component, scalar_component)
-      call accumulate_cross_components(raw_scalar_field_index(iPhi, "t_cross_u"), scalar_component, i_u)
-      call accumulate_cross_components(raw_scalar_field_index(iPhi, "t_cross_v"), scalar_component, i_v)
-      call accumulate_cross_components(raw_scalar_field_index(iPhi, "t_cross_w"), scalar_component, i_w)
-      call accumulate_cross_product_field(raw_scalar_field_index(iPhi, "t_cross_tu"), scalar_component, scalar_component, i_u)
-      call accumulate_cross_product_field(raw_scalar_field_index(iPhi, "t_cross_tw"), scalar_component, scalar_component, i_w)
-      call accumulate_cross_derivative(raw_scalar_field_index(iPhi, "t_cross_dyyt"), scalar_component, scalar_component, 2)
-      call accumulate_cross_product_derivative_field(raw_scalar_field_index(iPhi, "t_cross_dytv"), scalar_component, scalar_component, i_v)
-      call accumulate_cross_derivative(raw_scalar_field_index(iPhi, "t_cross_dyt"), scalar_component, scalar_component, 1)
-      call accumulate_cross_derivative(raw_scalar_field_index(iPhi, "t_cross_dyv"), scalar_component, i_v, 1)
+      call accumulate_cross_components(scalar_field_slot(iPhi, is_t_cross_t), scalar_component, scalar_component)
+      call accumulate_cross_components(scalar_field_slot(iPhi, is_t_cross_u), scalar_component, i_u)
+      call accumulate_cross_components(scalar_field_slot(iPhi, is_t_cross_v), scalar_component, i_v)
+      call accumulate_cross_components(scalar_field_slot(iPhi, is_t_cross_w), scalar_component, i_w)
+      call accumulate_cross_product_field(scalar_field_slot(iPhi, is_t_cross_tu), scalar_component, scalar_component, i_u)
+      call accumulate_cross_product_field(scalar_field_slot(iPhi, is_t_cross_tw), scalar_component, scalar_component, i_w)
+      call accumulate_cross_derivative(scalar_field_slot(iPhi, is_t_cross_dyyt), scalar_component, scalar_component, 2)
+      call accumulate_cross_product_derivative_field(scalar_field_slot(iPhi, is_t_cross_dytv), scalar_component, scalar_component, i_v)
+      call accumulate_cross_derivative(scalar_field_slot(iPhi, is_t_cross_dyt), scalar_component, scalar_component, 1)
+      call accumulate_cross_derivative(scalar_field_slot(iPhi, is_t_cross_dyv), scalar_component, i_v, 1)
     end do
-    call accumulate_cross_product_field(field_name_index("u_cross_uu", velocity_field_names, "velocity"), i_u, i_u, i_u)
-    call accumulate_cross_product_field(field_name_index("u_cross_uw", velocity_field_names, "velocity"), i_u, i_u, i_w)
-    call accumulate_cross_product_field(field_name_index("v_cross_uv", velocity_field_names, "velocity"), i_v, i_u, i_v)
-    call accumulate_cross_product_field(field_name_index("v_cross_vw", velocity_field_names, "velocity"), i_v, i_v, i_w)
-    call accumulate_cross_product_field(field_name_index("w_cross_uw", velocity_field_names, "velocity"), i_w, i_u, i_w)
-    call accumulate_cross_product_field(field_name_index("w_cross_ww", velocity_field_names, "velocity"), i_w, i_w, i_w)
-   call accumulate_cross_product_derivative_field(field_name_index("u_cross_dyuv", velocity_field_names, "velocity"), i_u, i_u, i_v)
-   call accumulate_cross_product_derivative_field(field_name_index("v_cross_dyvv", velocity_field_names, "velocity"), i_v, i_v, i_v)
-   call accumulate_cross_product_derivative_field(field_name_index("w_cross_dyvw", velocity_field_names, "velocity"), i_w, i_v, i_w)
+    call accumulate_cross_product_field(iv_u_cross_uu, i_u, i_u, i_u)
+    call accumulate_cross_product_field(iv_u_cross_uw, i_u, i_u, i_w)
+    call accumulate_cross_product_field(iv_v_cross_uv, i_v, i_u, i_v)
+    call accumulate_cross_product_field(iv_v_cross_vw, i_v, i_v, i_w)
+    call accumulate_cross_product_field(iv_w_cross_uw, i_w, i_u, i_w)
+    call accumulate_cross_product_field(iv_w_cross_ww, i_w, i_w, i_w)
+    call accumulate_cross_product_derivative_field(iv_u_cross_dyuv, i_u, i_u, i_v)
+    call accumulate_cross_product_derivative_field(iv_v_cross_dyvv, i_v, i_v, i_v)
+    call accumulate_cross_product_derivative_field(iv_w_cross_dyvw, i_w, i_v, i_w)
 
-    call accumulate_cross_pressure(field_name_index("u_cross_p", velocity_field_names, "velocity"), i_u, .false.)
-    call accumulate_cross_pressure(field_name_index("v_cross_dpdy", velocity_field_names, "velocity"), i_v, .true.)
-    call accumulate_cross_pressure(field_name_index("w_cross_p", velocity_field_names, "velocity"), i_w, .false.)
+    call accumulate_cross_pressure(iv_u_cross_p, i_u, .false.)
+    call accumulate_cross_pressure(iv_v_cross_dpdy, i_v, .true.)
+    call accumulate_cross_pressure(iv_w_cross_p, i_w, .false.)
   end subroutine acc_convvelo_stats
 
   subroutine finish_convvelo_field(field_index)
@@ -1104,29 +1092,14 @@ contains
     close (98)
   end subroutine write_convvelo_field_layout
 
-  integer(C_INT) function raw_scalar_field_index(i_phi, name)
+  ! Raw field id of scalar `scalar_id` for the i_phi-th scalar: the scalar
+  ! blocks follow the velocity block, one full block per scalar.
+  pure integer(C_INT) function scalar_field_slot(i_phi, scalar_id)
     implicit none
-    integer(C_INT), intent(in) :: i_phi
-    character(len=*), intent(in) :: name
+    integer(C_INT), intent(in) :: i_phi, scalar_id
 
-    raw_scalar_field_index = n_convvelo_velocity_fields_total + (i_phi - 1)*n_convvelo_scalar_fields_total + &
-                             field_name_index(name, scalar_field_names, "scalar")
-  end function raw_scalar_field_index
-
-  integer(C_INT) function field_name_index(name, names, category)
-    implicit none
-    character(len=*), intent(in) :: name, category
-    character(len=*), intent(in) :: names(:)
-    integer(C_INT) :: i
-
-    do i = 1, size(names)
-      if (trim(names(i)) == trim(name)) then
-        field_name_index = i
-        return
-      end if
-    end do
-    error stop "field_name_index: unknown "//trim(category)//" field name"
-  end function field_name_index
+    scalar_field_slot = n_convvelo_velocity_fields_total + (i_phi - 1)*n_convvelo_scalar_fields_total + scalar_id
+  end function scalar_field_slot
 
   logical function convvelo_field_requested(field_index)
     implicit none

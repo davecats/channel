@@ -1,3 +1,5 @@
+#:include "convvelo_fields.fypph"
+
 module test_convvelo_utils
   use, intrinsic :: iso_c_binding
   use, intrinsic :: ieee_arithmetic
@@ -11,35 +13,16 @@ module test_convvelo_utils
   character(len=*), parameter, public :: convvelo_reference_snapshots(3) = [character(len=32) :: &
                            "tests/convvelo/Dati.cart.39.out", "tests/convvelo/Dati.cart.40.out", "tests/convvelo/Dati.cart.41.out" &
                                                                             ]
-  integer(C_INT), parameter, public :: n_convvelo_velocity_fields = 33
-  integer(C_INT), parameter, public :: n_convvelo_scalar_fields = 10
-  integer(C_INT), parameter, public :: n_convvelo_velocity_fields_minimal = 21
-  integer(C_INT), parameter, public :: n_convvelo_scalar_fields_minimal = 9
+  integer(C_INT), parameter, public :: n_convvelo_velocity_fields = ${len(CONVVELO_VELOCITY_FIELDS)}$
+  integer(C_INT), parameter, public :: n_convvelo_scalar_fields = ${len(CONVVELO_SCALAR_FIELDS)}$
+  integer(C_INT), parameter, public :: n_convvelo_velocity_fields_minimal = ${len(CONVVELO_MINIMAL_VELOCITY_FIELDS)}$
+  integer(C_INT), parameter, public :: n_convvelo_scalar_fields_minimal = ${len(CONVVELO_MINIMAL_SCALAR_FIELDS)}$
 
-  character(len=32), parameter, public :: velocity_field_names(n_convvelo_velocity_fields) = [character(len=32) :: &
-                               "u_cross_u", "u_cross_dyu", "u_cross_v", "u_cross_dyv", "u_cross_w", "u_cross_dyw", "u_cross_dyyu", &
-                               "v_cross_u", "v_cross_dyu", "v_cross_v", "v_cross_dyv", "v_cross_w", "v_cross_dyw", "v_cross_dyyv", &
-                               "w_cross_u", "w_cross_dyu", "w_cross_v", "w_cross_dyv", "w_cross_w", "w_cross_dyw", "w_cross_dyyw", &
-                                 "u_cross_p", "v_cross_dpdy", "w_cross_p", "u_cross_uu", "u_cross_uw", "v_cross_uv", "v_cross_vw", &
-                                                        "w_cross_uw", "w_cross_ww", "u_cross_dyuv", "v_cross_dyvv", "w_cross_dyvw" &
-                                                                                              ]
-  character(len=32), parameter, public :: scalar_field_names(n_convvelo_scalar_fields) = [character(len=32) :: &
-                                                                 "t_cross_t", "t_cross_u", "t_cross_v", "t_cross_w", "t_cross_tu", &
-                                                        "t_cross_tw", "t_cross_dyyt", "t_cross_dytv", "t_cross_dyt", "t_cross_dyv" &
-                                                                                          ]
-
-  ! Minimal mode stores only the reduced zero-crossflow subset.
-  character(len=32), parameter, public :: minimal_velocity_field_names(n_convvelo_velocity_fields_minimal) = [character(len=32) :: &
-                                                                  "u_cross_u", "u_cross_v", "u_cross_w", "v_cross_v", "w_cross_w", &
-                                                                                         "u_cross_p", "v_cross_dpdy", "w_cross_p", &
-                                               "u_cross_uu", "u_cross_uw", "v_cross_uv", "v_cross_vw", "w_cross_uw", "w_cross_ww", &
-                                                                                   "u_cross_dyyu", "v_cross_dyyv", "w_cross_dyyw", &
-                                                                     "u_cross_dyuv", "v_cross_dyvv", "w_cross_dyvw", "u_cross_dyv" &
-                                                                                                              ]
-  character(len=32), parameter, public :: minimal_scalar_field_names(n_convvelo_scalar_fields_minimal) = [character(len=32) :: &
-                                                                 "t_cross_t", "t_cross_u", "t_cross_v", "t_cross_w", "t_cross_tu", &
-                                                                       "t_cross_tw", "t_cross_dyyt", "t_cross_dytv", "t_cross_dyv" &
-                                                                                                          ]
+  ! Same catalogue the solver uses; these were a second hand-kept copy of it.
+  $:convvelo_name_array('velocity_field_names', CONVVELO_VELOCITY_FIELDS, ', public')
+  $:convvelo_name_array('scalar_field_names', CONVVELO_SCALAR_FIELDS, ', public')
+  $:convvelo_name_array('minimal_velocity_field_names', CONVVELO_MINIMAL_VELOCITY_FIELDS, ', public')
+  $:convvelo_name_array('minimal_scalar_field_names', CONVVELO_MINIMAL_SCALAR_FIELDS, ', public')
   integer(C_INT64_T), parameter, public :: convvelo_file_header_bytes = 2_C_INT64_T*8_C_INT64_T + 8_C_INT64_T
   integer(C_INT), parameter :: n_convvelo_profile_header_slots = 3
 
