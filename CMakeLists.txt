@@ -136,13 +136,11 @@ target_include_directories(channel_core PUBLIC "${CHANNEL_SOURCE_DIR}/core")
 # --------------------------------------------------------------------
 # MPI
 # --------------------------------------------------------------------
-option(NOMPI "Build without MPI support (no reading / writing of files)" OFF)
-
-if(NOT NOMPI)
-    find_package(MPI REQUIRED Fortran)
-    target_compile_definitions(channel_core PUBLIC HAVE_MPI)
-    target_link_libraries(channel_core PUBLIC MPI::MPI_Fortran)
-endif()
+find_package(MPI REQUIRED Fortran)
+# HAVE_MPI is now always on.  The next commit removes the conditionals it
+# guards; keeping the definition here lets that be a pure deletion.
+target_compile_definitions(channel_core PUBLIC HAVE_MPI)
+target_link_libraries(channel_core PUBLIC MPI::MPI_Fortran)
 
 # --------------------------------------------------------------------
 # Executable

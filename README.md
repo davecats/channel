@@ -83,15 +83,7 @@ ctest --test-dir build --output-on-failure
 If CMake finds plain `f95` before your MPI wrapper, set
 `-DCMAKE_Fortran_COMPILER=mpifort` explicitly.
 
-### CPU Without MPI
-
-```bash
-cmake -S . -B build-nompi -DNOMPI=ON
-cmake --build build-nompi -j
-```
-
-The MPI build is the normal production path. Use `NOMPI` only for small local
-experiments.
+MPI is required. Single-rank runs are just `-np 1`.
 
 ### NVIDIA GPU
 
