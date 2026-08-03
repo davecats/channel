@@ -5,18 +5,15 @@ module convvelo
 
   use, intrinsic :: iso_c_binding
   use config, only: ini_config, has_section, get_string, get_real
-  use dnsdata, only: V, nPhi, nz, ny, nxd, izd, factor, iproc, &
+  use dnsdata, only: V, nPhi, nz, ny, nxd, izd, factor, &
                      apply_complex_derivative_current_layout, apply_complex_second_derivative_current_layout, has_terminal, &
                      time, deltat, overlapping
   use pressure_output, only: compute_poisson, compute_dpdy
   use channel_grid, only: ny0, nyN, nx0, nxN, nxB, nzB, nx, has_average, nzd
   use mpi_transpose, only: ierr, sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, &
                            fft_transpose_is_local, repack_zTOx_local, repack_xTOz_local, roctxPush, roctxPop, &
-                           MPI_DOUBLE_COMPLEX, MPI_COMM_WORLD, MPI_Request, MPI_Status, MPI_Wait, MPI_File, &
-                           MPI_Datatype, MPI_OFFSET_KIND, MPI_ORDER_FORTRAN, MPI_DOUBLE_PRECISION, MPI_INTEGER8, &
-                           MPI_MODE_WRONLY, MPI_MODE_CREATE, MPI_INFO_NULL, MPI_Type_create_subarray, &
-                           MPI_Type_commit, MPI_Type_free, MPI_File_open, MPI_File_set_size, MPI_File_write_at, &
-                           MPI_File_set_view, MPI_File_write_all, MPI_File_close
+                           MPI_Request, MPI_Status, MPI_Wait
+  use convvelo_io, only: write_convvelo_raw_file, write_convvelo_layout_file, average_convvelo_field
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
   use ffts, only: IFT, RFT, HFT, FFT, VVdx, VVdz, get_fft_workspace_bytes, get_fft_workspace_bytes_for_dims, &
                   bind_fft_workspace, unbind_fft_workspace
@@ -40,7 +37,6 @@ module convvelo
   integer(C_INT), parameter :: i_u = 1
   integer(C_INT), parameter :: i_v = 2
   integer(C_INT), parameter :: i_w = 3
-  integer(C_INT64_T), parameter :: convvelo_file_header_bytes = 2_C_INT64_T*8_C_INT64_T + 8_C_INT64_T
   character(len=*), parameter :: convvelo_runtime_filename = "convvelo.bin"
 
   ! The catalogue lives in convvelo_fields.fypph.  The name arrays below feed
@@ -61,7 +57,6 @@ module convvelo
   integer(C_INT), save, public :: n_convvelo_velocity_fields = 0
   integer(C_INT), save, public :: n_convvelo_scalar_fields = 0
   integer(C_INT), save, public :: n_convvelo_fields = 0
-  integer(C_INT64_T), save :: n_convvelo_profile_slots = 0_C_INT64_T
   integer(C_INT64_T), save :: convvelo_last_write_index = -1_C_INT64_T
   real(C_DOUBLE), save :: convvelo_t_start = 0.0d0
   real(C_DOUBLE), save :: convvelo_dt_compute = -1.0d0
@@ -247,8 +242,6 @@ contains
           size(convvelo_velocity_field_ids) + (i - 1)*size(convvelo_scalar_field_ids) + raw_field_index
       end do
     end do
-
-    n_convvelo_profile_slots = int(3 + nPhi, C_INT64_T)
   end subroutine init_convvelo_field_layout
 
   subroutine reset_convvelo_stats()
@@ -743,7 +736,6 @@ contains
     n_convvelo_fields = 0
     n_convvelo_velocity_fields = 0
     n_convvelo_scalar_fields = 0
-    n_convvelo_profile_slots = 0_C_INT64_T
     convvelo_last_write_index = -1_C_INT64_T
     n_mean_samples = 0_C_INT64_T
     convvelo_average_start_time = 0.0d0
@@ -771,7 +763,9 @@ contains
     else
       convvelo_last_write_index = -1_C_INT64_T
     end if
-    call write_convvelo_field_layout(convvelo_runtime_filename)
+    call write_convvelo_layout_file(convvelo_runtime_filename, convvelo_profile_field_names, &
+                                    velocity_field_names(convvelo_velocity_field_ids), &
+                                    scalar_field_names(convvelo_scalar_field_ids))
   end subroutine init_convvelo_runtime
 
   subroutine advance_convvelo_runtime()
@@ -824,137 +818,21 @@ contains
     call reset_convvelo_stats()
   end subroutine write_convvelo_runtime_snapshot
 
+  ! Brings the statistics back from the device and hands them to convvelo_io,
+  ! which owns the file format.
   subroutine write_convvelo_raw_stats(filename)
     implicit none
 
     character(len=*), intent(in) :: filename
-    integer(C_INT) :: field_index, iPhi
-    real(C_DOUBLE) :: header_times(2)
-    integer(C_INT64_T) :: header_sample_count
-    complex(C_DOUBLE_COMPLEX), allocatable :: field_out(:, :, :)
-
-    type(MPI_File) :: fh
-    type(MPI_Status) :: status
-    type(MPI_Datatype) :: file_type, mem_type, profile_file_type, profile_mem_type
-    integer :: ierror
-    integer, parameter :: ndims = 3
-    integer, parameter :: ndims_profile = 1
-    integer :: sizes(ndims), subsizes(ndims), starts(ndims)
-    integer :: profile_sizes(ndims_profile), profile_subsizes(ndims_profile), profile_starts(ndims_profile)
-    integer(C_INT) :: write_y0, write_yN, write_y_count, local_y_count
-    integer(MPI_OFFSET_KIND) :: disp, field_bytes, profile_bytes, total_bytes
 
     if (.not. convvelo_initialized) return
 
     call update_convvelo_stats_from_device()
     !$omp target update from(component_means)
-    header_times = [convvelo_average_start_time, convvelo_average_end_time]
-    header_sample_count = n_mean_samples
-    allocate (field_out(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
-
-    write_y0 = ny0
-    write_yN = nyN
-    if (ny0 == 1) write_y0 = -1_C_INT
-    if (nyN == ny - 1) write_yN = ny + 1_C_INT
-    write_y_count = write_yN - write_y0 + 1_C_INT
-    local_y_count = nyN - ny0 + 5_C_INT
-
-    sizes = [ny + 3, 2*nz + 1, nx + 1]
-    subsizes = [write_y_count, 2*nz + 1, nxN - nx0 + 1]
-    starts = [write_y0 + 1, 0, nx0]
-    call MPI_Type_create_subarray(ndims, sizes, subsizes, starts, MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, file_type, ierror)
-    call MPI_Type_commit(file_type, ierror)
-
-    sizes = [local_y_count, 2*nz + 1, nxN - nx0 + 1]
-    subsizes = [write_y_count, 2*nz + 1, nxN - nx0 + 1]
-    starts = [write_y0 - (ny0 - 2), 0, 0]
-    call MPI_Type_create_subarray(ndims, sizes, subsizes, starts, MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, mem_type, ierror)
-    call MPI_Type_commit(mem_type, ierror)
-
-    profile_sizes = [ny + 3]
-    profile_subsizes = [write_y_count]
-    profile_starts = [write_y0 + 1]
-    call MPI_Type_create_subarray(ndims_profile, profile_sizes, profile_subsizes, profile_starts, MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, profile_file_type, ierror)
-    call MPI_Type_commit(profile_file_type, ierror)
-
-    profile_sizes = [local_y_count]
-    profile_subsizes = [write_y_count]
-    profile_starts = [write_y0 - (ny0 - 2)]
-    call MPI_Type_create_subarray(ndims_profile, profile_sizes, profile_subsizes, profile_starts, MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, profile_mem_type, ierror)
-    call MPI_Type_commit(profile_mem_type, ierror)
-
-    profile_bytes = int(16, MPI_OFFSET_KIND)*int(ny + 3, MPI_OFFSET_KIND)
-    field_bytes = int(16, MPI_OFFSET_KIND)*int(ny + 3, MPI_OFFSET_KIND)* &
-                  int(2*nz + 1, MPI_OFFSET_KIND)*int(nx + 1, MPI_OFFSET_KIND)
-    total_bytes = convvelo_file_header_bytes + int(n_convvelo_profile_slots, MPI_OFFSET_KIND)*profile_bytes + &
-                  int(n_convvelo_fields, MPI_OFFSET_KIND)*field_bytes
-
-    call MPI_File_open(MPI_COMM_WORLD, trim(filename), IOR(MPI_MODE_WRONLY, MPI_MODE_CREATE), MPI_INFO_NULL, fh)
-    call MPI_File_set_size(fh, total_bytes)
-
-    if (iproc == 0) then
-      call roctxPush("MPI_File_write_at convvelo_header")
-      call MPI_File_write_at(fh, 0_MPI_OFFSET_KIND, header_times, 2, MPI_DOUBLE_PRECISION, status)
-      call MPI_File_write_at(fh, 16_MPI_OFFSET_KIND, header_sample_count, 1, MPI_INTEGER8, status)
-      call roctxPop("MPI_File_write_at convvelo_header")
-    end if
-
-    call roctxPush("MPI_File_write_all convvelo_profiles")
-    disp = convvelo_file_header_bytes
-    call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, profile_file_type, 'native', MPI_INFO_NULL)
-    call write_convvelo_profile_collective(fh, component_means(:, 1), profile_mem_type, status)
-    disp = convvelo_file_header_bytes + profile_bytes
-    call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, profile_file_type, 'native', MPI_INFO_NULL)
-    call write_convvelo_profile_collective(fh, component_means(:, 2), profile_mem_type, status)
-    disp = convvelo_file_header_bytes + 2_MPI_OFFSET_KIND*profile_bytes
-    call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, profile_file_type, 'native', MPI_INFO_NULL)
-    call write_convvelo_profile_collective(fh, component_means(:, 3), profile_mem_type, status)
-    do iPhi = 1, nPhi
-      disp = convvelo_file_header_bytes + int(2 + iPhi, MPI_OFFSET_KIND)*profile_bytes
-      call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, profile_file_type, 'native', MPI_INFO_NULL)
-      call write_convvelo_profile_collective(fh, component_means(:, 3 + iPhi), profile_mem_type, status)
-    end do
-    call roctxPop("MPI_File_write_all convvelo_profiles")
-
-    call roctxPush("MPI_File_write_all convvelo_fields")
-    do field_index = 1, n_convvelo_fields
-      disp = convvelo_file_header_bytes + int(n_convvelo_profile_slots, MPI_OFFSET_KIND)*profile_bytes + &
-             int(field_index - 1, MPI_OFFSET_KIND)*field_bytes
-      call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, file_type, 'native', MPI_INFO_NULL)
-      call normalize_convvelo_field_for_output(field_index, field_out)
-      call MPI_File_write_all(fh, field_out, 1, mem_type, status)
-    end do
-    call roctxPop("MPI_File_write_all convvelo_fields")
-
-    call MPI_File_close(fh)
-    call MPI_Type_free(file_type, ierror)
-    call MPI_Type_free(mem_type, ierror)
-    call MPI_Type_free(profile_file_type, ierror)
-    call MPI_Type_free(profile_mem_type, ierror)
-    deallocate (field_out)
+    call write_convvelo_raw_file(filename, n_convvelo_fields, convvelo_stats, n_field_samples, &
+                                 component_means, n_mean_samples, &
+                                 convvelo_average_start_time, convvelo_average_end_time)
   end subroutine write_convvelo_raw_stats
-
-  subroutine normalize_convvelo_field_for_output(field_index, field_out)
-    implicit none
-    integer(C_INT), intent(in) :: field_index
-    complex(C_DOUBLE_COMPLEX), intent(out) :: field_out(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    real(C_DOUBLE) :: inv_samples
-    integer(C_INT) :: ix, iy, iz
-
-    if (n_field_samples(field_index) <= 0_C_INT64_T) then
-      field_out = (0.0d0, 0.0d0)
-      return
-    end if
-
-    inv_samples = 1.0d0/dble(n_field_samples(field_index))
-    do ix = nx0, nxN
-      do iz = -nz, nz
-        do iy = ny0 - 2, nyN + 2
-          field_out(iy, iz, ix) = inv_samples*convvelo_stats(iy, iz, ix, field_index)
-        end do
-      end do
-    end do
-  end subroutine normalize_convvelo_field_for_output
 
   subroutine update_convvelo_stats_from_device()
     implicit none
@@ -1023,74 +901,10 @@ contains
     implicit none
     integer(C_INT), intent(in) :: field_index
     complex(C_DOUBLE_COMPLEX), intent(out) :: field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    real(C_DOUBLE) :: inv_samples
-    integer(C_INT) :: ix, iy, iz
 
     call update_convvelo_stats_from_device()
-
-    if (n_field_samples(field_index) <= 0_C_INT64_T) then
-      field = (0.0d0, 0.0d0)
-      return
-    end if
-
-    inv_samples = 1.0d0/dble(n_field_samples(field_index))
-    do ix = nx0, nxN
-      do iz = -nz, nz
-        do iy = ny0 - 2, nyN + 2
-          field(iy, iz, ix) = inv_samples*convvelo_stats(iy, iz, ix, field_index)
-        end do
-      end do
-    end do
+    call average_convvelo_field(n_convvelo_fields, convvelo_stats, n_field_samples, field_index, field)
   end subroutine copy_convvelo_field_average
-
-  subroutine write_convvelo_profile_collective(fh, profile, profile_mem_type, status)
-    implicit none
-    type(MPI_File), intent(in) :: fh
-    complex(C_DOUBLE_COMPLEX), intent(in) :: profile(ny0 - 2:nyN + 2)
-    type(MPI_Datatype), intent(in) :: profile_mem_type
-    type(MPI_Status), intent(out) :: status
-    integer :: write_count
-
-    write_count = 0
-    if (has_average) write_count = 1
-    call MPI_File_write_all(fh, profile, write_count, profile_mem_type, status)
-  end subroutine write_convvelo_profile_collective
-
-  subroutine write_convvelo_field_layout(filename)
-    implicit none
-
-    character(len=*), intent(in) :: filename
-    character(len=512) :: layout_filename
-    integer :: io, i
-
-    if (iproc /= 0) return
-
-    layout_filename = trim(filename)//".fields"
-    open (unit=98, file=trim(layout_filename), status='replace', action='write', iostat=io)
-    if (io /= 0) then
-      write (*, *) 'ERROR: could not open convvelo field layout file: ', trim(layout_filename)
-      stop 1
-    end if
-
-    write (98, '(A)', advance='no') 'profile_fields:'
-    do i = 1, size(convvelo_profile_field_names)
-      write (98, '(1X,A)', advance='no') trim(convvelo_profile_field_names(i))
-    end do
-    write (98, *)
-
-    write (98, '(A)', advance='no') 'velocity_fields:'
-    do i = 1, size(convvelo_velocity_field_ids)
-      write (98, '(1X,A)', advance='no') trim(velocity_field_names(convvelo_velocity_field_ids(i)))
-    end do
-    write (98, *)
-
-    write (98, '(A)', advance='no') 'scalar_fields:'
-    do i = 1, size(convvelo_scalar_field_ids)
-      write (98, '(1X,A)', advance='no') trim(scalar_field_names(convvelo_scalar_field_ids(i)))
-    end do
-    write (98, *)
-    close (98)
-  end subroutine write_convvelo_field_layout
 
   ! Raw field id of scalar `scalar_id` for the i_phi-th scalar: the scalar
   ! blocks follow the velocity block, one full block per scalar.

@@ -4,6 +4,7 @@ module test_convvelo_utils
   use, intrinsic :: iso_c_binding
   use, intrinsic :: ieee_arithmetic
   use dnsdata, only: iproc, ierr, ny, nz, nx, nPhi, ny0, nyN, nx0, nxN, V, read_restart_file
+  use convvelo_io, only: convvelo_file_header_bytes
   use mpi_f08
   implicit none
 
@@ -23,7 +24,8 @@ module test_convvelo_utils
   $:convvelo_name_array('scalar_field_names', CONVVELO_SCALAR_FIELDS, ', public')
   $:convvelo_name_array('minimal_velocity_field_names', CONVVELO_MINIMAL_VELOCITY_FIELDS, ', public')
   $:convvelo_name_array('minimal_scalar_field_names', CONVVELO_MINIMAL_SCALAR_FIELDS, ', public')
-  integer(C_INT64_T), parameter, public :: convvelo_file_header_bytes = 2_C_INT64_T*8_C_INT64_T + 8_C_INT64_T
+  ! The header size comes from convvelo_io, which writes it.
+  public :: convvelo_file_header_bytes
   integer(C_INT), parameter :: n_convvelo_profile_header_slots = 3
 
   public :: compare_field_to_reference

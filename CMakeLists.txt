@@ -129,6 +129,7 @@ add_library(channel_core
     ${CHANNEL_SOURCE_DIR}/linsolve/y_schur_solver.f90
     ${CHANNEL_SOURCE_DIR}/mpi/mpi_transpose.f90
     ${CHANNEL_SOURCE_DIR}/core/restart_io.f90
+    ${CHANNEL_SOURCE_DIR}/core/convvelo_io.f90
     ${CHANNEL_SOURCE_DIR}/fft/ffts.f90
     ${CHANNEL_SOURCE_DIR}/mpi/mpi_autotune.f90
     ${CHANNEL_SOURCE_DIR}/core/channel_bcs.f90
