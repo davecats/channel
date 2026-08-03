@@ -1,5 +1,6 @@
 #include "header.h"
 #:include "channel_boundaries.fypph"
+#:include "channel_stencils.fypph"
 
 MODULE pressure_output
 
@@ -726,7 +727,7 @@ CONTAINS
       if (ix == 0 .and. iz == 0) then
         lower_ghost_row(:, iz, ix) = d140
         lower_wall_row(:, iz, ix) = d240
-        lower_ghost_value(iz, ix) = ni*sum(d240(-2:2)*v_owner(-1:3, iz, ix))
+        lower_ghost_value(iz, ix) = ni*${at_lower_wall('d240', 'v_owner', ', iz, ix')}$
         lower_wall_value(iz, ix) = owner_src(0, iz, ix)
       else
         lower_ghost_row(:, iz, ix) = der(1, 3, :)
@@ -734,8 +735,8 @@ CONTAINS
         lower_wall_row(-1, iz, ix) = 1.0d0
         lower_ghost_value(iz, ix) = (0.0d0, 0.0d0)
         lower_wall_value(iz, ix) = -ni*( &
-                                   ialfa(ix)*sum(d240(-2:2)*u_owner(-1:3, iz, ix)) + &
-                                   ibeta(iz)*sum(d240(-2:2)*w_owner(-1:3, iz, ix)))/k2(iz, ix)
+                                   ialfa(ix)*${at_lower_wall('d240', 'u_owner', ', iz, ix')}$ + &
+                                   ibeta(iz)*${at_lower_wall('d240', 'w_owner', ', iz, ix')}$)/k2(iz, ix)
       end if
     #:endcall lower_wall_rows
 
@@ -748,8 +749,8 @@ CONTAINS
         upper_wall_value(iz, ix) = (0.0d0, 0.0d0)
       else
         upper_wall_value(iz, ix) = -ni*( &
-                                   ialfa(ix)*sum(d24n(-2:2)*u_owner(ny - 3:ny + 1, iz, ix)) + &
-                                   ibeta(iz)*sum(d24n(-2:2)*w_owner(ny - 3:ny + 1, iz, ix)))/k2(iz, ix)
+                                   ialfa(ix)*${at_upper_wall('d24n', 'u_owner', ', iz, ix')}$ + &
+                                   ibeta(iz)*${at_upper_wall('d24n', 'w_owner', ', iz, ix')}$)/k2(iz, ix)
       end if
     #:endcall upper_wall_rows
   end subroutine assemble_pressure_boundaries
@@ -768,7 +769,7 @@ CONTAINS
       lower_wall_row(-1, iz, ix) = 1.0d0
       lower_ghost_row(:, iz, ix) = der(1, 3, :)
       lower_ghost_value(iz, ix) = (0.0d0, 0.0d0)
-      lower_wall_value(iz, ix) = ni*sum(d240(-2:2)*v_owner(-1:3, iz, ix))
+      lower_wall_value(iz, ix) = ni*${at_lower_wall('d240', 'v_owner', ', iz, ix')}$
     #:endcall lower_wall_rows
 
     #:call upper_wall_rows('v_owner, d24n, der, ni, ny')
@@ -776,7 +777,7 @@ CONTAINS
       upper_wall_row(1, iz, ix) = 1.0d0
       upper_ghost_row(:, iz, ix) = der(ny - 1, 3, :)
       upper_ghost_value(iz, ix) = (0.0d0, 0.0d0)
-      upper_wall_value(iz, ix) = ni*sum(d24n(-2:2)*v_owner(ny - 3:ny + 1, iz, ix))
+      upper_wall_value(iz, ix) = ni*${at_upper_wall('d24n', 'v_owner', ', iz, ix')}$
     #:endcall upper_wall_rows
   end subroutine assemble_dpdy_boundaries
 

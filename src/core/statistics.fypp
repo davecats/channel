@@ -1,4 +1,5 @@
 #include "header.h"
+#:include "channel_stencils.fypph"
 
 ! Runtime diagnostics and periodic field output.
 !
@@ -44,16 +45,16 @@ contains
 #endif
     IF (cflmax > 0) deltat = cflmax/runtime_global
     IF (has_average) THEN
-      dudy(1, 2) = -sum(d14n(-2:2)*dreal(mean_line_u(ny - 3:ny + 1)))
-      dudy(2, 2) = -sum(d14n(-2:2)*dreal(mean_line_w(ny - 3:ny + 1)))
+      dudy(1, 2) = -${at_upper_wall_real('d14n', 'mean_line_u')}$
+      dudy(2, 2) = -${at_upper_wall_real('d14n', 'mean_line_w')}$
       DO iPhi = 1, nPhi
         !$omp target update from(V(ny0 - 2:nyN + 2, 0, 0, 3 + iPhi))
         call gather_full_y_line(ny, V(:, 0, 0, 3 + iPhi), mean_line_scalar)
-        dudy(2 + iPhi, 2) = sum(d14n(-2:2)*dreal(mean_line_scalar(ny - 3:ny + 1)))
-        dudy(2 + iPhi, 1) = sum(d140(-2:2)*dreal(mean_line_scalar(-1:3)))
+        dudy(2 + iPhi, 2) = ${at_upper_wall_real('d14n', 'mean_line_scalar')}$
+        dudy(2 + iPhi, 1) = ${at_lower_wall_real('d140', 'mean_line_scalar')}$
       END DO
-      dudy(1, 1) = sum(d140(-2:2)*dreal(mean_line_u(-1:3)))
-      dudy(2, 1) = sum(d140(-2:2)*dreal(mean_line_w(-1:3)))
+      dudy(1, 1) = ${at_lower_wall_real('d140', 'mean_line_u')}$
+      dudy(2, 1) = ${at_lower_wall_real('d140', 'mean_line_w')}$
     END IF
     IF (has_terminal) THEN
       !$omp target update from(fr)

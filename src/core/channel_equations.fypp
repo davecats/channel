@@ -198,11 +198,11 @@ contains
       lower_ghost_row(:, iz, ix) = 0.0d0
       lower_wall_row(:, iz, ix) = 0.0d0
       if (derivative_order_value == 1_C_INT) then
-        lower_wall_value(iz, ix) = sum(d140(-2:2)*owner_src(-1:3, iz, ix))
-        lower_ghost_value(iz, ix) = sum(d14m1(-2:2)*owner_src(-1:3, iz, ix))
+        lower_wall_value(iz, ix) = ${at_lower_wall('d140', 'owner_src', ', iz, ix')}$
+        lower_ghost_value(iz, ix) = ${at_lower_wall('d14m1', 'owner_src', ', iz, ix')}$
       else
-        lower_wall_value(iz, ix) = sum(d240(-2:2)*owner_src(-1:3, iz, ix))
-        lower_ghost_value(iz, ix) = sum(d24m1(-2:2)*owner_src(-1:3, iz, ix))
+        lower_wall_value(iz, ix) = ${at_lower_wall('d240', 'owner_src', ', iz, ix')}$
+        lower_ghost_value(iz, ix) = ${at_lower_wall('d24m1', 'owner_src', ', iz, ix')}$
       end if
       lower_ghost_row(-2, iz, ix) = 1.0d0
       lower_wall_row(-1, iz, ix) = 1.0d0
@@ -212,11 +212,11 @@ contains
       upper_wall_row(:, iz, ix) = 0.0d0
       upper_ghost_row(:, iz, ix) = 0.0d0
       if (derivative_order_value == 1_C_INT) then
-        upper_wall_value(iz, ix) = sum(d14n(-2:2)*owner_src(ny - 3:ny + 1, iz, ix))
-        upper_ghost_value(iz, ix) = sum(d14np1(-2:2)*owner_src(ny - 3:ny + 1, iz, ix))
+        upper_wall_value(iz, ix) = ${at_upper_wall('d14n', 'owner_src', ', iz, ix')}$
+        upper_ghost_value(iz, ix) = ${at_upper_wall('d14np1', 'owner_src', ', iz, ix')}$
       else
-        upper_wall_value(iz, ix) = sum(d24n(-2:2)*owner_src(ny - 3:ny + 1, iz, ix))
-        upper_ghost_value(iz, ix) = sum(d24np1(-2:2)*owner_src(ny - 3:ny + 1, iz, ix))
+        upper_wall_value(iz, ix) = ${at_upper_wall('d24n', 'owner_src', ', iz, ix')}$
+        upper_ghost_value(iz, ix) = ${at_upper_wall('d24np1', 'owner_src', ', iz, ix')}$
       end if
       upper_wall_row(1, iz, ix) = 1.0d0
       upper_ghost_row(2, iz, ix) = 1.0d0

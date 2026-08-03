@@ -107,6 +107,7 @@ channel_fypp_generate(CHANNEL_GENERATED_SOURCES
     ${CHANNEL_SOURCE_DIR}/core/channel_equations.fypp
     ${CHANNEL_SOURCE_DIR}/core/dnsdata.fypp
     ${CHANNEL_SOURCE_DIR}/core/pressure_output.fypp
+    ${CHANNEL_SOURCE_DIR}/core/statistics.fypp
     ${CHANNEL_SOURCE_DIR}/linsolve/compact_line_solvers.fypp
 )
 
@@ -127,7 +128,6 @@ add_library(channel_core
     ${CHANNEL_SOURCE_DIR}/mpi/mpi_autotune.f90
     ${CHANNEL_SOURCE_DIR}/core/channel_bcs.f90
     ${CHANNEL_GENERATED_SOURCES}
-    ${CHANNEL_SOURCE_DIR}/core/statistics.f90
     ${CHANNEL_SOURCE_DIR}/core/convvelo.f90
     ${CHANNEL_SOURCE_DIR}/core/driver.f90
 )

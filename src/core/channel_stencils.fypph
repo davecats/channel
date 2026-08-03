@@ -35,6 +35,39 @@
 #:enddef
 
 #! ---------------------------------------------------------------------------
+#!  One-sided stencils at the walls.
+#!
+#!  d040/d140/d240 and the m1 rows close the lower wall and are only ever
+#!  applied to the five points y(-1:3); d04n/d14n/d24n and the np1 rows close
+#!  the upper wall and go with y(ny-3:ny+1).  Pairing a row with the wrong
+#!  span is silent -- it just reads five wrong points and returns a plausible
+#!  number -- so the span belongs here, with the stencil, rather than being
+#!  retyped at each of the twenty-odd call sites.
+#!
+#!  `sfx` carries whatever subscripts follow the y index: ', iz, ix' for a
+#!  spectral field, nothing for a single assembled line.  The _real variants
+#!  take the real part of the field first, for the (0,0) mean profiles.
+#!
+#!  In scope at every upper-wall call site: ny.
+#! ---------------------------------------------------------------------------
+
+#:def at_lower_wall(stencil, field, sfx='')
+sum(${stencil}$(-2:2)*${field}$(-1:3${sfx}$))
+#:enddef
+
+#:def at_upper_wall(stencil, field, sfx='')
+sum(${stencil}$(-2:2)*${field}$(ny - 3:ny + 1${sfx}$))
+#:enddef
+
+#:def at_lower_wall_real(stencil, field, sfx='')
+sum(${stencil}$(-2:2)*dreal(${field}$(-1:3${sfx}$)))
+#:enddef
+
+#:def at_upper_wall_real(stencil, field, sfx='')
+sum(${stencil}$(-2:2)*dreal(${field}$(ny - 3:ny + 1${sfx}$)))
+#:enddef
+
+#! ---------------------------------------------------------------------------
 #!  Runge-Kutta substep accumulation.
 #!
 #!  ODE(1:3) are the coefficients of the current substep.  `old` carries the
