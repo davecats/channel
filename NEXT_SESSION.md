@@ -5,104 +5,123 @@ Copy the block below as the opening message.
 ---
 
 Continue simplifying `channel` for readability, without changing behaviour.
+The next step is peeling the MPI-IO writer out of `convvelo`.
 
-Read `.claude/projects/-home-ws-xt8786-Codes-channel/memory/MEMORY.md` first —
-it points at the verification gates (including which machines have a usable
-GPU), the NVHPC constraints on module structure, and the state of the layering
-plan. Those were learned the hard way and will save you several wasted build
+Read `.claude/projects/-home-ws-xt8786-Codes-channel/memory/MEMORY.md` first.
+It points at the verification gates (including which machines have a usable
+GPU and how to reach them), the NVHPC constraints on module structure, a
+separate NVHPC trap about device calls, and the state of the layering plan.
+All of it was learned the hard way and will save you several wasted build
 cycles.
 
 ## Where the previous session left it
 
-The wall-normal solve is done. Every such problem — v, eta, scalars, d/dy,
-d²/dy², Poisson p and dp/dy — is a pentadiagonal system plus four closure rows
-(a ghost row and a wall row at each end), and closing it is always fold →
-eliminate → solve → reconstruct. Each of those now has one definition:
+Seven commits, each independently verified.
 
-- `wall_closure.fypph` (linsolve) — fold and eliminate, shared by the batched
-  device kernels in `channel_equations` and the single-line host solver in
-  `compact_line_solvers`.
-- `channel_boundaries.fypph` (core) — the target-region scaffolding the four
-  boundary-assembly callbacks used to each carry.
-- `channel_stencils.fypph` — `at_lower_wall` / `at_upper_wall`, which own the
-  span the one-sided wall rows must be applied to.
-- `compact_assembly_context` now names its *outputs* too, so callbacks no
-  longer write into public `y_line_solvers` workspace. `pressure_output` does
-  not reference that module at all any more.
+- **The halo pack pair** in `y_line_solvers` is one routine. The *unpack* pair
+  stays written twice on purpose -- they differ by destination array, not by an
+  index -- with the reason recorded at the site. The handoff had this filed as
+  a quartet; only half of it was index dispatch.
+- **`channel` no longer segfaults on exit.** `driver`'s `finalize` was calling
+  the old `mpi_finalize_` binding with no `ierror` argument, on every run, at
+  every rank count. `ctest` never runs the `channel` binary, which is why 30
+  green tests hid it. Gate leg 5 now says to run it and check `$?`.
+- **NOMPI is gone.** It had not compiled for some time; MPI is now required and
+  all 88 `HAVE_MPI` conditionals are deleted (288 lines). Verified by showing
+  every touched file preprocesses identically before and after, under three
+  backend flag sets -- stronger than a bit-identical run.
+- **The convvelo field catalogue is defined once** in `convvelo_fields.fypph`.
+  It had been written out twice, and `acc_convvelo_stats` looked every field up
+  by string at runtime: 43 linear scans per accumulation, all of literals.
+- **`dnsdata` is pure setup** (528 -> 350 lines). The transform pass moved to
+  `channel_transforms`.
+- **The custom pentadiagonal solve works on GPU.** It had been dying with
+  `CUDA_ERROR_ILLEGAL_ADDRESS` since before the session. Root cause: nvfortran
+  cannot forward an assumed-shape *dummy* array from inside a target region
+  into a `declare target` routine. `y_line_solvers.f90` -> `.fypp`; the solve
+  is expanded once per array set. See [[nvfortran-dummy-array-device-call]].
 
-Two things were deliberately left duplicated, both recorded in comments at the
-sites: `reconstruct` is spelled `a - sum(b)` on the host and
-`a - b1 - b2 - b3` on the device, which do not round alike; and
-`assemble_compact_derivative_interior` keeps the interleaved `ys_gpsv_ds`
-view, which is genuinely a different layout from the owner-indexed one.
+## Do this first
 
-Four commits, each independently bit-identity verified on CPU and GPU.
+**`convvelo` still mixes six concerns.** The ~180-line MPI-IO writer
+(`write_convvelo_raw_stats` and its helpers, from roughly the four
+`MPI_Type_create_subarray` calls to `write_convvelo_field_layout`) is the
+cleanest remaining peel: self-contained, narrow interface, and four dedicated
+tests plus the regression pair cover it. `convvelo` has no `declare target` of
+its own, so a new module that also declares none is the safe shape.
 
-`.fypp` sources are now `dnsdata`, `channel_equations`, `byte_workspace`,
-`pressure_output`, `statistics`, `compact_line_solvers`.
+Two smaller things in the same file, worth folding in or doing next:
 
-## Candidates, roughly in value order
+- `normalize_convvelo_field_for_output` and `copy_convvelo_field_average` are
+  the same loop -- divide a field by its sample count -- differing only in an
+  early-out and one device-update call.
+- The test-support block (`fill_convvelo_synthetic_state_for_test`,
+  `synthetic_profile_value`, `synthetic_field_value`) is public and ships in
+  the production module.
 
-1. **`convvelo.f90` (1190 lines).** Never touched beyond mechanical changes,
-   and now the largest thing that is not a solver. It mixes statistics
-   accumulation, workspace management and MPI-IO in one module. Start by
-   reading it and reporting what it actually does before changing anything.
+## After that, roughly in value order
 
-2. **`y_line_solvers.f90` (2440 lines).** Still the biggest module: workspace
-   management, the cuSPARSE/hipSPARSE wrapper, the endpoint-Schur solver, the
-   pipelined-LU solver (MPI and NCCL variants written twice, ~460 lines) and
-   the pentadiagonal kernels. The kernels **cannot** be extracted — that was
-   tried and reverted, see the memory notes. The MPI/NCCL pipeline pair is
-   genuinely different code (one non-blocking with overlap, one blocking), so
-   unifying it would change behaviour; read both before deciding.
+1. **The MPI/NCCL pipeline pair in `y_line_solvers`** (~460 lines written
+   twice). Genuinely different code -- one non-blocking with overlap, one
+   blocking -- so unifying it would change behaviour. Read both before
+   deciding, and be willing to report that it should stay.
+2. **`FFT`/`IFT` and `RFT`/`HFT` in `ffts.f90`.** Each pair differs only by
+   plan and direction across three `#ifdef` backends. Judge whether the result
+   is actually more readable before committing to it.
+3. **The transform round trip is written twice** -- `channel_transforms` and a
+   private copy in `convvelo` (`spectral_field_to_real_x`,
+   `real_x_to_spectral_field`). Now that the first has its own module,
+   unifying them is worth a look. The convvelo copy also spells
+   `if (.not. fft_transpose_is_local)` three times in a row where one block
+   would do.
 
-3. **The halo pack/unpack quartet in `y_line_solvers`** (`ys_pack_lower/upper_
-   solution_halo`, `ys_unpack_lower/upper_solution_halo`). Four near-identical
-   target regions differing only in a base index and a destination array. This
-   is *index* dispatch, so a single parameterised routine is a better fit than
-   fypp. It touches target regions, so gate on a GPU build.
+## Open items that are the user's call, not yours
 
-4. **`FFT`/`IFT` and `RFT`/`HFT` in `ffts.f90`.** Each pair differs only by
-   plan and direction across three `#ifdef` backends. Worth collapsing, but the
-   backend switching makes it fiddly — judge whether the result is actually
-   more readable before committing to it.
-
-5. **`compute_cfl` and the transform orchestration still in `dnsdata`.** These
-   are numerics rather than configuration; `dnsdata` would read better as pure
-   setup if they moved.
-
-## Two open questions that are the user's call, not yours
-
-- **`FFTW_PATIENT`** (`ffts.f90`) makes CPU runs non-reproducible at ULP level
-  run to run. Any bit-identity check needs a scratch build patched to
-  `FFTW_ESTIMATE`. Switching the default is a real performance tradeoff —
-  ask, don't decide.
-- **`-Dbodyforce`** compiles but nothing builds or tests it. It hid two
-  separate mistakes in an earlier session. Either give it a smoke test or
-  delete it. The same goes for `-Dhalfchannel` and `-DphiNeumann`: a latent
-  double-application of the wall fold survived in both for as long as it did
-  precisely because nothing exercises them.
+- **`FFTW_PATIENT`** (`ffts.f90`) makes CPU runs non-reproducible at ULP level.
+  Decided: keep it, and keep patching a scratch tree to `FFTW_ESTIMATE` for
+  bit-identity checks. Do not re-litigate.
+- **`-Dbodyforce` is dead code and is being kept anyway.** `F` is allocated,
+  zeroed, and never assigned, so a `-Dbodyforce` build is byte-identical to a
+  default one. The user decided to keep it rather than delete it. **It still
+  needs validating**: a source for `F` (deck section or file read) plus a test
+  that a known forcing produces the expected response. Until then the forcing
+  terms in `buildrhs_prepare` have never been exercised with a non-zero `F` --
+  do not trust them. See [[bodyforce-is-dead-code]].
+- **`-Dhalfchannel` and `-DphiNeumann`** do take effect (both change the
+  output), but nothing checks their numbers against a reference.
+- **The autotuner tries NCCL even when ranks share one GPU**, which makes 5
+  tests fail on any single-GPU box. `CHANNEL_COMM=mpi` works around it.
+  Arguably it should skip NCCL when it sees a shared device -- but that is a
+  behaviour change, so ask.
 
 ## How to work
 
-Small, independently verified commits — one logical change each, so a
+Small, independently verified commits -- one logical change each, so a
 regression bisects to one peel. For every change: CPU `ctest` (30 tests), an
-NVHPC GPU build, and bit-identity against the previous commit using a
+NVHPC GPU build, `-Dbodyforce` compiles, **run the `channel` binary and check
+its exit status**, and bit-identity against the previous commit using a
 `FFTW_ESTIMATE` scratch build. A green CPU suite has repeatedly been
-insufficient: three separate module changes passed all 30 tests and broke the
-GPU build.
+insufficient.
 
-Two techniques worth reusing:
+Techniques worth reusing, in order of how much they save:
 
-- **Diff the generated Fortran, not just the output.** When a change is fypp
-  expansion, expanding both trees and diffing the result proves the compiled
-  program is unchanged — stronger than a bit-identical run, and it retires the
-  performance question without needing an idle GPU. Shaping macros to take the
-  *text of each call site's own expressions* rather than fixed variable names
-  is what makes that achievable in hot kernels.
-- **Compare against the checked-in references too**, not only base-vs-work. A
-  bad test invocation once left stale files behind and reported a difference
-  that did not exist.
+- **Diff the preprocessed or generated Fortran, not just the output.** If a
+  change is fypp expansion or conditional removal, expanding both trees and
+  diffing proves the compiled program is unchanged. That retires the
+  performance question without needing an idle GPU. Ignore blank lines: `cpp`
+  leaves one where it removes a directive.
+- **Shape macros to take the *text* of each call site's own expressions**
+  rather than fixed variable names. That is what makes the generated code
+  identical to what was there before -- and, as the GPU fix showed, it is also
+  the way to keep device code free of dummy-argument indirection.
+- **Check that a flag you are relying on actually took effect.** Two claims
+  went wrong this way. `CHANNEL_OVERLAPPING=1` is bit-identical by design, so
+  output cannot confirm it -- the memory line does (buffers double). And a
+  comparison meant to isolate one flag had a second flag varying with it.
+- **Compare against the checked-in references too**, not only base-vs-work.
+- **When a run passes, ask what it did not cover.** `CHANNEL_OVERLAPPING` and
+  `CHANNEL_YS_FORCE_CUSTOM_GPSV` are set by no test; the second was hiding a
+  GPU crash. "30/30 green" is a statement about the 30.
 
 Report honestly when something is reverted and why. Several extractions have
 been abandoned across these sessions for good reasons, and recording that has
