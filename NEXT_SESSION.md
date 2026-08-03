@@ -5,6 +5,9 @@ Copy the block below as the opening message.
 ---
 
 Continue simplifying `channel` for readability, without changing behaviour.
+This time the subject is the duplicated pipelined-LU solve in
+`src/linsolve/y_line_solvers.fypp` -- see "Do this first" below. Answering
+"these should stay written twice, because ..." counts as finishing the task.
 
 Read `.claude/projects/-home-ws-xt8786-Codes-channel/memory/MEMORY.md` first.
 It points at the verification gates (including which machines have a usable
@@ -13,7 +16,7 @@ NVHPC constraints on module structure, a separate NVHPC trap about device
 calls, and the state of the layering plan. All of it was learned the hard way
 and will save you several wasted build cycles.
 
-## Where the previous session left it
+## Where the previous sessions left it
 
 Four code commits, each independently verified against the full gate.
 
@@ -59,15 +62,86 @@ Four code commits, each independently verified against the full gate.
   - `load_convvelo_field_to_zbuf` vs `load_pressure_field_to_zbuf` differ much
     more than these did; they were left alone.
 
-## Do this first, roughly in value order
+## Do this first: the MPI/NCCL pipeline pair in `y_line_solvers`
 
-1. **The MPI/NCCL pipeline pair in `y_line_solvers`** (~460 lines written
-   twice). Genuinely different code -- one non-blocking with overlap, one
-   blocking -- so unifying it would change behaviour. Read both before
-   deciding, and be willing to report that it should stay.
-2. **`FFT`/`IFT` and `RFT`/`HFT` in `ffts.f90`.** Each pair differs only by
-   plan and direction across three `#ifdef` backends. Judge whether the result
-   is actually more readable before committing to it.
+The question is whether `ys_solve_pipelined_lu_distributed`
+(`src/linsolve/y_line_solvers.fypp:1368-1656`) and
+`ys_solve_pipelined_lu_nccl_distributed` (`1658-1775`) should be one routine.
+**"No, and here is why" is a perfectly good answer** -- several extractions
+have been abandoned across these sessions and recording the reason has been
+worth more than forcing them through. What is *not* acceptable is deciding
+without reading both.
+
+Some of this was already measured, so you do not have to rediscover it. Treat
+it as a starting point to verify, not as the conclusion:
+
+- The counts in the older notes ("~460 lines written twice") were wrong. It is
+  289 lines and 118. They are not the same length because they are not the
+  same algorithm.
+- **They are not two peers.** The MPI one is the only entry point; it
+  dispatches to the NCCL one at `1390-1393` and returns. Whatever you do has
+  to keep that door.
+- **They differ in schedule, not only in transport.** The MPI version
+  pre-posts every backward `Irecv` before the forward sweep (`1417-1431`) and
+  then drains backward batches *inside* the forward loop via `MPI_Test`
+  (`drain_backward_batches`, called non-blocking at `1516` and blocking at
+  `1522`), so batch k's backward substitution overlaps batch k+1's
+  factorisation. The NCCL version runs a complete forward loop and then a
+  separate reverse loop (`1738`). Unifying the two bodies either serialises
+  the MPI path or invents an overlap the NCCL path does not currently have --
+  either way it is a behaviour change, not a readability change. **This is
+  most likely the fact that decides the question.**
+- What genuinely *is* duplicated is thin: the six stride/offset quantities
+  (`1403-1409` vs `1666-1672`) and the order in which the `ys_*_pipelined_*`
+  and `ys_pack_*_state` kernels are called. Six lines of arithmetic is not
+  worth a shared abstraction on its own -- though
+  if the offsets ever disagree between the two paths the bug would be
+  invisible, which is an argument for naming them once.
+- **About 60 of the MPI version's extra lines are instrumentation**, not
+  algorithm: `CHANNEL_Y_PIPELINE_TIMING`, a `tic`/`toc` pair around nearly
+  every step, ten timing buckets and a CSV writer. The NCCL path has none of
+  it. If you come away wanting to change one thing in this routine, consider
+  that this is what actually makes it hard to read -- and note that thinning
+  it is a change to a *diagnostic*, which is a much easier thing to verify
+  than a change to the solve.
+
+Then look at the smaller pair: `ys_exchange_pipelined_solution_halos`
+(`1792`, 47 lines) and `..._nccl` (`1840`, 33). Same shape as the big pair --
+MPI posts both neighbours' Irecv/Isend, does one `Waitall`, then unpacks both;
+NCCL packs both, then does sendrecv-and-unpack per neighbour -- so again the
+MPI side overlaps the two neighbours and the NCCL side does not. The
+difference is smaller here, so this may be the honest yes even if the big one
+is a no. Decide the two separately and commit them separately.
+
+### The verification trap on this one -- read before you touch the NCCL half
+
+**No test sets `CHANNEL_COMM`** (checked: it appears nowhere in
+`cmake/tests.cmake`), and NCCL only exists in a GPU build. So:
+
+- On CPU, `ctest` never executes `ys_solve_pipelined_lu_nccl_distributed` at
+  all. `CHANNEL_Y_SOLVER=pipelined_lu` with `CHANNEL_NPY=2`/`3` covers the
+  **MPI** half only.
+- On the local single-GPU box you cannot run it either -- NCCL cannot make a
+  communicator with two ranks sharing one device.
+- So a change to the NCCL half has to be verified on `istmcetus` with
+  `CHANNEL_COMM=nccl` and npy > 1. Settle early whether you can actually get a
+  multi-rank run there; the notes disagree with themselves (`ctest` was 30/30,
+  but a plain non-interactive ssh failed `opal_init` at 6 ranks). If you
+  cannot run it, say so and stop rather than committing an unverified change
+  to a path nothing tests.
+
+This is the "30/30 green is a statement about the 30" trap in its purest
+form, so do not let a green local suite stand in for evidence here.
+
+Also, from [[gpu-build-constrains-module-structure]]: the `use` that supplies
+`ycomm_sendbuf` to the target regions must stay *outside* any `#ifdef`. That
+one has already bitten this file.
+
+## After that
+
+**`FFT`/`IFT` and `RFT`/`HFT` in `ffts.f90`.** Each pair differs only by plan
+and direction across three `#ifdef` backends. Judge whether the result is
+actually more readable before committing to it.
 
 ## Looked at and deliberately left alone
 
@@ -88,9 +162,12 @@ Do not redo these without new information; the reasoning is in the commits.
 - **`mpi_autotune`'s copy of the blocking transpose.** Converting it would put
   two extra roctx markers inside the loop the autotuner times, and that
   measurement feeds the decomposition choice.
-- **The halo unpack pair in `y_line_solvers`** -- the two differ by
-  destination array, not by an index; the reason is a comment at the site. The
-  *pack* pair was unified.
+- **The halo unpack pair in `y_line_solvers`** -- `ys_unpack_lower_solution_
+  halo` and `ys_unpack_upper_solution_halo`, which differ by destination
+  array, not by an index; the reason is a comment at the site. The *pack* pair
+  was unified. Do not confuse these with
+  `ys_exchange_pipelined_solution_halos{,_nccl}`, which the task above does
+  ask about -- those are the callers, and they are still open.
 - **Reconstruct (step 3 of the wall closure)** stays written twice: the host
   spells it `a - sum(b)`, the batched one `a - b1 - b2 - b3`, and those do not
   round alike.
