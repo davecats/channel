@@ -415,6 +415,36 @@
       !$omp end target teams distribute parallel do
     end subroutine yslab_copy_from_full
 
+    ! The six xz pack/repack kernels below move the same data between two
+    ! pencil layouts: the z-pencil Vz(iz, ix, iy) owns every z line for a
+    ! slice of x, the x-pencil Vx(ix, iz, iy) owns every x line for a slice
+    ! of z.  When this rank already owns all of z the move is a plain
+    ! in-memory transpose (repack_*_local); otherwise it goes through the
+    ! alltoall buffer, npxz blocks of sendcount, one per peer.
+    !
+    ! Two rules hold across all six, and breaking either is silent:
+    !
+    ! * The innermost loop is the index the *read* runs contiguously in --
+    !   iz where the source is a z-pencil or a zTOx buffer, ix where it is an
+    !   x-pencil or an xTOz buffer.  Each buffer's in-block layout was chosen
+    !   to match the pencil it is packed from, which is why pack_* is the
+    !   fully coalesced kernel of its pair and unpack_* pays the stride on
+    !   its write -- a transpose has to pay it on one side.  Note this is the
+    !   source's fastest index, not the destination's: repack_zTOx_local
+    !   writes Vx(ix, ...) and still runs iz innermost.  Reordering a nest
+    !   here is a device performance change that no correctness test sees.
+    ! * pack_zTOx and unpack_zTOx must spell p identically, and so must
+    !   pack_xTOz and unpack_xTOz.  The alltoall permutes whole blocks
+    !   between ranks, so a formula that drifts between the two halves of a
+    !   pair scrambles the field rather than failing.
+    !
+    ! They stay written out.  Everything that differs -- the nest order, both
+    ! subscript triples, which array carries the rank offset (pack_* on the
+    ! source pencil, unpack_* on the destination one) -- is exactly what a
+    ! shared body would have to take as text, so the macro's arguments would
+    ! *be* the kernel.  Worse for the two rules above: the nest order would
+    ! still be spelled per site, and comparing two argument lists is harder
+    ! than comparing two formulas, so drift would get less visible, not more.
     SUBROUTINE repack_zTOx_local(Vz, Vx)
       use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
       implicit none
