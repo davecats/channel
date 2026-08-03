@@ -565,6 +565,54 @@
 
     END SUBROUTINE alltoall
 
+    ! The blocking form of the xz transpose: pack, post, wait, unpack -- or,
+    ! when this rank already owns every z line, just repack in place and touch
+    ! no buffer at all.  `label` names the caller in the profiler ranges.
+    !
+    ! transform_to_physical and transform_back_and_build_rhs do not use these:
+    ! they have a whole component to work on while the alltoall flies, so they
+    ! post it and wait later, and the four steps have to stay apart.  These are
+    ! for the callers that transform one field and have nothing to overlap.
+    SUBROUTINE transpose_zTOx(Vz, Vx, label)
+      IMPLICIT NONE
+      complex(C_DOUBLE_COMPLEX), intent(in) :: Vz(1:, 1:, :)
+      complex(C_DOUBLE_COMPLEX), intent(out) :: Vx(1:, 1:, :)
+      character(len=*), intent(in) :: label
+      type(MPI_Request) :: request
+      type(MPI_Status) :: status
+
+      if (fft_transpose_is_local) then
+        call repack_zTOx_local(Vz, Vx)
+      else
+        call pack_zTOx(Vz, sendbuf(:, 1))
+        call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "zTOx "//label)
+        call roctxPush("MPI_Wait zTOx "//label)
+        call MPI_Wait(request, status, ierr)
+        call roctxPop("MPI_Wait zTOx "//label)
+        call unpack_zTOx(recvbuf(:, 1), Vx)
+      end if
+    END SUBROUTINE transpose_zTOx
+
+    SUBROUTINE transpose_xTOz(Vx, Vz, label)
+      IMPLICIT NONE
+      complex(C_DOUBLE_COMPLEX), intent(in) :: Vx(1:, 1:, :)
+      complex(C_DOUBLE_COMPLEX), intent(out) :: Vz(1:, 1:, :)
+      character(len=*), intent(in) :: label
+      type(MPI_Request) :: request
+      type(MPI_Status) :: status
+
+      if (fft_transpose_is_local) then
+        call repack_xTOz_local(Vx, Vz)
+      else
+        call pack_xTOz(Vx, sendbuf(:, 1))
+        call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "xTOz "//label)
+        call roctxPush("MPI_Wait xTOz "//label)
+        call MPI_Wait(request, status, ierr)
+        call roctxPop("MPI_Wait xTOz "//label)
+        call unpack_xTOz(recvbuf(:, 1), Vz)
+      end if
+    END SUBROUTINE transpose_xTOz
+
     subroutine finalize_xcomm_nccl_contexts()
       implicit none
 

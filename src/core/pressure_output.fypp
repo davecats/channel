@@ -20,9 +20,7 @@ MODULE pressure_output
   USE byte_workspace, ONLY: workspace_request, workspace_release, workspace_align_offset, &
                             workspace_layout, layout_begin, layout_bytes, layout_real_3d, layout_complex_3d
   USE channel_grid, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, npy_grid, ipy, iproc
-  USE mpi_transpose, ONLY: ierr, sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, &
-                           fft_transpose_is_local, repack_zTOx_local, repack_xTOz_local, roctxPush, roctxPop, &
-                           MPI_Request, MPI_Status, MPI_Wait
+  USE mpi_transpose, ONLY: transpose_zTOx, transpose_xTOz
 
   IMPLICIT NONE
 
@@ -494,25 +492,12 @@ CONTAINS
   SUBROUTINE spectral_field_to_real_x(rx)
     IMPLICIT NONE
     real(C_DOUBLE), intent(out) :: rx(:, :, ny0 - 2:)
-    type(MPI_Request) :: request
-    type(MPI_Status) :: status
     integer(C_INT) :: ix, iz, iy, y_first, y_last
     y_first = ny0
     y_last = nyN
 
     call IFT(VVdz(:, :, :, 1))
-    if (fft_transpose_is_local) then
-      call repack_zTOx_local(VVdz(:, :, :, 1), VVdx(:, :, :, 1))
-    else
-      call pack_zTOx(VVdz(:, :, :, 1), sendbuf(:, 1))
-      call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "zTOx pressure_spectral_to_real")
-    end if
-    if (.not. fft_transpose_is_local) then
-      call roctxPush("MPI_Wait zTOx pressure_spectral_to_real")
-      call MPI_Wait(request, status, ierr)
-      call roctxPop("MPI_Wait zTOx pressure_spectral_to_real")
-    end if
-    if (.not. fft_transpose_is_local) call unpack_zTOx(recvbuf(:, 1), VVdx(:, :, :, 1))
+    call transpose_zTOx(VVdz(:, :, :, 1), VVdx(:, :, :, 1), "pressure_spectral_to_real")
     !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp shared(VVdx, nx, nxd, nzB, y_first, y_last) private(ix, iz, iy)
     do iy = y_first - 2, y_last + 2
@@ -529,25 +514,12 @@ CONTAINS
     IMPLICIT NONE
     real(C_DOUBLE), intent(in) :: rx(:, :, ny0 - 2:)
     complex(C_DOUBLE_COMPLEX), intent(out) :: field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    type(MPI_Request) :: request
-    type(MPI_Status) :: status
     integer(C_INT) :: ix, iz, iy, y_first, y_last
     y_first = ny0
     y_last = nyN
 
     call HFT(rx, VVdx(:, :, :, 1))
-    if (fft_transpose_is_local) then
-      call repack_xTOz_local(VVdx(:, :, :, 1), VVdz(:, :, :, 1))
-    else
-      call pack_xTOz(VVdx(:, :, :, 1), sendbuf(:, 1))
-      call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "xTOz pressure_real_to_spectral")
-    end if
-    if (.not. fft_transpose_is_local) then
-      call roctxPush("MPI_Wait xTOz pressure_real_to_spectral")
-      call MPI_Wait(request, status, ierr)
-      call roctxPop("MPI_Wait xTOz pressure_real_to_spectral")
-    end if
-    if (.not. fft_transpose_is_local) call unpack_xTOz(recvbuf(:, 1), VVdz(:, :, :, 1))
+    call transpose_xTOz(VVdx(:, :, :, 1), VVdz(:, :, :, 1), "pressure_real_to_spectral")
     call FFT(VVdz(:, :, :, 1))
     !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp shared(VVdz, nx0, nxN, ny, y_first, y_last, nz, field) private(ix, iz, iy)
