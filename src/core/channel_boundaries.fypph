@@ -1,0 +1,97 @@
+#! ===========================================================================
+#!  Scaffolding for the boundary-row assembly callbacks.
+#!
+#!  A boundary callback's job is to fill, for every Fourier mode this rank
+#!  owns, the two closure rows at a wall and their right-hand sides.  What
+#!  differs between callbacks is four to eight lines of physics; what they all
+#!  had around it was the same twenty lines -- a guard on owning the wall, a
+#!  target region over (ix, iz) with a hand-maintained shared() list, and the
+#!  pointer boilerplate to lift the destination slots out of the context.
+#!  Getting a name wrong in one of those shared() lists is the failure mode
+#!  that repeatedly broke the NVHPC build, so it is worth writing once.
+#!
+#!  Usage in a callback taking `type(compact_assembly_context), intent(in) ::
+#!  ctx`:
+#!
+#!      $:declare_boundary_rows()
+#!      <the callback's own locals>
+#!      $:bind_boundary_rows()
+#!      #:call lower_wall_rows('owner_src, d140, d240')
+#!        <body, in scope: ix, iz, and the four lower slots>
+#!      #:endcall lower_wall_rows
+#!
+#!  The macros deliberately refer to names they do not take as arguments --
+#!  the eight slot pointers, has_lower_boundary/has_upper_boundary, ix, iz,
+#!  ix0_owner, ixN_owner -- all of which declare_boundary_rows and
+#!  bind_boundary_rows put in scope under fixed names.  That is what lets the
+#!  shared() lists be written once; a callback that skips either macro fails
+#!  to compile rather than silently misbehaving.
+#!
+#!  In scope at every call site: nz (from channel_grid), and ctx.
+#! ===========================================================================
+
+#! Local views of the assembled system, plus the loop and guard variables the
+#! kernels below need.  Goes with the callback's other declarations.
+#:def declare_boundary_rows()
+real(C_DOUBLE), pointer :: lower_ghost_row(:, :, :), lower_wall_row(:, :, :)
+real(C_DOUBLE), pointer :: upper_wall_row(:, :, :), upper_ghost_row(:, :, :)
+complex(C_DOUBLE_COMPLEX), pointer :: lower_ghost_value(:, :), lower_wall_value(:, :)
+complex(C_DOUBLE_COMPLEX), pointer :: upper_wall_value(:, :), upper_ghost_value(:, :)
+complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
+logical :: has_lower_boundary, has_upper_boundary
+integer(C_INT) :: ix, iz, ix0_owner, ixN_owner
+#:enddef
+
+#! Lift them out of the context.  A derived type with pointer components
+#! cannot be mapped to the device, so this must happen before any target
+#! region -- which is the whole reason the locals exist.
+#:def bind_boundary_rows()
+owner_src => ctx%src
+lower_ghost_row => ctx%lower_ghost_row
+lower_wall_row => ctx%lower_wall_row
+upper_wall_row => ctx%upper_wall_row
+upper_ghost_row => ctx%upper_ghost_row
+lower_ghost_value => ctx%lower_ghost_value
+lower_wall_value => ctx%lower_wall_value
+upper_wall_value => ctx%upper_wall_value
+upper_ghost_value => ctx%upper_ghost_value
+has_lower_boundary = ctx%has_lower_boundary
+has_upper_boundary = ctx%has_upper_boundary
+ix0_owner = lbound(owner_src, 3)
+ixN_owner = ubound(owner_src, 3)
+#:enddef
+
+#! One kernel over the modes this rank owns, writing the lower wall's two
+#! closure rows.  `shared_extra` is whatever else the body reads.
+#:def lower_wall_rows(shared_extra, body)
+if (has_lower_boundary) then
+  !$omp target teams distribute parallel do collapse(2) default(none) &
+  !$omp shared(lower_ghost_row, lower_wall_row, lower_ghost_value, lower_wall_value) &
+  !$omp shared(nz, ix0_owner, ixN_owner) &
+  !$omp shared(${shared_extra}$) &
+  !$omp private(ix, iz)
+  do ix = ix0_owner, ixN_owner
+    do iz = -nz, nz
+${body}$
+    end do
+  end do
+  !$omp end target teams distribute parallel do
+end if
+#:enddef
+
+#! The same for the upper wall.
+#:def upper_wall_rows(shared_extra, body)
+if (has_upper_boundary) then
+  !$omp target teams distribute parallel do collapse(2) default(none) &
+  !$omp shared(upper_wall_row, upper_ghost_row, upper_wall_value, upper_ghost_value) &
+  !$omp shared(nz, ix0_owner, ixN_owner) &
+  !$omp shared(${shared_extra}$) &
+  !$omp private(ix, iz)
+  do ix = ix0_owner, ixN_owner
+    do iz = -nz, nz
+${body}$
+    end do
+  end do
+  !$omp end target teams distribute parallel do
+end if
+#:enddef

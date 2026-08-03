@@ -1,4 +1,5 @@
 #include "header.h"
+#:include "channel_boundaries.fypph"
 
 MODULE pressure_output
 
@@ -21,9 +22,6 @@ MODULE pressure_output
   USE mpi_transpose, ONLY: ierr, sendbuf, recvbuf, pack_zTOx, unpack_zTOx, pack_xTOz, unpack_xTOz, alltoall, &
                            fft_transpose_is_local, repack_zTOx_local, repack_xTOz_local, roctxPush, roctxPop, &
                            MPI_Request, MPI_Status, MPI_Wait
-  USE y_line_solvers, ONLY: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, ys_lower_ghost_owner, ys_lower_boundary_owner, &
-                            ys_upper_boundary_owner, ys_upper_ghost_owner, ys_eqm1_owner, ys_eq0_owner, &
-                            ys_eqn_owner, ys_eqnp1_owner
 
   IMPLICIT NONE
 
@@ -578,14 +576,11 @@ CONTAINS
     end do
   END SUBROUTINE real_x_to_spectral_field
 
-  subroutine pressure_velocity_view(owner_src, u_owner, v_owner, w_owner, ix0_owner, ixN_owner)
+  ! The pressure wall conditions are built from the velocity field, not from
+  ! the Poisson source, so the callbacks need a view of V alongside ctx%src.
+  subroutine pressure_velocity_view(u_owner, v_owner, w_owner)
     implicit none
-    complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: owner_src(:, :, :)
     complex(C_DOUBLE_COMPLEX), pointer :: u_owner(:, :, :), v_owner(:, :, :), w_owner(:, :, :)
-    integer(C_INT), intent(out) :: ix0_owner, ixN_owner
-
-    ix0_owner = lbound(owner_src, 3)
-    ixN_owner = ubound(owner_src, 3)
 
     u_owner(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => V(:, :, :, 1)
     v_owner(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => V(:, :, :, 2)
@@ -654,9 +649,12 @@ CONTAINS
     integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner
 
     complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
+    complex(C_DOUBLE_COMPLEX), pointer :: system_matrix(:, :, :, :), system_rhs(:, :, :)
     integer(C_INT) :: row_start, row_end
 
     owner_src => ctx%src
+    system_matrix => ctx%system_matrix
+    system_rhs => ctx%system_rhs
     row_start = ctx%row_start
     row_end = ctx%row_end
     ix0_owner = lbound(owner_src, 3)
@@ -664,17 +662,17 @@ CONTAINS
 
     !$omp target teams distribute parallel do collapse(2) default(none) &
     !$omp& shared(owner_src, der, k2, row_start, row_end, nz, ix0_owner, ixN_owner) &
-    !$omp& shared(ys_gpsv_owner_matrix, ys_gpsv_owner_rhs) &
+    !$omp& shared(system_matrix, system_rhs) &
     !$omp private(ix, iz, iy)
     do ix = ix0_owner, ixN_owner
       do iz = -nz, nz
         do iy = row_start, row_end
-          ys_gpsv_owner_rhs(iz, ix, iy) = owner_src(iy, iz, ix)
+          system_rhs(iz, ix, iy) = owner_src(iy, iz, ix)
           if (ix == 0 .and. iz == 0) then
-            ys_gpsv_owner_matrix(iz, ix, iy, -2:2) = cmplx(der(iy, 2, -2:2), 0.0d0, kind=C_DOUBLE)
+            system_matrix(iz, ix, iy, -2:2) = cmplx(der(iy, 2, -2:2), 0.0d0, kind=C_DOUBLE)
           else
-            ys_gpsv_owner_matrix(iz, ix, iy, -2:2) = cmplx(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2), &
-                                                           0.0d0, kind=C_DOUBLE)
+            system_matrix(iz, ix, iy, -2:2) = cmplx(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2), &
+                                                    0.0d0, kind=C_DOUBLE)
           end if
         end do
       end do
@@ -688,9 +686,12 @@ CONTAINS
     integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner
 
     complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
+    complex(C_DOUBLE_COMPLEX), pointer :: system_matrix(:, :, :, :), system_rhs(:, :, :)
     integer(C_INT) :: row_start, row_end
 
     owner_src => ctx%src
+    system_matrix => ctx%system_matrix
+    system_rhs => ctx%system_rhs
     row_start = ctx%row_start
     row_end = ctx%row_end
     ix0_owner = lbound(owner_src, 3)
@@ -698,14 +699,14 @@ CONTAINS
 
     !$omp target teams distribute parallel do collapse(2) default(none) &
     !$omp& shared(owner_src, der, k2, row_start, row_end, nz, ix0_owner, ixN_owner) &
-    !$omp& shared(ys_gpsv_owner_matrix, ys_gpsv_owner_rhs) &
+    !$omp& shared(system_matrix, system_rhs) &
     !$omp private(ix, iz, iy)
     do ix = ix0_owner, ixN_owner
       do iz = -nz, nz
         do iy = row_start, row_end
-          ys_gpsv_owner_rhs(iz, ix, iy) = owner_src(iy, iz, ix)
-          ys_gpsv_owner_matrix(iz, ix, iy, -2:2) = cmplx(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2), &
-                                                         0.0d0, kind=C_DOUBLE)
+          system_rhs(iz, ix, iy) = owner_src(iy, iz, ix)
+          system_matrix(iz, ix, iy, -2:2) = cmplx(der(iy, 2, -2:2) - k2(iz, ix)*der(iy, 0, -2:2), &
+                                                  0.0d0, kind=C_DOUBLE)
         end do
       end do
     end do
@@ -715,115 +716,68 @@ CONTAINS
   subroutine assemble_pressure_boundaries(ctx)
     implicit none
     type(compact_assembly_context), intent(in) :: ctx
-    complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
-    logical :: has_lower_boundary, has_upper_boundary
-    integer(C_INT) :: ix, iz, ix0_owner, ixN_owner
+    $:declare_boundary_rows()
     complex(C_DOUBLE_COMPLEX), pointer :: u_owner(:, :, :), v_owner(:, :, :), w_owner(:, :, :)
 
-    owner_src => ctx%src
-    has_lower_boundary = ctx%has_lower_boundary
-    has_upper_boundary = ctx%has_upper_boundary
+    $:bind_boundary_rows()
+    call pressure_velocity_view(u_owner, v_owner, w_owner)
 
-    call pressure_velocity_view(owner_src, u_owner, v_owner, w_owner, ix0_owner, ixN_owner)
+    #:call lower_wall_rows('owner_src, u_owner, v_owner, w_owner, d140, d240, der, ialfa, ibeta, k2, ni')
+      if (ix == 0 .and. iz == 0) then
+        lower_ghost_row(:, iz, ix) = d140
+        lower_wall_row(:, iz, ix) = d240
+        lower_ghost_value(iz, ix) = ni*sum(d240(-2:2)*v_owner(-1:3, iz, ix))
+        lower_wall_value(iz, ix) = owner_src(0, iz, ix)
+      else
+        lower_ghost_row(:, iz, ix) = der(1, 3, :)
+        lower_wall_row(:, iz, ix) = 0.0d0
+        lower_wall_row(-1, iz, ix) = 1.0d0
+        lower_ghost_value(iz, ix) = (0.0d0, 0.0d0)
+        lower_wall_value(iz, ix) = -ni*( &
+                                   ialfa(ix)*sum(d240(-2:2)*u_owner(-1:3, iz, ix)) + &
+                                   ibeta(iz)*sum(d240(-2:2)*w_owner(-1:3, iz, ix)))/k2(iz, ix)
+      end if
+    #:endcall lower_wall_rows
 
-    if (has_lower_boundary) then
-      !$omp target teams distribute parallel do collapse(2) default(none) &
-      !$omp& shared(owner_src, u_owner, v_owner, w_owner, d140, d240, der) &
-      !$omp& shared(ialfa, ibeta, k2, ni, nz, ix0_owner, ixN_owner) &
-      !$omp& shared(ys_eqm1_owner, ys_eq0_owner, ys_lower_ghost_owner, ys_lower_boundary_owner) &
-      !$omp private(ix, iz)
-      do ix = ix0_owner, ixN_owner
-        do iz = -nz, nz
-          if (ix == 0 .and. iz == 0) then
-            ys_eqm1_owner(:, iz, ix) = d140
-            ys_eq0_owner(:, iz, ix) = d240
-            ys_lower_ghost_owner(iz, ix) = ni*sum(d240(-2:2)*v_owner(-1:3, iz, ix))
-            ys_lower_boundary_owner(iz, ix) = owner_src(0, iz, ix)
-          else
-            ys_eqm1_owner(:, iz, ix) = der(1, 3, :)
-            ys_eq0_owner(:, iz, ix) = 0.0d0
-            ys_eq0_owner(-1, iz, ix) = 1.0d0
-            ys_lower_ghost_owner(iz, ix) = (0.0d0, 0.0d0)
-            ys_lower_boundary_owner(iz, ix) = -ni*( &
-                                              ialfa(ix)*sum(d240(-2:2)*u_owner(-1:3, iz, ix)) + &
-                                              ibeta(iz)*sum(d240(-2:2)*w_owner(-1:3, iz, ix)))/k2(iz, ix)
-          end if
-        end do
-      end do
-      !$omp end target teams distribute parallel do
-    end if
-
-    if (has_upper_boundary) then
-      !$omp target teams distribute parallel do collapse(2) default(none) &
-      !$omp& shared(u_owner, w_owner, d24n, der, ialfa, ibeta, k2, ni, ny, nz, ix0_owner, ixN_owner) &
-      !$omp& shared(ys_eqn_owner, ys_eqnp1_owner, ys_upper_boundary_owner, ys_upper_ghost_owner) &
-      !$omp private(ix, iz)
-      do ix = ix0_owner, ixN_owner
-        do iz = -nz, nz
-          ys_eqn_owner(:, iz, ix) = 0.0d0
-          ys_eqn_owner(1, iz, ix) = 1.0d0
-          ys_eqnp1_owner(:, iz, ix) = der(ny - 1, 3, :)
-          ys_upper_ghost_owner(iz, ix) = (0.0d0, 0.0d0)
-          if (ix == 0 .and. iz == 0) then
-            ys_upper_boundary_owner(iz, ix) = (0.0d0, 0.0d0)
-          else
-            ys_upper_boundary_owner(iz, ix) = -ni*( &
-                                              ialfa(ix)*sum(d24n(-2:2)*u_owner(ny - 3:ny + 1, iz, ix)) + &
-                                              ibeta(iz)*sum(d24n(-2:2)*w_owner(ny - 3:ny + 1, iz, ix)))/k2(iz, ix)
-          end if
-        end do
-      end do
-      !$omp end target teams distribute parallel do
-    end if
+    #:call upper_wall_rows('u_owner, w_owner, d24n, der, ialfa, ibeta, k2, ni, ny')
+      upper_wall_row(:, iz, ix) = 0.0d0
+      upper_wall_row(1, iz, ix) = 1.0d0
+      upper_ghost_row(:, iz, ix) = der(ny - 1, 3, :)
+      upper_ghost_value(iz, ix) = (0.0d0, 0.0d0)
+      if (ix == 0 .and. iz == 0) then
+        upper_wall_value(iz, ix) = (0.0d0, 0.0d0)
+      else
+        upper_wall_value(iz, ix) = -ni*( &
+                                   ialfa(ix)*sum(d24n(-2:2)*u_owner(ny - 3:ny + 1, iz, ix)) + &
+                                   ibeta(iz)*sum(d24n(-2:2)*w_owner(ny - 3:ny + 1, iz, ix)))/k2(iz, ix)
+      end if
+    #:endcall upper_wall_rows
   end subroutine assemble_pressure_boundaries
 
   subroutine assemble_dpdy_boundaries(ctx)
     implicit none
     type(compact_assembly_context), intent(in) :: ctx
-    complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
-    logical :: has_lower_boundary, has_upper_boundary
-    integer(C_INT) :: ix, iz, ix0_owner, ixN_owner
+    $:declare_boundary_rows()
     complex(C_DOUBLE_COMPLEX), pointer :: u_owner(:, :, :), v_owner(:, :, :), w_owner(:, :, :)
 
-    owner_src => ctx%src
-    has_lower_boundary = ctx%has_lower_boundary
-    has_upper_boundary = ctx%has_upper_boundary
+    $:bind_boundary_rows()
+    call pressure_velocity_view(u_owner, v_owner, w_owner)
 
-    call pressure_velocity_view(owner_src, u_owner, v_owner, w_owner, ix0_owner, ixN_owner)
+    #:call lower_wall_rows('v_owner, d240, der, ni')
+      lower_wall_row(:, iz, ix) = 0.0d0
+      lower_wall_row(-1, iz, ix) = 1.0d0
+      lower_ghost_row(:, iz, ix) = der(1, 3, :)
+      lower_ghost_value(iz, ix) = (0.0d0, 0.0d0)
+      lower_wall_value(iz, ix) = ni*sum(d240(-2:2)*v_owner(-1:3, iz, ix))
+    #:endcall lower_wall_rows
 
-    if (has_lower_boundary) then
-      !$omp target teams distribute parallel do collapse(2) default(none) &
-      !$omp& shared(v_owner, d240, der, ni, nz, ix0_owner, ixN_owner) &
-      !$omp& shared(ys_eqm1_owner, ys_eq0_owner, ys_lower_ghost_owner, ys_lower_boundary_owner) &
-      !$omp private(ix, iz)
-      do ix = ix0_owner, ixN_owner
-        do iz = -nz, nz
-          ys_eq0_owner(:, iz, ix) = 0.0d0
-          ys_eq0_owner(-1, iz, ix) = 1.0d0
-          ys_eqm1_owner(:, iz, ix) = der(1, 3, :)
-          ys_lower_ghost_owner(iz, ix) = (0.0d0, 0.0d0)
-          ys_lower_boundary_owner(iz, ix) = ni*sum(d240(-2:2)*v_owner(-1:3, iz, ix))
-        end do
-      end do
-      !$omp end target teams distribute parallel do
-    end if
-
-    if (has_upper_boundary) then
-      !$omp target teams distribute parallel do collapse(2) default(none) &
-      !$omp& shared(v_owner, d24n, der, ni, ny, nz, ix0_owner, ixN_owner) &
-      !$omp& shared(ys_eqn_owner, ys_eqnp1_owner, ys_upper_boundary_owner, ys_upper_ghost_owner) &
-      !$omp private(ix, iz)
-      do ix = ix0_owner, ixN_owner
-        do iz = -nz, nz
-          ys_eqn_owner(:, iz, ix) = 0.0d0
-          ys_eqn_owner(1, iz, ix) = 1.0d0
-          ys_eqnp1_owner(:, iz, ix) = der(ny - 1, 3, :)
-          ys_upper_ghost_owner(iz, ix) = (0.0d0, 0.0d0)
-          ys_upper_boundary_owner(iz, ix) = ni*sum(d24n(-2:2)*v_owner(ny - 3:ny + 1, iz, ix))
-        end do
-      end do
-      !$omp end target teams distribute parallel do
-    end if
+    #:call upper_wall_rows('v_owner, d24n, der, ni, ny')
+      upper_wall_row(:, iz, ix) = 0.0d0
+      upper_wall_row(1, iz, ix) = 1.0d0
+      upper_ghost_row(:, iz, ix) = der(ny - 1, 3, :)
+      upper_ghost_value(iz, ix) = (0.0d0, 0.0d0)
+      upper_wall_value(iz, ix) = ni*sum(d24n(-2:2)*v_owner(ny - 3:ny + 1, iz, ix))
+    #:endcall upper_wall_rows
   end subroutine assemble_dpdy_boundaries
 
 END MODULE pressure_output
