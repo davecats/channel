@@ -397,6 +397,12 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
     USE ffts, only: free_fft
 #endif
     USE mpi_transpose, only: free_MPI, finalize_xcomm_nccl_contexts
+#ifdef HAVE_MPI
+    ! Without this, MPI_Finalize below resolves to the implicit external
+    ! mpi_finalize_ -- the old binding, whose ierror argument is mandatory --
+    ! and the zero-argument call makes it write through a garbage pointer.
+    USE mpi_f08, only: MPI_Finalize
+#endif
     IMPLICIT NONE
     if (disable_restart_write) then
       IF (has_terminal) WRITE (*, *) "End of time/iterations loop: restart write disabled for benchmark profiling at time ", time
