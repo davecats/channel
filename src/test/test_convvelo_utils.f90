@@ -2,9 +2,7 @@ module test_convvelo_utils
   use, intrinsic :: iso_c_binding
   use, intrinsic :: ieee_arithmetic
   use dnsdata, only: iproc, ierr, ny, nz, nx, nPhi, ny0, nyN, nx0, nxN, V, read_restart_file
-#ifdef HAVE_MPI
   use mpi_f08
-#endif
   implicit none
 
   private
@@ -66,9 +64,7 @@ contains
     integer(C_INT) :: global_nfail
 
     global_nfail = nfail
-#ifdef HAVE_MPI
     call MPI_Allreduce(nfail, global_nfail, 1, MPI_INTEGER, MPI_SUM, MPI_COMM_WORLD, ierr)
-#endif
 
     if (iproc == 0) then
       if (global_nfail == 0) then
@@ -78,9 +74,7 @@ contains
       end if
     end if
 
-#ifdef HAVE_MPI
     if (global_nfail /= 0) call MPI_ABORT(MPI_COMM_WORLD, 1, ierr)
-#endif
   end subroutine finish_convvelo_test
 
   subroutine compute_reference_mean_profiles(mean_profiles)
@@ -204,29 +198,18 @@ contains
       end do
     end do
 
-#ifdef HAVE_MPI
     call MPI_Allreduce(local_max_err, global_max_err, 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, ierr)
     call MPI_Allreduce(local_has_nan, global_has_nan, 1, MPI_LOGICAL, MPI_LOR, MPI_COMM_WORLD, ierr)
-#else
-    global_max_err = local_max_err
-    global_has_nan = local_has_nan
-#endif
 
     if (iproc == 0) write (*, '(A,": max_err=",ES12.4,", has_nan=",L1)') trim(name), global_max_err, global_has_nan
 
     if (global_has_nan .or. global_max_err >= tol_local) then
       nfail_local = nfail_local + 1
-#ifdef HAVE_MPI
       if (abs(local_max_err - global_max_err) < 1.0d-15) then
         write (*, '(A,": worst rank/iy/iz/ix = ",4(I0,1X))') trim(name), iproc, worst_iy, worst_iz, worst_ix
         write (*, '(A,": computed / reference = ",2("(",ES20.12,",",ES20.12,")",1X))') &
           trim(name), worst_computed, worst_reference
       end if
-#else
-      write (*, '(A,": worst iy/iz/ix = ",3(I0,1X))') trim(name), worst_iy, worst_iz, worst_ix
-      write (*, '(A,": computed / reference = ",2("(",ES20.12,",",ES20.12,")",1X))') &
-        trim(name), worst_computed, worst_reference
-#endif
     end if
   end subroutine compare_complex_fields
 
@@ -330,7 +313,6 @@ contains
     character(len=*), intent(in) :: filename
     integer(C_INT), intent(in) :: field_index
     complex(C_DOUBLE_COMPLEX), intent(out) :: ref(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-#ifdef HAVE_MPI
     type(MPI_File) :: fh
     type(MPI_Status) :: status
     type(MPI_Datatype) :: file_type, mem_type
@@ -364,23 +346,6 @@ contains
     call MPI_File_close(fh)
     call MPI_Type_free(file_type, ierror)
     call MPI_Type_free(mem_type, ierror)
-#else
-    integer :: io
-    integer(C_INT64_T) :: profile_bytes, field_bytes, pos_bytes
-
-    profile_bytes = int(16, C_INT64_T)*int(ny + 3, C_INT64_T)
-    field_bytes = int(16, C_INT64_T)*int(ny + 3, C_INT64_T)*int(2*nz + 1, C_INT64_T)*int(nx + 1, C_INT64_T)
-    pos_bytes = convvelo_file_header_bytes + int(n_convvelo_profile_header_slots + nPhi, C_INT64_T)*profile_bytes + &
-                int(field_index, C_INT64_T)*field_bytes + 1_C_INT64_T
-
-    open (unit=95, file=filename, form='unformatted', access='stream', status='old', action='read', iostat=io)
-    if (io /= 0) then
-      write (*, *) 'ERROR: could not open convvelo reference file: ', trim(filename)
-      stop 1
-    end if
-    read (95, pos=pos_bytes) ref
-    close (95)
-#endif
   end subroutine read_raw_stat_field_mpi
 
 end module test_convvelo_utils

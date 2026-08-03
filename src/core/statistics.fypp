@@ -36,13 +36,9 @@ contains
       call gather_full_y_line(ny, V(:, 0, 0, 1), mean_line_u)
       call gather_full_y_line(ny, V(:, 0, 0, 3), mean_line_w)
     end if
-#ifdef HAVE_MPI
     call roctxPush("MPI_Allreduce outstats_cfl")
     CALL MPI_Allreduce(cfl, runtime_global, 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD); cfl = 0; 
     call roctxPop("MPI_Allreduce outstats_cfl")
-#else
-    runtime_global = cfl
-#endif
     IF (cflmax > 0) deltat = cflmax/runtime_global
     IF (has_average) THEN
       dudy(1, 2) = -${at_upper_wall_real('d14n', 'mean_line_u')}$

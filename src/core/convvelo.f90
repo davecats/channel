@@ -476,10 +476,8 @@ contains
   subroutine spectral_field_to_real_x(rx)
     implicit none
     real(C_DOUBLE), intent(out) :: rx(:, :, ny0 - 2:)
-#ifdef HAVE_MPI
     type(MPI_Request) :: request
     type(MPI_Status) :: status
-#endif
     integer(C_INT) :: ix, iz, iy
 
     call IFT(VVdz(:, :, :, 1))
@@ -489,13 +487,11 @@ contains
       call pack_zTOx(VVdz(:, :, :, 1), sendbuf(:, 1))
       call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "zTOx convvelo_spectral_to_real")
     end if
-#ifdef HAVE_MPI
     if (.not. fft_transpose_is_local) then
       call roctxPush("MPI_Wait zTOx convvelo_spectral_to_real")
       call MPI_Wait(request, status, ierr)
       call roctxPop("MPI_Wait zTOx convvelo_spectral_to_real")
     end if
-#endif
     if (.not. fft_transpose_is_local) call unpack_zTOx(recvbuf(:, 1), VVdx(:, :, :, 1))
     !$omp target teams distribute parallel do collapse(3) &
     !$omp shared(VVdx, nx, nxd, nzB) private(ix, iz, iy)
@@ -513,10 +509,8 @@ contains
     implicit none
     real(C_DOUBLE), intent(in) :: rx(:, :, ny0 - 2:)
     complex(C_DOUBLE_COMPLEX), intent(out) :: field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-#ifdef HAVE_MPI
     type(MPI_Request) :: request
     type(MPI_Status) :: status
-#endif
     integer(C_INT) :: ix, iz, iy
 
     call HFT(rx, VVdx(:, :, :, 1))
@@ -526,13 +520,11 @@ contains
       call pack_xTOz(VVdx(:, :, :, 1), sendbuf(:, 1))
       call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "xTOz convvelo_real_to_spectral")
     end if
-#ifdef HAVE_MPI
     if (.not. fft_transpose_is_local) then
       call roctxPush("MPI_Wait xTOz convvelo_real_to_spectral")
       call MPI_Wait(request, status, ierr)
       call roctxPop("MPI_Wait xTOz convvelo_real_to_spectral")
     end if
-#endif
     if (.not. fft_transpose_is_local) call unpack_xTOz(recvbuf(:, 1), VVdz(:, :, :, 1))
     call FFT(VVdz(:, :, :, 1))
 
@@ -853,7 +845,6 @@ contains
     integer(C_INT64_T) :: header_sample_count
     complex(C_DOUBLE_COMPLEX), allocatable :: field_out(:, :, :)
 
-#ifdef HAVE_MPI
     type(MPI_File) :: fh
     type(MPI_Status) :: status
     type(MPI_Datatype) :: file_type, mem_type, profile_file_type, profile_mem_type
@@ -864,9 +855,6 @@ contains
     integer :: profile_sizes(ndims_profile), profile_subsizes(ndims_profile), profile_starts(ndims_profile)
     integer(C_INT) :: write_y0, write_yN, write_y_count, local_y_count
     integer(MPI_OFFSET_KIND) :: disp, field_bytes, profile_bytes, total_bytes
-#else
-    integer :: io
-#endif
 
     if (.not. convvelo_initialized) return
 
@@ -876,7 +864,6 @@ contains
     header_sample_count = n_mean_samples
     allocate (field_out(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
 
-#ifdef HAVE_MPI
     write_y0 = ny0
     write_yN = nyN
     if (ny0 == 1) write_y0 = -1_C_INT
@@ -956,27 +943,6 @@ contains
     call MPI_Type_free(mem_type, ierror)
     call MPI_Type_free(profile_file_type, ierror)
     call MPI_Type_free(profile_mem_type, ierror)
-#else
-    open (unit=99, file=trim(filename), form='unformatted', access='stream', status='replace', action='write', iostat=io)
-    if (io /= 0) then
-      write (*, *) 'ERROR: could not open convvelo output file: ', trim(filename)
-      stop 1
-    end if
-
-    write (99) header_times
-    write (99) header_sample_count
-    write (99) component_means(:, 1)
-    write (99) component_means(:, 2)
-    write (99) component_means(:, 3)
-    do iPhi = 1, nPhi
-      write (99) component_means(:, 3 + iPhi)
-    end do
-    do field_index = 1, n_convvelo_fields
-      call normalize_convvelo_field_for_output(field_index, field_out)
-      write (99) field_out
-    end do
-    close (99)
-#endif
     deallocate (field_out)
   end subroutine write_convvelo_raw_stats
 
@@ -1089,7 +1055,6 @@ contains
     end do
   end subroutine copy_convvelo_field_average
 
-#ifdef HAVE_MPI
   subroutine write_convvelo_profile_collective(fh, profile, profile_mem_type, status)
     implicit none
     type(MPI_File), intent(in) :: fh
@@ -1102,7 +1067,6 @@ contains
     if (has_average) write_count = 1
     call MPI_File_write_all(fh, profile, write_count, profile_mem_type, status)
   end subroutine write_convvelo_profile_collective
-#endif
 
   subroutine write_convvelo_field_layout(filename)
     implicit none

@@ -5,9 +5,7 @@ program test_convvelo_stats
   use pressure_output, only: free_pressure_output
   use driver, only: initialize
   use test_convvelo_utils
-#ifdef HAVE_MPI
   use mpi_f08
-#endif
   implicit none
 
   character(len=*), parameter :: config_file = "tests/convvelo/dns.in"
@@ -54,9 +52,7 @@ program test_convvelo_stats
   call free_pressure_output()
   call free_convvelo()
   call free_memory(.true.)
-#ifdef HAVE_MPI
   call MPI_Finalize()
-#endif
 
 contains
 

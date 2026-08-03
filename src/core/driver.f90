@@ -51,11 +51,7 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
     integer :: iPhi
     integer(C_INT) :: npxz_tuned
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
-#ifdef HAVE_MPI
     integer :: num_dev, dev, local_rank, num_dev_min, num_dev_max
-#else
-    integer :: num_dev, dev, local_rank
-#endif
 #endif
     logical :: run_solver, exit_after_autotune
     complex(C_DOUBLE_COMPLEX), allocatable :: zero_mode(:)
@@ -64,18 +60,12 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
     if (present(solveNS)) run_solver = solveNS
 
     ! Init MPI
-#ifdef HAVE_MPI
     CALL MPI_INIT(ierr)
     CALL MPI_COMM_RANK(MPI_COMM_WORLD, iproc, ierr)
     CALL MPI_COMM_SIZE(MPI_COMM_WORLD, nproc, ierr)
-#else
-    iproc = 0
-    nproc = 1
-#endif
 
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
     num_dev = omp_get_num_devices()
-#ifdef HAVE_MPI
     call MPI_Allreduce(num_dev, num_dev_min, 1, MPI_INTEGER, MPI_MIN, MPI_COMM_WORLD, ierr)
     call MPI_Allreduce(num_dev, num_dev_max, 1, MPI_INTEGER, MPI_MAX, MPI_COMM_WORLD, ierr)
     if (num_dev_min < 1 .or. num_dev_min /= num_dev_max) then
@@ -88,12 +78,6 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
       end if
       call MPI_Abort(MPI_COMM_WORLD, 1, ierr)
     end if
-#else
-    if (num_dev < 1) then
-      print *, 'ERROR: no OpenMP target devices are available'
-      error stop 'No OpenMP target devices are available'
-    end if
-#endif
     local_rank = mpi_local_rank_from_env()
     if (local_rank >= 0) then
       dev = mod(local_rank, num_dev)
@@ -123,9 +107,7 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
     call env_flag("CHANNEL_EXIT_AFTER_MPI_AUTOTUNE", exit_after_autotune)
     if (exit_after_autotune) then
       if (iproc == 0) print *, "CHANNEL_EXIT_AFTER_MPI_AUTOTUNE set; exiting after MPI autotune/configuration."
-#ifdef HAVE_MPI
       CALL MPI_FINALIZE(ierr)
-#endif
       stop
     end if
     call configure_convvelo(cfg)
@@ -397,12 +379,10 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
     USE ffts, only: free_fft
 #endif
     USE mpi_transpose, only: free_MPI, finalize_xcomm_nccl_contexts
-#ifdef HAVE_MPI
     ! Without this, MPI_Finalize below resolves to the implicit external
     ! mpi_finalize_ -- the old binding, whose ierror argument is mandatory --
     ! and the zero-argument call makes it write through a garbage pointer.
     USE mpi_f08, only: MPI_Finalize
-#endif
     IMPLICIT NONE
     if (disable_restart_write) then
       IF (has_terminal) WRITE (*, *) "End of time/iterations loop: restart write disabled for benchmark profiling at time ", time
@@ -426,9 +406,7 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
     CALL free_MPI()
     CALL free_memory(.TRUE.)
     call workspace_finalize()
-#ifdef HAVE_MPI
     CALL MPI_Finalize()
-#endif
   END SUBROUTINE finalize
 
   subroutine print_memory_line(label, n_floats)

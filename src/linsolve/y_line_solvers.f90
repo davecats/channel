@@ -13,18 +13,14 @@ module y_line_solvers
   use y_schur_solver, only: ys_schur_config, ys_schur_workspace, ys_schur_configure, &
                             ys_schur_prepare, ys_schur_release, ys_schur_solve_from_packed, &
                             YS_SCHUR_EXCHANGE_AUTO
-#ifdef HAVE_MPI
   use mpi_transpose, only: MPI_COMM_Y
   use y_pipeline_nccl, only: channel_comm_use_nccl, channel_comm_p2p_ensure, &
                              channel_comm_send, channel_comm_recv, channel_comm_sendrecv, &
                              channel_comm_cache, channel_comm_cache_reserve, channel_comm_cache_finalize
-#endif
   use roctx, only: roctxPush, roctxPop
   use byte_workspace, only: workspace_request, workspace_release, workspace_slice, workspace_align_offset
   use env_options, only: env_flag, env_int, env_int64
-#ifdef HAVE_MPI
   use mpi_f08
-#endif
 #ifdef HAVE_CUDA
   use cusparse
 #elif defined(HAVE_HIP)
@@ -119,9 +115,7 @@ module y_line_solvers
   integer(C_SIZE_T), save :: ys_batch_complex_cap = YS_BATCH_DEFAULT_COMPLEX_CAP
   logical, save :: ys_batch_complex_cap_initialized = .false.
   integer(C_INT), save :: ys_pipeline_timing_solve_id = 0_C_INT
-#ifdef HAVE_MPI
   type(channel_comm_cache), save :: ys_pipeline_nccl_contexts
-#endif
 
   complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_gpsv_matrix_store(:) => null(), ys_gpsv_rhs_store(:) => null()
   complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_gpsv_ds(:), ys_gpsv_dl(:), ys_gpsv_d(:), ys_gpsv_du(:), ys_gpsv_dw(:), ys_gpsv_x(:)
@@ -1320,11 +1314,7 @@ call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pas
     if (npy_grid == 1_C_INT) then
       call ys_solve_packed_pentadiagonal(active_n, nlines, "ys_pipelined_lu_local")
     else
-#ifdef HAVE_MPI
       call ys_solve_pipelined_lu_distributed(active_n, nlines, nbatches, batch_max_lines)
-#else
-      error stop "pipelined LU distributed solve requires MPI"
-#endif
     end if
 
     call ys_unpack_pipelined_solution(dst, active_n, nlines, nlines_z, nx_count, dst_row_base)
@@ -1363,7 +1353,6 @@ call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pas
     first_line = (batch - 1_C_INT)*base_count + min(batch - 1_C_INT, remainder) + 1_C_INT
   end subroutine ys_pipeline_batch_range
 
-#ifdef HAVE_MPI
   subroutine ys_solve_pipelined_lu_distributed(active_n, nlines, nbatches, batch_max_lines)
     implicit none
     integer(C_INT), intent(in) :: active_n, nlines, nbatches, batch_max_lines
@@ -1784,10 +1773,8 @@ call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pas
 
   subroutine ys_finalize_nccl_contexts()
     implicit none
-#ifdef HAVE_MPI
 
     call channel_comm_cache_finalize(ys_pipeline_nccl_contexts)
-#endif
   end subroutine ys_finalize_nccl_contexts
 
   subroutine ys_exchange_pipelined_solution_halos(active_n, nlines)
@@ -2112,7 +2099,6 @@ call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pas
     end do
     !$omp end target teams distribute parallel do
   end subroutine ys_pack_backward_state
-#endif
 
   subroutine ys_unpack_pipelined_solution(dst, active_n, nlines, nlines_z, nx_count, dst_row_base)
     implicit none
@@ -2169,7 +2155,6 @@ call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pas
 
   subroutine ys_pack_reduced_leaf_rows()
     implicit none
-#ifdef HAVE_MPI
     integer(C_INT) :: arity, nlines, base_count, remainder
     integer(C_INT) :: dest, local_line, irow, first_line, line_count, global_line, offset
 
@@ -2198,14 +2183,10 @@ call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pas
     end do
     !$omp end target teams distribute parallel do
     call roctxPop("ys_schur_pack_leaf_rows")
-#else
-    error stop "ys_pack_reduced_leaf_rows requires MPI"
-#endif
   end subroutine ys_pack_reduced_leaf_rows
 
   subroutine ys_unpack_reduced_leaf_values()
     implicit none
-#ifdef HAVE_MPI
     integer(C_INT) :: arity, nlines, base_count, remainder, row0
     integer(C_INT) :: src, local_line, k, first_line, line_count, global_line, offset
 
@@ -2240,9 +2221,6 @@ call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pas
     end do
     !$omp end target teams distribute parallel do
     call roctxPop("ys_schur_unpack_leaf_values")
-#else
-    error stop "ys_unpack_reduced_leaf_values requires MPI"
-#endif
   end subroutine ys_unpack_reduced_leaf_values
 
   ! Pentadiagonal LU factorization of one interleaved line.

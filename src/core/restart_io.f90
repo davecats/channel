@@ -15,10 +15,8 @@ module restart_io
   use, intrinsic :: iso_c_binding
   use channel_grid
   use roctx, only: roctxPush, roctxPop
-#ifdef HAVE_MPI
   use mpi_transpose, only: vel_read_type, vel_field_type, writeview_type, owned2write_type
   use mpi_f08
-#endif
 
   implicit none
   private
@@ -39,7 +37,6 @@ contains
     integer(C_INT) :: r_nx, r_ny, r_nz
     real(C_DOUBLE) :: r_alfa0, r_beta0, r_ni, r_a, r_ymin, r_ymax
     real(C_DOUBLE) :: rn(1:3)
-#ifdef HAVE_MPI
     INTEGER(MPI_OFFSET_KIND) :: disp = 3*C_INT + 7*C_DOUBLE
     TYPE(MPI_File) :: fh
 
@@ -64,7 +61,6 @@ contains
         STOP
       END IF
     ELSE
-#endif
       IF (has_terminal) PRINT *, "Restart file "//filename//" not found"
       R = 0
       IF (has_terminal) WRITE (*, *) "Generating initial field..."
@@ -86,9 +82,7 @@ contains
           END DO
         END DO
       END IF
-#ifdef HAVE_MPI
     END IF
-#endif
     CLOSE (120)
   END SUBROUTINE restart_read
 
@@ -101,7 +95,6 @@ contains
     complex(C_DOUBLE_COMPLEX), intent(in) :: R(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3 + nPhi)
     character(len=*), intent(in) :: filename
     ! mpi stuff
-#ifdef HAVE_MPI
     TYPE(MPI_File) :: fh
     INTEGER(MPI_OFFSET_KIND) :: disp
     TYPE(MPI_Status) :: status
@@ -126,7 +119,6 @@ contains
 
     ! close file
     call MPI_File_close(fh)
-#endif
   END SUBROUTINE restart_write
 
 end module restart_io

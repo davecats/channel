@@ -3,9 +3,7 @@ program test_convvelo_mpi_io
   use dnsdata, only: free_memory
   use driver, only: initialize
   use pressure_output, only: free_pressure_output
-#ifdef HAVE_MPI
   use mpi_f08
-#endif
   implicit none
   character(len=256) :: config_file, restart_file
 
@@ -24,7 +22,5 @@ program test_convvelo_mpi_io
   call free_convvelo()
   call free_pressure_output()
   call free_memory(.true.)
-#ifdef HAVE_MPI
   call MPI_Finalize()
-#endif
 end program test_convvelo_mpi_io

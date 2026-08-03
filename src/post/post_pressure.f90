@@ -8,9 +8,7 @@ PROGRAM post_pressure
 #ifdef HAVE_FFTW
   USE ffts, ONLY: free_fft, VVdz, VVdx, rVVdx
 #endif
-#ifdef HAVE_MPI
   USE mpi_f08
-#endif
   IMPLICIT NONE
 
   CHARACTER(len=*), PARAMETER :: config_file = 'dns.in'
@@ -59,9 +57,7 @@ PROGRAM post_pressure
   call free_fft()
 #endif
   call free_memory(.FALSE.)
-#ifdef HAVE_MPI
   call MPI_Finalize()
-#endif
 
 CONTAINS
 
@@ -120,7 +116,6 @@ CONTAINS
   SUBROUTINE write_field_mpi(filename, field)
     CHARACTER(len=*), INTENT(IN) :: filename
     COMPLEX(C_DOUBLE_COMPLEX), INTENT(IN) :: field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-#ifdef HAVE_MPI
     TYPE(MPI_File) :: fh
     TYPE(MPI_Status) :: status
     TYPE(MPI_Datatype) :: file_type, mem_type
@@ -149,12 +144,6 @@ CONTAINS
     call MPI_File_close(fh)
     call MPI_Type_free(file_type, ierror)
     call MPI_Type_free(mem_type, ierror)
-#else
-    INTEGER :: io
-    open (newunit=io, file=filename, form='unformatted', access='stream', status='replace', action='write')
-    write (io) field
-    close (io)
-#endif
   END SUBROUTINE write_field_mpi
 
   INTEGER(C_INT) FUNCTION process_id()

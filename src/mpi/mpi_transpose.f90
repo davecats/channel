@@ -32,9 +32,7 @@
 
     USE, intrinsic :: iso_c_binding
     USE, intrinsic :: iso_fortran_env
-#ifdef HAVE_MPI
     USE mpi_f08
-#endif
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
     use omp_lib
 #endif
@@ -45,9 +43,7 @@
 
     IMPLICIT NONE
 
-#ifdef HAVE_MPI
     TYPE(MPI_Comm) :: MPI_CART_COMM, MPI_COMM_X, MPI_COMM_Y
-#endif
 #if defined(HAVE_HIP)
     complex(C_DOUBLE_COMPLEX), pointer:: sendbuf(:, :), recvbuf(:, :)
     complex(C_DOUBLE_COMPLEX), pointer:: ycomm_sendbuf(:), ycomm_recvbuf(:)
@@ -77,9 +73,7 @@
 
     logical, save :: fft_transpose_is_local
     logical, save :: mpi_transpose_initialized = .false.
-#ifdef HAVE_MPI
     TYPE(MPI_Datatype), save :: writeview_type, owned2write_type, vel_read_type, vel_field_type
-#endif
     type(channel_comm_cache), save :: xcomm_nccl_contexts
 
   CONTAINS
@@ -188,7 +182,6 @@
       ycomm_recv_capacity = max(1_C_INT, recv_elems)
     end subroutine ensure_ycomm_buffers
 
-#ifdef HAVE_MPI
     subroutine yslab_transpose_to_full(field, slab, ny, nz, nlines, nlines_z, include_physical_ghosts)
       implicit none
       integer(C_INT), intent(in) :: ny, nz, nlines, nlines_z
@@ -379,7 +372,6 @@
       !$omp end target teams distribute parallel do
       call roctxPop("yslab_from_full unpack")
     end subroutine yslab_transpose_from_full
-#endif
 
     subroutine yslab_copy_to_full(field, slab, ny, nz, first_line, line_count, nlines_z)
       implicit none
@@ -585,12 +577,8 @@
       complex(C_DOUBLE_COMPLEX), intent(in) :: local_line(ny0 - 2:nyN + 2)
       complex(C_DOUBLE_COMPLEX), intent(out) :: full_line(-1:ny + 1)
 
-#ifdef HAVE_MPI
       complex(C_DOUBLE_COMPLEX) :: send_line(-1:ny + 1)
       integer(C_INT) :: send_start, send_end
-#else
-      integer(C_INT) :: send_start, send_end
-#endif
 
       send_start = ny0
       send_end = nyN
@@ -598,7 +586,6 @@
       if (ipy == 0) send_start = -1
       if (ipy == npy_grid - 1) send_end = ny + 1
 
-#ifdef HAVE_MPI
       send_line = (0.0d0, 0.0d0)
 
       send_line(send_start:send_end) = local_line(send_start:send_end)
@@ -606,9 +593,6 @@
       call roctxPush("MPI_Allreduce gather_full_y_line")
       call MPI_Allreduce(send_line, full_line, ny + 3, MPI_DOUBLE_COMPLEX, MPI_SUM, MPI_COMM_Y, ierr)
       call roctxPop("MPI_Allreduce gather_full_y_line")
-#else
-      full_line(-1:ny + 1) = local_line(-1:ny + 1)
-#endif
     END SUBROUTINE gather_full_y_line
 
     SUBROUTINE allgather_y_device_complex_rows(send_rows, recv_rows, nrows, ncols, marker)
@@ -616,13 +600,8 @@
       complex(C_DOUBLE_COMPLEX), intent(inout) :: recv_rows(:, :, :)
       integer(C_INT), intent(in) :: nrows, ncols
       character(len=*), intent(in) :: marker
-#ifndef HAVE_MPI
-      integer(C_INT) :: irow, icol
-#else
       integer(C_INT) :: send_elems, recv_elems, src, dst_col, irow, icol
-#endif
 
-#ifdef HAVE_MPI
       send_elems = nrows*ncols
       recv_elems = send_elems*npy_grid
       call ensure_ycomm_buffers(send_elems, recv_elems)
@@ -654,16 +633,6 @@
         end do
       end do
       !$omp end target teams distribute parallel do
-#else
-      !$omp target teams distribute parallel do collapse(2) default(none) &
-      !$omp shared(send_rows, recv_rows, nrows, ncols) private(irow, icol)
-      do icol = 1, ncols
-        do irow = 1, nrows
-          recv_rows(irow, icol, 1) = send_rows(irow, icol)
-        end do
-      end do
-      !$omp end target teams distribute parallel do
-#endif
     END SUBROUTINE allgather_y_device_complex_rows
 
     !------- Divide the problem in pencils ---------!
@@ -684,7 +653,6 @@
       ! Define which process write on screen
       has_terminal = (iproc == 0)
       npy_grid = npy_requested
-#ifdef HAVE_MPI
       if (npy_grid < 1) then
         if (has_terminal) print *, "Error: npy must be >= 1."
         call MPI_Abort(MPI_COMM_WORLD, 1, ierror)
@@ -696,21 +664,16 @@
         end if
         call MPI_Abort(MPI_COMM_WORLD, 1, ierror)
       end if
-#else
-      if (npy_grid /= 1) error stop "init_MPI: npy > 1 requires MPI"
-#endif
       npxz = nproc/npy_grid
       ipy = iproc/npxz
       ipxz = mod(iproc, npxz)
 
-#ifdef HAVE_MPI
       color = ipy
       key = ipxz
       call MPI_Comm_split(MPI_COMM_WORLD, color, key, MPI_COMM_X, ierr)
       color = ipxz
       key = ipy
       call MPI_Comm_split(MPI_COMM_WORLD, color, key, MPI_COMM_Y, ierr)
-#endif
       ! Calculate domain division in wall-normal direction.
       ! ny0:nyN are the only persistent y-partition variables.
       ny0 = 1 + ipy*(ny - 1)/npy_grid
@@ -737,7 +700,6 @@
       has_average = (nx0 == 0)
       !$omp target update to(npy_grid, npxz, ipy, ipxz, nx0, nxN, nxB, nz0, nzN, nzB, ny0, nyN)
       fft_transpose_is_local = (nzB == nzd)
-#ifdef HAVE_MPI
 #ifdef mpiverbose
       if (.not. quiet_verbose) then
         DO i = 0, nproc - 1
@@ -805,15 +767,12 @@
       array_of_starts = [miny_local - (ny0 - 2), 0, 0, 0] ! starting position of each component; !!! IT'S ZERO BASED AND WRT TO ARRAY IN MEMORY !!!
     CALL MPI_Type_create_subarray(ndims, array_of_sizes, array_of_subsizes, array_of_starts, MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, owned2write_type, ierror)
       CALL MPI_Type_commit(owned2write_type, ierror)
-#endif
       mpi_transpose_initialized = .true.
     END SUBROUTINE init_MPI
 
     subroutine free_MPI()
       implicit none
-#ifdef HAVE_MPI
       integer :: ierror
-#endif
 
       if (.not. mpi_transpose_initialized) return
 
@@ -851,7 +810,6 @@
       ycomm_send_capacity = 0
       ycomm_recv_capacity = 0
 
-#ifdef HAVE_MPI
       call finalize_xcomm_nccl_contexts()
       call MPI_Type_free(writeview_type, ierror)
       call MPI_Type_free(owned2write_type, ierror)
@@ -861,7 +819,6 @@
       call MPI_Comm_free(MPI_COMM_Y, ierror)
       MPI_COMM_X = MPI_COMM_NULL
       MPI_COMM_Y = MPI_COMM_NULL
-#endif
       mpi_transpose_initialized = .false.
     end subroutine free_MPI
 

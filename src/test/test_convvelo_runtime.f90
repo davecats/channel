@@ -6,9 +6,7 @@ program test_convvelo_runtime
   use pressure_output, only: free_pressure_output
   use driver, only: initialize, timeloop
   use test_convvelo_utils
-#ifdef HAVE_MPI
   use mpi_f08
-#endif
   implicit none
 
   character(len=32) :: mode
@@ -142,8 +140,6 @@ program test_convvelo_runtime
   if (convvelo_enabled) call free_convvelo()
   call free_pressure_output()
   call free_memory(.true.)
-#ifdef HAVE_MPI
   call MPI_Finalize()
-#endif
 
 end program test_convvelo_runtime

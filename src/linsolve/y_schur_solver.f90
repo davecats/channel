@@ -4,12 +4,10 @@ module y_schur_solver
 
   use, intrinsic :: iso_c_binding
   use roctx, only: roctxPush, roctxPop
-#ifdef HAVE_MPI
   use channel_grid, only: ipy
   use mpi_transpose, only: MPI_COMM_Y, ensure_ycomm_buffers, ycomm_sendbuf, ycomm_recvbuf
   use y_pipeline_nccl, only: channel_comm_alltoall_complex, channel_comm_context_reset
   use mpi_f08
-#endif
 
   implicit none
   private
@@ -67,16 +65,11 @@ module y_schur_solver
   integer(C_INT), save :: s_prepared_exchange_mode = -1_C_INT
   logical, save :: s_prepared_comm_stats = .false.
 
-#ifdef HAVE_MPI
   type(MPI_Comm), allocatable, save :: s_level_comm(:)
   logical, allocatable, save :: s_level_comm_active(:)
   type(c_ptr), allocatable, save :: s_level_nccl_ctx(:)
   integer(C_INT), allocatable, save :: s_level_nccl_key_npy(:), s_level_nccl_key_span(:)
   integer(C_INT), allocatable, save :: s_level_nccl_key_arity(:), s_level_nccl_key_parent(:)
-#else
-  integer(C_INT), parameter :: ipy = 0_C_INT
-  complex(C_DOUBLE_COMPLEX), allocatable, save :: ycomm_sendbuf(:), ycomm_recvbuf(:)
-#endif
 
 #if defined(HAVE_CUDA)
   !$omp declare target(ys_schur_factor_banded_complex_fixed)
@@ -144,11 +137,8 @@ contains
   subroutine ys_schur_release(ws)
     implicit none
     type(ys_schur_workspace), intent(inout) :: ws
-#ifdef HAVE_MPI
     integer :: ilevel, ierr_local
-#endif
 
-#ifdef HAVE_MPI
     if (allocated(s_level_comm)) then
       do ilevel = 1, size(s_level_comm)
         if (s_level_comm_active(ilevel)) then
@@ -160,7 +150,6 @@ contains
       end do
       deallocate (s_level_comm, s_level_comm_active)
     end if
-#endif
 
     if (allocated(s_rows)) then
       !$omp target exit data map(delete: s_rows, s_recover_basis, s_values)
@@ -216,7 +205,6 @@ contains
     schur_prepared_matches = .true.
   end function schur_prepared_matches
 
-#ifdef HAVE_MPI
   subroutine ensure_schur_nccl_context_slots(pass_count)
     implicit none
     integer(C_INT), intent(in) :: pass_count
@@ -283,11 +271,9 @@ contains
     s_level_nccl_key_arity(ilevel) = arity
     s_level_nccl_key_parent(ilevel) = parent_group
   end subroutine prepare_schur_nccl_context_slot
-#endif
 
   subroutine ys_schur_finalize_contexts()
     implicit none
-#ifdef HAVE_MPI
     integer :: ilevel
 
     if (allocated(s_level_nccl_ctx)) then
@@ -300,7 +286,6 @@ contains
     if (allocated(s_level_nccl_key_span)) deallocate (s_level_nccl_key_span)
     if (allocated(s_level_nccl_key_arity)) deallocate (s_level_nccl_key_arity)
     if (allocated(s_level_nccl_key_parent)) deallocate (s_level_nccl_key_parent)
-#endif
   end subroutine ys_schur_finalize_contexts
 
   subroutine ys_schur_prepare(ws, cfg, nlines, npy_count)
@@ -373,14 +358,10 @@ contains
     s_value_send_elems = 0_C_INT
     s_value_recv_elems = 0_C_INT
 
-#ifdef HAVE_MPI
     allocate (s_level_comm(ws%pass_count), s_level_comm_active(ws%pass_count))
     s_level_comm = MPI_COMM_NULL
     s_level_comm_active = .false.
     call ensure_schur_nccl_context_slots(ws%pass_count)
-#else
-    error stop "distributed y-Schur requires MPI"
-#endif
 
     max_owned = 1_C_INT
     max_send_elems = 0_C_INT
@@ -449,7 +430,6 @@ contains
       max_send_elems = max(max_send_elems, s_row_send_elems(ilevel), s_value_send_elems(ilevel))
       max_recv_elems = max(max_recv_elems, s_row_recv_elems(ilevel), s_value_recv_elems(ilevel))
 
-#ifdef HAVE_MPI
       call MPI_Comm_split(MPI_COMM_Y, int(parent_group*child_span + child_pos), int(child_id), &
                           s_level_comm(ilevel), ierr_local)
       if (ierr_local /= MPI_SUCCESS) error stop "MPI_Comm_split y-Schur level communicator failed"
@@ -457,15 +437,12 @@ contains
       call MPI_Comm_size(s_level_comm(ilevel), comm_size, ierr_local)
       if (ierr_local /= MPI_SUCCESS) error stop "MPI_Comm_size y-Schur level communicator failed"
       if (comm_size /= int(s_level_arity(ilevel))) error stop "unexpected y-Schur dense communicator size"
-#endif
 
       prev_first = s_level_owned_first(ilevel)
       prev_count = s_level_owned_count(ilevel)
     end do
 
-#ifdef HAVE_MPI
     call ensure_ycomm_buffers(max(1_C_INT, max_send_elems), max(1_C_INT, max_recv_elems))
-#endif
 
     allocate (s_rows(YS_SCHUR_ROW_WIDTH, max_owned, ws%pass_count))
     allocate (s_recover_basis(4*max_arity, 5, max_owned, ws%pass_count))
@@ -533,7 +510,6 @@ contains
   subroutine ys_schur_exchange_rows(ilevel)
     implicit none
     integer, intent(in) :: ilevel
-#ifdef HAVE_MPI
     integer :: ierr_local
     real(C_DOUBLE) :: comm_t0, elapsed
 
@@ -574,15 +550,11 @@ contains
     else
       error stop "internal error: nonuniform y-Schur Alltoallv path disabled"
     end if
-#else
-    error stop "ys_schur_exchange_rows requires MPI"
-#endif
   end subroutine ys_schur_exchange_rows
 
   subroutine ys_schur_exchange_values(ilevel)
     implicit none
     integer, intent(in) :: ilevel
-#ifdef HAVE_MPI
     integer :: ierr_local
     real(C_DOUBLE) :: comm_t0, elapsed
 
@@ -607,9 +579,6 @@ contains
                                       s_value_send_elems(ilevel), s_value_recv_elems(ilevel), elapsed)
     end if
     call roctxPop("channel_comm_alltoall ys_schur_values")
-#else
-    error stop "ys_schur_exchange_values requires MPI"
-#endif
   end subroutine ys_schur_exchange_values
 
   subroutine ys_schur_compose_level(ilevel, solve_redundant)
@@ -913,7 +882,6 @@ contains
     first_item = rank*base_count + min(rank, remainder) + 1_C_INT
   end subroutine ys_schur_split_range
 
-#ifdef HAVE_MPI
   subroutine ys_schur_report_comm_stats(label, comm, send_elems, recv_elems, elapsed)
     implicit none
     character(*), intent(in) :: label
@@ -934,7 +902,6 @@ contains
       trim(label), ipy, comm_rank, comm_size, local_send_bytes/1.0e6_C_DOUBLE, local_recv_bytes/1.0e6_C_DOUBLE, &
       elapsed*1.0e3_C_DOUBLE
   end subroutine ys_schur_report_comm_stats
-#endif
 
   subroutine ys_schur_factor_banded_complex_fixed(a, n)
     implicit none

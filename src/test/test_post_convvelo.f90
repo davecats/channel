@@ -5,9 +5,7 @@ program test_post_convvelo
   use pressure_output, only: free_pressure_output
   use driver, only: initialize
   use test_convvelo_utils
-#ifdef HAVE_MPI
   use mpi_f08
-#endif
   implicit none
 
   character(len=256) :: config_file, restart_file, generated_file
@@ -76,8 +74,6 @@ program test_post_convvelo
   call free_convvelo()
   call free_pressure_output()
   call free_memory(.false.)
-#ifdef HAVE_MPI
   call MPI_Finalize()
-#endif
 
 end program test_post_convvelo

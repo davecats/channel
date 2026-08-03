@@ -10,9 +10,7 @@ program post_convvelo
 #ifdef HAVE_FFTW
   use ffts, only: free_fft, VVdz, VVdx, rVVdx
 #endif
-#ifdef HAVE_MPI
   use mpi_f08
-#endif
   implicit none
 
   character(len=*), parameter :: config_file = "dns.in"
@@ -60,9 +58,7 @@ program post_convvelo
   call free_fft()
 #endif
   call free_memory(.false.)
-#ifdef HAVE_MPI
   call MPI_Finalize()
-#endif
 
 contains
 

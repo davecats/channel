@@ -27,9 +27,6 @@ program test_y_reduced_known_good_local_dst
   integer(C_INT) :: ix, iz, iy, iline
   integer(C_INT) :: global_x, global_z
 
-#ifndef HAVE_MPI
-  error stop "test_y_reduced_known_good_local_dst requires MPI"
-#else
 
   call MPI_Init(ierr)
   call MPI_Comm_rank(MPI_COMM_WORLD, iproc, ierr)
@@ -163,7 +160,6 @@ program test_y_reduced_known_good_local_dst
 
   call MPI_Finalize()
 
-#endif
 
 contains
 

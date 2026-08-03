@@ -4,9 +4,7 @@ program test_pressure_dpdy
   use dnsdata, only: iproc, ierr, ny, nz, nx, ny0, nyN, nx0, nxN, free_memory
   use pressure_output, only: compute_pressure_output, free_pressure_output
   use driver, only: initialize
-#ifdef HAVE_MPI
   use mpi_f08
-#endif
   implicit none
 
   character(len=256) :: restart_in, config_file
@@ -100,7 +98,6 @@ program test_pressure_dpdy
     write (*, *) 'NaN in dpdy   = ', global_has_nan_dpdy
   end if
 
-#ifdef HAVE_MPI
   if (abs(local_max_err_p - global_max_err_p) < 1.0d-15) then
     write (*, *) 'Worst p error rank/iy/iz/ix = ', iproc, max_iy_p, max_iz_p, max_ix_p
     write (*, *) 'Computed p / ref p          = ', max_p_val, max_p_ref
@@ -109,12 +106,6 @@ program test_pressure_dpdy
     write (*, *) 'Worst dpdy error rank/iy/iz/ix = ', iproc, max_iy_dpdy, max_iz_dpdy, max_ix_dpdy
     write (*, *) 'Computed dpdy / ref dpdy       = ', max_dpdy_val, max_dpdy_ref
   end if
-#else
-  write (*, *) 'Worst p error iy/iz/ix = ', max_iy_p, max_iz_p, max_ix_p
-  write (*, *) 'Computed p / ref p     = ', max_p_val, max_p_ref
-  write (*, *) 'Worst dpdy error iy/iz/ix = ', max_iy_dpdy, max_iz_dpdy, max_ix_dpdy
-  write (*, *) 'Computed dpdy / ref dpdy   = ', max_dpdy_val, max_dpdy_ref
-#endif
 
   if (iproc == 0) then
     write (*, *) 'Sample p(:,0,0) computed/refo at iy=0,1,8,15,16 = '
@@ -136,16 +127,12 @@ program test_pressure_dpdy
     write (*, *) 'Regression test PASSED'
   else
     write (*, *) 'Regression test FAILED'
-#ifdef HAVE_MPI
     call MPI_ABORT(MPI_COMM_WORLD, 1, ierr)
-#endif
   end if
 
   call free_pressure_output()
   call free_memory(.FALSE.)
-#ifdef HAVE_MPI
   call MPI_Finalize()
-#endif
 
 contains
 
@@ -154,7 +141,6 @@ contains
     implicit none
     character(len=*), intent(in) :: filename
     complex(C_DOUBLE_COMPLEX), intent(out) :: ref(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-#ifdef HAVE_MPI
     type(MPI_File) :: fh
     type(MPI_Status) :: status
     type(MPI_Datatype) :: file_type, mem_type
@@ -182,16 +168,6 @@ contains
     call MPI_File_close(fh)
     call MPI_Type_free(file_type, ierror)
     call MPI_Type_free(mem_type, ierror)
-#else
-    integer :: io
-    open (unit=99, file=filename, form='unformatted', access='stream', status='old', iostat=io)
-    if (io /= 0) then
-      write (*, *) 'ERROR: could not open reference field: ', trim(filename)
-      stop 1
-    end if
-    read (99) ref
-    close (99)
-#endif
   end subroutine read_reference_field_mpi
 
 end program test_pressure_dpdy
