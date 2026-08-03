@@ -1,0 +1,105 @@
+#! Closing a banded wall-normal system at a physical boundary.
+#!
+#! Every wall-normal problem here is pentadiagonal on the interior unknowns
+#! x(1:n-1) plus four closure rows: at each wall, one row enforcing the
+#! physical condition and one for the ghost node just outside it.  Reducing
+#! that to a system the pentadiagonal solvers can take is always the same
+#! three steps, whatever the operator:
+#!
+#!   1. fold  -- combine the ghost row into the wall row, so the wall row no
+#!               longer references the ghost unknown.  The folded row spans
+#!               (-1:2) at the lower wall and (-2:1) at the upper one.
+#!   2. eliminate -- use the ghost row and the folded wall row to clear the
+#!               out-of-band entries from the first two and last two interior
+#!               rows.  After this the interior system is purely pentadiagonal.
+#!   3. reconstruct -- once the interior is solved, back out x(0), x(-1) and
+#!               x(n), x(n+1) from the same two rows.
+#!
+#! Steps 1 and 2 are defined here once and expanded at both call sites: the
+#! batched per-mode kernels in channel_equations, and the single-line host
+#! solver in compact_line_solvers.  fypp rather than procedures because the
+#! batched site expands inside an !$omp target region, and device-callable
+#! procedures cannot cross a module boundary.
+#!
+#! Step 3 is deliberately NOT here.  The two implementations spell it
+#! differently -- the host one as a - sum(b), the batched one as
+#! a - b1 - b2 - b3 -- which are not the same in floating point, so giving
+#! them one definition would change results.
+#!
+#! Every macro below assumes the caller has a scratch `fac` in scope -- real
+#! where the rows are real, complex where they are complex -- and the fold
+#! macros an integer loop variable `ib`.
+#!
+#! Arguments are the *text* of the caller's own expressions, so each site keeps
+#! its own storage: the batched site names its per-mode workspace with the
+#! (iz, ix) subscripts already attached, the host site names plain locals.  The
+#! fold macros additionally take `sfx`, the trailing subscripts to append after
+#! the band index, because they index it with a loop variable.  This is what
+#! lets both sites expand to exactly the code they had before -- in particular
+#! the batched kernels are byte-for-byte unchanged, so no new temporaries and
+#! no new memory traffic appear in the hot path.
+
+#! ---- step 1: fold the ghost row into the wall row --------------------
+#!
+#! out_eq(-1:2) <- eq0 with the ghost row scaled out; out_rhs likewise.
+#! The loop is written out rather than sliced on purpose: expressing it as an
+#! array assignment slows the nvhpc kernel absurdly.
+#:def fold_ghost_into_lower_wall(out_eq, out_rhs, eq0, eqm1, rhs_wall, rhs_ghost, sfx='')
+${out_rhs}$ = ${rhs_wall}$ - ${rhs_ghost}$*${eq0}$(-2${sfx}$)/${eqm1}$(-2${sfx}$)
+do ib = -1, 2
+  ${out_eq}$(ib${sfx}$) = ${eq0}$(ib${sfx}$) - ${eqm1}$(ib${sfx}$)*${eq0}$(-2${sfx}$)/${eqm1}$(-2${sfx}$)
+end do
+#:enddef
+
+#! out_eq(-2:1) <- eqn with the ghost row scaled out; out_rhs likewise.
+#:def fold_ghost_into_upper_wall(out_eq, out_rhs, eqn, eqnp1, rhs_wall, rhs_ghost, sfx='')
+${out_rhs}$ = ${rhs_wall}$ - ${rhs_ghost}$*${eqn}$(2${sfx}$)/${eqnp1}$(2${sfx}$)
+do ib = -2, 1
+  ${out_eq}$(ib${sfx}$) = ${eqn}$(ib${sfx}$) - ${eqnp1}$(ib${sfx}$)*${eqn}$(2${sfx}$)/${eqnp1}$(2${sfx}$)
+end do
+#:enddef
+
+#! ---- step 2: clear the out-of-band entries from the interior rows ----
+#!
+#! First interior row: it reaches the ghost node and the wall, so both rows
+#! come out of it.  row(-2:2) and rhs are updated in place.  ghost_diag is the
+#! (-2) entry of the ghost row, ghost_row the whole of it.
+#:def eliminate_lower_first_row(row, rhs, ghost_diag, ghost_row, rhs_ghost, eq0, rhs0)
+fac = ${row}$(-2)/${ghost_diag}$
+${rhs}$ = ${rhs}$ - ${rhs_ghost}$*fac
+${row}$ = ${row}$ - ${ghost_row}$*fac
+${row}$(-2) = 0.0d0
+fac = ${row}$(-1)/${eq0}$(-1)
+${rhs}$ = ${rhs}$ - ${rhs0}$*fac
+${row}$(-1:2) = ${row}$(-1:2) - ${eq0}$*fac
+${row}$(-1) = 0.0d0
+#:enddef
+
+#! Second interior row: reaches the wall only.
+#:def eliminate_lower_second_row(row, rhs, eq0, rhs0)
+fac = ${row}$(-2)/${eq0}$(-1)
+${rhs}$ = ${rhs}$ - ${rhs0}$*fac
+${row}$(-2:1) = ${row}$(-2:1) - ${eq0}$(-1:2)*fac
+${row}$(-2) = 0.0d0
+#:enddef
+
+#! Second-to-last interior row: reaches the wall only.
+#:def eliminate_upper_second_last_row(row, rhs, eqn, rhsn)
+fac = ${row}$(2)/${eqn}$(1)
+${rhs}$ = ${rhs}$ - ${rhsn}$*fac
+${row}$(-1:2) = ${row}$(-1:2) - ${eqn}$(-2:1)*fac
+${row}$(2) = 0.0d0
+#:enddef
+
+#! Last interior row: reaches the wall and the ghost node.  ghost_diag is the
+#! (2) entry of the ghost row, ghost_row the whole of it.
+#:def eliminate_upper_last_row(row, rhs, ghost_diag, ghost_row, rhs_ghost, eqn, rhsn)
+fac = ${row}$(2)/${ghost_diag}$
+${rhs}$ = ${rhs}$ - ${rhs_ghost}$*fac
+${row}$ = ${row}$ - ${ghost_row}$*fac
+${row}$(2) = 0.0d0
+fac = ${row}$(1)/${eqn}$(1)
+${rhs}$ = ${rhs}$ - ${rhsn}$*fac
+${row}$(-2:1) = ${row}$(-2:1) - ${eqn}$*fac
+${row}$(1) = 0.0d0
+#:enddef

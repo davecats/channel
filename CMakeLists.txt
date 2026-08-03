@@ -78,7 +78,9 @@ if(NOT FYPP_EXECUTABLE)
 endif()
 
 # Re-expand whenever any shared definition file changes, not just the .fypp itself.
-file(GLOB CHANNEL_FYPP_INCLUDES "${CHANNEL_SOURCE_DIR}/core/*.fypph")
+file(GLOB CHANNEL_FYPP_INCLUDES
+    "${CHANNEL_SOURCE_DIR}/core/*.fypph"
+    "${CHANNEL_SOURCE_DIR}/linsolve/*.fypph")
 
 function(channel_fypp_generate out_var)
     set(generated)
@@ -89,6 +91,7 @@ function(channel_fypp_generate out_var)
             OUTPUT "${outfile}"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/generated"
             COMMAND ${FYPP_EXECUTABLE} -I "${CHANNEL_SOURCE_DIR}/core"
+                    -I "${CHANNEL_SOURCE_DIR}/linsolve"
                     --line-length=132 --folding-mode=smart
                     "${infile}" "${outfile}"
             DEPENDS "${infile}" ${CHANNEL_FYPP_INCLUDES}
@@ -103,6 +106,7 @@ channel_fypp_generate(CHANNEL_GENERATED_SOURCES
     ${CHANNEL_SOURCE_DIR}/core/byte_workspace.fypp
     ${CHANNEL_SOURCE_DIR}/core/channel_equations.fypp
     ${CHANNEL_SOURCE_DIR}/core/dnsdata.fypp
+    ${CHANNEL_SOURCE_DIR}/linsolve/compact_line_solvers.fypp
 )
 
 add_library(channel_core
@@ -116,7 +120,6 @@ add_library(channel_core
     ${CHANNEL_SOURCE_DIR}/gpu/y_pipeline_nccl.f90
     ${CHANNEL_SOURCE_DIR}/linsolve/y_schur_solver.f90
     ${CHANNEL_SOURCE_DIR}/linsolve/y_line_solvers.f90
-    ${CHANNEL_SOURCE_DIR}/linsolve/compact_line_solvers.f90
     ${CHANNEL_SOURCE_DIR}/mpi/mpi_transpose.f90
     ${CHANNEL_SOURCE_DIR}/core/restart_io.f90
     ${CHANNEL_SOURCE_DIR}/fft/ffts.f90

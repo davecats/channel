@@ -1,6 +1,7 @@
 #include "header.h"
 #:include "channel_operators.fypph"
 #:include "channel_stencils.fypph"
+#:include "wall_closure.fypph"
 
 ! The equations of the channel formulation.
 !
@@ -402,32 +403,21 @@ contains
       !$omp private(ix, iz, rhs_value, row_coeffs, eq0, fac, ib) collapse(2)
       do ix = ix0_owner, ixN_owner
         do iz = -nz, nz
-          ys_boundary_lower_rhs0_owner(iz, ix) = ys_lower_boundary_owner(iz, ix) - ys_lower_ghost_owner(iz, ix)*ys_eq0_owner(-2, iz, ix)/ys_eqm1_owner(-2, iz, ix)
-          do ib = -1, 2
-            ! do not express this loop with slicing, it somehow slows the nvhpc kernel absurdly
-            ys_boundary_lower_eq_owner(ib, iz, ix) = ys_eq0_owner(ib, iz, ix) - ys_eqm1_owner(ib, iz, ix)*ys_eq0_owner(-2, iz, ix)/ys_eqm1_owner(-2, iz, ix)
-          end do
+          $:fold_ghost_into_lower_wall('ys_boundary_lower_eq_owner', 'ys_boundary_lower_rhs0_owner(iz, ix)', &
+                                       'ys_eq0_owner', 'ys_eqm1_owner', &
+                                       'ys_lower_boundary_owner(iz, ix)', 'ys_lower_ghost_owner(iz, ix)', sfx=', iz, ix')
           eq0 = ys_boundary_lower_eq_owner(:, iz, ix)
 
           rhs_value = ys_gpsv_owner_rhs(iz, ix, row_start)
           row_coeffs = ys_gpsv_owner_matrix(iz, ix, row_start, -2:2)
-          fac = row_coeffs(-2)/ys_eqm1_owner(-2, iz, ix)
-          rhs_value = rhs_value - ys_lower_ghost_owner(iz, ix)*fac
-          row_coeffs = row_coeffs - ys_eqm1_owner(:, iz, ix)*fac
-          row_coeffs(-2) = 0.0d0
-          fac = row_coeffs(-1)/eq0(-1)
-          rhs_value = rhs_value - ys_boundary_lower_rhs0_owner(iz, ix)*fac
-          row_coeffs(-1:2) = row_coeffs(-1:2) - eq0*fac
-          row_coeffs(-1) = 0.0d0
+          $:eliminate_lower_first_row('row_coeffs', 'rhs_value', 'ys_eqm1_owner(-2, iz, ix)', 'ys_eqm1_owner(:, iz, ix)', &
+                                      'ys_lower_ghost_owner(iz, ix)', 'eq0', 'ys_boundary_lower_rhs0_owner(iz, ix)')
           ys_gpsv_owner_rhs(iz, ix, row_start) = rhs_value
           ys_gpsv_owner_matrix(iz, ix, row_start, -2:2) = row_coeffs
 
           rhs_value = ys_gpsv_owner_rhs(iz, ix, row_start + 1)
           row_coeffs = ys_gpsv_owner_matrix(iz, ix, row_start + 1, -2:2)
-          fac = row_coeffs(-2)/eq0(-1)
-          rhs_value = rhs_value - ys_boundary_lower_rhs0_owner(iz, ix)*fac
-          row_coeffs(-2:1) = row_coeffs(-2:1) - eq0(-1:2)*fac
-          row_coeffs(-2) = 0.0d0
+          $:eliminate_lower_second_row('row_coeffs', 'rhs_value', 'eq0', 'ys_boundary_lower_rhs0_owner(iz, ix)')
           ys_gpsv_owner_rhs(iz, ix, row_start + 1) = rhs_value
           ys_gpsv_owner_matrix(iz, ix, row_start + 1, -2:2) = row_coeffs
         end do
@@ -444,32 +434,21 @@ contains
       !$omp private(ix, iz, rhs_value, row_coeffs, eqn, fac, ib) collapse(2)
       do ix = ix0_owner, ixN_owner
         do iz = -nz, nz
-          ys_boundary_upper_rhsn_owner(iz, ix) = ys_upper_boundary_owner(iz, ix) - ys_upper_ghost_owner(iz, ix)*ys_eqn_owner(2, iz, ix)/ys_eqnp1_owner(2, iz, ix)
-          do ib = -2, 1
-            ! do not express this loop with slicing, it somehow slows the nvhpc kernel absurdly
-            ys_boundary_upper_eq_owner(ib, iz, ix) = ys_eqn_owner(ib, iz, ix) - ys_eqnp1_owner(ib, iz, ix)*ys_eqn_owner(2, iz, ix)/ys_eqnp1_owner(2, iz, ix)
-          end do
+          $:fold_ghost_into_upper_wall('ys_boundary_upper_eq_owner', 'ys_boundary_upper_rhsn_owner(iz, ix)', &
+                                       'ys_eqn_owner', 'ys_eqnp1_owner', &
+                                       'ys_upper_boundary_owner(iz, ix)', 'ys_upper_ghost_owner(iz, ix)', sfx=', iz, ix')
           eqn = ys_boundary_upper_eq_owner(:, iz, ix)
 
           rhs_value = ys_gpsv_owner_rhs(iz, ix, row_end - 1)
           row_coeffs = ys_gpsv_owner_matrix(iz, ix, row_end - 1, -2:2)
-          fac = row_coeffs(2)/eqn(1)
-          rhs_value = rhs_value - ys_boundary_upper_rhsn_owner(iz, ix)*fac
-          row_coeffs(-1:2) = row_coeffs(-1:2) - eqn(-2:1)*fac
-          row_coeffs(2) = 0.0d0
+          $:eliminate_upper_second_last_row('row_coeffs', 'rhs_value', 'eqn', 'ys_boundary_upper_rhsn_owner(iz, ix)')
           ys_gpsv_owner_rhs(iz, ix, row_end - 1) = rhs_value
           ys_gpsv_owner_matrix(iz, ix, row_end - 1, -2:2) = row_coeffs
 
           rhs_value = ys_gpsv_owner_rhs(iz, ix, row_end)
           row_coeffs = ys_gpsv_owner_matrix(iz, ix, row_end, -2:2)
-          fac = row_coeffs(2)/ys_eqnp1_owner(2, iz, ix)
-          rhs_value = rhs_value - ys_upper_ghost_owner(iz, ix)*fac
-          row_coeffs = row_coeffs - ys_eqnp1_owner(:, iz, ix)*fac
-          row_coeffs(2) = 0.0d0
-          fac = row_coeffs(1)/eqn(1)
-          rhs_value = rhs_value - ys_boundary_upper_rhsn_owner(iz, ix)*fac
-          row_coeffs(-2:1) = row_coeffs(-2:1) - eqn*fac
-          row_coeffs(1) = 0.0d0
+          $:eliminate_upper_last_row('row_coeffs', 'rhs_value', 'ys_eqnp1_owner(2, iz, ix)', 'ys_eqnp1_owner(:, iz, ix)', &
+                                     'ys_upper_ghost_owner(iz, ix)', 'eqn', 'ys_boundary_upper_rhsn_owner(iz, ix)')
           ys_gpsv_owner_rhs(iz, ix, row_end) = rhs_value
           ys_gpsv_owner_matrix(iz, ix, row_end, -2:2) = row_coeffs
         end do
@@ -488,6 +467,9 @@ contains
     logical, intent(in) :: has_lower_boundary, has_upper_boundary
     integer(C_INT), optional, intent(in) :: ix_start, ix_end
     integer(C_INT) :: ix, iz, jx, ix0_owner, ixN_owner
+    ! Step 3 of the closure; steps 1 and 2 come from wall_closure.fypph.  This
+    ! step is not shared with the single-line path, which spells the same sum
+    ! as a - sum(b) rather than a - b1 - b2 - b3; the two do not round alike.
     if (.not. has_lower_boundary .and. .not. has_upper_boundary) return
 
     ix0_owner = nx0
