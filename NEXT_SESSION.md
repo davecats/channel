@@ -5,7 +5,6 @@ Copy the block below as the opening message.
 ---
 
 Continue simplifying `channel` for readability, without changing behaviour.
-The next step is peeling the MPI-IO writer out of `convvelo`.
 
 Read `.claude/projects/-home-ws-xt8786-Codes-channel/memory/MEMORY.md` first.
 It points at the verification gates (including which machines have a usable
@@ -16,64 +15,63 @@ cycles.
 
 ## Where the previous session left it
 
-Seven commits, each independently verified.
+Two commits, each independently verified.
 
-- **The halo pack pair** in `y_line_solvers` is one routine. The *unpack* pair
-  stays written twice on purpose -- they differ by destination array, not by an
-  index -- with the reason recorded at the site. The handoff had this filed as
-  a quartet; only half of it was index dispatch.
-- **`channel` no longer segfaults on exit.** `driver`'s `finalize` was calling
-  the old `mpi_finalize_` binding with no `ierror` argument, on every run, at
-  every rank count. `ctest` never runs the `channel` binary, which is why 30
-  green tests hid it. Gate leg 5 now says to run it and check `$?`.
-- **NOMPI is gone.** It had not compiled for some time; MPI is now required and
-  all 88 `HAVE_MPI` conditionals are deleted (288 lines). Verified by showing
-  every touched file preprocesses identically before and after, under three
-  backend flag sets -- stronger than a bit-identical run.
-- **The convvelo field catalogue is defined once** in `convvelo_fields.fypph`.
-  It had been written out twice, and `acc_convvelo_stats` looked every field up
-  by string at runtime: 43 linear scans per accumulation, all of literals.
-- **`dnsdata` is pure setup** (528 -> 350 lines). The transform pass moved to
-  `channel_transforms`.
-- **The custom pentadiagonal solve works on GPU.** It had been dying with
-  `CUDA_ERROR_ILLEGAL_ADDRESS` since before the session. Root cause: nvfortran
-  cannot forward an assumed-shape *dummy* array from inside a target region
-  into a `declare target` routine. `y_line_solvers.f90` -> `.fypp`; the solve
-  is expanded once per array set. See [[nvfortran-dummy-array-device-call]].
+- **The convvelo MPI-IO writer is out.** `src/core/convvelo_io.f90` holds the
+  raw-statistics writer, the profile write, the field averaging and the
+  `.fields` layout file. It takes its state as arguments rather than `use`ing
+  convvelo -- the shape `restart_io` already had -- so the dependency runs one
+  way and it needs no field catalogue, only the names its caller passes it.
+  `convvelo.fypp` 1127 -> 913 lines. `write_convvelo_raw_stats` is still the
+  public entry point (two tests and the snapshot call it); it now does the two
+  device updates and hands the host arrays over.
+  - `normalize_convvelo_field_for_output` and `copy_convvelo_field_average`
+    were the same loop; both now call `average_convvelo_field`.
+  - The mean profiles were three copy-pasted blocks plus a loop over the
+    scalars; the displacement arithmetic works out to one loop over 3 + nPhi.
+  - `test_convvelo_utils` had its own copy of the header size and now uses
+    convvelo_io's.
+- **The convvelo transform routines asked `fft_transpose_is_local` three times
+  in a row.** The wait and the unpack only apply to the alltoall the first
+  `if` just posted, so they moved into that branch.
 
 ## Do this first
 
-**`convvelo` still mixes six concerns.** The ~180-line MPI-IO writer
-(`write_convvelo_raw_stats` and its helpers, from roughly the four
-`MPI_Type_create_subarray` calls to `write_convvelo_field_layout`) is the
-cleanest remaining peel: self-contained, narrow interface, and four dedicated
-tests plus the regression pair cover it. `convvelo` has no `declare target` of
-its own, so a new module that also declares none is the safe shape.
+Nothing in convvelo is as clean a peel as the writer was. Judgement calls,
+roughly in value order:
 
-Two smaller things in the same file, worth folding in or doing next:
-
-- `normalize_convvelo_field_for_output` and `copy_convvelo_field_average` are
-  the same loop -- divide a field by its sample count -- differing only in an
-  early-out and one device-update call.
-- The test-support block (`fill_convvelo_synthetic_state_for_test`,
-  `synthetic_profile_value`, `synthetic_field_value`) is public and ships in
-  the production module.
-
-## After that, roughly in value order
-
-1. **The MPI/NCCL pipeline pair in `y_line_solvers`** (~460 lines written
+1. **The test-support block in `convvelo`** (`fill_convvelo_synthetic_state_
+   for_test`, `synthetic_profile_value`, `synthetic_field_value`, ~55 lines,
+   public, shipping in the production module). The previous session looked at
+   moving it and **did not**, because every shape it tried was worse: the
+   filler writes `n_field_samples`, `n_mean_samples` and the averaging window,
+   all private, so a test-side module means making them public; and the two
+   `!$omp target update to(...)` calls should stay with the declarations (see
+   [[gpu-build-constrains-module-structure]] -- a module mapping *another*
+   module's variables has failed here before). The least-bad version is a
+   public setter plus host writes through the already-public
+   `convvelo_stats`/`component_means`, which trades one test-only public
+   routine for another. Worth doing only if you find a shape that shrinks the
+   public surface rather than reshuffling it. The synthetic pattern is
+   duplicated in `tests/convvelo/verify_synthetic_raw.py` either way -- that
+   copy is across languages and cannot be removed.
+2. **The transform round trip in `convvelo` vs `channel_transforms`.** The
+   handoff used to call these "written twice". They are not: `channel_
+   transforms` is the pipelined version (`to`/`from` buffer indices,
+   `requests(m)`, a component-ahead loop), convvelo's is a single
+   non-overlapped pass over one field. Unifying them would mean giving
+   convvelo the overlapping machinery, which is a behaviour change. What *is*
+   shared is the four-step motif -- local repack, or pack / post / wait /
+   unpack -- and that could become one small helper taking the buffers and a
+   label. Narrower and safer than "unify the round trip"; check whether it
+   actually reads better before committing.
+3. **The MPI/NCCL pipeline pair in `y_line_solvers`** (~460 lines written
    twice). Genuinely different code -- one non-blocking with overlap, one
    blocking -- so unifying it would change behaviour. Read both before
    deciding, and be willing to report that it should stay.
-2. **`FFT`/`IFT` and `RFT`/`HFT` in `ffts.f90`.** Each pair differs only by
+4. **`FFT`/`IFT` and `RFT`/`HFT` in `ffts.f90`.** Each pair differs only by
    plan and direction across three `#ifdef` backends. Judge whether the result
    is actually more readable before committing to it.
-3. **The transform round trip is written twice** -- `channel_transforms` and a
-   private copy in `convvelo` (`spectral_field_to_real_x`,
-   `real_x_to_spectral_field`). Now that the first has its own module,
-   unifying them is worth a look. The convvelo copy also spells
-   `if (.not. fft_transpose_is_local)` three times in a row where one block
-   would do.
 
 ## Open items that are the user's call, not yours
 
@@ -89,10 +87,15 @@ Two smaller things in the same file, worth folding in or doing next:
   do not trust them. See [[bodyforce-is-dead-code]].
 - **`-Dhalfchannel` and `-DphiNeumann`** do take effect (both change the
   output), but nothing checks their numbers against a reference.
-- **The autotuner tries NCCL even when ranks share one GPU**, which makes 5
-  tests fail on any single-GPU box. `CHANNEL_COMM=mpi` works around it.
-  Arguably it should skip NCCL when it sees a shared device -- but that is a
-  behaviour change, so ask.
+- **17 of the 30 GPU tests now fail on the local workstation**, at HEAD and
+  before it -- a UCX/CMA crash in multi-rank runs that share the one device,
+  not a code bug. It was 5 in the previous session, so the environment moved.
+  Every single-rank test and every convvelo test still passes, including the
+  4-rank `convvelo_mpi_io_npxz2_npy2`. Establish the failing set at HEAD
+  before reading anything into a GPU run here, or use `istmcetus`.
+- **The autotuner tries NCCL even when ranks share one GPU.** Arguably it
+  should skip NCCL when it sees a shared device -- but that is a behaviour
+  change, so ask.
 
 ## How to work
 
@@ -114,14 +117,18 @@ Techniques worth reusing, in order of how much they save:
   rather than fixed variable names. That is what makes the generated code
   identical to what was there before -- and, as the GPU fix showed, it is also
   the way to keep device code free of dummy-argument indirection.
+- **Ask which branch your run actually took.** A 2-rank run of the convvelo
+  deck autotunes to npxz=1, where `fft_transpose_is_local` is true and the
+  alltoall path is never entered -- so the first bit-identity check of the
+  branch merge above proved nothing about the code it changed. `CHANNEL_NPXZ=2
+  CHANNEL_NPY=1` forces the other side. Same lesson as `CHANNEL_OVERLAPPING=1`
+  and `CHANNEL_YS_FORCE_CUSTOM_GPSV`: "30/30 green" is a statement about the
+  30.
 - **Check that a flag you are relying on actually took effect.** Two claims
   went wrong this way. `CHANNEL_OVERLAPPING=1` is bit-identical by design, so
   output cannot confirm it -- the memory line does (buffers double). And a
   comparison meant to isolate one flag had a second flag varying with it.
 - **Compare against the checked-in references too**, not only base-vs-work.
-- **When a run passes, ask what it did not cover.** `CHANNEL_OVERLAPPING` and
-  `CHANNEL_YS_FORCE_CUSTOM_GPSV` are set by no test; the second was hiding a
-  GPU crash. "30/30 green" is a statement about the 30.
 
 Report honestly when something is reverted and why. Several extractions have
 been abandoned across these sessions for good reasons, and recording that has
