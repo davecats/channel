@@ -15,7 +15,7 @@ cycles.
 
 ## Where the previous session left it
 
-Two commits, each independently verified.
+Three commits, each independently verified.
 
 - **The convvelo MPI-IO writer is out.** `src/core/convvelo_io.f90` holds the
   raw-statistics writer, the profile write, the field averaging and the
@@ -34,6 +34,14 @@ Two commits, each independently verified.
 - **The convvelo transform routines asked `fft_transpose_is_local` three times
   in a row.** The wait and the unpack only apply to the alltoall the first
   `if` just posted, so they moved into that branch.
+- **The blocking xz transpose is one routine.** pack / post / wait / unpack --
+  or repack in place -- was written out at six sites. `mpi_transpose` now has
+  `transpose_zTOx` / `transpose_xTOz`, taking the two arrays and a profiler
+  label; the buffers stay behind the boundary. convvelo and pressure_output
+  each went from a fifteen-name `use mpi_transpose` to two names.
+  `transform_to_physical` keeps its steps apart on purpose (it overlaps the
+  alltoall with a whole component) and `mpi_autotune` was left alone because
+  its copy is inside the loop it times.
 
 ## Do this first
 
@@ -55,16 +63,18 @@ roughly in value order:
    public surface rather than reshuffling it. The synthetic pattern is
    duplicated in `tests/convvelo/verify_synthetic_raw.py` either way -- that
    copy is across languages and cannot be removed.
-2. **The transform round trip in `convvelo` vs `channel_transforms`.** The
-   handoff used to call these "written twice". They are not: `channel_
-   transforms` is the pipelined version (`to`/`from` buffer indices,
-   `requests(m)`, a component-ahead loop), convvelo's is a single
-   non-overlapped pass over one field. Unifying them would mean giving
-   convvelo the overlapping machinery, which is a behaviour change. What *is*
-   shared is the four-step motif -- local repack, or pack / post / wait /
-   unpack -- and that could become one small helper taking the buffers and a
-   label. Narrower and safer than "unify the round trip"; check whether it
-   actually reads better before committing.
+2. **`convvelo` and `pressure_output` now have the same three routines.**
+   `spectral_field_to_real_x` and `real_x_to_spectral_field` are, after the
+   transpose helper, near-identical in the two files -- pressure_output's pair
+   differs only by hoisting `ny0`/`nyN` into `y_first`/`y_last` locals and by
+   `default(none)` on the target regions. `load_*_field_to_zbuf` differs more.
+   The obstacle is `VVdx`/`VVdz`: they come from `ffts` on GPU and from
+   `dnsdata` on CPU, so a shared module would need both spellings behind the
+   same `#if`, which is how both files already open. Worth a look; the
+   `default(none)` difference has to be resolved deliberately, not silently.
+   Note the transform round trip in `channel_transforms` is *not* a third copy
+   -- it is the pipelined version (`to`/`from` indices, `requests(m)`, a
+   component-ahead loop) and unifying it would change behaviour.
 3. **The MPI/NCCL pipeline pair in `y_line_solvers`** (~460 lines written
    twice). Genuinely different code -- one non-blocking with overlap, one
    blocking -- so unifying it would change behaviour. Read both before
