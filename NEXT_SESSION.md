@@ -5,21 +5,27 @@ Copy the block below as the opening message.
 ---
 
 Continue simplifying `channel` for readability, without changing behaviour.
-This time the subject is `FFT`/`IFT` and `RFT`/`HFT` in `ffts.f90` -- see
-"Do this first" below. Answering "these should stay written out, because ..."
-counts as finishing the task.
+This time the subject is the four transform wrappers in `src/fft/ffts.f90` --
+see "Do this first" below. One of the two pairs there is worth unifying and
+one is not; deciding that is the task, and "these should stay written out,
+because ..." is a complete answer. What is *not* acceptable is deciding
+without reading all four.
 
-Read `.claude/projects/-home-ws-xt8786-Codes-channel/memory/MEMORY.md` first.
-It points at the verification gates (including which machines have a usable
-GPU, how to reach them, and the one environment variable that decides whether
-half the GPU suite runs at all), the NVHPC constraints on module structure, a
-separate NVHPC trap about device calls, and the state of the layering plan.
-All of it was learned the hard way and will save you several wasted build
-cycles.
+Read `.claude/projects/-home-ws-xt8786-Codes-channel/memory/MEMORY.md` first,
+then this whole file. Between them they carry the verification gate (including
+which machines have a usable GPU, how to reach them, and the one environment
+variable that decides whether half the GPU suite runs at all), two separate
+NVHPC traps about module structure and device calls, and the state of the
+layering plan. All of it was learned the hard way and will save you several
+wasted build cycles.
+
+Work in small, independently verified commits -- one logical change each. Run
+the full gate on every one; none of its legs is optional, and each has caught
+something the others missed.
 
 ## Where the previous sessions left it
 
-Five code commits, each independently verified against the full gate.
+Seven code commits, each independently verified against the full gate.
 
 - **The convvelo MPI-IO writer is out.** `src/core/convvelo_io.f90` holds the
   raw-statistics writer, the profile write, the field averaging and the
@@ -48,25 +54,55 @@ Five code commits, each independently verified against the full gate.
   is two fypp macros** (both below).
 - **`-Dbodyforce` is gone** (below).
 
-## Do this first: `FFT`/`IFT` and `RFT`/`HFT` in `ffts.f90`
+## Do this first: the four transform wrappers in `ffts.f90`
 
-Each pair differs only by plan and direction, across three `#ifdef` backends
-(FFTW, cuFFT, hipFFT). Judge whether unifying them actually reads better
-before committing to it -- three backends' worth of conditional inside one
-routine can easily come out worse than two routines that each read straight
-through.
+`src/fft/ffts.f90`, 579 lines. `FFT` (386), `IFT` (420), `RFT` (454) and
+`HFT` (507) each wrap one library call three times over, under
+`#ifdef HAVE_CUDA` / `HAVE_HIP` / `HAVE_FFTW`. Some of this was already
+measured, so you do not have to rediscover it -- treat it as a starting point
+to verify, not as the conclusion.
 
-Two things make this tractable:
+**The older note said "each pair differs only by plan and direction". That is
+true of one pair and false of the other.**
 
-- If it can be shaped so the **generated/preprocessed Fortran is unchanged**,
-  that is the whole proof: no GPU benchmark needed. That worked twice this
-  session (see the techniques section). `ffts.f90` is plain `.f90` today, so
-  this would mean making it `.fypp` -- which is the established move here
-  (`dnsdata`, `statistics`, `pressure_output` and `y_line_solvers` all went
-  that way).
-- `FFTW_PATIENT` makes CPU numbers non-reproducible, so patch a scratch tree
-  to `FFTW_ESTIMATE` *before* comparing anything. This is the file that
-  defines it.
+- **`FFT` and `IFT` are the clean pair** -- 33 lines each, and per backend
+  they differ in *three tokens*: the plan handle (`cu_pFFT`/`cu_pIFT`,
+  `hip_pFFT`/`hip_pIFT`, `pFFT`/`pIFT`), the direction constant
+  (`CUFFT_FORWARD`/`CUFFT_INVERSE`, `HIPFFT_FORWARD`/`HIPFFT_INVERSE`; FFTW
+  has none, the plan carries the direction), and the string in the error
+  message. Everything else -- the `target data use_device_addr(x)`, the two
+  `cudaDeviceSynchronize` calls, the two status prints, the `y0 = lbound(x, 3)`,
+  the FFTW loop over `fft_y0:fft_yN` -- is character-for-character the same.
+  This is the one worth doing.
+- **`RFT` and `HFT` are not a pair.** 52 and 37 lines. They are inverses, not
+  variants: the argument order is swapped (`RFT(x, rx)` vs `HFT(rx, x)`), the
+  library calls are `Z2D` against `D2Z`, and **`RFT` carries a HIP-only
+  zero-fill block** (`nreal`, lines 489-498) that has no counterpart in `HFT`.
+  Unifying those two means parameterising away a block that exists on one side
+  of one backend. Look, then say no if that is what you find.
+- There is also a **`free_fft` written three times** (545-577), one per
+  backend, differing by handle prefix -- except the FFTW one also destroys
+  plans, deallocates five arrays and nullifies three pointers, so it is not
+  the same routine. Probably another no; check rather than assume.
+
+Practicalities:
+
+- `ffts.f90` is plain `.f90` today, so this means **`ffts.f90` -> `ffts.fypp`**
+  and moving it from the `add_library(channel_core ...)` list
+  (`CMakeLists.txt:133`) into `channel_fypp_generate(...)` (around line 105).
+  That move is the established one here -- `dnsdata`, `statistics`,
+  `pressure_output`, `convvelo`, `compact_line_solvers` and `y_line_solvers`
+  all went that way. fypp and `#ifdef` coexist fine; `y_line_solvers.fypp`
+  does both.
+- **Aim for byte-identical generated Fortran.** If the expansion matches what
+  is there now, that *is* the proof -- these are hot-path routines called
+  every substep, and it retires the performance question without needing an
+  idle GPU. The last two commits were verified exactly this way.
+- Only the FFTW arm of this file is exercised by `ctest`. The cuFFT arm needs
+  the NVHPC build; **nothing here builds the HIP arm at all**, so treat
+  `HAVE_HIP` edits as unverifiable and keep them textually mechanical.
+- `FFTW_PATIENT` is defined in this file (line 66). Patch a scratch tree to
+  `FFTW_ESTIMATE` *before* comparing any numbers.
 
 **"These should stay written out, because ..." is a perfectly good answer.**
 Several extractions have been abandoned across these sessions and recording
