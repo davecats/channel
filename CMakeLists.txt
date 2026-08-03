@@ -133,6 +133,7 @@ add_library(channel_core
     ${CHANNEL_SOURCE_DIR}/mpi/mpi_autotune.f90
     ${CHANNEL_SOURCE_DIR}/core/channel_bcs.f90
     ${CHANNEL_GENERATED_SOURCES}
+    ${CHANNEL_SOURCE_DIR}/core/channel_transforms.f90
     ${CHANNEL_SOURCE_DIR}/core/driver.f90
 )
 target_include_directories(channel_core PUBLIC "${CHANNEL_SOURCE_DIR}/core")

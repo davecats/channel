@@ -23,6 +23,7 @@ CONTAINS
     use config, only: ini_config, read_ini_file
     USE dnsdata
     USE mpi_transpose, only: init_MPI
+    USE channel_transforms, only: transform_to_physical, compute_cfl
     USE mpi_autotune, only: configure_mpi_decomposition
     USE convvelo, only: init_convvelo_runtime, get_convvelo_memory_estimate, get_convvelo_workspace_estimate, configure_convvelo
     USE ffts, only: get_fft_memory_estimate
@@ -255,6 +256,7 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
   !==========================================================
   SUBROUTINE timeloop()
     USE dnsdata
+    USE channel_transforms, only: transform_to_physical, transform_back_and_build_rhs, compute_cfl
     USE convvelo, only: advance_convvelo_runtime
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
     USE ffts, only: acquire_fft_workspace, release_fft_workspace
