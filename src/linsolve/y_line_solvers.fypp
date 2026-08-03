@@ -1,5 +1,89 @@
 #include "header.h"
 
+#! ===================================================================
+#! The interleaved pentadiagonal batch solve, expanded once per array
+#! set rather than parameterised by dummy arguments.
+#!
+#! nvfortran cannot forward an assumed-shape *dummy* array from inside
+#! an !$omp target region into a declare-target routine: the callee
+#! receives a descriptor holding a host data pointer and the kernel
+#! dies with CUDA_ERROR_ILLEGAL_ADDRESS (compute-sanitizer reports no
+#! invalid access -- the launch itself fails).  Naming the module
+#! arrays at the call site is what the working pipelined path already
+#! does.  These macros take the *text* of each site's array names so
+#! every expansion does the same.
+#! ===================================================================
+
+#! The hand-written batched solve, used on CPU and when
+#! CHANNEL_YS_FORCE_CUSTOM_GPSV selects it over the vendor library.
+#:def custom_penta_kernel(ds, dl, d, du, dw, x)
+      !$omp target teams distribute parallel do default(none) &
+      !$omp shared(${ds}$, ${dl}$, ${d}$, ${du}$, ${dw}$, ${x}$, n, batch_count) &
+      !$omp private(iline)
+      do iline = 1, batch_count
+        call ys_factor_penta_interleaved(${ds}$, ${dl}$, ${d}$, ${du}$, ${dw}$, &
+                                         batch_count, iline, n, .false.)
+        call ys_solve_factored_penta_interleaved(${x}$, ${ds}$, ${dl}$, ${d}$, ${du}$, ${dw}$, &
+                                                 batch_count, iline, n)
+      end do
+      !$omp end target teams distribute parallel do
+#:enddef
+
+#:def interleaved_penta_solver(name, ds, dl, d, du, dw, x)
+  ! Solve the interleaved pentadiagonal batch held in ${ds}$ .. ${x}$.
+  subroutine ${name}$(n, batch_count, label)
+    implicit none
+    integer(C_INT), intent(in) :: n, batch_count
+    character(*), intent(in) :: label
+    integer(C_INT) :: iline
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    integer(C_INT64_T) :: p, p1
+    complex(C_DOUBLE_COMPLEX) :: d0inv, d1inv, lfac, rhs0, rhs1
+#endif
+
+    call roctxPush(label)
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    ! ROCSparse fails if the system size is 1: https://github.com/ROCm/rocSPARSE/blob/develop_deprecated/library/src/precond/rocsparse_gtsv.cpp
+    if (ys_use_custom_gpsv()) then
+$:custom_penta_kernel(ds, dl, d, du, dw, x)
+    else if (n < 3) then
+      !$omp target teams distribute parallel do default(none) &
+      !$omp shared(${ds}$, ${dl}$, ${d}$, ${du}$, ${dw}$, ${x}$, n, batch_count) &
+      !$omp private(iline, p, p1, d0inv, d1inv, lfac, rhs0, rhs1)
+      do iline = 1, batch_count
+        p = int(iline, C_INT64_T)
+        if (n == 1) then
+          d0inv = 1.0d0/${d}$(p)
+          ${d}$(p) = d0inv
+          ${x}$(p) = ${x}$(p)*d0inv
+        else
+          p1 = p + int(batch_count, C_INT64_T)
+          d0inv = 1.0d0/${d}$(p)
+          lfac = ${dl}$(p1)*d0inv
+          d1inv = 1.0d0/(${d}$(p1) - lfac*${du}$(p))
+          rhs1 = (${x}$(p1) - lfac*${x}$(p))*d1inv
+          rhs0 = (${x}$(p) - ${du}$(p)*rhs1)*d0inv
+
+          ${d}$(p) = d0inv
+          ${dl}$(p1) = lfac
+          ${d}$(p1) = d1inv
+          ${x}$(p) = rhs0
+          ${x}$(p1) = rhs1
+        end if
+      end do
+      !$omp end target teams distribute parallel do
+    else
+      call ys_prepare_gpusparse_workspace(n, batch_count, ${ds}$, ${dl}$, ${d}$, ${du}$, ${dw}$, ${x}$)
+      call ys_call_gpsv_interleaved(${ds}$, ${dl}$, ${d}$, ${du}$, ${dw}$, ${x}$, &
+                                    n, batch_count, label)
+    end if
+#else
+$:custom_penta_kernel(ds, dl, d, du, dw, x)
+#endif
+    call roctxPop(label)
+  end subroutine ${name}$
+#:enddef
+
 module y_line_solvers
 
   use, intrinsic :: iso_c_binding
@@ -841,80 +925,9 @@ call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pas
   end subroutine ys_prepare_gpusparse_workspace
 #endif
 
-  subroutine ys_solve_interleaved_pentadiagonal(ds, dl, d, du, dw, x, n, batch_count, label)
-    implicit none
-    complex(C_DOUBLE_COMPLEX), intent(inout), target :: ds(:), dl(:), d(:), du(:), dw(:), x(:)
-    integer(C_INT), intent(in) :: n, batch_count
-    character(*), intent(in) :: label
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
-    integer(C_INT) :: iline
-    integer(C_INT64_T) :: p, p1
-    complex(C_DOUBLE_COMPLEX) :: d0inv, d1inv, lfac, rhs0, rhs1
-#endif
+$:interleaved_penta_solver('ys_solve_packed_pentadiagonal', 'ys_gpsv_ds', 'ys_gpsv_dl', 'ys_gpsv_d', 'ys_gpsv_du', 'ys_gpsv_dw', 'ys_gpsv_x')
 
-    call roctxPush(label)
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
-    ! ROCSparse fails if the system size is 1: https://github.com/ROCm/rocSPARSE/blob/develop_deprecated/library/src/precond/rocsparse_gtsv.cpp
-    if (ys_use_custom_gpsv()) then
-      call ys_solve_custom_interleaved_pentadiagonal(ds, dl, d, du, dw, x, n, batch_count)
-    else if (n < 3) then
-      !$omp target teams distribute parallel do default(none) &
-      !$omp shared(ds, dl, d, du, dw, x, n, batch_count) private(iline, p, p1, d0inv, d1inv, lfac, rhs0, rhs1)
-      do iline = 1, batch_count
-        p = int(iline, C_INT64_T)
-        if (n == 1) then
-          d0inv = 1.0d0/d(p)
-          d(p) = d0inv
-          x(p) = x(p)*d0inv
-        else
-          p1 = p + int(batch_count, C_INT64_T)
-          d0inv = 1.0d0/d(p)
-          lfac = dl(p1)*d0inv
-          d1inv = 1.0d0/(d(p1) - lfac*du(p))
-          rhs1 = (x(p1) - lfac*x(p))*d1inv
-          rhs0 = (x(p) - du(p)*rhs1)*d0inv
-
-          d(p) = d0inv
-          dl(p1) = lfac
-          d(p1) = d1inv
-          x(p) = rhs0
-          x(p1) = rhs1
-        end if
-      end do
-      !$omp end target teams distribute parallel do
-    else
-      call ys_prepare_gpusparse_workspace(n, batch_count, ds, dl, d, du, dw, x)
-      call ys_call_gpsv_interleaved(ds, dl, d, du, dw, x, n, batch_count, label)
-    end if
-#else
-    call ys_solve_custom_interleaved_pentadiagonal(ds, dl, d, du, dw, x, n, batch_count)
-#endif
-    call roctxPop(label)
-  end subroutine ys_solve_interleaved_pentadiagonal
-
-  subroutine ys_solve_custom_interleaved_pentadiagonal(ds, dl, d, du, dw, x, n, batch_count)
-    implicit none
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: ds(:), dl(:), d(:), du(:), dw(:), x(:)
-    integer(C_INT), intent(in) :: n, batch_count
-    integer(C_INT) :: iline
-
-    !$omp target teams distribute parallel do default(none) &
-    !$omp shared(ds, dl, d, du, dw, x, n, batch_count) private(iline)
-    do iline = 1, batch_count
-      call ys_factor_penta_interleaved(ds, dl, d, du, dw, batch_count, iline, n, .false.)
-      call ys_solve_factored_penta_interleaved(x, ds, dl, d, du, dw, batch_count, iline, n)
-    end do
-    !$omp end target teams distribute parallel do
-  end subroutine ys_solve_custom_interleaved_pentadiagonal
-
-  subroutine ys_solve_packed_pentadiagonal(n, batch_count, label)
-    implicit none
-    integer(C_INT), intent(in) :: n, batch_count
-    character(*), intent(in) :: label
-
-    call ys_solve_interleaved_pentadiagonal(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, &
-                                            n, batch_count, label)
-  end subroutine ys_solve_packed_pentadiagonal
+$:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_batch_dl', 'ys_batch_d', 'ys_batch_du', 'ys_batch_dw', 'ys_batch_x')
 
   subroutine ys_solve_endpoint_schur(dst, symmetric_operator)
     implicit none
@@ -1104,8 +1117,7 @@ call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pas
       !$omp end target teams distribute parallel do
       call roctxPop("ys_endpoint_pack_plus_response")
 
-      call ys_solve_interleaved_pentadiagonal(ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x, &
-                                              nI, chunk_batch_count, "ys_endpoint_gpsv_plus_response")
+      call ys_solve_batch_pentadiagonal(nI, chunk_batch_count, "ys_endpoint_gpsv_plus_response")
     end subroutine solve_endpoint_chunk
 
     subroutine pack_schur_chunk(ix0_chunk, nx_chunk)

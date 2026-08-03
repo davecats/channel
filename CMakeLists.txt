@@ -110,6 +110,7 @@ channel_fypp_generate(CHANNEL_GENERATED_SOURCES
     ${CHANNEL_SOURCE_DIR}/core/statistics.fypp
     ${CHANNEL_SOURCE_DIR}/core/convvelo.fypp
     ${CHANNEL_SOURCE_DIR}/linsolve/compact_line_solvers.fypp
+    ${CHANNEL_SOURCE_DIR}/linsolve/y_line_solvers.fypp
 )
 
 channel_fypp_generate(CHANNEL_GENERATED_TEST_SOURCES
@@ -126,7 +127,6 @@ add_library(channel_core
     ${CHANNEL_SOURCE_DIR}/core/roctx.f90
     ${CHANNEL_SOURCE_DIR}/gpu/y_pipeline_nccl.f90
     ${CHANNEL_SOURCE_DIR}/linsolve/y_schur_solver.f90
-    ${CHANNEL_SOURCE_DIR}/linsolve/y_line_solvers.f90
     ${CHANNEL_SOURCE_DIR}/mpi/mpi_transpose.f90
     ${CHANNEL_SOURCE_DIR}/core/restart_io.f90
     ${CHANNEL_SOURCE_DIR}/fft/ffts.f90
