@@ -5,9 +5,9 @@ Copy the block below as the opening message.
 ---
 
 Continue simplifying `channel` for readability, without changing behaviour.
-This time the subject is the instrumentation inside
-`ys_solve_pipelined_lu_distributed` -- see "Do this first" below. Answering
-"this should stay as it is, because ..." counts as finishing the task.
+This time the subject is `FFT`/`IFT` and `RFT`/`HFT` in `ffts.f90` -- see
+"Do this first" below. Answering "these should stay written out, because ..."
+counts as finishing the task.
 
 Read `.claude/projects/-home-ws-xt8786-Codes-channel/memory/MEMORY.md` first.
 It points at the verification gates (including which machines have a usable
@@ -44,54 +44,72 @@ Five code commits, each independently verified against the full gate.
   turned out to be a third copy of `zero_vvdx_hft` and now calls it. The
   `VVdx`/`VVdz` obstacle an older handoff warned about was **stale** -- one
   `grep` retired the whole complication.
-- **The pipelined-LU buffer layout is named once** (this session, below).
+- **The pipelined-LU buffer layout is named once**, and **its instrumentation
+  is two fypp macros** (both below).
+- **`-Dbodyforce` is gone** (below).
 
-## Do this first: the instrumentation in `ys_solve_pipelined_lu_distributed`
+## Do this first: `FFT`/`IFT` and `RFT`/`HFT` in `ffts.f90`
 
-`src/linsolve/y_line_solvers.fypp`. About 60 of that routine's ~280 lines are
-diagnostics, not algorithm: `CHANNEL_Y_PIPELINE_TIMING`, a `tic`/`toc` pair
-and a `roctxPush`/`roctxPop` pair around nearly every step, ten timing buckets
-and a CSV writer. Its NCCL twin has the roctx markers and none of the timing.
-Nearly every step reads
+Each pair differs only by plan and direction, across three `#ifdef` backends
+(FFTW, cuFFT, hipFFT). Judge whether unifying them actually reads better
+before committing to it -- three backends' worth of conditional inside one
+routine can easily come out worse than two routines that each read straight
+through.
 
-```fortran
-call roctxPush("ys_pipeline <label>")
-call tic()
-call <one line of actual work>
-call toc(T_<BUCKET>)
-call roctxPop("ys_pipeline <label>")
-```
+Two things make this tractable:
 
-which is five lines per step, fifteen times over, and it is what actually
-makes the routine hard to read -- the schedule is buried in its own
-telemetry. A fypp macro taking the label, the bucket and the *text* of the
-call would collapse each to one line (see the technique note in
-[[channel-layering-plan]]: macros that take each site's own expressions
-generate byte-identical Fortran).
+- If it can be shaped so the **generated/preprocessed Fortran is unchanged**,
+  that is the whole proof: no GPU benchmark needed. That worked twice this
+  session (see the techniques section). `ffts.f90` is plain `.f90` today, so
+  this would mean making it `.fypp` -- which is the established move here
+  (`dnsdata`, `statistics`, `pressure_output` and `y_line_solvers` all went
+  that way).
+- `FFTW_PATIENT` makes CPU numbers non-reproducible, so patch a scratch tree
+  to `FFTW_ESTIMATE` *before* comparing anything. This is the file that
+  defines it.
 
-Two things make this a good next step rather than a risky one:
+**"These should stay written out, because ..." is a perfectly good answer.**
+Several extractions have been abandoned across these sessions and recording
+the reason has been worth more than forcing them through.
 
-- It is a change to a **diagnostic**. If the generated Fortran comes out
-  identical -- expand both trees with fypp and diff, ignoring blank lines --
-  the compiled program is provably unchanged and no GPU benchmark is needed.
-- The verification path for this routine is now open (see the gate below);
-  the pipelined-LU GPU tests pass again on `istmcetus`.
+## Settled recently: the pipeline instrumentation
 
-Watch for: the timed regions must not nest (there is one shared `time_t0` and
-a comment saying so), and `drain_backward_batches` is a contained subroutine
-that uses the outer routine's variables -- a macro must expand inside it too.
+`ys_solve_pipelined_lu_distributed` used to carry `roctxPush` / `tic` / step /
+`toc` / `roctxPop` at twenty sites -- four lines of bookkeeping around one
+line of work, with the schedule buried in its own telemetry. Two fypp macros
+in the file's preamble, `timed_step(label, bucket)` and
+`timed_comm_post(buffer, label=)`, now take the body as a `#:call` /
+`#:endcall` block, so it stays ordinary Fortran and the label is written once
+and expanded into both the push and the pop -- a mistyped pop label was
+silently possible before.
 
-**"Leave it alone, because ..." is a perfectly good answer.** Several
-extractions have been abandoned across these sessions and recording the reason
-has been worth more than forcing them through.
+Left in long form on purpose: the `MPI_Test` probe is untimed (the point of
+the test is that it may cost nothing), and the outer roctx ranges wrap loops
+rather than steps. One deliberate change: the timing report now runs *after*
+the halo range is popped, because it barriers across `MPI_COMM_Y` once per
+rank and a profiler was charging that to the halo.
 
-## After that
+**The generated Fortran is byte-identical apart from that one moved
+`roctxPop`** -- which is how it was verified, and is worth reaching for
+whenever a refactor can be shaped to allow it. `CHANNEL_Y_PIPELINE_TIMING=1`
+was also run on CPU and GPU, since no test sets it.
 
-**`FFT`/`IFT` and `RFT`/`HFT` in `ffts.f90`.** Each pair differs only by plan
-and direction across three `#ifdef` backends. Judge whether the result is
-actually more readable before committing to it.
+## Settled recently: `-Dbodyforce` is gone
 
-## Settled this session: the MPI/NCCL pipeline pair
+It allocated an `ny x nz x nx x 3` array `F`, mapped it to the device,
+computed a wall closure on it and added it to the Orr-Sommerfeld and Squire
+right-hand sides -- but nothing ever put a force *into* `F`: no deck
+parameter, no file read, no initialiser. It was also broken: `buildrhs_prepare`
+indexed `F` over the wrong y range on a y-split rank, so a `-Dbodyforce` build
+died at np=2 on an out-of-bounds access while np=1 exited 0. Nothing built it,
+which is why that went unseen.
+
+Removing it changed no compiled code (`cpp` over the generated sources before
+and after differs only in two comment lines of `header.h`). **If forcing is
+wanted back, the missing half is the input path** -- re-adding the terms alone
+would recreate exactly what was deleted.
+
+## Settled earlier: the MPI/NCCL pipeline pair
 
 The question was whether `ys_solve_pipelined_lu_distributed` and
 `ys_solve_pipelined_lu_nccl_distributed` should be one routine. **They should
@@ -150,17 +168,6 @@ Do not redo these without new information; the reasoning is in the commits.
 
 ## Open items that are the user's call, not yours
 
-- **`-Dbodyforce` crashes at np=2.** Found this session by running the binary,
-  not just compiling it: `buildrhs_prepare` indexes `F` over the wrong y range
-  on a y-split rank (`channel_equations.f90:897`, "Index '-1' ... outside of
-  expected range (6:17)" on one rank, "Index '16' ... range (-1:9)" on the
-  other). np=1 exits 0. Confirmed pre-existing by building the same commit
-  unchanged. The CPU build has `-fcheck=all`, so an optimised build would
-  corrupt memory quietly rather than stop. This does not contradict "the
-  forcing is dead code" -- `F` is still never assigned -- but the earlier
-  claim that a `-Dbodyforce` build is byte-identical to a default one holds
-  only at np=1. Fixing the indexing, giving `F` a source, and testing a known
-  forcing are all still open. See [[bodyforce-is-dead-code]].
 - **`FFTW_PATIENT`** (`ffts.f90`) makes CPU runs non-reproducible at ULP
   level. Decided: keep it, and keep patching a scratch tree to
   `FFTW_ESTIMATE` for bit-identity checks. Do not re-litigate.
@@ -182,15 +189,13 @@ regression bisects to one peel. The gate, none of which is optional:
 2. An NVHPC GPU build, and the GPU suite compared against **HEAD built in a
    scratch tree**, not against an expectation. The environment moves
    underneath both boxes, so establish the failing set at HEAD every time.
-3. `-Dbodyforce` compiles (uncomment it in `src/core/header.h`; nothing builds
-   it, so it hides breakage). Do this in a *separate* scratch copy -- editing
-   `header.h` in the tree you are using for bit-identity silently poisons that
-   comparison, which cost a rebuild this session.
-4. **Run the `channel` binary and check `$?`.** `ctest` never runs it -- every
+3. **Run the `channel` binary and check `$?`.** `ctest` never runs it -- every
    test drives its own `test_*` binary -- which is how it segfaulted in
    `MPI_Finalize` on every run with 30 green tests, and how the `-Dbodyforce`
-   crash above surfaced.
-5. Bit-identity against the parent commit, both trees built with
+   crash surfaced. There is no longer a `-Dbodyforce` leg; `-Dhalfchannel` and
+   `-DphiNeumann` still exist and nothing builds them, so compile one of those
+   if you touch the code they guard.
+4. Bit-identity against the parent commit, both trees built with
    `FFTW_PATIENT` patched to `FFTW_ESTIMATE`. The working recipe: `git archive
    HEAD` into a scratch dir, `sed` the plan type, build, then run
    `mpirun -np 2 .../channel` in a directory holding
@@ -264,6 +269,11 @@ also proves the NCCL branch was actually taken.
   lesson as `CHANNEL_OVERLAPPING=1` and `CHANNEL_YS_FORCE_CUSTOM_GPSV`, which
   no test sets and which was hiding a GPU crash: "30/30 green" is a statement
   about the 30.
+- **Keep the bit-identity trees pristine.** A scratch tree you also used for a
+  flag experiment is no longer the thing you meant to compare: toggling
+  `header.h` in the work tree and rebuilding it silently turned a
+  bit-identity run into a comparison of two different builds. One rebuild
+  lost. Do side experiments in their own copy.
 - **Check that a flag you are relying on actually took effect.** Two claims
   went wrong this way. `CHANNEL_OVERLAPPING=1` is bit-identical by design, so
   output cannot confirm it -- the memory line does (buffers double). And a
