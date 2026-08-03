@@ -5,11 +5,12 @@ Copy the block below as the opening message.
 ---
 
 Continue simplifying `channel` for readability, without changing behaviour.
-This time the subject is the four transform wrappers in `src/fft/ffts.f90` --
-see "Do this first" below. One of the two pairs there is worth unifying and
-one is not; deciding that is the task, and "these should stay written out,
-because ..." is a complete answer. What is *not* acceptable is deciding
-without reading all four.
+This time the subject is the six xz pack/repack kernels in
+`src/mpi/mpi_transpose.f90` -- see "Do this first" below. Deciding which of
+them, if any, should share a body is the task, and "these should stay written
+out, because ..." is a complete answer. What is *not* acceptable is deciding
+without reading all six, or unifying them in a way that changes a loop nest
+order.
 
 Read `.claude/projects/-home-ws-xt8786-Codes-channel/memory/MEMORY.md` first,
 then this whole file. Between them they carry the verification gate (including
@@ -25,7 +26,7 @@ something the others missed.
 
 ## Where the previous sessions left it
 
-Seven code commits, each independently verified against the full gate.
+Eight code commits, each independently verified against the full gate.
 
 - **The convvelo MPI-IO writer is out.** `src/core/convvelo_io.f90` holds the
   raw-statistics writer, the profile write, the field averaging and the
@@ -53,60 +54,93 @@ Seven code commits, each independently verified against the full gate.
 - **The pipelined-LU buffer layout is named once**, and **its instrumentation
   is two fypp macros** (both below).
 - **`-Dbodyforce` is gone** (below).
+- **`FFT` and `IFT` are written once**; `RFT`/`HFT` and the three `free_fft`
+  bodies were looked at and left (below).
 
-## Do this first: the four transform wrappers in `ffts.f90`
+## Do this first: the six xz pack kernels in `mpi_transpose.f90`
 
-`src/fft/ffts.f90`, 579 lines. `FFT` (386), `IFT` (420), `RFT` (454) and
-`HFT` (507) each wrap one library call three times over, under
-`#ifdef HAVE_CUDA` / `HAVE_HIP` / `HAVE_FFTW`. Some of this was already
-measured, so you do not have to rediscover it -- treat it as a starting point
-to verify, not as the conclusion.
+`src/mpi/mpi_transpose.f90:418-551`. Six small `!$omp target teams distribute
+parallel do` kernels move the same data between the z-pencil and x-pencil
+layouts:
 
-**The older note said "each pair differs only by plan and direction". That is
-true of one pair and false of the other.**
+- `repack_zTOx_local` / `repack_xTOz_local` (19 lines each) -- the
+  `fft_transpose_is_local` case, a plain transpose with no buffer.
+- `pack_zTOx` / `unpack_zTOx` and `pack_xTOz` / `unpack_xTOz` (22-24 lines
+  each) -- the alltoall case, one linear buffer index per element.
 
-- **`FFT` and `IFT` are the clean pair** -- 33 lines each, and per backend
-  they differ in *three tokens*: the plan handle (`cu_pFFT`/`cu_pIFT`,
-  `hip_pFFT`/`hip_pIFT`, `pFFT`/`pIFT`), the direction constant
-  (`CUFFT_FORWARD`/`CUFFT_INVERSE`, `HIPFFT_FORWARD`/`HIPFFT_INVERSE`; FFTW
-  has none, the plan carries the direction), and the string in the error
-  message. Everything else -- the `target data use_device_addr(x)`, the two
-  `cudaDeviceSynchronize` calls, the two status prints, the `y0 = lbound(x, 3)`,
-  the FFTW loop over `fft_y0:fft_yN` -- is character-for-character the same.
-  This is the one worth doing.
-- **`RFT` and `HFT` are not a pair.** 52 and 37 lines. They are inverses, not
-  variants: the argument order is swapped (`RFT(x, rx)` vs `HFT(rx, x)`), the
-  library calls are `Z2D` against `D2Z`, and **`RFT` carries a HIP-only
-  zero-fill block** (`nreal`, lines 489-498) that has no counterpart in `HFT`.
-  Unifying those two means parameterising away a block that exists on one side
-  of one backend. Look, then say no if that is what you find.
-- There is also a **`free_fft` written three times** (545-577), one per
-  backend, differing by handle prefix -- except the FFTW one also destroys
-  plans, deallocates five arrays and nullifies three pointers, so it is not
-  the same routine. Probably another no; check rather than assume.
+They are much closer to each other than `FFT`/`IFT` were, but **not by three
+tokens**, and the differences are not all cosmetic:
+
+- **The loop nest order differs on purpose.** Every kernel puts the *output's*
+  fastest index innermost (`repack_zTOx_local` runs `iz` inner, its mirror
+  runs `ix` inner; same in the pack pair). That is a coalescing choice on the
+  device, so a shared body must keep each site's own nest order -- swapping
+  one is a performance change, invisible to every correctness check in the
+  gate.
+- **The linear index differs in which extent is the stride**: `iz + nzB*(ix-1)
+  + nzB*nxB*(iy-1)` against `ix + nxB*(iz-1) + nxB*nzB*(iy-1)`.
+- **The rank offset moves sides**: `pack_*` offsets the *array* subscript
+  (`Vz(dest*nzB + iz, ...)`) while `unpack_*` offsets it on the other array
+  (`Vx(ix + src*nxB, ...)`), and the buffer subscript carries `dest`/`src`
+  either way.
+
+So the honest question is whether a fypp macro taking each site's own nest
+order and index text (the technique in "Techniques worth reusing") reads
+better than six kernels that each fit on one screen -- or whether naming the
+buffer index alone (one `#:def` used six times) gets most of the value. Both
+"unify" and "leave them, because ..." are acceptable; deciding without reading
+all six is not.
 
 Practicalities:
 
-- `ffts.f90` is plain `.f90` today, so this means **`ffts.f90` -> `ffts.fypp`**
-  and moving it from the `add_library(channel_core ...)` list
-  (`CMakeLists.txt:133`) into `channel_fypp_generate(...)` (around line 105).
-  That move is the established one here -- `dnsdata`, `statistics`,
-  `pressure_output`, `convvelo`, `compact_line_solvers` and `y_line_solvers`
-  all went that way. fypp and `#ifdef` coexist fine; `y_line_solvers.fypp`
-  does both.
-- **Aim for byte-identical generated Fortran.** If the expansion matches what
-  is there now, that *is* the proof -- these are hot-path routines called
-  every substep, and it retires the performance question without needing an
-  idle GPU. The last two commits were verified exactly this way.
-- Only the FFTW arm of this file is exercised by `ctest`. The cuFFT arm needs
-  the NVHPC build; **nothing here builds the HIP arm at all**, so treat
-  `HAVE_HIP` edits as unverifiable and keep them textually mechanical.
-- `FFTW_PATIENT` is defined in this file (line 66). Patch a scratch tree to
-  `FFTW_ESTIMATE` *before* comparing any numbers.
+- `mpi_transpose.f90` is plain `.f90`, so this means **`.f90` -> `.fypp`** and
+  moving it from the `add_library(channel_core ...)` list into
+  `channel_fypp_generate(...)` (`CMakeLists.txt:105`). That move is routine
+  here -- eight files have made it, most recently `ffts`. fypp and `#ifdef`
+  coexist fine; `y_line_solvers.fypp` does both.
+- **Aim for byte-identical generated Fortran** (see below); it is what retires
+  the performance question for a device kernel without an idle GPU.
+- These kernels are on the alltoall path, which **a 2-rank run does not reach**
+  -- it autotunes to npxz=1. Force `CHANNEL_NPXZ=2 CHANNEL_NPY=1`.
+- The 15 GPU tests that fail environmentally are exactly the ones whose xz
+  transpose goes over MPI, i.e. the ones that would exercise this code on the
+  device. Plan on the CPU suite plus generated-Fortran identity carrying the
+  weight, and say so.
 
 **"These should stay written out, because ..." is a perfectly good answer.**
 Several extractions have been abandoned across these sessions and recording
 the reason has been worth more than forcing them through.
+
+## Settled recently: `FFT` and `IFT`, and what was left in `ffts.f90`
+
+`ffts.f90` -> `ffts.fypp`, with a `z2z_transform(name, direction)` macro in
+the preamble. The two 33-line bodies really did differ in three tokens per
+backend, and the plan handles already follow the routine name everywhere
+(`cu_p<name>` / `hip_p<name>` / `p<name>`), so the call sites are
+`$:z2z_transform('FFT', 'FORWARD')` and `$:z2z_transform('IFT', 'INVERSE')`.
+**The generated Fortran is identical to the old file inside both routines on
+all three backends** -- which is also what makes the unbuildable HIP arm safe.
+Elsewhere the generated file differs only by a removed no-op trailing `;` in
+`FFT` and by wrapping the two `fftw_plan_many_dft` calls in `init_fft`, which
+were 139 and 140 columns -- past the free-form limit, and fypp would have
+folded them anyway.
+
+Left written out, with the reason now a comment above `RFT`:
+
+- **`RFT` and `HFT` are inverses, not variants.** Argument order swapped,
+  `Z2D` against `D2Z`, and `RFT` carries a HIP-only zero-fill of the padding
+  columns with no counterpart in `HFT`. Unifying means parameterising away a
+  block that exists on one side of one backend.
+- **The three `free_fft` bodies.** The CUDA and HIP ones are the same eight
+  lines up to the handle prefix, but the FFTW one is a different routine
+  (a `target exit data`, four `fftw_destroy_plan`, four deallocates, three
+  nullifies). Unifying the two device arms means a macro used twice to replace
+  eight lines, in the arm nothing builds. Not worth it.
+- Noticed while reading, **not fixed**: the FFTW `free_fft` deallocates
+  `products` but does not `nullify` it (the `nullify` lists only `VVdz`,
+  `VVdx`, `rVVdx`), so a second call would test `associated(products)` on a
+  dangling pointer. Nothing calls it twice today. Flagging rather than fixing,
+  since it is a behaviour change in a path no test covers.
 
 ## Settled recently: the pipeline instrumentation
 
@@ -183,6 +217,7 @@ information.
 Do not redo these without new information; the reasoning is in the commits.
 
 - **The two pipeline pairs above.**
+- **`RFT`/`HFT` and the three `free_fft` bodies** in `ffts.fypp` (above).
 - **The test-support block in `convvelo`** (`fill_convvelo_synthetic_state_
   for_test` and the two synthetic value functions, ~55 lines, public, shipping
   in the production module). Every shape tried was worse: the filler writes
@@ -204,7 +239,7 @@ Do not redo these without new information; the reasoning is in the commits.
 
 ## Open items that are the user's call, not yours
 
-- **`FFTW_PATIENT`** (`ffts.f90`) makes CPU runs non-reproducible at ULP
+- **`FFTW_PATIENT`** (`ffts.fypp`) makes CPU runs non-reproducible at ULP
   level. Decided: keep it, and keep patching a scratch tree to
   `FFTW_ESTIMATE` for bit-identity checks. Do not re-litigate.
 - **`-Dhalfchannel` and `-DphiNeumann`** do take effect (both change the
@@ -256,6 +291,10 @@ regression bisects to one peel. The gate, none of which is optional:
   tests share two. The same 15 fail at HEAD on both boxes.
 - **Run the GPU suite serially.** `ctest -j2` on two GPUs adds failures the
   serial run does not have.
+- **Gate leg 3 on GPU: `channel` itself exits 139 at np=2** on cetus, and does
+  so at HEAD too (verified this session by running both trees). Same
+  environmental crash as the 15. At np=1 it exits 0, so run leg 3 at np=1 on
+  GPU and at np=2 on CPU.
 - **Both boxes share the NVHPC tree over NFS**, so they share its hpcx/UCX
   bug. The old "30/30 on istmcetus" note is stale.
 - Fresh configure recipe (`module load toolkits/nvhpc/25.9` silently does
