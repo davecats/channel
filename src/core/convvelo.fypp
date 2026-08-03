@@ -9,15 +9,13 @@ module convvelo
                      apply_complex_derivative_current_layout, apply_complex_second_derivative_current_layout, has_terminal, &
                      time, deltat, overlapping
   use pressure_output, only: compute_poisson, compute_dpdy
-  use channel_grid, only: ny0, nyN, nx0, nxN, nxB, nzB, nx, has_average, nzd
-  use mpi_transpose, only: transpose_zTOx, transpose_xTOz
+  use channel_grid, only: ny0, nyN, nx0, nxN, nxB, nzB, has_average, nzd
+  use channel_transforms, only: spectral_field_to_real_x, real_x_to_spectral_field
   use convvelo_io, only: write_convvelo_raw_file, write_convvelo_layout_file, average_convvelo_field
+  use ffts, only: VVdz
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
-  use ffts, only: IFT, RFT, HFT, FFT, VVdx, VVdz, get_fft_workspace_bytes, get_fft_workspace_bytes_for_dims, &
+  use ffts, only: get_fft_workspace_bytes, get_fft_workspace_bytes_for_dims, &
                   bind_fft_workspace, unbind_fft_workspace
-#else
-  use dnsdata, only: VVdx, VVdz
-  use ffts, only: IFT, RFT, HFT, FFT
 #endif
   use byte_workspace, only: workspace_request, workspace_release, workspace_align_offset, &
                             workspace_layout, layout_begin, layout_bytes, layout_real_3d
@@ -452,55 +450,6 @@ contains
     end do
   end subroutine load_convvelo_field_to_zbuf
 
-  subroutine spectral_field_to_real_x(rx)
-    implicit none
-    real(C_DOUBLE), intent(out) :: rx(:, :, ny0 - 2:)
-    integer(C_INT) :: ix, iz, iy
-
-    call IFT(VVdz(:, :, :, 1))
-    call transpose_zTOx(VVdz(:, :, :, 1), VVdx(:, :, :, 1), "convvelo_spectral_to_real")
-    !$omp target teams distribute parallel do collapse(3) &
-    !$omp shared(VVdx, nx, nxd, nzB) private(ix, iz, iy)
-    do iy = ny0 - 2, nyN + 2
-      do iz = 1, nzB
-        do ix = nx + 2, nxd + 1
-          VVdx(ix, iz, iy, 1) = (0.0d0, 0.0d0)
-        end do
-      end do
-    end do
-    call RFT(VVdx(:, :, :, 1), rx)
-  end subroutine spectral_field_to_real_x
-
-  subroutine real_x_to_spectral_field(rx, field)
-    implicit none
-    real(C_DOUBLE), intent(in) :: rx(:, :, ny0 - 2:)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    integer(C_INT) :: ix, iz, iy
-
-    call HFT(rx, VVdx(:, :, :, 1))
-    call transpose_xTOz(VVdx(:, :, :, 1), VVdz(:, :, :, 1), "convvelo_real_to_spectral")
-    call FFT(VVdz(:, :, :, 1))
-
-    !$omp target teams distribute parallel do collapse(3) &
-    !$omp shared(VVdz, nx0, nxN, ny, nz, field) private(ix, iz, iy)
-    do ix = nx0, nxN
-      do iy = ny0 - 2, nyN + 2
-        do iz = 0, nz
-          field(iy, iz, ix) = VVdz(iz + 1, ix - nx0 + 1, iy, 1)
-        end do
-      end do
-    end do
-    !$omp target teams distribute parallel do collapse(3) &
-    !$omp shared(VVdz, nx0, nxN, ny, nz, field, izd) private(ix, iz, iy)
-    do ix = nx0, nxN
-      do iy = ny0 - 2, nyN + 2
-        do iz = -nz, -1
-          field(iy, iz, ix) = VVdz(izd(iz) + 1, ix - nx0 + 1, iy, 1)
-        end do
-      end do
-    end do
-  end subroutine real_x_to_spectral_field
-
   subroutine accumulate_cross_components(field_index, lhs_component, rhs_component)
     implicit none
     integer(C_INT), intent(in) :: field_index, lhs_component, rhs_component
@@ -572,9 +521,9 @@ contains
 
     call acquire_convvelo_real_workspace("convvelo_real")
     call load_convvelo_field_to_zbuf(rhs0)
-    call spectral_field_to_real_x(convvelo_real0)
+    call spectral_field_to_real_x(convvelo_real0, "convvelo_spectral_to_real")
     call load_convvelo_field_to_zbuf(rhs1)
-    call spectral_field_to_real_x(convvelo_real1)
+    call spectral_field_to_real_x(convvelo_real1, "convvelo_spectral_to_real")
     !$omp target teams distribute parallel do collapse(3) &
     !$omp shared(convvelo_real_prod, convvelo_real0, convvelo_real1, factor, nxd, nzB) private(ix, iz, iy)
     do iy = ny0 - 2, nyN + 2
@@ -584,7 +533,7 @@ contains
         end do
       end do
     end do
-    call real_x_to_spectral_field(convvelo_real_prod, convvelo_work)
+    call real_x_to_spectral_field(convvelo_real_prod, convvelo_work, "convvelo_real_to_spectral")
     call release_convvelo_real_workspace("convvelo_real")
   end subroutine build_cross_product_work
 

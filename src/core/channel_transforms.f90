@@ -204,4 +204,53 @@ CONTAINS
       end if
     END DO
   END SUBROUTINE transform_back_and_build_rhs
+
+  ! The same round trip for a single field, without the pipelining above: one
+  ! field is already sitting in VVdz(:,:,:,1), so there is nothing to overlap
+  ! the alltoall with and the four steps stay in sequence.  convvelo and
+  ! pressure_output both drive it -- they differ only in what they load into
+  ! the buffer beforehand and what they do with the result -- so the label
+  ! argument is what shows up in the profile.
+  SUBROUTINE spectral_field_to_real_x(rx, label)
+    IMPLICIT NONE
+    real(C_DOUBLE), intent(out) :: rx(:, :, ny0 - 2:)
+    character(len=*), intent(in) :: label
+
+    call IFT(VVdz(:, :, :, 1))
+    call transpose_zTOx(VVdz(:, :, :, 1), VVdx(:, :, :, 1), label)
+    call zero_vvdx_hft(1)
+    call RFT(VVdx(:, :, :, 1), rx)
+  END SUBROUTINE spectral_field_to_real_x
+
+  SUBROUTINE real_x_to_spectral_field(rx, field, label)
+    IMPLICIT NONE
+    real(C_DOUBLE), intent(in) :: rx(:, :, ny0 - 2:)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    character(len=*), intent(in) :: label
+    integer(C_INT) :: ix, iz, iy, y_first, y_last
+    y_first = ny0
+    y_last = nyN
+
+    call HFT(rx, VVdx(:, :, :, 1))
+    call transpose_xTOz(VVdx(:, :, :, 1), VVdz(:, :, :, 1), label)
+    call FFT(VVdz(:, :, :, 1))
+    !$omp target teams distribute parallel do collapse(3) default(none) &
+    !$omp shared(VVdz, nx0, nxN, ny, y_first, y_last, nz, field) private(ix, iz, iy)
+    do ix = nx0, nxN
+      do iy = y_first - 2, y_last + 2
+        do iz = 0, nz
+          field(iy, iz, ix) = VVdz(iz + 1, ix - nx0 + 1, iy, 1)
+        end do
+      end do
+    end do
+    !$omp target teams distribute parallel do collapse(3) default(none) &
+    !$omp shared(VVdz, nx0, nxN, ny, y_first, y_last, nz, field, izd) private(ix, iz, iy)
+    do ix = nx0, nxN
+      do iy = y_first - 2, y_last + 2
+        do iz = -nz, -1
+          field(iy, iz, ix) = VVdz(izd(iz) + 1, ix - nx0 + 1, iy, 1)
+        end do
+      end do
+    end do
+  END SUBROUTINE real_x_to_spectral_field
 end module channel_transforms

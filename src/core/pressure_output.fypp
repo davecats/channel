@@ -5,22 +5,18 @@
 MODULE pressure_output
 
   USE, intrinsic :: iso_c_binding
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
   USE dnsdata, ONLY: V, der, k2, ialfa, ibeta, d140, d240, d24n, ni, alfa0, beta0, factor, &
                      ny, nz, nxd, nPhi, izd, d040, zero_bc, overlapping, solve_compact_component_current_layout, &
                      compact_assembly_context
-  USE ffts, ONLY: FFT, IFT, RFT, HFT, VVdz, VVdx, get_fft_workspace_bytes, get_fft_workspace_bytes_for_dims, &
+  USE ffts, ONLY: VVdz
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+  USE ffts, ONLY: get_fft_workspace_bytes, get_fft_workspace_bytes_for_dims, &
                   bind_fft_workspace, unbind_fft_workspace
-#else
-  USE dnsdata, ONLY: V, der, k2, ialfa, ibeta, d140, d240, d24n, ni, alfa0, beta0, factor, &
-                     ny, nz, nxd, nPhi, izd, VVdz, VVdx, d040, zero_bc, overlapping, solve_compact_component_current_layout, &
-                     compact_assembly_context
-  USE ffts, ONLY: FFT, IFT, RFT, HFT
 #endif
   USE byte_workspace, ONLY: workspace_request, workspace_release, workspace_align_offset, &
                             workspace_layout, layout_begin, layout_bytes, layout_real_3d, layout_complex_3d
-  USE channel_grid, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, nx, npy_grid, ipy, iproc
-  USE mpi_transpose, ONLY: transpose_zTOx, transpose_xTOz
+  USE channel_grid, ONLY: ny0, nyN, nx0, nxN, nxB, nzB, nzd, npy_grid, ipy, iproc
+  USE channel_transforms, ONLY: spectral_field_to_real_x, real_x_to_spectral_field
 
   IMPLICIT NONE
 
@@ -268,8 +264,8 @@ CONTAINS
     call build_pressure_real_x(ivz, pressure_real1)
     call accumulate_scaled_product(pressure_h1, pressure_real0, pressure_real1, -2.0d0*factor)
 
-    call real_x_to_spectral_field(pressure_h0, pressure_src0)
-    call real_x_to_spectral_field(pressure_h1, pressure_src1)
+    call real_x_to_spectral_field(pressure_h0, pressure_src0, "pressure_real_to_spectral")
+    call real_x_to_spectral_field(pressure_h1, pressure_src1, "pressure_real_to_spectral")
   END SUBROUTINE assemble_pressure_sources
 
   SUBROUTINE accumulate_h0_diagonal(dst, dudx, dwdz)
@@ -322,7 +318,7 @@ CONTAINS
     real(C_DOUBLE), intent(out) :: rx(:, :, ny0 - 2:)
 
     call load_pressure_field_to_zbuf(kind)
-    call spectral_field_to_real_x(rx)
+    call spectral_field_to_real_x(rx, "pressure_spectral_to_real")
   END SUBROUTINE build_pressure_real_x
 
   SUBROUTINE load_pressure_field_to_zbuf(kind)
@@ -488,58 +484,6 @@ CONTAINS
       end do
     end select
   END SUBROUTINE load_pressure_field_to_zbuf
-
-  SUBROUTINE spectral_field_to_real_x(rx)
-    IMPLICIT NONE
-    real(C_DOUBLE), intent(out) :: rx(:, :, ny0 - 2:)
-    integer(C_INT) :: ix, iz, iy, y_first, y_last
-    y_first = ny0
-    y_last = nyN
-
-    call IFT(VVdz(:, :, :, 1))
-    call transpose_zTOx(VVdz(:, :, :, 1), VVdx(:, :, :, 1), "pressure_spectral_to_real")
-    !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(VVdx, nx, nxd, nzB, y_first, y_last) private(ix, iz, iy)
-    do iy = y_first - 2, y_last + 2
-      do iz = 1, nzB
-        do ix = nx + 2, nxd + 1
-          VVdx(ix, iz, iy, 1) = (0.0d0, 0.0d0)
-        end do
-      end do
-    end do
-    call RFT(VVdx(:, :, :, 1), rx)
-  END SUBROUTINE spectral_field_to_real_x
-
-  SUBROUTINE real_x_to_spectral_field(rx, field)
-    IMPLICIT NONE
-    real(C_DOUBLE), intent(in) :: rx(:, :, ny0 - 2:)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    integer(C_INT) :: ix, iz, iy, y_first, y_last
-    y_first = ny0
-    y_last = nyN
-
-    call HFT(rx, VVdx(:, :, :, 1))
-    call transpose_xTOz(VVdx(:, :, :, 1), VVdz(:, :, :, 1), "pressure_real_to_spectral")
-    call FFT(VVdz(:, :, :, 1))
-    !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(VVdz, nx0, nxN, ny, y_first, y_last, nz, field) private(ix, iz, iy)
-    do ix = nx0, nxN
-      do iy = y_first - 2, y_last + 2
-        do iz = 0, nz
-          field(iy, iz, ix) = VVdz(iz + 1, ix - nx0 + 1, iy, 1)
-        end do
-      end do
-    end do
-    !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(VVdz,nx0, nxN, ny, y_first, y_last, nz, field, izd) private(ix, iz, iy)
-    do ix = nx0, nxN
-      do iy = y_first - 2, y_last + 2
-        do iz = -nz, -1
-          field(iy, iz, ix) = VVdz(izd(iz) + 1, ix - nx0 + 1, iy, 1)
-        end do
-      end do
-    end do
-  END SUBROUTINE real_x_to_spectral_field
 
   ! The pressure wall conditions are built from the velocity field, not from
   ! the Poisson source, so the callbacks need a view of V alongside ctx%src.
