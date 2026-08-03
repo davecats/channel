@@ -462,18 +462,19 @@ contains
     integer(C_INT) :: ix, iz, iy
 
     call IFT(VVdz(:, :, :, 1))
+    ! One field at a time, so there is nothing to overlap the alltoall with --
+    ! unlike transform_to_physical, which posts it and works on the previous
+    ! component while it flies.
     if (fft_transpose_is_local) then
       call repack_zTOx_local(VVdz(:, :, :, 1), VVdx(:, :, :, 1))
     else
       call pack_zTOx(VVdz(:, :, :, 1), sendbuf(:, 1))
       call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "zTOx convvelo_spectral_to_real")
-    end if
-    if (.not. fft_transpose_is_local) then
       call roctxPush("MPI_Wait zTOx convvelo_spectral_to_real")
       call MPI_Wait(request, status, ierr)
       call roctxPop("MPI_Wait zTOx convvelo_spectral_to_real")
+      call unpack_zTOx(recvbuf(:, 1), VVdx(:, :, :, 1))
     end if
-    if (.not. fft_transpose_is_local) call unpack_zTOx(recvbuf(:, 1), VVdx(:, :, :, 1))
     !$omp target teams distribute parallel do collapse(3) &
     !$omp shared(VVdx, nx, nxd, nzB) private(ix, iz, iy)
     do iy = ny0 - 2, nyN + 2
@@ -500,13 +501,11 @@ contains
     else
       call pack_xTOz(VVdx(:, :, :, 1), sendbuf(:, 1))
       call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "xTOz convvelo_real_to_spectral")
-    end if
-    if (.not. fft_transpose_is_local) then
       call roctxPush("MPI_Wait xTOz convvelo_real_to_spectral")
       call MPI_Wait(request, status, ierr)
       call roctxPop("MPI_Wait xTOz convvelo_real_to_spectral")
+      call unpack_xTOz(recvbuf(:, 1), VVdz(:, :, :, 1))
     end if
-    if (.not. fft_transpose_is_local) call unpack_xTOz(recvbuf(:, 1), VVdz(:, :, :, 1))
     call FFT(VVdz(:, :, :, 1))
 
     !$omp target teams distribute parallel do collapse(3) &
