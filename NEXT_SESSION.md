@@ -5,12 +5,12 @@ Copy the block below as the opening message.
 ---
 
 Continue simplifying `channel` for readability, without changing behaviour.
-This time the subject is the six xz pack/repack kernels in
-`src/mpi/mpi_transpose.f90` -- see "Do this first" below. Deciding which of
-them, if any, should share a body is the task, and "these should stay written
-out, because ..." is a complete answer. What is *not* acceptable is deciding
-without reading all six, or unifying them in a way that changes a loop nest
-order.
+There is no queued subject this time: the six xz pack/repack kernels were the
+last named candidate and they have been decided (they stay written out -- see
+"Settled recently" below). Pick the next one yourself, or ask. The remaining
+leads are in "Open items that are the user's call" and the two `statistics` /
+`channel_bcs` peels noted in [[channel-layering-plan]], neither of which is
+load-bearing for readability.
 
 Read `.claude/projects/-home-ws-xt8786-Codes-channel/memory/MEMORY.md` first,
 then this whole file. Between them they carry the verification gate (including
@@ -26,7 +26,7 @@ something the others missed.
 
 ## Where the previous sessions left it
 
-Eight code commits, each independently verified against the full gate.
+Nine code commits, each independently verified against the full gate.
 
 - **The convvelo MPI-IO writer is out.** `src/core/convvelo_io.f90` holds the
   raw-statistics writer, the profile write, the field averaging and the
@@ -57,59 +57,52 @@ Eight code commits, each independently verified against the full gate.
 - **`FFT` and `IFT` are written once**; `RFT`/`HFT` and the three `free_fft`
   bodies were looked at and left (below).
 
-## Do this first: the six xz pack kernels in `mpi_transpose.f90`
+## Settled recently: the six xz pack kernels stay written out
 
-`src/mpi/mpi_transpose.f90:418-551`. Six small `!$omp target teams distribute
-parallel do` kernels move the same data between the z-pencil and x-pencil
-layouts:
+`src/mpi/mpi_transpose.f90`. All six were read; the file stays plain `.f90`
+and no macro was introduced. The reasoning is now a comment above
+`repack_zTOx_local`, so it is at the site rather than only here.
 
-- `repack_zTOx_local` / `repack_xTOz_local` (19 lines each) -- the
-  `fft_transpose_is_local` case, a plain transpose with no buffer.
-- `pack_zTOx` / `unpack_zTOx` and `pack_xTOz` / `unpack_xTOz` (22-24 lines
-  each) -- the alltoall case, one linear buffer index per element.
+**The nest-order claim in the old handoff was wrong**, and correcting it is
+most of the value of the session. It said each kernel puts the *output's*
+fastest index innermost. It does not: `repack_zTOx_local` writes
+`Vx(ix, iz, iy)` -- fastest index `ix` -- and runs `iz` innermost. The rule
+that actually holds in all six is **the innermost loop is the index the
+*read* runs contiguously in**. Consequences worth keeping:
 
-They are much closer to each other than `FFT`/`IFT` were, but **not by three
-tokens**, and the differences are not all cosmetic:
+- Each alltoall buffer's in-block layout was *chosen* to match the pencil it
+  is packed from (the zTOx buffer runs fastest in z, the xTOz buffer in x), so
+  `pack_*` is coalesced on both sides and `unpack_*` pays the stride on its
+  write. A transpose has to pay it on one side; the packs are the side that
+  gets away with it.
+- `pack_zTOx` and `unpack_zTOx` must spell the linear buffer index
+  identically, and so must the xTOz pair. The alltoall permutes whole blocks
+  between ranks, so a formula that drifts between the halves of a pair
+  scrambles the field rather than failing -- the same silent-corruption shape
+  as the `YS_PIPELINE_*_ELEMS` duplication, but here the two halves are 20
+  lines apart and each is five tokens.
 
-- **The loop nest order differs on purpose.** Every kernel puts the *output's*
-  fastest index innermost (`repack_zTOx_local` runs `iz` inner, its mirror
-  runs `ix` inner; same in the pack pair). That is a coalescing choice on the
-  device, so a shared body must keep each site's own nest order -- swapping
-  one is a performance change, invisible to every correctness check in the
-  gate.
-- **The linear index differs in which extent is the stride**: `iz + nzB*(ix-1)
-  + nzB*nxB*(iy-1)` against `ix + nxB*(iz-1) + nxB*nzB*(iy-1)`.
-- **The rank offset moves sides**: `pack_*` offsets the *array* subscript
-  (`Vz(dest*nzB + iz, ...)`) while `unpack_*` offsets it on the other array
-  (`Vx(ix + src*nxB, ...)`), and the buffer subscript carries `dest`/`src`
-  either way.
+Why no macro: everything that differs -- the nest order, both subscript
+triples, which array carries the rank offset (`pack_*` the source pencil,
+`unpack_*` the destination one) -- is exactly what a shared body would take as
+text, so its arguments would *be* the kernel. It would also weaken both rules
+above, since the nest order stays spelled per site regardless and two argument
+lists are harder to compare than two formulas. **Naming the buffer index alone
+was tried on paper and rejected for the same reason**: `${xz_buffer_index(
+'dest', 'iz', 'nzB', 'ix', 'nxB')}$` is five positional arguments standing in
+for a five-token expression, which moves the drift hazard into the argument
+list instead of removing it. A version taking only the direction would hide a
+`#:if` inside the macro while leaving the nest order outside it -- worse.
 
-So the honest question is whether a fypp macro taking each site's own nest
-order and index text (the technique in "Techniques worth reusing") reads
-better than six kernels that each fit on one screen -- or whether naming the
-buffer index alone (one `#:def` used six times) gets most of the value. Both
-"unify" and "leave them, because ..." are acceptable; deciding without reading
-all six is not.
-
-Practicalities:
-
-- `mpi_transpose.f90` is plain `.f90`, so this means **`.f90` -> `.fypp`** and
-  moving it from the `add_library(channel_core ...)` list into
-  `channel_fypp_generate(...)` (`CMakeLists.txt:105`). That move is routine
-  here -- eight files have made it, most recently `ffts`. fypp and `#ifdef`
-  coexist fine; `y_line_solvers.fypp` does both.
-- **Aim for byte-identical generated Fortran** (see below); it is what retires
-  the performance question for a device kernel without an idle GPU.
-- These kernels are on the alltoall path, which **a 2-rank run does not reach**
-  -- it autotunes to npxz=1. Force `CHANNEL_NPXZ=2 CHANNEL_NPY=1`.
-- The 15 GPU tests that fail environmentally are exactly the ones whose xz
-  transpose goes over MPI, i.e. the ones that would exercise this code on the
-  device. Plan on the CPU suite plus generated-Fortran identity carrying the
-  weight, and say so.
-
-**"These should stay written out, because ..." is a perfectly good answer.**
-Several extractions have been abandoned across these sessions and recording
-the reason has been worth more than forcing them through.
+Verification, since the change is comment-only: `cpp` over the file before and
+after, with plain comments and blank lines stripped and the 74 `!$omp`
+directives retained, is **byte-identical at 668 lines**. That is a stronger
+statement than a bit-identity run, which would have compared the program with
+itself, so leg 4 was answered that way rather than by building a scratch tree.
+CPU 30/30, NVHPC build clean, GPU 15/30 (the documented environmental set,
+unchanged), `channel` exits 0 at CPU np=2 with `CHANNEL_NPXZ=2 CHANNEL_NPY=1`
+(confirmed in the log: `npxz= 2`, so the alltoall path was really entered) and
+at GPU np=1. `fprettify -i 2 -w 2` leaves the file untouched.
 
 ## Settled recently: `FFT` and `IFT`, and what was left in `ffts.f90`
 
@@ -222,6 +215,7 @@ information.
 Do not redo these without new information; the reasoning is in the commits.
 
 - **The two pipeline pairs above.**
+- **The six xz pack/repack kernels** in `mpi_transpose.f90` (above).
 - **`RFT`/`HFT` and the three `free_fft` bodies** in `ffts.fypp` (above).
 - **The test-support block in `convvelo`** (`fill_convvelo_synthetic_state_
   for_test` and the two synthetic value functions, ~55 lines, public, shipping
@@ -365,6 +359,11 @@ also proves the NCCL branch was actually taken.
   not for some time -- one `grep` retired the whole complication. Notes about
   *why something is hard* age faster than notes about what was done. The
   `opal_init` and "30/30 on cetus" notes were both stale this session too.
+- **Re-derive the reason, do not inherit it.** This handoff described the six
+  xz kernels as ordering their nests by the *output's* fastest index. Reading
+  them showed it is the *read's*. The conclusion (leave them written out)
+  survived, but a session that had trusted the summary would have written the
+  wrong rule into the very file it was documenting.
 - `fprettify` corrupts `.fypp` (it eats the space in `${macro}$ - x`); the
   pre-commit hook is restricted to `\.f90$`. `pre-commit` is not on PATH on
   this box -- run `fprettify -i 2 -w 2` from a throwaway venv instead.
