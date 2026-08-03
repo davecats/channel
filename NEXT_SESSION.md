@@ -15,7 +15,7 @@ and will save you several wasted build cycles.
 
 ## Where the previous session left it
 
-Three code commits, each independently verified against the full gate.
+Four code commits, each independently verified against the full gate.
 
 - **The convvelo MPI-IO writer is out.** `src/core/convvelo_io.f90` (229
   lines, plain `.f90`) holds the raw-statistics writer, the profile write, the
@@ -38,36 +38,28 @@ Three code commits, each independently verified against the full gate.
 - **The blocking xz transpose is one routine.** pack / post / wait / unpack --
   or repack in place -- was written out at six sites. `mpi_transpose` now has
   `transpose_zTOx` / `transpose_xTOz`, taking the two arrays and a profiler
-  label; `sendbuf`/`recvbuf` stay behind the boundary. convvelo and
-  pressure_output each went from a fifteen-name `use mpi_transpose` to two
-  names. `transform_to_physical` keeps its four steps apart on purpose (it
-  overlaps the alltoall with a whole component), and `mpi_autotune` was left
-  alone because its copy sits inside the loop it is timing.
+  label; `sendbuf`/`recvbuf` stay behind the boundary. `transform_to_physical`
+  keeps its four steps apart on purpose (it overlaps the alltoall with a whole
+  component), and `mpi_autotune` was left alone because its copy sits inside
+  the loop it is timing.
+- **The single-field xz round trip is shared.**
+  `spectral_field_to_real_x` / `real_x_to_spectral_field` are now one copy in
+  `channel_transforms`, sitting next to the pipelined round trip they are the
+  non-overlapped sibling of; the profiler label is an argument. The
+  `pressure_output` form is the one that survived -- `default(none)` kept, and
+  convvelo gained the `y_first`/`y_last` hoist that satisfies it -- rather
+  than dropping the clause from the stricter side. The x-padding zero turned
+  out to be a third copy of `zero_vvdx_hft` and now calls it.
+  - **The `VVdx`/`VVdz` obstacle the last handoff warned about was stale.**
+    They have lived in `ffts` on *both* the GPU and the FFTW path since they
+    stopped being threaded through `init_fft`; there is a comment saying so at
+    `ffts.f90:67`. So the shared routines need no `#if` and both callers lost
+    theirs, and convvelo and pressure_output no longer `use mpi_transpose` at
+    all.
+  - `load_convvelo_field_to_zbuf` vs `load_pressure_field_to_zbuf` differ much
+    more than these did; they were left alone.
 
-## Do this first
-
-**`convvelo` and `pressure_output` now hold the same two transform routines.**
-After the transpose helper, their `spectral_field_to_real_x` and
-`real_x_to_spectral_field` differ *only* by the profiler label, by
-pressure_output hoisting `ny0`/`nyN` into `y_first`/`y_last` locals, and by
-`default(none)` on its target regions. Diff them and see -- roughly 50 lines
-each. (`load_convvelo_field_to_zbuf` vs `load_pressure_field_to_zbuf` differ
-much more; leave those.)
-
-The obstacle is `VVdx`/`VVdz`: they come from `ffts` on GPU and from `dnsdata`
-on CPU, so a shared module needs both spellings behind the same `#if` -- which
-is how both files already open, so it is not new machinery. Two things to
-decide deliberately rather than silently: the `default(none)` difference (do
-not just drop it from one side), and whether the shared module can hold these
-without tripping the rule in [[gpu-build-constrains-module-structure]] -- it
-would `use` other modules, so it must declare no `!$omp declare target`
-variables of its own, which it does not need to.
-
-Note the round trip in `channel_transforms` is *not* a third copy: it is the
-pipelined version (`to`/`from` buffer indices, `requests(m)`, a
-component-ahead loop) and unifying it would change behaviour.
-
-## After that, roughly in value order
+## Do this first, roughly in value order
 
 1. **The MPI/NCCL pipeline pair in `y_line_solvers`** (~460 lines written
    twice). Genuinely different code -- one non-blocking with overlap, one
@@ -134,8 +126,11 @@ regression bisects to one peel. The gate, none of which is optional:
    underneath you. `module load toolkits/nvhpc/25.9` silently does nothing
    there; a fresh configure needs
    `PATH=$NV/compilers/bin:$NV/comm_libs/12.9/hpcx/latest/ompi/bin:$PATH`
-   with `NV=/opt/Nvidia/nvhpc/Linux_x86_64/25.9`. `istmcetus` is the clean
-   machine.
+   with `NV=/opt/Nvidia/nvhpc/Linux_x86_64/25.9`, plus
+   `-DCMAKE_CUDA_ARCHITECTURES=86 -DCMAKE_Fortran_COMPILER=$NV/compilers/bin/
+   nvfortran` -- that recipe works, and the same 17 fail by name in the
+   scratch tree, so the comparison is worth the one extra build.
+   `istmcetus` is the clean machine.
 3. `-Dbodyforce` compiles (uncomment it in `src/core/header.h`; nothing builds
    it, so it hides breakage).
 4. **Run the `channel` binary and check `$?`.** `ctest` never runs it -- every
@@ -174,6 +169,11 @@ Techniques worth reusing, in order of how much they save:
   output cannot confirm it -- the memory line does (buffers double). And a
   comparison meant to isolate one flag had a second flag varying with it.
 - **Compare against the checked-in references too**, not only base-vs-work.
+- **Re-check the obstacle before working around it.** This handoff said a
+  shared transform module would need `VVdx`/`VVdz` behind an `#if` because
+  they came from two different modules. They had not for some time -- one
+  `grep` retired the whole complication. Notes about *why something is hard*
+  age faster than notes about what was done.
 - `fprettify` corrupts `.fypp` (it eats the space in `${macro}$ - x`); the
   pre-commit hook is restricted to `\.f90$`. `pre-commit` is not on PATH on
   this box -- run `fprettify -i 2 -w 2` from a throwaway venv instead.
