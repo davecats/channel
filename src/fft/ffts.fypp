@@ -13,6 +13,55 @@
 
 #include "header.h"
 
+#! ===================================================================
+#! FFT and IFT are one in-place complex-to-complex transform of x along
+#! z, run in opposite directions.  Per backend they differ in exactly
+#! three tokens: the plan handle, the direction constant and the name in
+#! the error message.  The plan handles follow the routine name on every
+#! backend (cu_p<name> / hip_p<name> / p<name>, created in init_cufft /
+#! init_hipfft / init_fft) and the direction constants are the CUFFT /
+#! HIPFFT spelling of <direction>, so the macro needs only those two
+#! words.  FFTW takes no direction argument: its plan carries it.
+#!
+#! RFT and HFT are deliberately *not* written this way -- see the
+#! comment above RFT.
+#! ===================================================================
+#:def z2z_transform(name, direction)
+  SUBROUTINE ${name}$(x)
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    complex(C_DOUBLE_COMPLEX), intent(inout), target :: x(:, :, ny0 - 2:)
+#else
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, ny0 - 2:)
+#endif
+    integer :: y0
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    integer :: istat
+#elif defined(HAVE_FFTW)
+    integer :: i
+#endif
+    y0 = lbound(x, 3)
+#ifdef HAVE_CUDA
+    !$omp target data use_device_addr(x)
+    istat = cudaDeviceSynchronize()
+    istat = cufftExecZ2Z(cu_p${name}$, x(1, 1, y0), x(1, 1, y0), CUFFT_${direction}$)
+    if (istat /= 0) print *, "cufftExecZ2Z ${name}$ failed:", istat
+    istat = cudaDeviceSynchronize()
+    if (istat /= 0) print *, "cudaDeviceSynchronize ${name}$ failed:", istat
+    !$omp end target data
+#elif defined(HAVE_HIP)
+    !$omp target data use_device_addr(x)
+    istat = hipDeviceSynchronize()
+    istat = hipfftExecZ2Z(hip_p${name}$, c_loc(x(1, 1, y0)), c_loc(x(1, 1, y0)), HIPFFT_${direction}$)
+    istat = hipDeviceSynchronize()
+    !$omp end target data
+#elif defined(HAVE_FFTW)
+    DO i = fft_y0, fft_yN
+      CALL fftw_execute_dft(p${name}$, x(:, :, i), x(:, :, i))
+    END DO
+#endif
+  END SUBROUTINE ${name}$
+#:enddef
+
 MODULE ffts
 #ifdef HAVE_CUDA
   use cudafor
@@ -240,8 +289,10 @@ CONTAINS
 
     !$omp target enter data map(to: VVdz)
     !FFTs plans
-    pFFT = fftw_plan_many_dft(1, n_z, nxB, VVdz(:, :, fft_y0, 1), n_z, 1, nzd, VVdz(:, :, fft_y0, 1), n_z, 1, nzd, FFTW_FORWARD, plan_type)
-    pIFT = fftw_plan_many_dft(1, n_z, nxB, VVdz(:, :, fft_y0, 1), n_z, 1, nzd, VVdz(:, :, fft_y0, 1), n_z, 1, nzd, FFTW_BACKWARD, plan_type)
+    pFFT = fftw_plan_many_dft(1, n_z, nxB, VVdz(:, :, fft_y0, 1), n_z, 1, nzd, &
+                              VVdz(:, :, fft_y0, 1), n_z, 1, nzd, FFTW_FORWARD, plan_type)
+    pIFT = fftw_plan_many_dft(1, n_z, nxB, VVdz(:, :, fft_y0, 1), n_z, 1, nzd, &
+                              VVdz(:, :, fft_y0, 1), n_z, 1, nzd, FFTW_BACKWARD, plan_type)
     pRFT = fftw_plan_many_dft_c2r(1, rn_x, nzB, VVdx(:, :, fft_y0, 1), n_x + 1, 1, (nxd + 1), &
                                   rVVdx(:, :, fft_y0, 1), 2*(n_x + 1), 1, 2*(nxd + 1), plan_type)
     pHFT = fftw_plan_many_dft_r2c(1, rn_x, nzB, rVVdx(:, :, fft_y0, 1), 2*(n_x + 1), 1, 2*(nxd + 1), &
@@ -383,74 +434,16 @@ CONTAINS
     isFIT = ((j == 1) .OR. (j == 3))
   END FUNCTION fftFIT
 
-  SUBROUTINE FFT(x)
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
-    complex(C_DOUBLE_COMPLEX), intent(inout), target :: x(:, :, ny0 - 2:)
-#else
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, ny0 - 2:)
-#endif
-    integer :: y0
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
-    integer :: istat
-#elif defined(HAVE_FFTW)
-    integer :: i
-#endif
-    y0 = lbound(x, 3)
-#ifdef HAVE_CUDA
-    !$omp target data use_device_addr(x)
-    istat = cudaDeviceSynchronize()
-    istat = cufftExecZ2Z(cu_pFFT, x(1, 1, y0), x(1, 1, y0), CUFFT_FORWARD)
-    if (istat /= 0) print *, "cufftExecZ2Z FFT failed:", istat
-    istat = cudaDeviceSynchronize()
-    if (istat /= 0) print *, "cudaDeviceSynchronize FFT failed:", istat
-    !$omp end target data
-#elif defined(HAVE_HIP)
-    !$omp target data use_device_addr(x)
-    istat = hipDeviceSynchronize()
-    istat = hipfftExecZ2Z(hip_pFFT, c_loc(x(1, 1, y0)), c_loc(x(1, 1, y0)), HIPFFT_FORWARD)
-    istat = hipDeviceSynchronize()
-    !$omp end target data
-#elif defined(HAVE_FFTW)
-    DO i = fft_y0, fft_yN
-      CALL fftw_execute_dft(pFFT, x(:, :, i), x(:, :, i)); 
-    END DO
-#endif
-  END SUBROUTINE FFT
+$:z2z_transform('FFT', 'FORWARD')
 
-  SUBROUTINE IFT(x)
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
-    complex(C_DOUBLE_COMPLEX), intent(inout), target :: x(:, :, ny0 - 2:)
-#else
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, ny0 - 2:)
-#endif
-    integer :: y0
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
-    integer :: istat
-#elif defined(HAVE_FFTW)
-    integer :: i
-#endif
-    y0 = lbound(x, 3)
-#ifdef HAVE_CUDA
-    !$omp target data use_device_addr(x)
-    istat = cudaDeviceSynchronize()
-    istat = cufftExecZ2Z(cu_pIFT, x(1, 1, y0), x(1, 1, y0), CUFFT_INVERSE)
-    if (istat /= 0) print *, "cufftExecZ2Z IFT failed:", istat
-    istat = cudaDeviceSynchronize()
-    if (istat /= 0) print *, "cudaDeviceSynchronize IFT failed:", istat
-    !$omp end target data
-#elif defined(HAVE_HIP)
-    !$omp target data use_device_addr(x)
-    istat = hipDeviceSynchronize()
-    istat = hipfftExecZ2Z(hip_pIFT, c_loc(x(1, 1, y0)), c_loc(x(1, 1, y0)), HIPFFT_INVERSE)
-    istat = hipDeviceSynchronize()
-    !$omp end target data
-#elif defined(HAVE_FFTW)
-    DO i = fft_y0, fft_yN
-      CALL fftw_execute_dft(pIFT, x(:, :, i), x(:, :, i))
-    END DO
-#endif
-  END SUBROUTINE IFT
+$:z2z_transform('IFT', 'INVERSE')
 
+  ! RFT and HFT are inverses of each other, not two variants of one
+  ! transform, and are written out on purpose.  The argument order is
+  ! swapped, the library calls are Z2D against D2Z, and RFT carries a
+  ! HIP-only zero-fill of the padding columns that HFT has no counterpart
+  ! for.  Sharing a body would mean parameterising away a block that
+  ! exists on one side of one backend.
   SUBROUTINE RFT(x, rx)
     IMPLICIT NONE
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)

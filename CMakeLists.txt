@@ -109,6 +109,7 @@ channel_fypp_generate(CHANNEL_GENERATED_SOURCES
     ${CHANNEL_SOURCE_DIR}/core/pressure_output.fypp
     ${CHANNEL_SOURCE_DIR}/core/statistics.fypp
     ${CHANNEL_SOURCE_DIR}/core/convvelo.fypp
+    ${CHANNEL_SOURCE_DIR}/fft/ffts.fypp
     ${CHANNEL_SOURCE_DIR}/linsolve/compact_line_solvers.fypp
     ${CHANNEL_SOURCE_DIR}/linsolve/y_line_solvers.fypp
 )
@@ -130,7 +131,6 @@ add_library(channel_core
     ${CHANNEL_SOURCE_DIR}/mpi/mpi_transpose.f90
     ${CHANNEL_SOURCE_DIR}/core/restart_io.f90
     ${CHANNEL_SOURCE_DIR}/core/convvelo_io.f90
-    ${CHANNEL_SOURCE_DIR}/fft/ffts.f90
     ${CHANNEL_SOURCE_DIR}/mpi/mpi_autotune.f90
     ${CHANNEL_SOURCE_DIR}/core/channel_bcs.f90
     ${CHANNEL_GENERATED_SOURCES}
