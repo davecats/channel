@@ -23,8 +23,9 @@
 #! HIPFFT spelling of <direction>, so the macro needs only those two
 #! words.  FFTW takes no direction argument: its plan carries it.
 #!
-#! RFT and HFT are deliberately *not* written this way -- see the
-#! comment above RFT.
+#! RFT and HFT are also inverses of each other but are deliberately *not*
+#! written this way -- see the comment above RFT for what actually
+#! separates them.
 #! ===================================================================
 #:def z2z_transform(name, direction)
   SUBROUTINE ${name}$(x)
@@ -438,12 +439,17 @@ $:z2z_transform('FFT', 'FORWARD')
 
 $:z2z_transform('IFT', 'INVERSE')
 
-  ! RFT and HFT are inverses of each other, not two variants of one
-  ! transform, and are written out on purpose.  The argument order is
-  ! swapped, the library calls are Z2D against D2Z, and RFT carries a
-  ! HIP-only zero-fill of the padding columns that HFT has no counterpart
-  ! for.  Sharing a body would mean parameterising away a block that
-  ! exists on one side of one backend.
+  ! RFT and HFT are written out on purpose.  Being inverses of each other
+  ! is not the reason -- FFT and IFT are inverses too, and share a body.
+  ! The difference is that those two are one in-place complex-to-complex
+  ! transform with a direction flag, whereas these move between two
+  ! layouts: RFT takes the packed complex spectrum to the padded real
+  ! field and HFT brings it back, so the two arguments swap roles as well
+  ! as types (RFT(x, rx) against HFT(rx, x)) and the calls are Z2D
+  ! against D2Z.  RFT also zeroes the padding columns on HIP, which HFT
+  ! has no counterpart for.  A shared body would have to parameterise
+  ! which dummy is the input as well as a block that exists on one side
+  ! of one backend.
   SUBROUTINE RFT(x, rx)
     IMPLICIT NONE
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)

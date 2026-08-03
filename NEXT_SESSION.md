@@ -127,10 +127,15 @@ folded them anyway.
 
 Left written out, with the reason now a comment above `RFT`:
 
-- **`RFT` and `HFT` are inverses, not variants.** Argument order swapped,
-  `Z2D` against `D2Z`, and `RFT` carries a HIP-only zero-fill of the padding
-  columns with no counterpart in `HFT`. Unifying means parameterising away a
-  block that exists on one side of one backend.
+- **`RFT` and `HFT`.** Being inverses is *not* the reason -- `FFT` and `IFT`
+  are inverses too and share a body fine. The reason is that `FFT`/`IFT` are
+  one in-place complex-to-complex transform with a direction flag, while these
+  two move between layouts: `RFT` takes the packed complex spectrum to the
+  padded real field and `HFT` brings it back, so the arguments swap roles as
+  well as types (`RFT(x, rx)` against `HFT(rx, x)`) and the calls are `Z2D`
+  against `D2Z`. `RFT` also zeroes the padding columns on HIP, with no
+  counterpart in `HFT`. A shared body would have to parameterise which dummy
+  is the input, plus a block that exists on one side of one backend.
 - **The three `free_fft` bodies.** The CUDA and HIP ones are the same eight
   lines up to the handle prefix, but the FFTW one is a different routine
   (a `target exit data`, four `fftw_destroy_plan`, four deallocates, three
