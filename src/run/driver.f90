@@ -262,7 +262,7 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
     USE ffts, only: acquire_fft_workspace, release_fft_workspace
 #endif
     IMPLICIT NONE
-    integer:: iPhi, ix, iz, i
+    integer:: iPhi, i
 #ifdef chron
     REAL timei, timee, elapsed_run_time
 
@@ -274,29 +274,7 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
       CALL CPU_TIME(timei)
 #endif
       call roctxPush("timestep")
-      ! apply boundary conditions from input file (Couette-like)
-      call roctxPush("boundary_conditions")
-      IF (has_average) THEN
-        !$omp target
-        bc0(0, 0, 1) = u0; bcn(0, 0, 1) = uN
-        !$omp end target
-      END IF
-      !$omp target teams distribute parallel do collapse(3) private(iPhi, ix, iz)
-      DO iPhi = 1, nPhi
-        DO ix = nx0, nxN
-          DO iz = -nz, nz
-            IF (ix == 0 .and. iz == 0) THEN
-              bc0(iz, ix, 5 + iPhi) = t0
-              bcn(iz, ix, 5 + iPhi) = tn
-            ELSE
-              bc0(iz, ix, 5 + iPhi) = 0
-              bcn(iz, ix, 5 + iPhi) = 0
-            END IF
-          END DO
-        END DO
-      END DO
-      !$omp end target teams distribute parallel do
-      call roctxPop("boundary_conditions")
+      CALL apply_wall_values()
       ! Increment number of steps
       istep = istep + 1
 

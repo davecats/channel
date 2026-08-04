@@ -1,6 +1,15 @@
 #include "build_options.h"
 
-! Wall boundary conditions.
+! Wall boundary conditions -- both halves, and the only file you need to edit
+! to change them.
+!
+! A wall condition is a *row* saying which combination of nodes is constrained,
+! and a *value* saying what it is constrained to.  The two used to live apart:
+! the rows here, the values written straight into bc0/bcn from inside the
+! driver's time loop.  They are both here now.
+!
+!   setup_boundary_conditions  runs once, and builds the rows.
+!   apply_wall_values          runs once per time step, and sets the values.
 !
 ! Each component needs two rows at each wall: one enforcing the physical
 ! condition and one for the ghost node just outside it.  This module only
@@ -15,16 +24,22 @@
 !
 ! Half-channel and body-force variants are selected by the cpp switches, as
 ! before.
+!
+! A time-dependent or wall-parallel-varying condition -- an oscillating wall,
+! blowing and suction, a modulated scalar flux -- is a change to
+! apply_wall_values alone.  It is called once per step, before the substeps,
+! with the clock in `time`.
 module channel_bcs
 
   use, intrinsic :: iso_c_binding
   use channel_grid
   use channel_state
   use stencil_coefficients
+  use roctx, only: roctxPush, roctxPop
 
   implicit none
 
-  public :: setup_boundary_conditions
+  public :: setup_boundary_conditions, apply_wall_values
 
 contains
 
@@ -76,5 +91,40 @@ contains
     END DO
     !$omp target update from(bc0, bcn)
   END SUBROUTINE setup_boundary_conditions
+
+  ! The inhomogeneous side of the wall conditions, refreshed once per time step.
+  !
+  ! Streamwise wall velocities u0/uN drive the Couette-like cases; the scalars
+  ! are held at t0/tN on the mean mode and at zero on every other mode.  Both
+  ! come from the input deck and are constant in time, so this recomputes the
+  ! same planes every step -- which is what makes it the place to put a
+  ! condition that is *not* constant.
+  SUBROUTINE apply_wall_values()
+    IMPLICIT NONE
+    integer :: iPhi, ix, iz
+
+    call roctxPush("boundary_conditions")
+    IF (has_average) THEN
+      !$omp target
+      bc0(0, 0, 1) = u0; bcn(0, 0, 1) = uN
+      !$omp end target
+    END IF
+    !$omp target teams distribute parallel do collapse(3) private(iPhi, ix, iz)
+    DO iPhi = 1, nPhi
+      DO ix = nx0, nxN
+        DO iz = -nz, nz
+          IF (ix == 0 .and. iz == 0) THEN
+            bc0(iz, ix, 5 + iPhi) = t0
+            bcn(iz, ix, 5 + iPhi) = tn
+          ELSE
+            bc0(iz, ix, 5 + iPhi) = 0
+            bcn(iz, ix, 5 + iPhi) = 0
+          END IF
+        END DO
+      END DO
+    END DO
+    !$omp end target teams distribute parallel do
+    call roctxPop("boundary_conditions")
+  END SUBROUTINE apply_wall_values
 
 end module channel_bcs
