@@ -26,7 +26,7 @@ MODULE dnsdata
   USE rbmat
   USE channel_grid
   USE channel_state
-  USE compact_stencils
+  USE stencil_coefficients
   USE channel_equations
   USE channel_bcs
   USE statistics

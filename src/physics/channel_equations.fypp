@@ -1,6 +1,6 @@
 #include "header.h"
 #:include "channel_operators.fypph"
-#:include "channel_stencils.fypph"
+#:include "stencil_macros.fypph"
 #:include "channel_boundaries.fypph"
 #:include "wall_closure.fypph"
 
@@ -28,7 +28,7 @@ module channel_equations
   use, intrinsic :: iso_c_binding
   use channel_grid
   use channel_state
-  use compact_stencils
+  use stencil_coefficients
   use rbmat
   use mpi_transpose
   use roctx, only: roctxPush, roctxPop

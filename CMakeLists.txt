@@ -141,7 +141,7 @@ add_library(channel_core
     ${CHANNEL_SOURCE_DIR}/util/roctx.f90
     # numerics/ -- grid, stencils and dense linear algebra
     ${CHANNEL_SOURCE_DIR}/numerics/channel_grid.f90
-    ${CHANNEL_SOURCE_DIR}/numerics/compact_stencils.f90
+    ${CHANNEL_SOURCE_DIR}/numerics/stencil_coefficients.f90
     ${CHANNEL_SOURCE_DIR}/numerics/rbmat.f90
     # physics/ -- the state the equations act on
     ${CHANNEL_SOURCE_DIR}/physics/channel_state.f90

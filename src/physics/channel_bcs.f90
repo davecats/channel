@@ -20,7 +20,7 @@ module channel_bcs
   use, intrinsic :: iso_c_binding
   use channel_grid
   use channel_state
-  use compact_stencils
+  use stencil_coefficients
 
   implicit none
 

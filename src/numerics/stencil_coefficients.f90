@@ -1,6 +1,9 @@
 #include "header.h"
 
-! Compact (Pade-type) wall-normal derivative coefficients.
+! Compact (Pade-type) wall-normal derivative coefficients -- the numbers.
+!
+! The macros that *apply* these to a field are the separate file
+! stencil_macros.fypph.  Coefficients here, code there.
 !
 ! der(iy, n, j) holds the j = -2..2 stencil weights at node iy for
 !   n = 0 : interpolation, 1 : D^1, 2 : D^2, 3 : D^4,
@@ -13,7 +16,7 @@
 ! Declarations only, and no `use` of any other module -- see channel_state for
 ! why that is load-bearing rather than stylistic.  setup_derivatives, which
 ! computes these and needs rbmat, lives with its caller instead.
-module compact_stencils
+module stencil_coefficients
 
   use, intrinsic :: iso_c_binding
 
@@ -25,4 +28,4 @@ module compact_stencils
   real(C_DOUBLE), dimension(-2:2) :: d04n, d14n, d24n, d14np1, d24np1
   !$omp declare target(d14np1, d14n, d14m1, d140)
 
-end module compact_stencils
+end module stencil_coefficients

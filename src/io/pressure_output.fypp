@@ -1,6 +1,6 @@
 #include "header.h"
 #:include "channel_boundaries.fypph"
-#:include "channel_stencils.fypph"
+#:include "stencil_macros.fypph"
 
 MODULE pressure_output
 

@@ -1,5 +1,9 @@
 #! ===========================================================================
-#!  Wall-normal compact stencils and the time-integration vocabulary.
+#!  Applying the wall-normal compact stencils, and the time-integration
+#!  vocabulary.
+#!
+#!  The coefficients these expand against -- der and the one-sided wall rows --
+#!  are declared in stencil_coefficients.f90.  Code here, numbers there.
 #!
 #!  These are discretisation, not physics: they say how a wall-normal
 #!  derivative is applied and how one Runge-Kutta substep accumulates, not

@@ -1,5 +1,5 @@
 #include "header.h"
-#:include "channel_stencils.fypph"
+#:include "stencil_macros.fypph"
 
 ! Runtime diagnostics and periodic field output.
 !
@@ -12,7 +12,7 @@ module statistics
   use, intrinsic :: iso_c_binding
   use channel_grid
   use channel_state
-  use compact_stencils
+  use stencil_coefficients
   use mpi_transpose
   use restart_io, only: restart_write
   use roctx, only: roctxPush, roctxPop
