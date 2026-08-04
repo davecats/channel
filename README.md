@@ -33,7 +33,9 @@ at a friction Reynolds number of Re_tau = 500<br/>
 
 The source tree is split by *who owns a file*. `src/physics/` is the layer a
 user changes to solve a different problem; everything else is machinery that a
-normal case never needs to touch.
+normal case never needs to touch. See
+[`src/physics/README.md`](src/physics/README.md) for which file to edit for
+which change.
 
 ```text
 src/channel.f90              Main DNS executable
@@ -128,6 +130,20 @@ cmake --build build-amd -j
 
 For LLVM Flang, the current CMake path is configured for AMD offload and uses
 `gfx942` in the compiler flags. Adjust `CMakeLists.txt` if your target GPU differs.
+
+### Physics Options
+
+Two choices about the problem are made at build time rather than in `dns.in`,
+because each selects which stencil rows close the wall:
+
+```bash
+cmake -S . -B build -DCHANNEL_HALF_CHANNEL=ON   # half channel
+cmake -S . -B build -DCHANNEL_PHI_NEUMANN=ON    # Neumann scalars at the wall
+```
+
+Both default to `OFF`. The `physics_options_compile` test keeps the guarded
+code building, but nothing checks that the numbers either option produces are
+correct; validate against a known case before relying on them.
 
 ## Running
 
