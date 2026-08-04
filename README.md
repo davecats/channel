@@ -31,13 +31,24 @@ at a friction Reynolds number of Re_tau = 500<br/>
 
 ## Repository Layout
 
+The source tree is split by *who owns a file*. `src/physics/` is the layer a
+user changes to solve a different problem; everything else is machinery that a
+normal case never needs to touch.
+
 ```text
 src/channel.f90              Main DNS executable
-src/core/                    DNS state, driver, pressure output, config parser
-src/fft/                     FFT backends
-src/gpu/                     NCCL/RCCL C bridge and Fortran communication wrapper
+src/physics/                 The equations, their operators, the boundary
+                             conditions and the run state -- what you edit
+src/numerics/                Discretisation: grid, compact stencils, transforms
 src/linsolve/                Compact and wall-normal line solvers
+src/fft/                     FFT backends
 src/mpi/                     MPI decomposition, transposes, autotuning
+src/gpu/                     NCCL/RCCL C bridge and Fortran communication wrapper
+src/io/                      Input deck parser, restart files, diagnostics,
+                             pressure and convvelo output
+src/run/                     Case setup and the time-stepping driver
+src/util/                    Environment options, scratch workspace, profiler
+                             markers, build-time switches (header.h)
 src/post/                    post_pressure and post_convvelo executables
 src/test/                    Fortran test programs
 cmake/                       CMake helper modules and CTest definitions
@@ -45,6 +56,11 @@ tests/                       Regression input and reference data
 examples/                    Example dns.in input decks
 postpro/                     Python post-processing utilities
 ```
+
+Two file extensions are used beyond `.f90`: `.fypp` is a source expanded by
+[fypp](https://github.com/aradi/fypp) before compilation, and `.fypph` is a
+shared definition file included by them. Expansion happens into the build tree;
+the generated `.f90` is never committed.
 
 ## Dependencies
 

@@ -77,10 +77,26 @@ if(NOT FYPP_EXECUTABLE)
     message(FATAL_ERROR "fypp not found. Install it (pip install fypp) or pass -DFYPP_EXECUTABLE=/path/to/fypp")
 endif()
 
+# Directories holding shared fypp definitions (.fypph).  Both the -I list the
+# expander is given and the dependency glob below are built from this one list,
+# so a new definition directory only has to be named once.
+set(CHANNEL_FYPP_INCLUDE_DIRS
+    "${CHANNEL_SOURCE_DIR}/physics"
+    "${CHANNEL_SOURCE_DIR}/numerics"
+    "${CHANNEL_SOURCE_DIR}/io"
+    "${CHANNEL_SOURCE_DIR}/linsolve")
+
+set(CHANNEL_FYPP_INCLUDE_FLAGS)
+foreach(dir IN LISTS CHANNEL_FYPP_INCLUDE_DIRS)
+    list(APPEND CHANNEL_FYPP_INCLUDE_FLAGS -I "${dir}")
+endforeach()
+
 # Re-expand whenever any shared definition file changes, not just the .fypp itself.
-file(GLOB CHANNEL_FYPP_INCLUDES
-    "${CHANNEL_SOURCE_DIR}/core/*.fypph"
-    "${CHANNEL_SOURCE_DIR}/linsolve/*.fypph")
+set(CHANNEL_FYPP_INCLUDE_GLOBS)
+foreach(dir IN LISTS CHANNEL_FYPP_INCLUDE_DIRS)
+    list(APPEND CHANNEL_FYPP_INCLUDE_GLOBS "${dir}/*.fypph")
+endforeach()
+file(GLOB CHANNEL_FYPP_INCLUDES ${CHANNEL_FYPP_INCLUDE_GLOBS})
 
 function(channel_fypp_generate out_var)
     set(generated)
@@ -90,8 +106,7 @@ function(channel_fypp_generate out_var)
         add_custom_command(
             OUTPUT "${outfile}"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/generated"
-            COMMAND ${FYPP_EXECUTABLE} -I "${CHANNEL_SOURCE_DIR}/core"
-                    -I "${CHANNEL_SOURCE_DIR}/linsolve"
+            COMMAND ${FYPP_EXECUTABLE} ${CHANNEL_FYPP_INCLUDE_FLAGS}
                     --line-length=132 --folding-mode=smart
                     "${infile}" "${outfile}"
             DEPENDS "${infile}" ${CHANNEL_FYPP_INCLUDES}
@@ -103,12 +118,12 @@ function(channel_fypp_generate out_var)
 endfunction()
 
 channel_fypp_generate(CHANNEL_GENERATED_SOURCES
-    ${CHANNEL_SOURCE_DIR}/core/byte_workspace.fypp
-    ${CHANNEL_SOURCE_DIR}/core/channel_equations.fypp
-    ${CHANNEL_SOURCE_DIR}/core/dnsdata.fypp
-    ${CHANNEL_SOURCE_DIR}/core/pressure_output.fypp
-    ${CHANNEL_SOURCE_DIR}/core/statistics.fypp
-    ${CHANNEL_SOURCE_DIR}/core/convvelo.fypp
+    ${CHANNEL_SOURCE_DIR}/physics/channel_equations.fypp
+    ${CHANNEL_SOURCE_DIR}/io/pressure_output.fypp
+    ${CHANNEL_SOURCE_DIR}/io/statistics.fypp
+    ${CHANNEL_SOURCE_DIR}/io/convvelo.fypp
+    ${CHANNEL_SOURCE_DIR}/run/dnsdata.fypp
+    ${CHANNEL_SOURCE_DIR}/util/byte_workspace.fypp
     ${CHANNEL_SOURCE_DIR}/fft/ffts.fypp
     ${CHANNEL_SOURCE_DIR}/linsolve/compact_line_solvers.fypp
     ${CHANNEL_SOURCE_DIR}/linsolve/y_line_solvers.fypp
@@ -118,26 +133,36 @@ channel_fypp_generate(CHANNEL_GENERATED_TEST_SOURCES
     ${CHANNEL_SOURCE_DIR}/test/test_convvelo_utils.fypp
 )
 
+# Grouped by layer, in the order the layers stack.  CMake resolves Fortran
+# module dependencies itself, so this order is for the reader.
 add_library(channel_core
-    ${CHANNEL_SOURCE_DIR}/core/channel_grid.f90
-    ${CHANNEL_SOURCE_DIR}/core/compact_stencils.f90
-    ${CHANNEL_SOURCE_DIR}/core/channel_state.f90
-    ${CHANNEL_SOURCE_DIR}/core/env_options.f90
-    ${CHANNEL_SOURCE_DIR}/core/config.f90
-    ${CHANNEL_SOURCE_DIR}/core/rbmat.f90
-    ${CHANNEL_SOURCE_DIR}/core/roctx.f90
+    # util/ -- no domain vocabulary, depends on nothing in the code
+    ${CHANNEL_SOURCE_DIR}/util/env_options.f90
+    ${CHANNEL_SOURCE_DIR}/util/roctx.f90
+    # numerics/ -- grid, stencils and dense linear algebra
+    ${CHANNEL_SOURCE_DIR}/numerics/channel_grid.f90
+    ${CHANNEL_SOURCE_DIR}/numerics/compact_stencils.f90
+    ${CHANNEL_SOURCE_DIR}/numerics/rbmat.f90
+    # physics/ -- the state the equations act on
+    ${CHANNEL_SOURCE_DIR}/physics/channel_state.f90
+    ${CHANNEL_SOURCE_DIR}/physics/channel_bcs.f90
+    # communication and wall-normal solvers
     ${CHANNEL_SOURCE_DIR}/gpu/y_pipeline_nccl.f90
     ${CHANNEL_SOURCE_DIR}/linsolve/y_schur_solver.f90
     ${CHANNEL_SOURCE_DIR}/mpi/mpi_transpose.f90
-    ${CHANNEL_SOURCE_DIR}/core/restart_io.f90
-    ${CHANNEL_SOURCE_DIR}/core/convvelo_io.f90
     ${CHANNEL_SOURCE_DIR}/mpi/mpi_autotune.f90
-    ${CHANNEL_SOURCE_DIR}/core/channel_bcs.f90
+    # io/
+    ${CHANNEL_SOURCE_DIR}/io/config.f90
+    ${CHANNEL_SOURCE_DIR}/io/restart_io.f90
+    ${CHANNEL_SOURCE_DIR}/io/convvelo_io.f90
+    # everything expanded from .fypp
     ${CHANNEL_GENERATED_SOURCES}
-    ${CHANNEL_SOURCE_DIR}/core/channel_transforms.f90
-    ${CHANNEL_SOURCE_DIR}/core/driver.f90
+    # numerics/ and run/ entries that sit above the generated sources
+    ${CHANNEL_SOURCE_DIR}/numerics/channel_transforms.f90
+    ${CHANNEL_SOURCE_DIR}/run/driver.f90
 )
-target_include_directories(channel_core PUBLIC "${CHANNEL_SOURCE_DIR}/core")
+# header.h, included by nearly every source.
+target_include_directories(channel_core PUBLIC "${CHANNEL_SOURCE_DIR}/util")
 
 # --------------------------------------------------------------------
 # MPI
