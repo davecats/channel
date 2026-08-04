@@ -1,7 +1,7 @@
 program test_pressure_dpdy
   use, intrinsic :: iso_c_binding
   use, intrinsic :: ieee_arithmetic
-  use dnsdata, only: iproc, ierr, ny, nz, nx, ny0, nyN, nx0, nxN, free_memory
+  use case_setup, only: iproc, ierr, ny, nz, nx, ny0, nyN, nx0, nxN, free_memory
   use pressure_output, only: compute_pressure_output, free_pressure_output
   use driver, only: initialize
   use mpi_f08

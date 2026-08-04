@@ -5,7 +5,7 @@ module convvelo
 
   use, intrinsic :: iso_c_binding
   use config, only: ini_config, has_section, get_string, get_real
-  use dnsdata, only: V, nPhi, nz, ny, nxd, izd, factor, &
+  use case_setup, only: V, nPhi, nz, ny, nxd, izd, factor, &
                      apply_complex_derivative_current_layout, apply_complex_second_derivative_current_layout, has_terminal, &
                      time, deltat, overlapping
   use pressure_output, only: compute_poisson, compute_dpdy

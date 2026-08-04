@@ -2,7 +2,7 @@
 
 program post_convvelo
   use, intrinsic :: iso_c_binding
-  use dnsdata, only: iproc, read_restart_file, free_memory, V
+  use case_setup, only: iproc, read_restart_file, free_memory, V
   use convvelo, only: convvelo_enabled, free_convvelo, reset_convvelo_stats, update_convvelo_component_means, &
                       acc_convvelo_stats, convvelo_has_pending_output, write_convvelo_runtime_snapshot
   use pressure_output, only: free_pressure_output

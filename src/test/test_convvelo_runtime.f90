@@ -1,6 +1,6 @@
 program test_convvelo_runtime
   use, intrinsic :: iso_c_binding
-  use dnsdata, only: nPhi, ny0, nyN, nz, nx0, nxN, time, free_memory
+  use case_setup, only: nPhi, ny0, nyN, nz, nx0, nxN, time, free_memory
   use convvelo, only: free_convvelo, convvelo_has_pending_output, write_convvelo_runtime_snapshot, convvelo_enabled, &
                       update_convvelo_component_means, acc_convvelo_stats
   use pressure_output, only: free_pressure_output

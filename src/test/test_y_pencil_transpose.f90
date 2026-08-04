@@ -2,7 +2,7 @@
 
 program test_y_reduced_known_good_local_dst
   use, intrinsic :: iso_c_binding
-  use dnsdata, only: eliminate_assembled_boundaries, nz
+  use case_setup, only: eliminate_assembled_boundaries, nz
   use channel_grid, only: iproc, nproc, npy_grid, npxz, ipy, ny0, nyN, nx0, nxN, nxB
   use mpi_transpose, only: ierr, init_MPI, MPI_COMM_WORLD, MPI_Init, MPI_Comm_rank, MPI_Comm_size, MPI_Abort, &
                            MPI_Barrier, MPI_Allreduce, MPI_Finalize, MPI_DOUBLE_PRECISION, MPI_MAX

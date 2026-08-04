@@ -1,6 +1,6 @@
 program test_convvelo_mpi_io
   use convvelo, only: init_convvelo, fill_convvelo_synthetic_state_for_test, write_convvelo_raw_stats, free_convvelo
-  use dnsdata, only: free_memory
+  use case_setup, only: free_memory
   use driver, only: initialize
   use pressure_output, only: free_pressure_output
   use mpi_f08

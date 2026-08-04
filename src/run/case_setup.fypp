@@ -1,6 +1,6 @@
 !============================================!
 !                                            !
-!    Data Structures, Definitions and I/O    !
+!            Bringing a case up              !
 !                  for the                   !
 !     Direct Numerical Simulation (DNS)      !
 !        of a turbulent channel flow         !
@@ -10,15 +10,24 @@
 ! Author: Dr.-Ing. Davide Gatti
 ! Date  : 28/Jul/2015
 !
+! Everything that has to happen once, before the first time step: parse the
+! input deck into the grid and the physical parameters, allocate the fields and
+! map them to the device, build the compact derivative coefficients, and wrap
+! the restart reader and writer with the run state their header carries.
+!
+! This module was called `dnsdata` and did own the data; the declarations moved
+! out to channel_grid, channel_state and stencil_coefficients, and what is left
+! is the setup.  It still `use`s all of them without an ONLY list, so `use
+! case_setup` continues to bring the whole vocabulary into scope -- which is
+! what the tests and the post-processing executables rely on.
+!
+! Array layouts are documented where the arrays are declared: the fields and
+! boundary planes in channel_state, der and the wall rows in
+! stencil_coefficients, the mesh and wavenumbers in channel_grid.
 
 #include "header.h"
 
-MODULE dnsdata
-
-  ! V(iy,iz,ix,i) ,                                 i={1:u,2:v,3:w, 4 to 3+nPhi: scalar}
-  ! oldrhs(iy,iz,ix,i),                         i={1:eta,2:d2v, 3 to 2+nPhi: scalar}
-  ! bc0(iz,ix,i), bcn(iz,ix,i),                 i={1:u, 2:v, 3:w, 4:vy, 5:eta, 6 to 5+nPhi: scalar}
-  ! der(iy,i,j),                                 i={0:d0, 1:d1, 2:d2, 3:d4}, j={-2:2}
+MODULE case_setup
 
   USE, intrinsic :: iso_c_binding
   USE config
@@ -337,4 +346,4 @@ CONTAINS
 
   !--------------------------------------------------------------!
 
-END MODULE dnsdata
+END MODULE case_setup

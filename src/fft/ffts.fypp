@@ -115,7 +115,7 @@ MODULE ffts
   INCLUDE 'fftw3.f03'
   integer, save        :: plan_type = FFTW_PATIENT
   ! Declared here on both paths so consumers say `use ffts` either way; on the
-  ! FFTW path these used to live in dnsdata and be threaded through init_fft.
+  ! FFTW path these used to live in case_setup and be threaded through init_fft.
   complex(C_DOUBLE_COMPLEX), dimension(:, :, :, :), pointer :: VVdz => null(), VVdx => null()
   real(C_DOUBLE), dimension(:, :, :, :), pointer :: rVVdx => null()
   real(C_DOUBLE), dimension(:, :, :, :), pointer :: products

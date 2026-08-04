@@ -122,7 +122,7 @@ channel_fypp_generate(CHANNEL_GENERATED_SOURCES
     ${CHANNEL_SOURCE_DIR}/io/pressure_output.fypp
     ${CHANNEL_SOURCE_DIR}/io/statistics.fypp
     ${CHANNEL_SOURCE_DIR}/io/convvelo.fypp
-    ${CHANNEL_SOURCE_DIR}/run/dnsdata.fypp
+    ${CHANNEL_SOURCE_DIR}/run/case_setup.fypp
     ${CHANNEL_SOURCE_DIR}/util/byte_workspace.fypp
     ${CHANNEL_SOURCE_DIR}/fft/ffts.fypp
     ${CHANNEL_SOURCE_DIR}/linsolve/compact_line_solvers.fypp

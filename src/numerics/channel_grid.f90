@@ -5,10 +5,10 @@
 ! These names used to be split between two modules for no reason other than
 ! history: the global sizes nx and nzd and every owned index range lived in
 ! mpi_transpose, while ny, nz, nxd and the spectral wavenumber arrays lived in
-! dnsdata.  A reader had to know which half of the vocabulary lived where.
+! case_setup.  A reader had to know which half of the vocabulary lived where.
 ! They are all declared here now, and the modules that compute them fill them
 ! in: init_MPI (mpi_transpose) sets the decomposition, read_dnsin and
-! init_memory (dnsdata) set the mesh and the wavenumbers.
+! init_memory (case_setup) set the mesh and the wavenumbers.
 !
 ! This module owns declarations only.  It deliberately depends on nothing, so
 ! it can sit underneath both the numerics and the physics.

@@ -1,5 +1,5 @@
 PROGRAM regression_test
-  USE dnsdata
+  USE case_setup
   USE driver
 #include "header.h"
   IMPLICIT NONE

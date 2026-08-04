@@ -10,7 +10,7 @@
 ! declare-target variables.  A use-free declaration module is the shape that
 ! is known to work.  Anything needing `use` belongs elsewhere.
 !
-! Everything here is filled in by dnsdata (read_dnsin, init_memory) and
+! Everything here is filled in by case_setup (read_dnsin, init_memory) and
 ! consumed by the solver, the statistics and the I/O.
 module channel_state
 

@@ -5,7 +5,7 @@
 MODULE pressure_output
 
   USE, intrinsic :: iso_c_binding
-  USE dnsdata, ONLY: V, der, k2, ialfa, ibeta, d140, d240, d24n, ni, alfa0, beta0, factor, &
+  USE case_setup, ONLY: V, der, k2, ialfa, ibeta, d140, d240, d24n, ni, alfa0, beta0, factor, &
                      ny, nz, nxd, nPhi, izd, d040, zero_bc, overlapping, solve_compact_component_current_layout, &
                      compact_assembly_context
   USE ffts, ONLY: VVdz

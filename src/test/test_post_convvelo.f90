@@ -1,6 +1,6 @@
 program test_post_convvelo
   use, intrinsic :: iso_c_binding
-  use dnsdata, only: nPhi, ny0, nyN, nz, nx0, nxN, free_memory
+  use case_setup, only: nPhi, ny0, nyN, nz, nx0, nxN, free_memory
   use convvelo, only: free_convvelo
   use pressure_output, only: free_pressure_output
   use driver, only: initialize

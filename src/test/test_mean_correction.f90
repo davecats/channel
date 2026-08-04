@@ -1,6 +1,6 @@
 program test_mean_correction
   use, intrinsic :: iso_c_binding
-  use dnsdata, only: ny, der, ni, k2, eta0bc, eta0m1bc, etanbc, etanp1bc, free_memory
+  use case_setup, only: ny, der, ni, k2, eta0bc, eta0m1bc, etanbc, etanp1bc, free_memory
   use driver, only: initialize
   use channel_grid, only: ipy, npy_grid
   use mpi_transpose, only: MPI_COMM_Y, ierr, MPI_Bcast, MPI_Allreduce, MPI_Abort, MPI_Finalize, MPI_DOUBLE_COMPLEX, &

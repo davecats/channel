@@ -3,7 +3,7 @@
 module test_convvelo_utils
   use, intrinsic :: iso_c_binding
   use, intrinsic :: ieee_arithmetic
-  use dnsdata, only: iproc, ierr, ny, nz, nx, nPhi, ny0, nyN, nx0, nxN, V, read_restart_file
+  use case_setup, only: iproc, ierr, ny, nz, nx, nPhi, ny0, nyN, nx0, nxN, V, read_restart_file
   use convvelo_io, only: convvelo_file_header_bytes
   use mpi_f08
   implicit none

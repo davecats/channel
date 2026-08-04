@@ -2,7 +2,7 @@
 
 PROGRAM post_pressure
   USE, intrinsic :: iso_c_binding
-  USE dnsdata, ONLY: iproc, read_restart_file, free_memory, V, ny, nz, nx, ny0, nyN, nx0, nxN
+  USE case_setup, ONLY: iproc, read_restart_file, free_memory, V, ny, nz, nx, ny0, nyN, nx0, nxN
   USE pressure_output, ONLY: free_pressure_output, compute_pressure_output
   USE driver, ONLY: initialize
 #ifdef HAVE_FFTW

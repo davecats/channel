@@ -21,7 +21,7 @@ CONTAINS
   !==========================================================
   SUBROUTINE initialize(config_file, restart_file, solveNS)
     use config, only: ini_config, read_ini_file
-    USE dnsdata
+    USE case_setup
     USE mpi_transpose, only: init_MPI
     USE channel_transforms, only: transform_to_physical, compute_cfl
     USE mpi_autotune, only: configure_mpi_decomposition
@@ -255,7 +255,7 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
 
   !==========================================================
   SUBROUTINE timeloop()
-    USE dnsdata
+    USE case_setup
     USE channel_transforms, only: transform_to_physical, transform_back_and_build_rhs, compute_cfl
     USE convvelo, only: advance_convvelo_runtime
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
@@ -365,7 +365,7 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
   END SUBROUTINE timeloop
 
   SUBROUTINE finalize()
-    USE dnsdata, only: disable_restart_write, has_terminal, time, save_restart_file, V, &
+    USE case_setup, only: disable_restart_write, has_terminal, time, save_restart_file, V, &
 #ifdef HAVE_FFTW
                        VVdz, VVdx, rVVdx, &
 #endif
