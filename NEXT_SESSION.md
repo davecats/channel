@@ -5,13 +5,13 @@ Copy the block below as the opening message.
 ---
 
 Continue simplifying `channel` for readability, without changing behaviour.
-This time the subject is the `start` / `_continue` duplication in
-`src/linsolve/y_line_solvers.fypp` -- see "Do this first" below. There are two
-layers of it, they are not the same case, and one of them contains two
-*character-identical* loop bodies. Deciding what each layer deserves is the
-task, and "these should stay written out, because ..." is a complete answer.
-What is *not* acceptable is deciding without reading all of both layers, or
-unifying anything in a way that changes the arithmetic of a recurrence.
+This time the subject is the **send side** of the pipelined-LU messages and
+the solution-halo kernels in `src/linsolve/y_line_solvers.fypp` -- see "Do
+this first" below. The receive side was just done and left these out for
+stated reasons; your job is to test those reasons rather than inherit them,
+and "these should stay written out, because ..." is a complete answer. What is
+*not* acceptable is deciding without reading all six kernels, or making a
+macro whose argument list is the kernel.
 
 Read `.claude/projects/-home-ws-xt8786-Codes-channel/memory/MEMORY.md` first,
 then this whole file. Between them they carry the verification gate (including
@@ -27,7 +27,9 @@ something the others missed.
 
 ## Where the previous sessions left it
 
-Nine code commits, each independently verified against the full gate.
+Thirteen code commits, each independently verified against the full gate.
+
+- **The `start`/`_continue` duplication is settled** (four commits, below).
 
 - **The convvelo MPI-IO writer is out.** `src/core/convvelo_io.f90` holds the
   raw-statistics writer, the profile write, the field averaging and the
@@ -58,86 +60,117 @@ Nine code commits, each independently verified against the full gate.
 - **`FFT` and `IFT` are written once**; `RFT`/`HFT` and the three `free_fft`
   bodies were looked at and left (below).
 
-## Do this first: `start` / `_continue` in `y_line_solvers.fypp`
+## Do this first: the send side, and the halo kernels
 
-The pipelined-LU solver splits every wall-normal line across y ranks, so each
-rank runs a recurrence that either *starts* a line or *continues* one seeded by
-the batch above. That doubling is written out at two levels, and the two levels
-are different problems -- read both before deciding either.
+The receive side of the pipelined-LU messages was just unified. Six kernels
+now share `pipelined_line_loop` (`y_line_solvers.fypp:154`). Six *other*
+kernels have a family resemblance to them and were deliberately left out. Two
+groups, and they are not the same question -- read all six before deciding
+either.
 
-**Layer 1: the three leaf recurrences (`y_line_solvers.fypp:2262-2440`).**
-`ys_factor_penta_interleaved`, `ys_forward_substitute_penta_interleaved`,
-`ys_backward_substitute_penta_interleaved`, each with a `_continue` twin. All
-seven leaf routines (including `ys_solve_factored_penta_interleaved`) are
-`!$omp declare target` -- see the block at lines 315-321 -- so anything done
-here lands in device code and the rules in [[nvfortran-dummy-array-device-call]]
-apply directly.
+**Group 1: the three pack kernels** (`ys_pack_factor_state` 2118,
+`ys_pack_forward_state` 2144, `ys_pack_backward_state` 2165). These are the
+send-side twins of the wrappers that now use the macro: same `stride =
+ys_workspace_nlines`, same `target teams distribute` over `local_line`, same
+`iline = first_line + local_line - 1`, same `q = int(offset + ELEMS*(local_line
+- 1))`. Three things stopped them going in:
 
-The two substitute pairs are the strong case, and the fact worth having up
-front: **their interior loops are character-identical**, verified by `diff`.
+- they need `p0`/`p1` as extra `private` scratch, which the macro does not
+  offer;
+- they read `send_offset`, not `recv_offset`, and they share `ycomm_sendbuf`,
+  not `ycomm_recvbuf`;
+- `ys_pack_backward_state` does not take `active_n`, which is in the macro's
+  fixed shared list.
 
-- forward: `do i = 2, n - 1` at lines 2350-2354 and 2374-2378 -- identical.
-- backward: `do i = n - 3, 0, -1` at 2397-2401 and 2421-2425 -- identical.
+So making them fit costs at least an extra-private parameter, a buffer/offset
+parameter, and something for the missing `active_n`. **That is the judgement
+call**: `pipelined_line_loop` has three parameters today and its argument list
+is plainly not the kernel. With three more it might be. If the honest answer
+is "the pack kernels keep their own loop", say so at the site -- the macro's
+comment already claims this and a session that actually reads them should
+either confirm that claim or correct it.
 
-In both pairs the `_continue` twin is *the same interior loop preceded by a
-different prologue*: the plain one opens the recurrence at the wall, the
-`_continue` one seeds rows 0 and 1 from the previous batch's tail
-(`prev0_rhs`/`prev1_rhs`, or `next0_rhs`/`next1_rhs` going backward). So there
-is a real shared invariant -- the pentadiagonal recurrence itself -- and a real
-hazard: change it in one twin and the single-rank and multi-rank solves
-silently disagree. That is the same silent-corruption shape the
-`YS_PIPELINE_*_ELEMS` step fixed, except here the drift would be in the
-arithmetic rather than in an offset.
+**Group 2: the halo kernels** (`ys_pack_solution_rows` 1991,
+`ys_unpack_lower_solution_halo` 2014, `ys_unpack_upper_solution_halo` 2030).
+These are *not* the same scaffolding: they loop `iline` directly over `nlines`
+with no `first_line` and no batch, so `pipelined_line_loop` does not apply and
+forcing it would be the mistake. The real question here is the number 2, which
+appears at five sites: `count = 2_C_INT*nlines` in both transport routines
+(1915 and 1960) and `2_C_INT*(iline - 1_C_INT)` in the three kernels.
 
-**The factor pair is not the same case, and lumping the three together is the
-mistake to avoid.** `ys_factor_penta_interleaved_continue` has *no* interior
-loop at all -- it is only the two seed rows, because the elimination it would
-otherwise repeat was already done by the batch above. It shares a prologue
-shape with its twin, not a body. Judge it separately; the honest answer may
-well differ from whatever the substitute pairs get.
-
-**Layer 2: the four batch wrappers (`y_line_solvers.fypp:1992-2064`).**
-`ys_forward_pipelined_batch` / `_continue` and `ys_backward_pipelined_batch` /
-`_continue` are ~15 lines each and about 80% scaffolding: `stride =
-ys_workspace_nlines`, an `!$omp target teams distribute parallel do` with a
-`default(none)` shared list, a loop over `local_line`, and one leaf call. What
-differs is the shared list, the leaf routine's name and argument list, and --
-in the `_continue` pair only -- the `q = recv_offset + 2*(local_line - 1)` seed
-index into `ycomm_recvbuf`. Four wrappers, ~60 lines of which the loop
-scaffolding is common to all four and the `q` line is common to two.
-
-This layer is where a macro is most likely to pay, precisely because what
-differs is *names*, not structure -- the `interleaved_penta_solver` case, which
-already worked in this file. But note the wrappers name the `ys_gpsv_*` module
-arrays directly at the call site, and that is load-bearing, not incidental:
-forwarding them as dummies is exactly the bug in
-[[nvfortran-dummy-array-device-call]]. Any macro must keep the array names as
-*text* at each site, which is the technique in "Techniques worth reusing".
+Commit 07b2cef deliberately did **not** fold these into
+`YS_PIPELINE_SOLVE_ELEMS`, and that part is settled: the halo pair is two
+adjacent solution rows, not a batch's solve state, and binding them would
+assert a coupling that does not exist. The open question is the different one
+-- whether the halo's own `2` deserves *its own* name, since the packer and
+its two unpackers must agree with the transport routines' `count` or the field
+is scrambled silently. Note the earlier verdict that the halo transport pair
+is "three lines of self-evident offset arithmetic" was about `count` /
+`lower_offset` / `upper_offset` in those two routines, and did not consider
+the three kernels. That is new information, so this one is open rather than
+closed.
 
 Practicalities:
 
-- The file is **already `.fypp`** and already defines four macros
-  (`custom_penta_kernel`, `interleaved_penta_solver`, `timed_step`,
-  `timed_comm_post`), so there is no `.f90` -> `.fypp` conversion to do and the
-  house style for this exact problem is already in the file to copy.
-- **Aim for byte-identical generated Fortran.** For device kernels that is what
-  retires the performance question without an idle GPU, and it is achievable
-  here because every difference is a name or an expression.
-- **A 1-batch pipelined solve exercises none of this.** Every `_continue` path
-  needs at least two batches, and every per-batch offset collapses to its first
-  term at one. Sweep `CHANNEL_Y_PIPELINE_BATCHES=1..5` at `CHANNEL_NPY=3` with
-  `CHANNEL_Y_SOLVER=pipelined_lu`, as an earlier session did for the stride
-  arithmetic.
-- The two pipelined-LU regression tests **do** pass on GPU with
-  `UCX_MEMTYPE_CACHE=n` (they are not in the environmental 15), so unlike the
-  xz kernels this subject can actually be checked on the device. Use that.
-- `CHANNEL_COMM=nccl` reaches `ys_*_pipelined_batch*` through the NCCL solver
-  too; the recipe is under "Verifying an NCCL change".
+- The `_continue` and halo paths need **at least two batches and npy >= 2**.
+  Sweep `CHANNEL_Y_PIPELINE_BATCHES=1..5` at `CHANNEL_NPY=3` with
+  `CHANNEL_Y_SOLVER=pipelined_lu`.
+- `y_batches=` in the decomposition line is the **autotuner's** field and is 0
+  even when the env var is set. To confirm the batch count really took, use
+  `CHANNEL_Y_PIPELINE_TIMING=1`, whose report prints `nbatches` per rank.
+  Varying diffnorm proves nothing -- `FFTW_PATIENT` varies run to run anyway.
+- The two pipelined-LU regression tests pass on GPU with `UCX_MEMTYPE_CACHE=n`
+  (they are not in the environmental 15), so this subject is checkable on the
+  device. `CHANNEL_COMM=nccl` reaches these kernels too; recipe below.
+- Prefer the **object-level comparison** in "Techniques worth reusing". It
+  settled all four commits of the last session and is cheaper than any run.
 
-**"These should stay written out, because ..." is a perfectly good answer**,
-and it may well be the right one for the factor pair even if it is not for the
-substitute pairs. Several extractions have been abandoned across these sessions
-and recording the reason has been worth more than forcing them through.
+## Settled recently: `start` / `_continue` in `y_line_solvers.fypp`
+
+Four commits. The queued description of this subject was wrong in two places,
+and correcting it was most of the value.
+
+- **The per-line seed stride is named.** `YS_PIPELINE_FACTOR_ELEMS` /
+  `SOLVE_ELEMS` set the buffer sizes and per-batch offsets, but six kernels
+  still stepped `q` by a bare `6_C_INT` / `2_C_INT`. The number is read from
+  two sides and a side that drifted would take a line's state from the wrong
+  place rather than fail.
+- **The two substitution interiors are written once**
+  (`penta_forward_interior` / `penta_backward_interior`, line 110). They were
+  character-identical, verified by `diff`, and they are the recurrence itself.
+  **They must be macros, not a shared device routine**: the leaves already
+  take their arrays as dummies, so a helper would forward assumed-shape
+  dummies into a `declare target` call from inside a target region -- exactly
+  the nvfortran failure this file's first block describes.
+- **The factor "pair" is not a pair**, and the old handoff's framing of three
+  parallel pairs was the error. The substitutions are an if/else -- `ipy > 0`
+  takes `_continue`, else the plain one. The factor path runs
+  `ys_apply_factor_continuation` *and then* `ys_factor_pipelined_batch`
+  unconditionally. `_continue` is a **prologue** to the plain routine, not an
+  alternative to it: it folds the previous rank's last two rows into this
+  batch's first two, and the plain routine then factorises the whole local
+  line. The interior loop it "lacks" is not an elimination the batch above
+  already did -- that elimination still runs, immediately afterwards. There is
+  no shared recurrence, and the pair stays written out.
+- **The batch wrappers were six, not four.** `ys_apply_factor_continuation`
+  does not match the `*_pipelined_batch*` pattern, which is presumably how the
+  count went wrong. `pipelined_line_loop` (a `#:call` block macro in the
+  `timed_step` idiom) holds the stride, the directive, the loop and the `q`
+  seed; each site keeps its leaf call as ordinary Fortran, which is also what
+  keeps the `ys_gpsv_*` names at the site as text. Its shared list is emitted
+  as **two clauses** because one site was already at 131 columns; repeated
+  data-sharing clauses are a no-op, and the object comparison confirms it
+  rather than assuming it.
+
+Verification, since three of the four changed compiled code: the generated
+Fortran for the interior extraction is **byte-identical**, and so is its
+gfortran object. For the other three, the gfortran `.text` is identical
+instruction for instruction and the nvfortran `.text` has the same instruction
+at every address, differing only in source-line constants and `_F1L<line>_`
+symbol names by exactly the known line shift. Plus CPU ctest 30/30, the
+batches sweep 1..5 against the committed reference, `channel` exiting 0 at CPU
+np=2 and GPU np=1, the GPU suite at the same 15 environmental failures, and
+`CHANNEL_COMM=nccl` passing the npy2 reference at 2 and 3 batches on cetus.
 
 ## Settled recently: the six xz pack kernels stay written out
 
@@ -297,6 +330,8 @@ information.
 Do not redo these without new information; the reasoning is in the commits.
 
 - **The two pipeline pairs above.**
+- **The factor "pair" in `y_line_solvers.fypp`** (above) -- and note *why*:
+  they are not two forms of one step, they are two steps that both run.
 - **The six xz pack/repack kernels** in `mpi_transpose.f90` (above).
 - **`RFT`/`HFT` and the three `free_fft` bodies** in `ffts.fypp` (above).
 - **The test-support block in `convvelo`** (`fill_convvelo_synthetic_state_
@@ -407,11 +442,29 @@ also proves the NCCL branch was actually taken.
 
 ### Techniques worth reusing, in order of how much they save
 
+- **Compare the object files, not the outputs.** Build HEAD and the change in
+  the *same* build tree (`git stash` / build / capture the `.o` / `stash pop`),
+  so paths and flags are identical. If the objects match, no runtime leg can
+  add anything -- a bit-identity run would compare the program with itself.
+  This settled all four commits of the last session. Four things it takes:
+  - **gfortran is byte-reproducible**, so `cmp` on the `.o` works directly.
+  - **nvfortran is not.** Two builds of the *same* source differ inside
+    `__nv_relfatbin`, the embedded device blob. **Run that control first**, or
+    you will chase a difference the compiler invented. Use `objdump -d` of the
+    host `.text`, which is stable across rebuilds.
+  - Adding or removing lines -- even comments -- shifts embedded source-line
+    constants and nvfortran's `_F1L<line>_` outlined-region symbol names.
+    Normalise (`$0x…` -> IMM, `_F1L[0-9]+_` -> `_F1L#_`), then check the
+    residue is empty and every delta equals the known line shift.
+  - For a directive rewrite, also compare `shared`/`private` clauses as *name
+    sets* and the loop bodies whitespace-normalised.
 - **Diff the preprocessed or generated Fortran, not just the output.** If a
   change is fypp expansion or conditional removal, expanding both trees and
   diffing proves the compiled program is unchanged. That retires the
   performance question without needing an idle GPU. Ignore blank lines: `cpp`
-  leaves one where it removes a directive.
+  leaves one where it removes a directive -- and note that a blank line
+  *between fypp macro blocks* is copied to the output, so use `#!` lines as
+  separators when exact byte-identity is wanted.
 - **Shape macros to take the *text* of each call site's own expressions**
   rather than fixed variable names. That is what makes the generated code
   identical to what was there before -- and, as the GPU fix showed, it is also
