@@ -41,7 +41,9 @@ which change.
 src/channel.f90              Main DNS executable
 src/physics/                 The equations, their operators, the boundary
                              conditions and the run state -- what you edit
-src/numerics/                Discretisation: grid, compact stencils, transforms
+src/numerics/                Discretisation: grid, compact stencils, transforms,
+                             and the wall-normal component solve every problem
+                             in the code goes through
 src/linsolve/                Compact and wall-normal line solvers
 src/fft/                     FFT backends
 src/mpi/                     MPI decomposition, transposes, autotuning
