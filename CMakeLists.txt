@@ -166,6 +166,27 @@ add_library(channel_core
 target_include_directories(channel_core PUBLIC "${CHANNEL_SOURCE_DIR}/util")
 
 # --------------------------------------------------------------------
+# Physics options
+# --------------------------------------------------------------------
+# These change the problem being solved, so they are options here rather than
+# #defines a user has to edit into a source header.  They stay compile-time
+# because they select which stencil rows close the wall and how the mesh is
+# stretched; a runtime switch would put a branch in kernels that run every
+# mode, every substep.  PUBLIC so every target that includes build_options.h
+# agrees about them.
+option(CHANNEL_HALF_CHANNEL "Solve a half channel instead of a full one" OFF)
+option(CHANNEL_PHI_NEUMANN "Neumann wall condition on the passive scalars" OFF)
+
+if(CHANNEL_HALF_CHANNEL)
+    target_compile_definitions(channel_core PUBLIC halfchannel)
+    message(STATUS "Physics option: half channel")
+endif()
+if(CHANNEL_PHI_NEUMANN)
+    target_compile_definitions(channel_core PUBLIC phiNeumann)
+    message(STATUS "Physics option: Neumann scalar wall condition")
+endif()
+
+# --------------------------------------------------------------------
 # MPI
 # --------------------------------------------------------------------
 find_package(MPI REQUIRED Fortran)
@@ -454,4 +475,23 @@ elseif (CMAKE_Fortran_COMPILER_ID MATCHES "LLVMFlang")
     target_compile_definitions(channel_core PRIVATE HAVE_HIP)
     message(STATUS "hipfort_DIR = ${hipfort_DIR}")
 
+endif()
+
+# --------------------------------------------------------------------
+# Physics-option compile check
+# --------------------------------------------------------------------
+# Registered here, not in cmake/tests.cmake, because it needs
+# CMAKE_Fortran_FLAGS -- which is set in the block above, after tests.cmake is
+# included.  GNU only: the check passes gfortran's -fsyntax-only and -J, and
+# the GPU compilers are exercised by hand anyway.
+if(CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
+    add_test(NAME physics_options_compile
+        COMMAND ${CMAKE_COMMAND}
+            -DFC=${CMAKE_Fortran_COMPILER}
+            -DFFLAGS=${CMAKE_Fortran_FLAGS}
+            -DBUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -DSRC_DIR=${CHANNEL_SOURCE_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_physics_options.cmake
+    )
+    set_tests_properties(physics_options_compile PROPERTIES PROCESSORS 1)
 endif()
