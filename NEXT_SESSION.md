@@ -5,12 +5,13 @@ Copy the block below as the opening message.
 ---
 
 Continue simplifying `channel` for readability, without changing behaviour.
-There is no queued subject this time: the six xz pack/repack kernels were the
-last named candidate and they have been decided (they stay written out -- see
-"Settled recently" below). Pick the next one yourself, or ask. The remaining
-leads are in "Open items that are the user's call" and the two `statistics` /
-`channel_bcs` peels noted in [[channel-layering-plan]], neither of which is
-load-bearing for readability.
+This time the subject is the `start` / `_continue` duplication in
+`src/linsolve/y_line_solvers.fypp` -- see "Do this first" below. There are two
+layers of it, they are not the same case, and one of them contains two
+*character-identical* loop bodies. Deciding what each layer deserves is the
+task, and "these should stay written out, because ..." is a complete answer.
+What is *not* acceptable is deciding without reading all of both layers, or
+unifying anything in a way that changes the arithmetic of a recurrence.
 
 Read `.claude/projects/-home-ws-xt8786-Codes-channel/memory/MEMORY.md` first,
 then this whole file. Between them they carry the verification gate (including
@@ -56,6 +57,87 @@ Nine code commits, each independently verified against the full gate.
 - **`-Dbodyforce` is gone** (below).
 - **`FFT` and `IFT` are written once**; `RFT`/`HFT` and the three `free_fft`
   bodies were looked at and left (below).
+
+## Do this first: `start` / `_continue` in `y_line_solvers.fypp`
+
+The pipelined-LU solver splits every wall-normal line across y ranks, so each
+rank runs a recurrence that either *starts* a line or *continues* one seeded by
+the batch above. That doubling is written out at two levels, and the two levels
+are different problems -- read both before deciding either.
+
+**Layer 1: the three leaf recurrences (`y_line_solvers.fypp:2262-2440`).**
+`ys_factor_penta_interleaved`, `ys_forward_substitute_penta_interleaved`,
+`ys_backward_substitute_penta_interleaved`, each with a `_continue` twin. All
+seven leaf routines (including `ys_solve_factored_penta_interleaved`) are
+`!$omp declare target` -- see the block at lines 315-321 -- so anything done
+here lands in device code and the rules in [[nvfortran-dummy-array-device-call]]
+apply directly.
+
+The two substitute pairs are the strong case, and the fact worth having up
+front: **their interior loops are character-identical**, verified by `diff`.
+
+- forward: `do i = 2, n - 1` at lines 2350-2354 and 2374-2378 -- identical.
+- backward: `do i = n - 3, 0, -1` at 2397-2401 and 2421-2425 -- identical.
+
+In both pairs the `_continue` twin is *the same interior loop preceded by a
+different prologue*: the plain one opens the recurrence at the wall, the
+`_continue` one seeds rows 0 and 1 from the previous batch's tail
+(`prev0_rhs`/`prev1_rhs`, or `next0_rhs`/`next1_rhs` going backward). So there
+is a real shared invariant -- the pentadiagonal recurrence itself -- and a real
+hazard: change it in one twin and the single-rank and multi-rank solves
+silently disagree. That is the same silent-corruption shape the
+`YS_PIPELINE_*_ELEMS` step fixed, except here the drift would be in the
+arithmetic rather than in an offset.
+
+**The factor pair is not the same case, and lumping the three together is the
+mistake to avoid.** `ys_factor_penta_interleaved_continue` has *no* interior
+loop at all -- it is only the two seed rows, because the elimination it would
+otherwise repeat was already done by the batch above. It shares a prologue
+shape with its twin, not a body. Judge it separately; the honest answer may
+well differ from whatever the substitute pairs get.
+
+**Layer 2: the four batch wrappers (`y_line_solvers.fypp:1992-2064`).**
+`ys_forward_pipelined_batch` / `_continue` and `ys_backward_pipelined_batch` /
+`_continue` are ~15 lines each and about 80% scaffolding: `stride =
+ys_workspace_nlines`, an `!$omp target teams distribute parallel do` with a
+`default(none)` shared list, a loop over `local_line`, and one leaf call. What
+differs is the shared list, the leaf routine's name and argument list, and --
+in the `_continue` pair only -- the `q = recv_offset + 2*(local_line - 1)` seed
+index into `ycomm_recvbuf`. Four wrappers, ~60 lines of which the loop
+scaffolding is common to all four and the `q` line is common to two.
+
+This layer is where a macro is most likely to pay, precisely because what
+differs is *names*, not structure -- the `interleaved_penta_solver` case, which
+already worked in this file. But note the wrappers name the `ys_gpsv_*` module
+arrays directly at the call site, and that is load-bearing, not incidental:
+forwarding them as dummies is exactly the bug in
+[[nvfortran-dummy-array-device-call]]. Any macro must keep the array names as
+*text* at each site, which is the technique in "Techniques worth reusing".
+
+Practicalities:
+
+- The file is **already `.fypp`** and already defines four macros
+  (`custom_penta_kernel`, `interleaved_penta_solver`, `timed_step`,
+  `timed_comm_post`), so there is no `.f90` -> `.fypp` conversion to do and the
+  house style for this exact problem is already in the file to copy.
+- **Aim for byte-identical generated Fortran.** For device kernels that is what
+  retires the performance question without an idle GPU, and it is achievable
+  here because every difference is a name or an expression.
+- **A 1-batch pipelined solve exercises none of this.** Every `_continue` path
+  needs at least two batches, and every per-batch offset collapses to its first
+  term at one. Sweep `CHANNEL_Y_PIPELINE_BATCHES=1..5` at `CHANNEL_NPY=3` with
+  `CHANNEL_Y_SOLVER=pipelined_lu`, as an earlier session did for the stride
+  arithmetic.
+- The two pipelined-LU regression tests **do** pass on GPU with
+  `UCX_MEMTYPE_CACHE=n` (they are not in the environmental 15), so unlike the
+  xz kernels this subject can actually be checked on the device. Use that.
+- `CHANNEL_COMM=nccl` reaches `ys_*_pipelined_batch*` through the NCCL solver
+  too; the recipe is under "Verifying an NCCL change".
+
+**"These should stay written out, because ..." is a perfectly good answer**,
+and it may well be the right one for the factor pair even if it is not for the
+substitute pairs. Several extractions have been abandoned across these sessions
+and recording the reason has been worth more than forcing them through.
 
 ## Settled recently: the six xz pack kernels stay written out
 
