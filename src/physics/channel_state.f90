@@ -1,4 +1,4 @@
-#include "header.h"
+#include "build_options.h"
 
 ! The state of a running simulation: the fields, the boundary planes, the
 ! physical parameters and the clock.

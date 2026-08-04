@@ -1,4 +1,4 @@
-#include "header.h"
+#include "build_options.h"
 
 module byte_workspace
   use, intrinsic :: iso_c_binding

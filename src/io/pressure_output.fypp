@@ -1,4 +1,4 @@
-#include "header.h"
+#include "build_options.h"
 #:include "channel_boundaries.fypph"
 #:include "stencil_macros.fypph"
 

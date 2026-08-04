@@ -161,7 +161,7 @@ add_library(channel_core
     ${CHANNEL_SOURCE_DIR}/numerics/channel_transforms.f90
     ${CHANNEL_SOURCE_DIR}/run/driver.f90
 )
-# header.h, included by nearly every source.
+# build_options.h, included by nearly every source.
 target_include_directories(channel_core PUBLIC "${CHANNEL_SOURCE_DIR}/util")
 
 # --------------------------------------------------------------------

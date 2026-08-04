@@ -11,7 +11,7 @@
 ! Author: Dr.-Ing. Davide Gatti
 !
 
-#include "header.h"
+#include "build_options.h"
 
 PROGRAM channel
   USE driver

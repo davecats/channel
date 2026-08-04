@@ -1,4 +1,4 @@
-#include "header.h"
+#include "build_options.h"
 #:include "stencil_macros.fypph"
 
 ! Runtime diagnostics and periodic field output.

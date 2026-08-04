@@ -1,4 +1,4 @@
-#include "header.h"
+#include "build_options.h"
 
 ! The spectral <-> physical round trip each Runge-Kutta substep runs, and the
 ! CFL number read off the physical-space velocities while they exist.

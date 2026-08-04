@@ -11,7 +11,7 @@
 ! Date  : 28/Jul/2015
 !
 
-#include "header.h"
+#include "build_options.h"
 
 #! ===================================================================
 #! FFT and IFT are one in-place complex-to-complex transform of x along

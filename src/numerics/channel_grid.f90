@@ -1,4 +1,4 @@
-#include "header.h"
+#include "build_options.h"
 
 ! The computational grid and its distribution over ranks.
 !

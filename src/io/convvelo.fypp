@@ -1,4 +1,4 @@
-#include "header.h"
+#include "build_options.h"
 #:include "convvelo_fields.fypph"
 
 module convvelo

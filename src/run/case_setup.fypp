@@ -25,7 +25,7 @@
 ! boundary planes in channel_state, der and the wall rows in
 ! stencil_coefficients, the mesh and wavenumbers in channel_grid.
 
-#include "header.h"
+#include "build_options.h"
 
 MODULE case_setup
 

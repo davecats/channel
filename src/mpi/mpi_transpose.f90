@@ -11,7 +11,7 @@
 ! Date  : 15/Apr/2019
 !
 
-#include "header.h"
+#include "build_options.h"
 
 #define SPLIT_BLOCK(total, nparts, part, start, count) \
   count = (total)/(nparts); \

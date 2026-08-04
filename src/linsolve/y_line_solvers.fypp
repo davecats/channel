@@ -1,4 +1,4 @@
-#include "header.h"
+#include "build_options.h"
 
 #! ===================================================================
 #! The interleaved pentadiagonal batch solve, expanded once per array

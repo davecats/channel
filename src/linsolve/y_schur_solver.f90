@@ -1,4 +1,4 @@
-#include "header.h"
+#include "build_options.h"
 
 module y_schur_solver
 

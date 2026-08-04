@@ -1,7 +1,7 @@
 PROGRAM regression_test
   USE case_setup
   USE driver
-#include "header.h"
+#include "build_options.h"
   IMPLICIT NONE
 
   CHARACTER(len=256) :: config_file, restart_in, restart_expected

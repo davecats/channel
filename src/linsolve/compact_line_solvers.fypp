@@ -1,4 +1,4 @@
-#include "header.h"
+#include "build_options.h"
 #:include "wall_closure.fypph"
 
 ! Pentadiagonal solvers for a single, fully assembled wall-normal line.

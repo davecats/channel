@@ -1,4 +1,4 @@
-#include "header.h"
+#include "build_options.h"
 
 PROGRAM post_pressure
   USE, intrinsic :: iso_c_binding

@@ -1,4 +1,4 @@
-#include "header.h"
+#include "build_options.h"
 
 program test_mpi_autotune_candidates
   use, intrinsic :: iso_c_binding

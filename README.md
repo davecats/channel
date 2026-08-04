@@ -48,7 +48,7 @@ src/io/                      Input deck parser, restart files, diagnostics,
                              pressure and convvelo output
 src/run/                     Case setup and the time-stepping driver
 src/util/                    Environment options, scratch workspace, profiler
-                             markers, build-time switches (header.h)
+                             markers, build-time switches (build_options.h)
 src/post/                    post_pressure and post_convvelo executables
 src/test/                    Fortran test programs
 cmake/                       CMake helper modules and CTest definitions

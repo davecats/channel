@@ -1,4 +1,4 @@
-#include "header.h"
+#include "build_options.h"
 
 program test_y_reduced_known_good_local_dst
   use, intrinsic :: iso_c_binding
