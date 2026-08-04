@@ -60,7 +60,7 @@ MODULE case_setup
   character(len=40) :: fname
 
   public :: get_solver_memory_estimate, get_solver_workspace_estimate, get_mpi_buffer_memory_estimate
-  public :: sync_velocity_to_device, apply_complex_derivative_current_layout, apply_complex_second_derivative_current_layout
+  public :: sync_velocity_to_device, apply_dy, apply_d2y
   public :: eliminate_assembled_boundaries, reconstruct_assembled_boundaries
 
 CONTAINS

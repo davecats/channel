@@ -6,7 +6,7 @@ MODULE pressure_output
 
   USE, intrinsic :: iso_c_binding
   USE case_setup, ONLY: V, der, k2, ialfa, ibeta, d140, d240, d24n, ni, alfa0, beta0, factor, &
-                     ny, nz, nxd, nPhi, izd, d040, zero_bc, overlapping, solve_compact_component_current_layout, &
+                     ny, nz, nxd, nPhi, izd, d040, zero_bc, overlapping, solve_wall_normal_component, &
                      compact_assembly_context
   USE ffts, ONLY: VVdz
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
@@ -119,11 +119,11 @@ CONTAINS
     call release_pressure_workspace("pressure_output")
 
     if (present(p_out)) then
-      call solve_compact_component_current_layout(p_out, assemble_pressure_operator, assemble_pressure_boundaries, &
+      call solve_wall_normal_component(p_out, assemble_pressure_operator, assemble_pressure_boundaries, &
                                                   0.0d0, 0.0d0, p_out, symmetric_operator=.true.)
     end if
     if (present(dpdy_out)) then
-      call solve_compact_component_current_layout(dpdy_out, assemble_dpdy_operator, assemble_dpdy_boundaries, &
+      call solve_wall_normal_component(dpdy_out, assemble_dpdy_operator, assemble_dpdy_boundaries, &
                                                   0.0d0, 0.0d0, dpdy_out, symmetric_operator=.true.)
     end if
   END SUBROUTINE compute_pressure_output

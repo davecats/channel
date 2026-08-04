@@ -10,7 +10,7 @@
 ! then the ghost row is folded into the wall row, both are eliminated into the
 ! first and last two interior rows, the banded system is solved, and the wall
 ! and ghost values are reconstructed.  That sequence is
-! solve_compact_component_current_layout, and it is identical for v, for eta,
+! solve_wall_normal_component, and it is identical for v, for eta,
 ! for each scalar, for d/dy and d2/dy2, and for the Poisson pressure and dp/dy
 ! in pressure_output.
 !
@@ -86,22 +86,22 @@ module compact_component_solve
   end interface
 contains
 
-  SUBROUTINE apply_complex_derivative_current_layout(src, dst)
+  SUBROUTINE apply_dy(src, dst)
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), target, intent(in) :: src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    call solve_compact_component_current_layout(dst, assemble_compact_derivative_interior, assemble_compact_derivative_boundary, 0.0d0, 0.0d0, src, &
+    call solve_wall_normal_component(dst, assemble_compact_derivative_interior, assemble_compact_derivative_boundary, 0.0d0, 0.0d0, src, &
                                                 symmetric_operator=.false.)
-  END SUBROUTINE apply_complex_derivative_current_layout
+  END SUBROUTINE apply_dy
 
-  SUBROUTINE apply_complex_second_derivative_current_layout(src, dst)
+  SUBROUTINE apply_d2y(src, dst)
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), target, intent(in) :: src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     complex(C_DOUBLE_COMPLEX), intent(out) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    call solve_compact_component_current_layout(dst, assemble_compact_derivative_interior, &
+    call solve_wall_normal_component(dst, assemble_compact_derivative_interior, &
                                                 assemble_compact_derivative_boundary, 0.0d0, 0.0d0, src, &
                                                 symmetric_operator=.false., derivative_order=2_C_INT)
-  END SUBROUTINE apply_complex_second_derivative_current_layout
+  END SUBROUTINE apply_d2y
 
   subroutine assemble_compact_derivative_interior(ctx)
     use y_line_solvers, only: ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x
@@ -395,7 +395,7 @@ contains
     end if
   end subroutine reconstruct_assembled_boundaries
 
-  SUBROUTINE solve_compact_component_current_layout(field_values, assemble_system, boundary_system, lambda_coeff, diffusion_coeff, source_values, &
+  SUBROUTINE solve_wall_normal_component(field_values, assemble_system, boundary_system, lambda_coeff, diffusion_coeff, source_values, &
                                                     symmetric_operator, derivative_order, boundaries)
    use y_line_solvers, only: ys_prepare_assembled_workspace, ys_release_workspace, ys_solve_endpoint_schur, ys_solve_pipelined_lu, &
                               Y_SOLVER_SCHUR, Y_SOLVER_PIPELINED_LU, ys_selected_solver, ys_selected_batches, &
@@ -472,7 +472,7 @@ contains
     end select
     call reconstruct_assembled_boundaries(owner_dst, ny0, has_lower_boundary, has_upper_boundary)
     call ys_release_workspace()
-  END SUBROUTINE solve_compact_component_current_layout
+  END SUBROUTINE solve_wall_normal_component
 
   SUBROUTINE scatter_full_y_line(full_line, local_line)
     IMPLICIT NONE
