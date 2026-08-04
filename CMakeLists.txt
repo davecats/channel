@@ -146,6 +146,7 @@ add_library(channel_core
     # physics/ -- the state the equations act on
     ${CHANNEL_SOURCE_DIR}/physics/channel_state.f90
     ${CHANNEL_SOURCE_DIR}/physics/channel_bcs.f90
+    ${CHANNEL_SOURCE_DIR}/physics/initial_condition.f90
     # communication and wall-normal solvers
     ${CHANNEL_SOURCE_DIR}/gpu/y_pipeline_nccl.f90
     ${CHANNEL_SOURCE_DIR}/linsolve/y_schur_solver.f90

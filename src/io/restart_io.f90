@@ -16,6 +16,7 @@ module restart_io
   use channel_grid
   use roctx, only: roctxPush, roctxPop
   use mpi_transpose, only: vel_read_type, vel_field_type, writeview_type, owned2write_type
+  use initial_condition, only: generate_initial_field
   use mpi_f08
 
   implicit none
@@ -33,10 +34,9 @@ contains
     real(C_DOUBLE), intent(inout) :: time
     complex(C_DOUBLE_COMPLEX), intent(INOUT) :: R(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3 + nPhi)
     character(len=*), intent(IN) :: filename
-    integer(C_SIZE_T) :: ix, iy, iz, io, iPhi
+    integer(C_SIZE_T) :: io
     integer(C_INT) :: r_nx, r_ny, r_nz
     real(C_DOUBLE) :: r_alfa0, r_beta0, r_ni, r_a, r_ymin, r_ymax
-    real(C_DOUBLE) :: rn(1:3)
     INTEGER(MPI_OFFSET_KIND) :: disp = 3*C_INT + 7*C_DOUBLE
     TYPE(MPI_File) :: fh
 
@@ -62,26 +62,8 @@ contains
       END IF
     ELSE
       IF (has_terminal) PRINT *, "Restart file "//filename//" not found"
-      R = 0
-      IF (has_terminal) WRITE (*, *) "Generating initial field..."
-      DO iy = ny0 - 2, nyN + 2; DO ix = nx0, nxN; DO iz = -nz, nz
-          CALL RANDOM_NUMBER(rn)
-          R(iy, iz, ix, 1) = perturbation_amplitude*EXP(dcmplx(0, rn(1) - 0.5))
-          R(iy, iz, ix, 2) = perturbation_amplitude*EXP(dcmplx(0, rn(2) - 0.5))
-          R(iy, iz, ix, 3) = perturbation_amplitude*EXP(dcmplx(0, rn(3) - 0.5))
-          !!R(iy,iz,ix,1) = 0.0001*EXP(dcmplx(0,rn(1)-0.5));  R(iy,iz,ix,2) = 0.0001*EXP(dcmplx(0,rn(2)-0.5));  R(iy,iz,ix,3) = 0.0001*EXP(dcmplx(0,rn(3)-0.5));
-        END DO; END DO; END DO
-      IF (has_average) THEN
-        DO iy = ny0 - 2, nyN + 2
-          R(iy, 0, 0, 1) = 3*0.5*y(iy)*(2 - y(iy))
-          !R(iy, 0, 0, 1) = 3*0.5*y(iy)*(2 - y(iy)) + 0.01*SIN(8*y(iy)*2*PI)/ni
-          !R(iy, 0, 0, 1) = y(iy)*(2 - y(iy))*3.d0/2.d0 + 0.001*SIN(8*y(iy)*2*PI);
-          !V(iy,0,0,1)=y(iy)-1
-          DO iPhi = 1, nPhi
-            R(iy, 0, 0, 3 + iPhi) = 3*0.5*y(iy)*(2 - y(iy))
-          END DO
-        END DO
-      END IF
+      ! What that field is is a physics choice, and lives in physics/.
+      call generate_initial_field(R, perturbation_amplitude)
     END IF
     CLOSE (120)
   END SUBROUTINE restart_read
