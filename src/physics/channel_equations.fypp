@@ -29,7 +29,7 @@ module channel_equations
   use channel_grid
   use channel_state
   use stencil_coefficients
-  use rbmat
+  use banded_lu
   use mpi_transpose
   use roctx, only: roctxPush, roctxPop
   use ffts

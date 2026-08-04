@@ -11,7 +11,7 @@
 ! Date  : 28/Jul/2015
 !
 
-MODULE rbmat
+MODULE banded_lu
 
   USE, intrinsic :: iso_c_binding
 
@@ -196,4 +196,4 @@ CONTAINS
     END DO
   END FUNCTION LLU5div
 
-END MODULE rbmat
+END MODULE banded_lu

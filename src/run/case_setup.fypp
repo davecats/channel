@@ -32,13 +32,13 @@ MODULE case_setup
   USE, intrinsic :: iso_c_binding
   USE config
   USE env_options, only: env_flag
-  USE rbmat
+  USE banded_lu
   USE channel_grid
   USE channel_state
   USE stencil_coefficients
   USE channel_equations
   USE channel_bcs
-  USE statistics
+  USE runtime_diagnostics
   USE restart_io, ONLY: restart_read, restart_write
   USE mpi_transpose
   USE roctx, only: roctxPush, roctxPop

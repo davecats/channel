@@ -15,7 +15,7 @@
 !
 ! Declarations only, and no `use` of any other module -- see channel_state for
 ! why that is load-bearing rather than stylistic.  setup_derivatives, which
-! computes these and needs rbmat, lives with its caller instead.
+! computes these and needs banded_lu, lives with its caller instead.
 module stencil_coefficients
 
   use, intrinsic :: iso_c_binding

@@ -120,7 +120,7 @@ endfunction()
 channel_fypp_generate(CHANNEL_GENERATED_SOURCES
     ${CHANNEL_SOURCE_DIR}/physics/channel_equations.fypp
     ${CHANNEL_SOURCE_DIR}/io/pressure_output.fypp
-    ${CHANNEL_SOURCE_DIR}/io/statistics.fypp
+    ${CHANNEL_SOURCE_DIR}/io/runtime_diagnostics.fypp
     ${CHANNEL_SOURCE_DIR}/io/convvelo.fypp
     ${CHANNEL_SOURCE_DIR}/run/case_setup.fypp
     ${CHANNEL_SOURCE_DIR}/util/byte_workspace.fypp
@@ -142,7 +142,7 @@ add_library(channel_core
     # numerics/ -- grid, stencils and dense linear algebra
     ${CHANNEL_SOURCE_DIR}/numerics/channel_grid.f90
     ${CHANNEL_SOURCE_DIR}/numerics/stencil_coefficients.f90
-    ${CHANNEL_SOURCE_DIR}/numerics/rbmat.f90
+    ${CHANNEL_SOURCE_DIR}/numerics/banded_lu.f90
     # physics/ -- the state the equations act on
     ${CHANNEL_SOURCE_DIR}/physics/channel_state.f90
     ${CHANNEL_SOURCE_DIR}/physics/channel_bcs.f90
