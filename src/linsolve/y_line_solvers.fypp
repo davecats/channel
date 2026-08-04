@@ -125,6 +125,56 @@ $:custom_penta_kernel(ds, dl, d, du, dw, x)
 #:enddef
 #!
 #! ===================================================================
+#! The pipelined-LU batch wrappers.
+#!
+#! Six routines drive one leaf kernel over the lines of a batch, and all
+#! six spell the same scaffolding: the workspace stride, a target teams
+#! distribute over local_line with a default(none) shared list, the line
+#! index, and -- where the batch is seeded by the rank below -- the
+#! offset q into ycomm_recvbuf.  What differs is the leaf call and the
+#! names it needs shared, so the scaffolding is written here once and
+#! the call stays ordinary Fortran at the site.
+#!
+#! The body is a block and not an argument for a reason: each site has
+#! to name its ys_gpsv_* module arrays as text, since forwarding them as
+#! dummies is the nvfortran failure this file's first block describes.
+#!
+#! shared: the names this site adds to the shared list, arrays first.
+#! seed:   the per-line message stride, for a batch that reads the rank
+#!         below; the macro then shares ycomm_recvbuf and recv_offset
+#!         and expects q.  Omit it for a batch that opens its own lines.
+#!
+#! The shared list is emitted as two clauses to keep every generated
+#! line inside the free-form limit; one site was already at 131 columns.
+#!
+#! The three pack kernels are deliberately not expressed here.  They add
+#! private scratch and read send_offset, which would cost this macro
+#! more parameters than the scaffolding it would save them.
+#! ===================================================================
+#:def pipelined_line_loop(shared, body, seed=None)
+    stride = ys_workspace_nlines
+
+    !$omp target teams distribute parallel do default(none) &
+#:if seed is None
+    !$omp shared(${shared}$) &
+    !$omp shared(stride, first_line, line_count, active_n) &
+    !$omp private(local_line, iline)
+#:else
+    !$omp shared(${shared}$, ycomm_recvbuf) &
+    !$omp shared(stride, first_line, line_count, active_n, recv_offset) &
+    !$omp private(local_line, iline, q)
+#:endif
+    do local_line = 1_C_INT, line_count
+      iline = first_line + local_line - 1_C_INT
+#:if seed is not None
+      q = int(recv_offset + ${seed}$*(local_line - 1_C_INT), C_INT64_T)
+#:endif
+${body.rstrip()}$
+    end do
+    !$omp end target teams distribute parallel do
+#:enddef
+#!
+#! ===================================================================
 #! Instrumentation of the pipelined-LU solve.
 #!
 #! Nearly every step of ys_solve_pipelined_lu_distributed carries a roctx
@@ -1999,21 +2049,13 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     integer(C_INT) :: local_line, iline, stride
     integer(C_INT64_T) :: q
 
-    stride = ys_workspace_nlines
-
-    !$omp target teams distribute parallel do default(none) &
-    !$omp shared(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ycomm_recvbuf, &
-    !$omp& first_line, line_count, active_n, stride, recv_offset) private(local_line, iline, q)
-    do local_line = 1_C_INT, line_count
-      iline = first_line + local_line - 1_C_INT
-      q = int(recv_offset + YS_PIPELINE_FACTOR_ELEMS*(local_line - 1_C_INT), C_INT64_T)
+#:call pipelined_line_loop('ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw', seed='YS_PIPELINE_FACTOR_ELEMS')
       call ys_factor_penta_interleaved_continue(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, &
                                                 stride, iline, active_n, &
                                                 ycomm_recvbuf(q + 1_C_INT64_T), ycomm_recvbuf(q + 2_C_INT64_T), &
                                                 ycomm_recvbuf(q + 3_C_INT64_T), ycomm_recvbuf(q + 4_C_INT64_T), &
                                                 ycomm_recvbuf(q + 5_C_INT64_T), ycomm_recvbuf(q + 6_C_INT64_T))
-    end do
-    !$omp end target teams distribute parallel do
+#:endcall
   end subroutine ys_apply_factor_continuation
 
   subroutine ys_factor_pipelined_batch(first_line, line_count, active_n, open_right)
@@ -2022,17 +2064,10 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     logical, intent(in) :: open_right
     integer(C_INT) :: local_line, iline, stride
 
-    stride = ys_workspace_nlines
-
-    !$omp target teams distribute parallel do default(none) &
-    !$omp shared(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, stride, first_line, line_count, active_n, open_right) &
-    !$omp private(local_line, iline)
-    do local_line = 1_C_INT, line_count
-      iline = first_line + local_line - 1_C_INT
+#:call pipelined_line_loop('ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, open_right')
       call ys_factor_penta_interleaved(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, &
                                        stride, iline, active_n, open_right)
-    end do
-    !$omp end target teams distribute parallel do
+#:endcall
   end subroutine ys_factor_pipelined_batch
 
   subroutine ys_forward_pipelined_batch(first_line, line_count, active_n)
@@ -2040,15 +2075,9 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     integer(C_INT), intent(in) :: first_line, line_count, active_n
     integer(C_INT) :: local_line, iline, stride
 
-    stride = ys_workspace_nlines
-
-    !$omp target teams distribute parallel do default(none) &
-    !$omp shared(ys_gpsv_x, ys_gpsv_ds, ys_gpsv_dl, stride, first_line, line_count, active_n) private(local_line, iline)
-    do local_line = 1_C_INT, line_count
-      iline = first_line + local_line - 1_C_INT
+#:call pipelined_line_loop('ys_gpsv_x, ys_gpsv_ds, ys_gpsv_dl')
       call ys_forward_substitute_penta_interleaved(ys_gpsv_x, ys_gpsv_ds, ys_gpsv_dl, stride, iline, active_n)
-    end do
-    !$omp end target teams distribute parallel do
+#:endcall
   end subroutine ys_forward_pipelined_batch
 
   subroutine ys_forward_pipelined_batch_continue(first_line, line_count, active_n, recv_offset)
@@ -2057,18 +2086,10 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     integer(C_INT) :: local_line, iline, stride
     integer(C_INT64_T) :: q
 
-    stride = ys_workspace_nlines
-
-    !$omp target teams distribute parallel do default(none) &
-    !$omp shared(ys_gpsv_x, ys_gpsv_ds, ys_gpsv_dl, ycomm_recvbuf, stride, first_line, line_count, active_n, recv_offset) &
-    !$omp private(local_line, iline, q)
-    do local_line = 1_C_INT, line_count
-      iline = first_line + local_line - 1_C_INT
-      q = int(recv_offset + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
+#:call pipelined_line_loop('ys_gpsv_x, ys_gpsv_ds, ys_gpsv_dl', seed='YS_PIPELINE_SOLVE_ELEMS')
       call ys_forward_substitute_penta_interleaved_continue(ys_gpsv_x, ys_gpsv_ds, ys_gpsv_dl, stride, iline, active_n, &
                                                             ycomm_recvbuf(q + 1_C_INT64_T), ycomm_recvbuf(q + 2_C_INT64_T))
-    end do
-    !$omp end target teams distribute parallel do
+#:endcall
   end subroutine ys_forward_pipelined_batch_continue
 
   subroutine ys_backward_pipelined_batch(first_line, line_count, active_n)
@@ -2076,15 +2097,9 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     integer(C_INT), intent(in) :: first_line, line_count, active_n
     integer(C_INT) :: local_line, iline, stride
 
-    stride = ys_workspace_nlines
-
-    !$omp target teams distribute parallel do default(none) &
-    !$omp shared(ys_gpsv_x, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, stride, first_line, line_count, active_n) private(local_line, iline)
-    do local_line = 1_C_INT, line_count
-      iline = first_line + local_line - 1_C_INT
+#:call pipelined_line_loop('ys_gpsv_x, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw')
       call ys_backward_substitute_penta_interleaved(ys_gpsv_x, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, stride, iline, active_n)
-    end do
-    !$omp end target teams distribute parallel do
+#:endcall
   end subroutine ys_backward_pipelined_batch
 
   subroutine ys_backward_pipelined_batch_continue(first_line, line_count, active_n, recv_offset)
@@ -2093,19 +2108,11 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     integer(C_INT) :: local_line, iline, stride
     integer(C_INT64_T) :: q
 
-    stride = ys_workspace_nlines
-
-    !$omp target teams distribute parallel do default(none) &
-    !$omp shared(ys_gpsv_x, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ycomm_recvbuf, &
-    !$omp& stride, first_line, line_count, active_n, recv_offset) private(local_line, iline, q)
-    do local_line = 1_C_INT, line_count
-      iline = first_line + local_line - 1_C_INT
-      q = int(recv_offset + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
+#:call pipelined_line_loop('ys_gpsv_x, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw', seed='YS_PIPELINE_SOLVE_ELEMS')
       call ys_backward_substitute_penta_interleaved_continue(ys_gpsv_x, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, &
                                                              stride, iline, active_n, &
                                                              ycomm_recvbuf(q + 1_C_INT64_T), ycomm_recvbuf(q + 2_C_INT64_T))
-    end do
-    !$omp end target teams distribute parallel do
+#:endcall
   end subroutine ys_backward_pipelined_batch_continue
 
   subroutine ys_pack_factor_state(first_line, line_count, active_n, send_offset)
