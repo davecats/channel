@@ -213,10 +213,16 @@ module y_line_solvers
 
   ! How many complex values each pipelined-LU line contributes to a message:
   ! six for the factor state of a batch, two for a solve state (forward or
-  ! backward).  They also set the per-batch strides in the ycomm buffers, so
-  ! the MPI and NCCL transports must agree on them -- see
-  ! ys_ensure_pipeline_buffers and ys_pipeline_batch_slice, which are the only
-  ! places either number appears.
+  ! backward).  Each number is read from two sides: ys_ensure_pipeline_buffers
+  ! and ys_pipeline_batch_slice use it for the message counts and the per-batch
+  ! strides, and the pack and continuation kernels below use it as the per-line
+  ! stride they step q by.  A side that drifted would read a line's state from
+  ! the wrong place rather than fail, since the buffer stays large enough
+  ! either way, so neither number is spelled as a literal anywhere.
+  !
+  ! The solution *halo* exchange also carries two values per line, but that is
+  ! a pair of adjacent rows rather than a batch's solve state; it is unrelated
+  ! to these and keeps its own count.
   integer(C_INT), parameter :: YS_PIPELINE_FACTOR_ELEMS = 6_C_INT
   integer(C_INT), parameter :: YS_PIPELINE_SOLVE_ELEMS = 2_C_INT
 
@@ -1960,7 +1966,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     !$omp& first_line, line_count, active_n, stride, recv_offset) private(local_line, iline, q)
     do local_line = 1_C_INT, line_count
       iline = first_line + local_line - 1_C_INT
-      q = int(recv_offset + 6_C_INT*(local_line - 1_C_INT), C_INT64_T)
+      q = int(recv_offset + YS_PIPELINE_FACTOR_ELEMS*(local_line - 1_C_INT), C_INT64_T)
       call ys_factor_penta_interleaved_continue(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, &
                                                 stride, iline, active_n, &
                                                 ycomm_recvbuf(q + 1_C_INT64_T), ycomm_recvbuf(q + 2_C_INT64_T), &
@@ -2018,7 +2024,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     !$omp private(local_line, iline, q)
     do local_line = 1_C_INT, line_count
       iline = first_line + local_line - 1_C_INT
-      q = int(recv_offset + 2_C_INT*(local_line - 1_C_INT), C_INT64_T)
+      q = int(recv_offset + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
       call ys_forward_substitute_penta_interleaved_continue(ys_gpsv_x, ys_gpsv_ds, ys_gpsv_dl, stride, iline, active_n, &
                                                             ycomm_recvbuf(q + 1_C_INT64_T), ycomm_recvbuf(q + 2_C_INT64_T))
     end do
@@ -2054,7 +2060,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     !$omp& stride, first_line, line_count, active_n, recv_offset) private(local_line, iline, q)
     do local_line = 1_C_INT, line_count
       iline = first_line + local_line - 1_C_INT
-      q = int(recv_offset + 2_C_INT*(local_line - 1_C_INT), C_INT64_T)
+      q = int(recv_offset + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
       call ys_backward_substitute_penta_interleaved_continue(ys_gpsv_x, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, &
                                                              stride, iline, active_n, &
                                                              ycomm_recvbuf(q + 1_C_INT64_T), ycomm_recvbuf(q + 2_C_INT64_T))
@@ -2077,7 +2083,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       iline = first_line + local_line - 1_C_INT
       p0 = int(iline, C_INT64_T) + int(active_n - 2_C_INT, C_INT64_T)*int(stride, C_INT64_T)
       p1 = p0 + int(stride, C_INT64_T)
-      q = int(send_offset + 6_C_INT*(local_line - 1_C_INT), C_INT64_T)
+      q = int(send_offset + YS_PIPELINE_FACTOR_ELEMS*(local_line - 1_C_INT), C_INT64_T)
       ycomm_sendbuf(q + 1_C_INT64_T) = ys_gpsv_d(p0)
       ycomm_sendbuf(q + 2_C_INT64_T) = ys_gpsv_du(p0)
       ycomm_sendbuf(q + 3_C_INT64_T) = ys_gpsv_dw(p0)
@@ -2102,7 +2108,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       iline = first_line + local_line - 1_C_INT
       p0 = int(iline, C_INT64_T) + int(active_n - 2_C_INT, C_INT64_T)*int(stride, C_INT64_T)
       p1 = p0 + int(stride, C_INT64_T)
-      q = int(send_offset + 2_C_INT*(local_line - 1_C_INT), C_INT64_T)
+      q = int(send_offset + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
       ycomm_sendbuf(q + 1_C_INT64_T) = ys_gpsv_x(p0)
       ycomm_sendbuf(q + 2_C_INT64_T) = ys_gpsv_x(p1)
     end do
@@ -2123,7 +2129,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       iline = first_line + local_line - 1_C_INT
       p0 = int(iline, C_INT64_T)
       p1 = p0 + int(stride, C_INT64_T)
-      q = int(send_offset + 2_C_INT*(local_line - 1_C_INT), C_INT64_T)
+      q = int(send_offset + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
       ycomm_sendbuf(q + 1_C_INT64_T) = ys_gpsv_x(p0)
       ycomm_sendbuf(q + 2_C_INT64_T) = ys_gpsv_x(p1)
     end do
