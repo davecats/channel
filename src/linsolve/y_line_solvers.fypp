@@ -85,6 +85,46 @@ $:custom_penta_kernel(ds, dl, d, du, dw, x)
 #:enddef
 
 #! ===================================================================
+#! The interior of the two pentadiagonal substitutions.
+#!
+#! Each substitution is written twice: one twin opens the recurrence at
+#! the wall, the other continues one seeded by the batch on the y rank
+#! below -- above, going backward.  Only that prologue differs.  From
+#! row 2 inward the twins ran character-identical loops, and those are
+#! the recurrence itself, so a change made to one twin and not the other
+#! would leave the single-rank and the multi-rank solve disagreeing in
+#! the arithmetic, silently.
+#!
+#! These have to be macros and not a shared device routine.  The leaves
+#! already receive their arrays as dummies, so passing them one level
+#! further -- into a declare-target call from inside a target region --
+#! is exactly the nvfortran failure described at the top of this file.
+#! A macro expands inline, so no dummy is created.
+#!
+#! Each reads the caller's rhs and diagonal dummies and its first /
+#! stride / n line descriptor, and uses i and p as scratch.  All four
+#! leaves declare those names already.
+#! ===================================================================
+#!
+#! Rows 2 .. n-1: each takes the two rows below it.
+#:def penta_forward_interior()
+    do i = 2, n - 1
+      p = int(first, C_INT64_T) + int(i, C_INT64_T)*int(stride, C_INT64_T)
+      rhs(p) = rhs(p) - ds(p)*rhs(int(first, C_INT64_T) + int(i - 2, C_INT64_T)*int(stride, C_INT64_T)) - &
+               dl(p)*rhs(int(first, C_INT64_T) + int(i - 1, C_INT64_T)*int(stride, C_INT64_T))
+    end do
+#:enddef
+#!
+#! Rows n-3 .. 0: each takes the two rows above it, then divides.
+#:def penta_backward_interior()
+    do i = n - 3, 0, -1
+      p = int(first, C_INT64_T) + int(i, C_INT64_T)*int(stride, C_INT64_T)
+      rhs(p) = (rhs(p) - du(p)*rhs(p + int(stride, C_INT64_T)) - &
+                dw(p)*rhs(p + 2_C_INT64_T*int(stride, C_INT64_T)))*d(p)
+    end do
+#:enddef
+#!
+#! ===================================================================
 #! Instrumentation of the pipelined-LU solve.
 #!
 #! Nearly every step of ys_solve_pipelined_lu_distributed carries a roctx
@@ -2353,11 +2393,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       p = int(first, C_INT64_T) + int(stride, C_INT64_T)
       rhs(p) = rhs(p) - dl(p)*rhs(first)
     end if
-    do i = 2, n - 1
-      p = int(first, C_INT64_T) + int(i, C_INT64_T)*int(stride, C_INT64_T)
-      rhs(p) = rhs(p) - ds(p)*rhs(int(first, C_INT64_T) + int(i - 2, C_INT64_T)*int(stride, C_INT64_T)) - &
-               dl(p)*rhs(int(first, C_INT64_T) + int(i - 1, C_INT64_T)*int(stride, C_INT64_T))
-    end do
+$:penta_forward_interior()
   end subroutine ys_forward_substitute_penta_interleaved
 
   subroutine ys_forward_substitute_penta_interleaved_continue(rhs, ds, dl, stride, first, n, prev0_rhs, prev1_rhs)
@@ -2377,11 +2413,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       p1 = p0 + int(stride, C_INT64_T)
       rhs(p1) = rhs(p1) - ds(p1)*prev1_rhs - dl(p1)*rhs(p0)
     end if
-    do i = 2, n - 1
-      p = int(first, C_INT64_T) + int(i, C_INT64_T)*int(stride, C_INT64_T)
-      rhs(p) = rhs(p) - ds(p)*rhs(int(first, C_INT64_T) + int(i - 2, C_INT64_T)*int(stride, C_INT64_T)) - &
-               dl(p)*rhs(int(first, C_INT64_T) + int(i - 1, C_INT64_T)*int(stride, C_INT64_T))
-    end do
+$:penta_forward_interior()
   end subroutine ys_forward_substitute_penta_interleaved_continue
 
   subroutine ys_backward_substitute_penta_interleaved(rhs, d, du, dw, stride, first, n)
@@ -2400,11 +2432,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       p = int(first, C_INT64_T) + int(n - 2, C_INT64_T)*int(stride, C_INT64_T)
       rhs(p) = (rhs(p) - du(p)*rhs(p + int(stride, C_INT64_T)))*d(p)
     end if
-    do i = n - 3, 0, -1
-      p = int(first, C_INT64_T) + int(i, C_INT64_T)*int(stride, C_INT64_T)
-      rhs(p) = (rhs(p) - du(p)*rhs(p + int(stride, C_INT64_T)) - &
-                dw(p)*rhs(p + 2_C_INT64_T*int(stride, C_INT64_T)))*d(p)
-    end do
+$:penta_backward_interior()
   end subroutine ys_backward_substitute_penta_interleaved
 
   subroutine ys_backward_substitute_penta_interleaved_continue(rhs, d, du, dw, stride, first, n, next0_rhs, next1_rhs)
@@ -2424,11 +2452,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       p_prev = p_last - int(stride, C_INT64_T)
       rhs(p_prev) = (rhs(p_prev) - du(p_prev)*rhs(p_last) - dw(p_prev)*next0_rhs)*d(p_prev)
     end if
-    do i = n - 3, 0, -1
-      p = int(first, C_INT64_T) + int(i, C_INT64_T)*int(stride, C_INT64_T)
-      rhs(p) = (rhs(p) - du(p)*rhs(p + int(stride, C_INT64_T)) - &
-                dw(p)*rhs(p + 2_C_INT64_T*int(stride, C_INT64_T)))*d(p)
-    end do
+$:penta_backward_interior()
   end subroutine ys_backward_substitute_penta_interleaved_continue
 
   subroutine ys_solve_factored_penta_interleaved(rhs, ds, dl, d, du, dw, stride, first, n)
