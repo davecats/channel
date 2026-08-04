@@ -54,6 +54,12 @@ module channel_state
   !$omp declare target(u0, uN, t0, tN)
   real(C_DOUBLE), allocatable :: pra(:)
   real(C_DOUBLE) :: perturbation_amplitude = 5.54d-5
+  ! Seed for the perturbation of a generated start field, from [velocity] seed.
+  ! INITIAL_SEED_UNSET means the deck did not give one, and the start field is
+  ! drawn from the unseeded intrinsic generator as it always was -- i.e. a
+  ! different field every run.  See physics/initial_condition.f90.
+  integer(C_INT), parameter :: INITIAL_SEED_UNSET = -1_C_INT
+  integer(C_INT) :: initial_seed = INITIAL_SEED_UNSET
 
   !-------------------------------------------------------------------------
   ! Mean flow forcing and the corrections that hold the flow rate fixed.

@@ -104,6 +104,12 @@ CONTAINS
     call require_real(cfg, "velocity", "u0", u0)
     call require_real(cfg, "velocity", "un", uN)
     call get_real(cfg, "velocity", "perturbation_amplitude", perturbation_amplitude, found)
+    initial_seed = INITIAL_SEED_UNSET
+    call get_integer(cfg, "velocity", "seed", initial_seed, found)
+    if (found .and. initial_seed < 0_C_INT) then
+      if (has_terminal) print *, "ERROR: [velocity] seed must be zero or positive; got", initial_seed
+      error stop "invalid seed"
+    end if
 
     call require_integer(cfg, "scalars", "nphi", nPhi)
     call require_real(cfg, "scalars", "meantx", meantx)
@@ -332,7 +338,7 @@ CONTAINS
     complex(C_DOUBLE_COMPLEX), intent(INOUT) :: R(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3 + nPhi)
     character(len=*), intent(IN) :: filename
 
-    call restart_read(filename, R, ni, time, perturbation_amplitude)
+    call restart_read(filename, R, ni, time, perturbation_amplitude, initial_seed)
   END SUBROUTINE read_restart_file
 
   SUBROUTINE save_restart_file(filename, R)

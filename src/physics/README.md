@@ -11,6 +11,7 @@ changes there is exactly one.
 | what the wall condition **is** (values), including in time | `channel_bcs.f90` → `apply_wall_values` |
 | which nodes a wall condition **constrains** (rows) | `channel_bcs.f90` → `setup_boundary_conditions` |
 | the field a restartless run starts from | `initial_condition.f90` |
+| make that field reproducible | nothing here — `[velocity] seed` in `dns.in` |
 | the viscous operators | `channel_operators.fypph` |
 | the nonlinear terms, the right-hand side, the mean-flow correction | `channel_equations.fypp` |
 | half channel, or Neumann scalars at the wall | neither — CMake options, see below |
@@ -77,9 +78,10 @@ having to benchmark.
 
 ## After you change something
 
-The suite never runs the `channel` binary — every test drives its own `test_*`
-program — so a green `ctest` is necessary and not sufficient. Run the binary and
-check its exit status too:
+Almost every test drives its own `test_*` program rather than the `channel`
+binary — `seeded_start_field` is the one exception — so a green `ctest` is
+necessary and not sufficient. Run the binary on your own case and check its exit
+status too:
 
 ```bash
 ctest --test-dir build -j8
@@ -91,6 +93,15 @@ output against the parent commit with both trees built using `FFTW_ESTIMATE`
 instead of `FFTW_PATIENT` (`src/fft/ffts.fypp`) — `FFTW_PATIENT` re-plans per
 run, so CPU output is not otherwise reproducible at ULP level.
 
-Note that a run with **no** restart file cannot be compared with anything:
-`initial_condition.f90` calls `RANDOM_NUMBER` without ever seeding it from the
-deck, so two runs of the same binary start from different fields.
+A run with **no** restart file can only be compared with another if the deck
+sets `[velocity] seed`. With a seed the start field is a pure function of the
+deck — bit-for-bit identical at any rank count and any `CHANNEL_NPY` for a given
+build, which is what `ctest -R seeded_start_field` checks. Across compilers it
+agrees only to a few ULP: the mixer returns identical bits, but the complex
+exponential and the `tanh` mesh come from each compiler's math library. Without
+a seed the field comes from the unseeded intrinsic generator and differs every
+run.
+
+`seeded_start_field` fails on this GPU box, along with every other multi-rank
+GPU test, for the environmental reason documented in the build notes — not
+because of the seed.

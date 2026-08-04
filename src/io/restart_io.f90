@@ -28,9 +28,10 @@ contains
 
   ! Reads a restart file into R, or fills R with a perturbed laminar profile
   ! when the file is absent.  time is taken from the file header.
-  SUBROUTINE restart_read(filename, R, ni, time, perturbation_amplitude)
+  SUBROUTINE restart_read(filename, R, ni, time, perturbation_amplitude, seed)
     IMPLICIT NONE
     real(C_DOUBLE), intent(in) :: ni, perturbation_amplitude
+    integer(C_INT), intent(in) :: seed
     real(C_DOUBLE), intent(inout) :: time
     complex(C_DOUBLE_COMPLEX), intent(INOUT) :: R(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3 + nPhi)
     character(len=*), intent(IN) :: filename
@@ -63,7 +64,7 @@ contains
     ELSE
       IF (has_terminal) PRINT *, "Restart file "//filename//" not found"
       ! What that field is is a physics choice, and lives in physics/.
-      call generate_initial_field(R, perturbation_amplitude)
+      call generate_initial_field(R, perturbation_amplitude, seed)
     END IF
     CLOSE (120)
   END SUBROUTINE restart_read

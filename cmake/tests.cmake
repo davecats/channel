@@ -282,3 +282,15 @@ add_channel_mpi_test(
     PROCESSORS 2
     ENVIRONMENT CHANNEL_NPY=2
 )
+
+# Drives the channel binary itself (four short runs at np=1 and np=2) rather
+# than a test_* program, because the property under test -- that a seeded start
+# field does not depend on the decomposition -- only exists across whole runs.
+# Each run works in its own temporary directory, so no RESOURCE_LOCK is needed.
+add_test(NAME seeded_start_field
+    COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_SOURCE_DIR}/tests/check_seeded_start.py
+        $<TARGET_FILE:channel>
+        ${MPIEXEC_EXECUTABLE}
+)
+set_tests_properties(seeded_start_field PROPERTIES PROCESSORS 2)

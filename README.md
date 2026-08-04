@@ -227,6 +227,16 @@ Important fields:
 - `meanpx`, `meanpz`: imposed mean pressure-gradient terms. Leave them zero when
   enforcing constant flow rate.
 - `u0`, `uN`: streamwise wall velocities at the lower and upper walls.
+- `perturbation_amplitude`: size of the random perturbation added to the generated
+  start field when no restart file is present. Ignored when restarting.
+- `seed`: optional, zero or positive. Makes that generated start field
+  reproducible: for a given build, the same seed gives a bit-for-bit identical
+  field on any number of ranks and under any `CHANNEL_NPY`. Between different
+  compilers the field agrees to a few ULP rather than exactly, because the
+  complex exponential and the `tanh` mesh stretching come from each compiler's
+  own math library. Omit `seed` and the field is drawn from the unseeded
+  generator, so every restartless run starts differently and cannot be compared
+  with any other.
 - `deltat = 0`: let the code choose the time step from `cflmax`.
 - `dt_field`: interval for `Dati.cart.<i>.out` field snapshots.
 - `dt_save`: interval for overwriting `Dati.cart.out`; use a negative value to
