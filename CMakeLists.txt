@@ -118,6 +118,7 @@ function(channel_fypp_generate out_var)
 endfunction()
 
 channel_fypp_generate(CHANNEL_GENERATED_SOURCES
+    ${CHANNEL_SOURCE_DIR}/numerics/compact_component_solve.fypp
     ${CHANNEL_SOURCE_DIR}/physics/channel_equations.fypp
     ${CHANNEL_SOURCE_DIR}/io/pressure_output.fypp
     ${CHANNEL_SOURCE_DIR}/io/runtime_diagnostics.fypp

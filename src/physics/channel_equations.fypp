@@ -1,8 +1,6 @@
 #include "build_options.h"
 #:include "channel_operators.fypph"
 #:include "stencil_macros.fypph"
-#:include "channel_boundaries.fypph"
-#:include "wall_closure.fypph"
 
 ! The equations of the channel formulation.
 !
@@ -20,73 +18,25 @@
 ! buildrhs.  Both halves of each operator come from the single definitions in
 ! channel_operators.fypph.
 !
-! This module holds the physics.  It reads the grid, the state and the
-! stencils, and hands the assembled systems to the wall-normal solvers; it
-! contains no MPI, no FFT and no linear algebra of its own.
+! This module holds the physics, and only the physics.  Its whole contract with
+! the numerics is: fill ctx%system_matrix and ctx%system_rhs in a callback, then
+! hand the callback to solve_compact_component_current_layout.  How that system
+! is closed at the walls, eliminated, distributed over ranks and solved is
+! compact_component_solve's business, and this file says nothing about it.
+!
+! It contains no MPI, no FFT and no linear algebra of its own.
 module channel_equations
 
   use, intrinsic :: iso_c_binding
   use channel_grid
   use channel_state
   use stencil_coefficients
-  use banded_lu
+  use compact_component_solve
   use mpi_transpose
   use roctx, only: roctxPush, roctxPop
   use ffts
-  use y_schur_solver, only: YS_SCHUR_EXCHANGE_ALLGATHER, YS_SCHUR_EXCHANGE_ALLTOALL, &
-                            YS_SCHUR_EXCHANGE_AUTO
 
   implicit none
-
-  ! Everything an assembly step reads, and everywhere it writes, in one place.
-  !
-  ! The interior and boundary callbacks used to take the union of every
-  ! parameter any implementation might want, so most of them ignored most of
-  ! their arguments; the boundary values were worse still, reaching the
-  ! callback through module variables that a separate call had to set first.
-  ! Both now travel in this context, which is filled once per solve.
-  !
-  ! The second half of the type is where the assembled system goes.  It used to
-  ! be the other way round from the first: inputs arrived in the context but
-  ! results were written straight into public y_line_solvers workspace, which
-  ! every callback -- including the ones in pressure_output -- had to import by
-  ! name and re-declare.  Naming those slots here instead means a callback says
-  ! what it produces rather than which of the solver's globals it happens to
-  ! know about, and the solver stays free to move its storage.
-  !
-  ! Implementations must copy what they need into locals *before* their target
-  ! region -- a derived type with pointer components cannot be mapped to the
-  ! device -- so the kernels themselves stay exactly as they were.  The
-  ! boundary callbacks get that boilerplate from channel_boundaries.fypph.
-  type, public :: compact_assembly_context
-    complex(C_DOUBLE_COMPLEX), pointer :: src(:, :, :) => null()
-    integer(C_INT) :: row_start = 0_C_INT, row_end = 0_C_INT
-    integer(C_INT) :: derivative_order = 1_C_INT
-    real(C_DOUBLE) :: lambda = 0.0d0, diffusion = 0.0d0
-    logical :: has_lower_boundary = .false., has_upper_boundary = .false.
-    real(C_DOUBLE) :: lower_bc(-2:2) = 0.0d0, lower_ghost_bc(-2:2) = 0.0d0
-    real(C_DOUBLE) :: upper_bc(-2:2) = 0.0d0, upper_ghost_bc(-2:2) = 0.0d0
-    complex(C_DOUBLE_COMPLEX), pointer :: lower_rhs(:, :) => null(), lower_ghost_rhs(:, :) => null()
-    complex(C_DOUBLE_COMPLEX), pointer :: upper_rhs(:, :) => null(), upper_ghost_rhs(:, :) => null()
-
-    ! Outputs: the banded interior system, ...
-    complex(C_DOUBLE_COMPLEX), pointer :: system_matrix(:, :, :, :) => null()
-    complex(C_DOUBLE_COMPLEX), pointer :: system_rhs(:, :, :) => null()
-    ! ... and the four closure rows with their right-hand sides.  The wall rows
-    ! enforce the physical condition, the ghost rows close the node just
-    ! outside it; see wall_closure.fypph for what is done with them next.
-    real(C_DOUBLE), pointer :: lower_ghost_row(:, :, :) => null(), lower_wall_row(:, :, :) => null()
-    real(C_DOUBLE), pointer :: upper_wall_row(:, :, :) => null(), upper_ghost_row(:, :, :) => null()
-    complex(C_DOUBLE_COMPLEX), pointer :: lower_ghost_value(:, :) => null(), lower_wall_value(:, :) => null()
-    complex(C_DOUBLE_COMPLEX), pointer :: upper_wall_value(:, :) => null(), upper_ghost_value(:, :) => null()
-  end type compact_assembly_context
-
-  abstract interface
-    subroutine compact_assembly_step(ctx)
-      import :: compact_assembly_context
-      type(compact_assembly_context), intent(in) :: ctx
-    end subroutine compact_assembly_step
-  end interface
 
 contains
 
@@ -110,175 +60,6 @@ contains
       II = II + a1*dreal(f(iy - 1)) + a2*dreal(f(iy)) + a3*dreal(f(iy + 1))
     END DO
   END FUNCTION yintegr
-
-  SUBROUTINE apply_complex_derivative_current_layout(src, dst)
-    IMPLICIT NONE
-    complex(C_DOUBLE_COMPLEX), target, intent(in) :: src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    call solve_compact_component_current_layout(dst, assemble_compact_derivative_interior, assemble_compact_derivative_boundary, 0.0d0, 0.0d0, src, &
-                                                symmetric_operator=.false.)
-  END SUBROUTINE apply_complex_derivative_current_layout
-
-  SUBROUTINE apply_complex_second_derivative_current_layout(src, dst)
-    IMPLICIT NONE
-    complex(C_DOUBLE_COMPLEX), target, intent(in) :: src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    complex(C_DOUBLE_COMPLEX), intent(out) :: dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    call solve_compact_component_current_layout(dst, assemble_compact_derivative_interior, &
-                                                assemble_compact_derivative_boundary, 0.0d0, 0.0d0, src, &
-                                                symmetric_operator=.false., derivative_order=2_C_INT)
-  END SUBROUTINE apply_complex_second_derivative_current_layout
-
-  subroutine assemble_compact_derivative_interior(ctx)
-    use y_line_solvers, only: ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x
-    IMPLICIT NONE
-    type(compact_assembly_context), intent(in) :: ctx
-    complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
-    integer(C_INT) :: derivative_order_value, row_start, row_end
-    integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner, nlines_z, nlines, iline
-    integer(C_INT64_T) :: p
-    complex(C_DOUBLE_COMPLEX) :: src_m2, src_m1, src_0, src_p1, src_p2
-
-    owner_src => ctx%src
-    row_start = ctx%row_start
-    row_end = ctx%row_end
-    derivative_order_value = ctx%derivative_order
-    ix0_owner = lbound(owner_src, 3)
-    ixN_owner = ubound(owner_src, 3)
-    nlines_z = 2_C_INT*nz + 1_C_INT
-    nlines = (ixN_owner - ix0_owner + 1_C_INT)*nlines_z
-    !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(owner_src, der, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, &
-    !$omp& row_start, row_end, derivative_order_value, nz, ix0_owner, ixN_owner, nlines_z, nlines) &
-    !$omp private(ix, iz, iy, iline, p, src_m2, src_m1, src_0, src_p1, src_p2)
-    do ix = ix0_owner, ixN_owner
-      do iz = -nz, nz
-        iline = (ix - ix0_owner)*nlines_z + iz + nz + 1_C_INT
-        src_m2 = owner_src(row_start - 2_C_INT, iz, ix)
-        src_m1 = owner_src(row_start - 1_C_INT, iz, ix)
-        src_0 = owner_src(row_start, iz, ix)
-        src_p1 = owner_src(row_start + 1_C_INT, iz, ix)
-        src_p2 = owner_src(row_start + 2_C_INT, iz, ix)
-        do iy = row_start, row_end
-          p = int(iy - row_start, C_INT64_T)*int(nlines, C_INT64_T) + int(iline, C_INT64_T)
-          ys_gpsv_ds(p) = cmplx(der(iy, 0, -2), 0.0d0, kind=C_DOUBLE)
-          ys_gpsv_dl(p) = cmplx(der(iy, 0, -1), 0.0d0, kind=C_DOUBLE)
-          ys_gpsv_d(p) = cmplx(der(iy, 0, 0), 0.0d0, kind=C_DOUBLE)
-          ys_gpsv_du(p) = cmplx(der(iy, 0, 1), 0.0d0, kind=C_DOUBLE)
-          ys_gpsv_dw(p) = cmplx(der(iy, 0, 2), 0.0d0, kind=C_DOUBLE)
-          ys_gpsv_x(p) = der(iy, derivative_order_value, -2)*src_m2 + &
-                         der(iy, derivative_order_value, -1)*src_m1 + &
-                         der(iy, derivative_order_value, 0)*src_0 + &
-                         der(iy, derivative_order_value, 1)*src_p1 + &
-                         der(iy, derivative_order_value, 2)*src_p2
-          if (iy < row_end) then
-            src_m2 = src_m1
-            src_m1 = src_0
-            src_0 = src_p1
-            src_p1 = src_p2
-            src_p2 = owner_src(iy + 3_C_INT, iz, ix)
-          end if
-        end do
-      end do
-    end do
-    !$omp end target teams distribute parallel do
-  end subroutine assemble_compact_derivative_interior
-
-  ! Taking a derivative is a solve too: the wall rows just say "the unknown
-  ! here is whatever the one-sided stencil of the source gives".
-  subroutine assemble_compact_derivative_boundary(ctx)
-    IMPLICIT NONE
-    type(compact_assembly_context), intent(in) :: ctx
-    $:declare_boundary_rows()
-    integer(C_INT) :: derivative_order_value
-
-    $:bind_boundary_rows()
-    derivative_order_value = ctx%derivative_order
-
-    #:call lower_wall_rows('owner_src, d140, d14m1, d240, d24m1, derivative_order_value')
-      lower_ghost_row(:, iz, ix) = 0.0d0
-      lower_wall_row(:, iz, ix) = 0.0d0
-      if (derivative_order_value == 1_C_INT) then
-        lower_wall_value(iz, ix) = ${at_lower_wall('d140', 'owner_src', ', iz, ix')}$
-        lower_ghost_value(iz, ix) = ${at_lower_wall('d14m1', 'owner_src', ', iz, ix')}$
-      else
-        lower_wall_value(iz, ix) = ${at_lower_wall('d240', 'owner_src', ', iz, ix')}$
-        lower_ghost_value(iz, ix) = ${at_lower_wall('d24m1', 'owner_src', ', iz, ix')}$
-      end if
-      lower_ghost_row(-2, iz, ix) = 1.0d0
-      lower_wall_row(-1, iz, ix) = 1.0d0
-    #:endcall lower_wall_rows
-
-    #:call upper_wall_rows('owner_src, d14n, d14np1, d24n, d24np1, derivative_order_value, ny')
-      upper_wall_row(:, iz, ix) = 0.0d0
-      upper_ghost_row(:, iz, ix) = 0.0d0
-      if (derivative_order_value == 1_C_INT) then
-        upper_wall_value(iz, ix) = ${at_upper_wall('d14n', 'owner_src', ', iz, ix')}$
-        upper_ghost_value(iz, ix) = ${at_upper_wall('d14np1', 'owner_src', ', iz, ix')}$
-      else
-        upper_wall_value(iz, ix) = ${at_upper_wall('d24n', 'owner_src', ', iz, ix')}$
-        upper_ghost_value(iz, ix) = ${at_upper_wall('d24np1', 'owner_src', ', iz, ix')}$
-      end if
-      upper_wall_row(1, iz, ix) = 1.0d0
-      upper_ghost_row(2, iz, ix) = 1.0d0
-    #:endcall upper_wall_rows
-  end subroutine assemble_compact_derivative_boundary
-
-  ! Packs the wall coefficients and their right-hand sides for a component into
-  ! a context, replacing the module state that a separate call used to set.
-  function compact_component_boundaries(lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, &
-                                        lower_rhs_values, lower_ghost_rhs_values, &
-                                        upper_rhs_values, upper_ghost_rhs_values) result(ctx)
-    implicit none
-    real(C_DOUBLE), intent(in) :: lower_bc(-2:2), lower_ghost_bc(-2:2), upper_bc(-2:2), upper_ghost_bc(-2:2)
-    complex(C_DOUBLE_COMPLEX), target, intent(in) :: lower_rhs_values(-nz:, nx0:), lower_ghost_rhs_values(-nz:, nx0:)
-    complex(C_DOUBLE_COMPLEX), target, intent(in) :: upper_rhs_values(-nz:, nx0:), upper_ghost_rhs_values(-nz:, nx0:)
-    type(compact_assembly_context) :: ctx
-
-    ctx%lower_bc = lower_bc
-    ctx%lower_ghost_bc = lower_ghost_bc
-    ctx%upper_bc = upper_bc
-    ctx%upper_ghost_bc = upper_ghost_bc
-    ctx%lower_rhs => lower_rhs_values
-    ctx%lower_ghost_rhs => lower_ghost_rhs_values
-    ctx%upper_rhs => upper_rhs_values
-    ctx%upper_ghost_rhs => upper_ghost_rhs_values
-  end function compact_component_boundaries
-
-  ! The ordinary case: the wall rows are the prescribed boundary condition and
-  ! the values are the precomputed bc0/bcn planes, both carried in the context.
-  subroutine assemble_selected_compact_component_boundaries(ctx)
-    IMPLICIT NONE
-    type(compact_assembly_context), intent(in) :: ctx
-    $:declare_boundary_rows()
-    complex(C_DOUBLE_COMPLEX), pointer :: compact_lower_rhs(:, :), compact_lower_ghost_rhs(:, :)
-    complex(C_DOUBLE_COMPLEX), pointer :: compact_upper_rhs(:, :), compact_upper_ghost_rhs(:, :)
-    real(C_DOUBLE) :: compact_lower_bc(-2:2), compact_lower_ghost_bc(-2:2)
-    real(C_DOUBLE) :: compact_upper_bc(-2:2), compact_upper_ghost_bc(-2:2)
-
-    $:bind_boundary_rows()
-    compact_lower_bc = ctx%lower_bc
-    compact_lower_ghost_bc = ctx%lower_ghost_bc
-    compact_upper_bc = ctx%upper_bc
-    compact_upper_ghost_bc = ctx%upper_ghost_bc
-    compact_lower_rhs => ctx%lower_rhs
-    compact_lower_ghost_rhs => ctx%lower_ghost_rhs
-    compact_upper_rhs => ctx%upper_rhs
-    compact_upper_ghost_rhs => ctx%upper_ghost_rhs
-
-    #:call lower_wall_rows('compact_lower_bc, compact_lower_ghost_bc, compact_lower_rhs, compact_lower_ghost_rhs')
-      lower_ghost_value(iz, ix) = compact_lower_ghost_rhs(iz, ix)
-      lower_wall_value(iz, ix) = compact_lower_rhs(iz, ix)
-      lower_ghost_row(:, iz, ix) = compact_lower_ghost_bc
-      lower_wall_row(:, iz, ix) = compact_lower_bc
-    #:endcall lower_wall_rows
-
-    #:call upper_wall_rows('compact_upper_bc, compact_upper_ghost_bc, compact_upper_rhs, compact_upper_ghost_rhs')
-      upper_wall_value(iz, ix) = compact_upper_rhs(iz, ix)
-      upper_ghost_value(iz, ix) = compact_upper_ghost_rhs(iz, ix)
-      upper_wall_row(:, iz, ix) = compact_upper_bc
-      upper_ghost_row(:, iz, ix) = compact_upper_ghost_bc
-    #:endcall upper_wall_rows
-  end subroutine assemble_selected_compact_component_boundaries
 
   subroutine assemble_compact_biharmonic_system(ctx)
     implicit none
@@ -355,236 +136,6 @@ contains
     end do
     !$omp end target teams distribute parallel do
   end subroutine assemble_compact_helmholtz_system
-
-  subroutine eliminate_assembled_boundaries(row_start, row_end, has_lower_boundary, has_upper_boundary)
-    use y_line_solvers, only: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, &
-          ys_lower_ghost_owner, ys_lower_boundary_owner, ys_upper_boundary_owner, ys_upper_ghost_owner, ys_eqm1_owner, ys_eq0_owner, ys_eqn_owner, ys_eqnp1_owner, &
-                  ys_boundary_lower_rhs0_owner, ys_boundary_upper_rhsn_owner, ys_boundary_lower_eq_owner, ys_boundary_upper_eq_owner
-    implicit none
-    integer(C_INT), intent(in) :: row_start, row_end
-    logical, intent(in) :: has_lower_boundary, has_upper_boundary
-    complex(C_DOUBLE_COMPLEX) :: rhs_value, row_coeffs(-2:2)
-    real(C_DOUBLE) :: eq0(-1:2), eqn(-2:1)
-    integer(C_INT) :: ix, iz, ix0_owner, ixN_owner, ib
-    complex(C_DOUBLE_COMPLEX) :: fac
-
-    if (.not. has_lower_boundary .and. .not. has_upper_boundary) return
-
-    ix0_owner = lbound(ys_gpsv_owner_rhs, 2)
-    ixN_owner = ubound(ys_gpsv_owner_rhs, 2)
-
-    if (has_lower_boundary) then
-      call roctxPush("assembled_boundary_eliminate_lower")
-      !$omp target teams distribute parallel do default(none) &
-      !$omp shared(ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, ys_lower_ghost_owner, ys_lower_boundary_owner, ys_eqm1_owner, ys_eq0_owner, &
-      !$omp& ys_boundary_lower_rhs0_owner, ys_boundary_lower_eq_owner, row_start, ix0_owner, ixN_owner, nz) &
-      !$omp private(ix, iz, rhs_value, row_coeffs, eq0, fac, ib) collapse(2)
-      do ix = ix0_owner, ixN_owner
-        do iz = -nz, nz
-          $:fold_ghost_into_lower_wall('ys_boundary_lower_eq_owner', 'ys_boundary_lower_rhs0_owner(iz, ix)', &
-                                       'ys_eq0_owner', 'ys_eqm1_owner', &
-                                       'ys_lower_boundary_owner(iz, ix)', 'ys_lower_ghost_owner(iz, ix)', sfx=', iz, ix')
-          eq0 = ys_boundary_lower_eq_owner(:, iz, ix)
-
-          rhs_value = ys_gpsv_owner_rhs(iz, ix, row_start)
-          row_coeffs = ys_gpsv_owner_matrix(iz, ix, row_start, -2:2)
-          $:eliminate_lower_first_row('row_coeffs', 'rhs_value', 'ys_eqm1_owner(-2, iz, ix)', 'ys_eqm1_owner(:, iz, ix)', &
-                                      'ys_lower_ghost_owner(iz, ix)', 'eq0', 'ys_boundary_lower_rhs0_owner(iz, ix)')
-          ys_gpsv_owner_rhs(iz, ix, row_start) = rhs_value
-          ys_gpsv_owner_matrix(iz, ix, row_start, -2:2) = row_coeffs
-
-          rhs_value = ys_gpsv_owner_rhs(iz, ix, row_start + 1)
-          row_coeffs = ys_gpsv_owner_matrix(iz, ix, row_start + 1, -2:2)
-          $:eliminate_lower_second_row('row_coeffs', 'rhs_value', 'eq0', 'ys_boundary_lower_rhs0_owner(iz, ix)')
-          ys_gpsv_owner_rhs(iz, ix, row_start + 1) = rhs_value
-          ys_gpsv_owner_matrix(iz, ix, row_start + 1, -2:2) = row_coeffs
-        end do
-      end do
-      !$omp end target teams distribute parallel do
-      call roctxPop("assembled_boundary_eliminate_lower")
-    end if
-
-    if (has_upper_boundary) then
-      call roctxPush("assembled_boundary_eliminate_upper")
-      !$omp target teams distribute parallel do default(none) &
-      !$omp shared(ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, ys_upper_boundary_owner, ys_upper_ghost_owner, ys_eqn_owner, ys_eqnp1_owner, &
-      !$omp& ys_boundary_upper_rhsn_owner, ys_boundary_upper_eq_owner, row_end, ix0_owner, ixN_owner, nz) &
-      !$omp private(ix, iz, rhs_value, row_coeffs, eqn, fac, ib) collapse(2)
-      do ix = ix0_owner, ixN_owner
-        do iz = -nz, nz
-          $:fold_ghost_into_upper_wall('ys_boundary_upper_eq_owner', 'ys_boundary_upper_rhsn_owner(iz, ix)', &
-                                       'ys_eqn_owner', 'ys_eqnp1_owner', &
-                                       'ys_upper_boundary_owner(iz, ix)', 'ys_upper_ghost_owner(iz, ix)', sfx=', iz, ix')
-          eqn = ys_boundary_upper_eq_owner(:, iz, ix)
-
-          rhs_value = ys_gpsv_owner_rhs(iz, ix, row_end - 1)
-          row_coeffs = ys_gpsv_owner_matrix(iz, ix, row_end - 1, -2:2)
-          $:eliminate_upper_second_last_row('row_coeffs', 'rhs_value', 'eqn', 'ys_boundary_upper_rhsn_owner(iz, ix)')
-          ys_gpsv_owner_rhs(iz, ix, row_end - 1) = rhs_value
-          ys_gpsv_owner_matrix(iz, ix, row_end - 1, -2:2) = row_coeffs
-
-          rhs_value = ys_gpsv_owner_rhs(iz, ix, row_end)
-          row_coeffs = ys_gpsv_owner_matrix(iz, ix, row_end, -2:2)
-          $:eliminate_upper_last_row('row_coeffs', 'rhs_value', 'ys_eqnp1_owner(2, iz, ix)', 'ys_eqnp1_owner(:, iz, ix)', &
-                                     'ys_upper_ghost_owner(iz, ix)', 'eqn', 'ys_boundary_upper_rhsn_owner(iz, ix)')
-          ys_gpsv_owner_rhs(iz, ix, row_end) = rhs_value
-          ys_gpsv_owner_matrix(iz, ix, row_end, -2:2) = row_coeffs
-        end do
-      end do
-      !$omp end target teams distribute parallel do
-      call roctxPop("assembled_boundary_eliminate_upper")
-    end if
-  end subroutine eliminate_assembled_boundaries
-
-  subroutine reconstruct_assembled_boundaries(line_values, row_start, has_lower_boundary, has_upper_boundary, ix_start, ix_end)
-    use y_line_solvers, only: ys_lower_ghost_owner, ys_upper_ghost_owner, ys_eqm1_owner, ys_eqnp1_owner, &
-                  ys_boundary_lower_rhs0_owner, ys_boundary_upper_rhsn_owner, ys_boundary_lower_eq_owner, ys_boundary_upper_eq_owner
-    implicit none
-    integer(C_INT), intent(in) :: row_start
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: line_values(row_start - 2:, -nz:, :)
-    logical, intent(in) :: has_lower_boundary, has_upper_boundary
-    integer(C_INT), optional, intent(in) :: ix_start, ix_end
-    integer(C_INT) :: ix, iz, jx, ix0_owner, ixN_owner
-    ! Step 3 of the closure; steps 1 and 2 come from wall_closure.fypph.  This
-    ! step is not shared with the single-line path, which spells the same sum
-    ! as a - sum(b) rather than a - b1 - b2 - b3; the two do not round alike.
-    if (.not. has_lower_boundary .and. .not. has_upper_boundary) return
-
-    ix0_owner = nx0
-    ixN_owner = nxN
-    if (present(ix_start)) ix0_owner = ix_start
-    if (present(ix_end)) ixN_owner = ix_end
-
-    if (has_lower_boundary) then
-      call roctxPush("assembled_boundary_reconstruct_lower")
-      !$omp target teams distribute parallel do default(none) &
-      !$omp shared(line_values, ys_lower_ghost_owner, ys_eqm1_owner, ys_boundary_lower_rhs0_owner, ys_boundary_lower_eq_owner, nz, ix0_owner, ixN_owner) &
-      !$omp private(ix, iz, jx) collapse(2)
-      do ix = ix0_owner, ixN_owner
-        do iz = -nz, nz
-          jx = ix - ix0_owner + 1
-   line_values(0, iz, jx) = (ys_boundary_lower_rhs0_owner(iz, ix) - ys_boundary_lower_eq_owner(0, iz, ix)*line_values(1, iz, jx) - &
-                                    ys_boundary_lower_eq_owner(1, iz, ix)*line_values(2, iz, jx) - &
-                                ys_boundary_lower_eq_owner(2, iz, ix)*line_values(3, iz, jx))/ys_boundary_lower_eq_owner(-1, iz, ix)
-          line_values(-1, iz, jx) = (ys_lower_ghost_owner(iz, ix) - ys_eqm1_owner(-1, iz, ix)*line_values(0, iz, jx) - &
-                               ys_eqm1_owner(0, iz, ix)*line_values(1, iz, jx) - ys_eqm1_owner(1, iz, ix)*line_values(2, iz, jx) - &
-                                     ys_eqm1_owner(2, iz, ix)*line_values(3, iz, jx))/ys_eqm1_owner(-2, iz, ix)
-        end do
-      end do
-      !$omp end target teams distribute parallel do
-      call roctxPop("assembled_boundary_reconstruct_lower")
-    end if
-
-    if (has_upper_boundary) then
-      call roctxPush("assembled_boundary_reconstruct_upper")
-      !$omp target teams distribute parallel do default(none) &
-      !$omp shared(line_values, ys_upper_ghost_owner, ys_eqnp1_owner, ys_boundary_upper_rhsn_owner, ys_boundary_upper_eq_owner, ny, nz, ix0_owner, ixN_owner) &
-      !$omp private(ix, iz, jx) collapse(2)
-      do ix = ix0_owner, ixN_owner
-        do iz = -nz, nz
-          jx = ix - ix0_owner + 1
-          line_values(ny, iz, jx) = (ys_boundary_upper_rhsn_owner(iz, ix) - ys_boundary_upper_eq_owner(-2, iz, ix)*line_values(ny - 3, iz, jx) - &
-                                     ys_boundary_upper_eq_owner(-1, iz, ix)*line_values(ny - 2, iz, jx) - &
-                            ys_boundary_upper_eq_owner(0, iz, ix)*line_values(ny - 1, iz, jx))/ys_boundary_upper_eq_owner(1, iz, ix)
-          line_values(ny + 1, iz, jx) = (ys_upper_ghost_owner(iz, ix) - ys_eqnp1_owner(-2, iz, ix)*line_values(ny - 3, iz, jx) - &
-                  ys_eqnp1_owner(-1, iz, ix)*line_values(ny - 2, iz, jx) - ys_eqnp1_owner(0, iz, ix)*line_values(ny - 1, iz, jx) - &
-                                         ys_eqnp1_owner(1, iz, ix)*line_values(ny, iz, jx))/ys_eqnp1_owner(2, iz, ix)
-        end do
-      end do
-      !$omp end target teams distribute parallel do
-      call roctxPop("assembled_boundary_reconstruct_upper")
-    end if
-  end subroutine reconstruct_assembled_boundaries
-
-  SUBROUTINE solve_compact_component_current_layout(field_values, assemble_system, boundary_system, lambda_coeff, diffusion_coeff, source_values, &
-                                                    symmetric_operator, derivative_order, boundaries)
-   use y_line_solvers, only: ys_prepare_assembled_workspace, ys_release_workspace, ys_solve_endpoint_schur, ys_solve_pipelined_lu, &
-                              Y_SOLVER_SCHUR, Y_SOLVER_PIPELINED_LU, ys_selected_solver, ys_selected_batches, &
-                              ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, ys_eqm1_owner, ys_eq0_owner, ys_eqn_owner, ys_eqnp1_owner, &
-                              ys_lower_ghost_owner, ys_lower_boundary_owner, ys_upper_boundary_owner, ys_upper_ghost_owner
-    IMPLICIT NONE
-    complex(C_DOUBLE_COMPLEX), target, intent(inout) :: field_values(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
-    procedure(compact_assembly_step) :: assemble_system
-    procedure(compact_assembly_step) :: boundary_system
-    real(C_DOUBLE), intent(in) :: lambda_coeff, diffusion_coeff
-    complex(C_DOUBLE_COMPLEX), target, intent(in) :: source_values( &
-                                                     lbound(field_values, 1):ubound(field_values, 1), &
-                                                     lbound(field_values, 2):ubound(field_values, 2), &
-                                                     lbound(field_values, 3):ubound(field_values, 3))
-    logical, optional, intent(in) :: symmetric_operator
-    integer(C_INT), optional, intent(in) :: derivative_order
-    type(compact_assembly_context), optional, intent(in) :: boundaries
-    logical :: has_lower_boundary, has_upper_boundary, symmetric_operator_value
-    complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :), owner_dst(:, :, :)
-    type(compact_assembly_context) :: ctx
-
-    symmetric_operator_value = .true.
-    if (present(symmetric_operator)) symmetric_operator_value = symmetric_operator
-
-    owner_src(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => source_values
-    owner_dst(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN) => field_values
-    has_lower_boundary = (ny0 == 1)
-    has_upper_boundary = (nyN == ny - 1)
-
-    ! Boundary coefficients, when the chosen boundary step needs them, come in
-    ! from the caller rather than from module state set by an earlier call.
-    if (present(boundaries)) ctx = boundaries
-    ctx%src => owner_src
-    ctx%row_start = ny0
-    ctx%row_end = nyN
-    ctx%lambda = lambda_coeff
-    ctx%diffusion = diffusion_coeff
-    ctx%has_lower_boundary = has_lower_boundary
-    ctx%has_upper_boundary = has_upper_boundary
-    if (present(derivative_order)) ctx%derivative_order = derivative_order
-    call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, nxB*(2*nz + 1), &
-                                        schur_pass_counts, schur_exchange_mode, &
-                                        prepare_schur=.true.)
-    ! Only now are the solver's views bound, so point the context at them here
-    ! rather than in the caller.  This is the whole of what a callback needs to
-    ! know about where its results go.
-    ctx%system_matrix => ys_gpsv_owner_matrix
-    ctx%system_rhs => ys_gpsv_owner_rhs
-    ctx%lower_ghost_row => ys_eqm1_owner
-    ctx%lower_wall_row => ys_eq0_owner
-    ctx%upper_wall_row => ys_eqn_owner
-    ctx%upper_ghost_row => ys_eqnp1_owner
-    ctx%lower_ghost_value => ys_lower_ghost_owner
-    ctx%lower_wall_value => ys_lower_boundary_owner
-    ctx%upper_wall_value => ys_upper_boundary_owner
-    ctx%upper_ghost_value => ys_upper_ghost_owner
-    call assemble_system(ctx)
-    call boundary_system(ctx)
-    call eliminate_assembled_boundaries(ny0, nyN, has_lower_boundary, has_upper_boundary)
-    ! configure_mpi_decomposition already resolved CHANNEL_Y_SOLVER against the
-    ! autotune result at startup, so the choice is just read here.  A batch count
-    ! is only available when the autotuner picked the pipelined solver itself.
-    select case (ys_selected_solver)
-    case (Y_SOLVER_SCHUR)
-      call ys_solve_endpoint_schur(field_values, symmetric_operator_value)
-    case (Y_SOLVER_PIPELINED_LU)
-      if (ys_selected_batches >= 1_C_INT) then
-        call ys_solve_pipelined_lu(field_values, ys_selected_batches)
-      else
-        call ys_solve_pipelined_lu(field_values)
-      end if
-    case default
-      error stop "invalid y solver selection"
-    end select
-    call reconstruct_assembled_boundaries(owner_dst, ny0, has_lower_boundary, has_upper_boundary)
-    call ys_release_workspace()
-  END SUBROUTINE solve_compact_component_current_layout
-
-  SUBROUTINE scatter_full_y_line(full_line, local_line)
-    IMPLICIT NONE
-    complex(C_DOUBLE_COMPLEX), intent(in) :: full_line(-1:ny + 1)
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: local_line(ny0 - 2:)
-    if (ny0 == 1 .and. nyN == ny - 1) then
-      local_line(-1:ny + 1) = full_line(-1:ny + 1)
-      return
-    end if
-    local_line(ny0 - 2:nyN + 2) = full_line(ny0 - 2:nyN + 2)
-  END SUBROUTINE scatter_full_y_line
 
   SUBROUTINE solve_mean_correction_line(x, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, lambda_coeff, diffusion_coeff)
     !!! THIS OPERATES ON A FULL Y LINE (ASSEMBLED FROM ALL PROCESSES) !!!
@@ -999,5 +550,4 @@ contains
     END SELECT
 
   END SUBROUTINE buildrhs
-
 end module channel_equations
