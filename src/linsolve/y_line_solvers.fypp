@@ -2302,8 +2302,10 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
   ! Pentadiagonal LU factorization of one interleaved line.
   !
   ! open_right = .true. leaves the trailing row coupled to the rows owned by the
-  ! next y rank, so its upper diagonal is carried forward as well; that is the
-  ! only difference between the local and the pipelined-continuation variants.
+  ! next y rank, so its upper diagonal is carried forward as well.  That is the
+  ! only difference between factorizing a line this rank owns outright and
+  ! factorizing one whose tail continues into the rank above -- both are this
+  ! routine, called with the flag set one way or the other.
 
   subroutine ys_factor_penta_interleaved(ds, dl, d, du, dw, stride, first, n, open_right)
     implicit none
@@ -2348,6 +2350,18 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     d(p1) = 1.0d0/d(p1)
   end subroutine ys_factor_penta_interleaved
 
+  ! Fold the predecessor batch's tail into the first two rows of this one.
+  !
+  ! Despite the name, this is not a variant of the routine above and the two
+  ! share no body.  The substitutions do pick one twin or the other -- a line is
+  ! either opened at the wall or continued from the rank below -- but the factor
+  ! path runs both: the pipelined solves call this whenever ipy > 0 and then
+  ! call the plain factorization unconditionally.  So it is a prologue to that
+  ! routine, not an alternative to it.  It carries the two eliminations that
+  ! need the previous rank's last two rows and nothing else; the interior
+  ! elimination it looks to be missing is the one the plain routine goes on to
+  ! do over the whole local line.  There is no shared recurrence here to write
+  ! once.
   subroutine ys_factor_penta_interleaved_continue(ds, dl, d, du, stride, first, n, &
                                                   prev0_d, prev0_du, prev0_dw, prev1_d, prev1_du, prev1_dw)
     implicit none
