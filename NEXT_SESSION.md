@@ -1,5 +1,18 @@
 # Prompt for the next session
 
+> **Note (Aug 4 2026): the source tree was reorganised after most of this file
+> was written.** `src/core/` no longer exists; sources now live under
+> `src/physics/`, `src/numerics/`, `src/io/`, `src/run/` and `src/util/`, and
+> several modules were renamed (`dnsdata` -> `case_setup`, `compact_stencils`
+> -> `stencil_coefficients`, `channel_stencils.fypph` -> `stencil_macros.fypph`,
+> `statistics` -> `runtime_diagnostics`, `rbmat` -> `banded_lu`, `header.h` ->
+> `build_options.h`, `solve_compact_component_current_layout` ->
+> `solve_wall_normal_component`). The historical entries below deliberately keep
+> the names that were current when they were written; see
+> `src/physics/README.md` and the memory note `channel-src-layout` for the
+> mapping. The subject of "Do this first" is unaffected and still outstanding --
+> the three pack kernels are unchanged in `src/linsolve/y_line_solvers.fypp`.
+
 Copy the block below as the opening message.
 
 ---
@@ -31,7 +44,7 @@ Thirteen code commits, each independently verified against the full gate.
 
 - **The `start`/`_continue` duplication is settled** (four commits, below).
 
-- **The convvelo MPI-IO writer is out.** `src/core/convvelo_io.f90` holds the
+- **The convvelo MPI-IO writer is out.** `src/io/convvelo_io.f90` holds the
   raw-statistics writer, the profile write, the field averaging and the
   `.fields` layout file, taking its state as arguments rather than `use`ing
   convvelo -- the shape `restart_io` already had. `convvelo.fypp` 1127 -> 913
@@ -371,13 +384,15 @@ Do not redo these without new information; the reasoning is in the commits.
 Small, independently verified commits -- one logical change each, so a
 regression bisects to one peel. The gate, none of which is optional:
 
-1. CPU `ctest` (30 tests) -- necessary, never sufficient. Add explicit runs of
+1. CPU `ctest` (32 tests as of Aug 4 2026; the counts in the historical
+   entries below were 30) -- necessary, never sufficient. Add explicit runs of
    whatever branch you touched; see "ask which branch your run took" below.
 2. An NVHPC GPU build, and the GPU suite compared against **HEAD built in a
    scratch tree**, not against an expectation. The environment moves
    underneath both boxes, so establish the failing set at HEAD every time.
-3. **Run the `channel` binary and check `$?`.** `ctest` never runs it -- every
-   test drives its own `test_*` binary -- which is how it segfaulted in
+3. **Run the `channel` binary and check `$?`.** Only one test (`seeded_start_
+   field`, added Aug 4 2026) runs it; every other drives its own `test_*`
+   binary -- which is how it segfaulted in
    `MPI_Finalize` on every run with 30 green tests, and how the `-Dbodyforce`
    crash surfaced. There is no longer a `-Dbodyforce` leg; `-Dhalfchannel` and
    `-DphiNeumann` still exist and nothing builds them, so compile one of those
