@@ -137,6 +137,26 @@ int channel_nccl_context_alltoall(void *ctx_ptr, const void *sendbuf, void *recv
 #endif
 }
 
+/* Unlike the alltoall above -- which NCCL only provides natively behind
+   HAVE_NCCL_ALLTOALL and which we otherwise emulate with grouped send/recv --
+   ncclAllGather is a native NCCL collective on every version we support.  The
+   y-Schur allgather branch was hard-wired to MPI_Allgather because no allgather
+   was ever exported here; this is that missing path.
+   count_elems counts double complex, hence the 16 bytes each, and it is the
+   per-rank CONTRIBUTION: the receive buffer holds nranks times that. */
+int channel_nccl_context_allgather(void *ctx_ptr, const void *sendbuf, void *recvbuf, size_t count_elems) {
+  int status;
+  size_t count_bytes = count_elems*16;
+  channel_nccl_context *ctx = (channel_nccl_context *)ctx_ptr;
+  if (ctx == NULL) return -1;
+  status = channel_nccl_check(ncclAllGather(sendbuf, recvbuf, count_bytes,
+                                            ncclUint8, ctx->comm, ctx->stream));
+  if (status != 0) return status;
+  channelError_t stream_status = channelStreamSynchronize(ctx->stream);
+  if (stream_status != channelSuccess) return 100000 + (int)stream_status;
+  return 0;
+}
+
 int channel_nccl_context_destroy(void *ctx_ptr) {
   channel_nccl_context *ctx = (channel_nccl_context *)ctx_ptr;
   if (ctx == NULL) return 0;

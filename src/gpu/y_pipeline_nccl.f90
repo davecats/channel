@@ -25,7 +25,7 @@ module y_pipeline_nccl
   public :: channel_comm_use_nccl, channel_comm_available
   public :: channel_comm_backend_from_env, channel_comm_backend_name
   public :: channel_comm_set_backend_override, channel_comm_clear_backend_override
-  public :: channel_comm_alltoall_complex
+  public :: channel_comm_alltoall_complex, channel_comm_allgather_complex
   public :: channel_comm_p2p_ensure, channel_comm_send, channel_comm_recv, channel_comm_sendrecv
   public :: channel_comm_context_reset
 
@@ -78,6 +78,14 @@ module y_pipeline_nccl
       type(c_ptr), value :: ctx, sendbuf, recvbuf
       integer(c_size_t), value :: count_elems
     end function channel_nccl_context_alltoall
+
+    function channel_nccl_context_allgather(ctx, sendbuf, recvbuf, count_elems) bind(c, name="channel_nccl_context_allgather")
+      use, intrinsic :: iso_c_binding
+      implicit none
+      integer(c_int) :: channel_nccl_context_allgather
+      type(c_ptr), value :: ctx, sendbuf, recvbuf
+      integer(c_size_t), value :: count_elems
+    end function channel_nccl_context_allgather
 
     function channel_nccl_context_sendrecv(ctx, sendbuf, send_elems, send_peer, recvbuf, recv_elems, recv_peer) &
       bind(c, name="channel_nccl_context_sendrecv")
@@ -297,6 +305,56 @@ contains
       if (ierr /= MPI_SUCCESS) error stop "channel_comm_alltoall_complex MPI failed"
     end if
   end subroutine channel_comm_alltoall_complex
+
+  ! count is the per-rank contribution; recvbuf holds comm_size times that.
+  ! Mirrors channel_comm_alltoall_complex, including the MPI fallback, so the
+  ! caller need not know which transport is active.
+  subroutine channel_comm_allgather_complex(sendbuf, recvbuf, count, comm, comm_ctx)
+    complex(c_double_complex), intent(in), target, contiguous :: sendbuf(:)
+    complex(c_double_complex), intent(out), target, contiguous :: recvbuf(:)
+    integer(c_int), intent(in), value :: count
+    type(MPI_Comm), intent(in) :: comm
+    type(c_ptr), intent(inout) :: comm_ctx
+    integer :: ierr
+
+    if (channel_comm_use_nccl()) then
+#ifdef HAVE_NCCL
+      call channel_comm_ensure_context(comm, comm_ctx)
+#ifndef HAVE_HIP
+      !$omp target data use_device_addr(sendbuf, recvbuf)
+#endif
+      call channel_nccl_allgather(comm_ctx, c_loc(sendbuf(1)), c_loc(recvbuf(1)), count)
+#ifndef HAVE_HIP
+      !$omp end target data
+#endif
+#else
+      error stop "CHANNEL_COMM=nccl requested, but this build has no NCCL/RCCL support"
+#endif
+    else
+#ifndef HAVE_HIP
+      !$omp target data use_device_addr(sendbuf, recvbuf)
+#endif
+      call MPI_Allgather(sendbuf, int(count), MPI_DOUBLE_COMPLEX, &
+                         recvbuf, int(count), MPI_DOUBLE_COMPLEX, comm, ierr)
+#ifndef HAVE_HIP
+      !$omp end target data
+#endif
+      if (ierr /= MPI_SUCCESS) error stop "channel_comm_allgather_complex MPI failed"
+    end if
+  end subroutine channel_comm_allgather_complex
+
+  subroutine channel_nccl_allgather(ctx, sendptr, recvptr, count)
+    type(c_ptr), intent(in), value :: ctx, sendptr, recvptr
+    integer(c_int), intent(in), value :: count
+#ifdef HAVE_NCCL
+    integer(c_int) :: status
+
+    status = channel_nccl_context_allgather(ctx, sendptr, recvptr, int(count, c_size_t))
+    if (status /= 0_c_int) error stop "channel_nccl_allgather failed"
+#else
+    error stop "NCCL/RCCL collective backend requested, but this build has no support"
+#endif
+  end subroutine channel_nccl_allgather
 
   subroutine channel_nccl_alltoall(ctx, sendptr, recvptr, count)
     type(c_ptr), intent(in), value :: ctx, sendptr, recvptr

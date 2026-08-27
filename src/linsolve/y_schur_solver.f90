@@ -6,7 +6,8 @@ module y_schur_solver
   use roctx, only: roctxPush, roctxPop
   use channel_grid, only: ipy
   use mpi_transpose, only: MPI_COMM_Y, ensure_ycomm_buffers, ycomm_sendbuf, ycomm_recvbuf
-  use y_pipeline_nccl, only: channel_comm_alltoall_complex, channel_comm_context_reset
+  use y_pipeline_nccl, only: channel_comm_alltoall_complex, channel_comm_allgather_complex, &
+                             channel_comm_context_reset
   use mpi_f08
 
   implicit none
@@ -510,30 +511,29 @@ contains
   subroutine ys_schur_exchange_rows(ilevel)
     implicit none
     integer, intent(in) :: ilevel
-    integer :: ierr_local
     real(C_DOUBLE) :: comm_t0, elapsed
 
     comm_t0 = 0.0_C_DOUBLE
     elapsed = 0.0_C_DOUBLE
     if (s_level_exchange_mode(ilevel) == YS_SCHUR_EXCHANGE_ALLGATHER) then
-      call roctxPush("MPI_Allgather ys_schur_rows")
+      ! Routed through channel_comm_allgather_complex rather than calling
+      ! MPI_Allgather directly, so that CHANNEL_COMM=nccl reaches this branch
+      ! too.  It used to be raw MPI, which meant a Schur hierarchy whose root
+      ! level is an allgather did part of its exchange over MPI even when
+      ! everything else was on NCCL.  ncclAllGather is a native collective,
+      ! where our alltoall is emulated with grouped send/recv.
+      call roctxPush("channel_comm_allgather ys_schur_rows")
       if (s_comm_stats_enabled) comm_t0 = MPI_Wtime()
-#ifndef HAVE_HIP
-      !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
-#endif
-      call MPI_Allgather(ycomm_sendbuf(1:s_row_send_elems(ilevel)), s_row_send_elems(ilevel), MPI_DOUBLE_COMPLEX, &
-                         ycomm_recvbuf(1:s_row_recv_elems(ilevel)), s_row_send_elems(ilevel), MPI_DOUBLE_COMPLEX, &
-                         s_level_comm(ilevel), ierr_local)
-#ifndef HAVE_HIP
-      !$omp end target data
-#endif
-      if (ierr_local /= MPI_SUCCESS) error stop "MPI_Allgather y-Schur rows failed"
+      call channel_comm_allgather_complex(ycomm_sendbuf(1:s_row_send_elems(ilevel)), &
+                                          ycomm_recvbuf(1:s_row_recv_elems(ilevel)), &
+                                          s_row_send_elems(ilevel), &
+                                          s_level_comm(ilevel), s_level_nccl_ctx(ilevel))
       if (s_comm_stats_enabled) then
         elapsed = MPI_Wtime() - comm_t0
         call ys_schur_report_comm_stats("ys_schur_rows_allgather", s_level_comm(ilevel), &
                                         s_row_send_elems(ilevel), s_row_recv_elems(ilevel), elapsed)
       end if
-      call roctxPop("MPI_Allgather ys_schur_rows")
+      call roctxPop("channel_comm_allgather ys_schur_rows")
     else if (s_level_use_alltoall(ilevel)) then
       call roctxPush("channel_comm_alltoall ys_schur_rows")
       if (s_comm_stats_enabled) comm_t0 = MPI_Wtime()
