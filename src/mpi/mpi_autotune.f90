@@ -7,11 +7,11 @@ module mpi_autotune
   use mpi_transpose, only: init_MPI, free_MPI, fft_transpose_is_local, repack_zTOx_local, pack_zTOx, alltoall, &
                            unpack_zTOx, repack_xTOz_local, pack_xTOz, unpack_xTOz, sendbuf, recvbuf
 #ifdef HAVE_CUDA
-  use ffts, only: init_cufft, free_fft, VVdz, VVdx, rVVdx
+  use ffts, only: init_cufft, free_fft, VVdz, VVdx, rVVdx, fft_plans_ok
 #elif defined(HAVE_HIP)
-  use ffts, only: init_hipfft, free_fft, VVdz, VVdx, rVVdx
+  use ffts, only: init_hipfft, free_fft, VVdz, VVdx, rVVdx, fft_plans_ok
 #elif defined(HAVE_FFTW)
-  use ffts, only: init_fft, free_fft, VVdz, VVdx, rVVdx
+  use ffts, only: init_fft, free_fft, VVdz, VVdx, rVVdx, fft_plans_ok
 #endif
   use y_line_solvers, only: Y_SOLVER_SCHUR, Y_SOLVER_PIPELINED_LU, &
                             ys_selected_solver, ys_selected_batches, &
@@ -200,7 +200,7 @@ contains
     real(C_DOUBLE) :: y_error
     integer(C_INT) :: ib, batches, npy, nlines, placeholder_path(MAXP), placeholder_npass, batch_candidates(3)
     integer(C_INT), allocatable :: placeholder_passes(:)
-    logical :: y_ok
+    logical :: y_ok, fft_ok
     integer :: ierr, rank
 
     if (.not. valid_decomposition(nranks, npxz, nxpp, nzd, ny, node)) return
@@ -209,7 +209,13 @@ contains
 
     call MPI_Comm_rank(MPI_COMM_WORLD, rank, ierr)
     call channel_comm_set_backend_override(comm_backend)
-    call time_xz_sweep(nxpp, nxd, nzd, nz, ny, nphi, overlapping, npy, xz_forward_cost, xz_back_cost)
+    call time_xz_sweep(nxpp, nxd, nzd, nz, ny, nphi, overlapping, npy, xz_forward_cost, xz_back_cost, fft_ok)
+    if (.not. fft_ok) then
+      if (rank == 0) write (*, '(*(g0,1x))') "MPI autotune rejected: npxz=", npxz, &
+        "npy=", npy, "comm=", trim(channel_comm_backend_name(comm_backend)), &
+        "reason= fft_plan_creation_failed"
+      return
+    end if
 
     placeholder_path = 1_C_INT
     call ys_schur_default_pass_counts(npy, placeholder_passes)
@@ -291,11 +297,18 @@ contains
     integer :: ierr, rank
     real(C_DOUBLE) :: xz_forward_cost, xz_back_cost, y_cost, score
     real(C_DOUBLE) :: y_error
-    logical :: y_ok
+    logical :: y_ok, fft_ok
     if (.not. is_valid_candidate(nranks, npxz, nxpp, nzd, nz, ny, node, path, npass)) return
     call MPI_Comm_rank(MPI_COMM_WORLD, rank, ierr)
     call channel_comm_set_backend_override(comm_backend)
-    call time_xz_sweep(nxpp, nxd, nzd, nz, ny, nphi, overlapping, nranks/npxz, xz_forward_cost, xz_back_cost)
+    call time_xz_sweep(nxpp, nxd, nzd, nz, ny, nphi, overlapping, nranks/npxz, xz_forward_cost, xz_back_cost, fft_ok)
+    if (.not. fft_ok) then
+      if (rank == 0) write (*, '(*(g0,1x))') "MPI autotune rejected: npxz=", npxz, &
+        "npy=", nranks/npxz, "comm=", trim(channel_comm_backend_name(comm_backend)), &
+        "passes=", trim(display_pass_string(path, npass, Y_SOLVER_SCHUR)), &
+        "reason= fft_plan_creation_failed"
+      return
+    end if
 
     call score_y_backend(Y_SOLVER_SCHUR, 0_C_INT)
 
@@ -436,10 +449,15 @@ contains
     end do
   end function min_schur_arity
 
-  subroutine time_xz_sweep(nxpp, nxd, nzd, nz, ny, nphi, overlapping, npy, forward_cost, back_cost)
+  subroutine time_xz_sweep(nxpp, nxd, nzd, nz, ny, nphi, overlapping, npy, forward_cost, back_cost, fft_ok)
     integer(C_INT), intent(in) :: nxpp, nxd, nzd, nz, ny, nphi, npy
     logical, intent(in) :: overlapping
     real(C_DOUBLE), intent(out) :: forward_cost, back_cost
+    ! .false. when this candidate's FFT plans could not be created -- almost
+    ! always because the candidate does not fit in device memory.  The transpose
+    ! timing below does not touch the plans, so it still produces a plausible
+    ! number; scoring that number would rank a decomposition that cannot run.
+    logical, intent(out) :: fft_ok
 #ifdef HAVE_FFTW
 #endif
     type(MPI_Request) :: request
@@ -455,6 +473,7 @@ contains
 #elif defined(HAVE_FFTW)
     call init_fft(nxd, nxB, nzd, nzB, nphi, overlapping)
 #endif
+    fft_ok = fft_plans_ok()
 
     nrepeat = tune_repeats()
     forward_elapsed = 0.0_C_DOUBLE

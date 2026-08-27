@@ -131,7 +131,24 @@ MODULE ffts
   integer(C_INT), save :: fft_y0, fft_yN, fft_ny
   integer(C_INT), save :: fft_nxd = 0, fft_nxB = 0, fft_nzd = 0, fft_nzB = 0, fft_nPhi = 0, fft_nflds = 0
   logical, save :: fft_workspace_bound = .false.
+  ! Plan-creation failures seen since the last init_*fft.  A failed plan is not
+  ! fatal here -- the run may be a discarded autotune candidate rather than the
+  ! real thing -- but it must be *visible*, because the plan handle is then
+  ! invalid and the CUDA error is sticky, so the damage surfaces much later and
+  ! somewhere else entirely.  Query with fft_plans_ok().
+  integer, save :: fft_plan_failures = 0
 CONTAINS
+
+  ! .false. when any plan created by the most recent init_*fft failed.
+  !
+  ! Only the CUDA path currently reports: init_hipfft ignores its istat
+  ! entirely and FFTW's planner does not fail the same way, so on those
+  ! backends this answers .true. because nothing has said otherwise -- it is
+  ! not a positive guarantee that every plan is sound.
+  logical function fft_plans_ok()
+    implicit none
+    fft_plans_ok = (fft_plan_failures == 0)
+  end function fft_plans_ok
 
   subroutine get_fft_memory_estimate(nxd, nxB, nzd, nzB, nPhi, overlapping, n_floats)
     implicit none
@@ -321,6 +338,11 @@ CONTAINS
     fft_nPhi = nPhi
     fft_nflds = nflds
 
+    ! Clear before planning, so fft_plans_ok() always describes THIS init and
+    ! not a failure inherited from a previous one.  The autotuner calls this
+    ! once per candidate.
+    fft_plan_failures = 0
+
     !FFTs plans
     istat = cufftCreate(cu_pIFT)
     call check_cufft_status("cufftCreate IFT", istat)
@@ -368,7 +390,10 @@ CONTAINS
     character(len=*), intent(in) :: where
     integer, intent(in) :: istat
 
-    if (istat /= 0) print *, trim(where), " failed:", istat
+    if (istat /= 0) then
+      fft_plan_failures = fft_plan_failures + 1
+      print *, trim(where), " failed:", istat
+    end if
   end subroutine check_cufft_status
 
 #elif defined(HAVE_HIP)
