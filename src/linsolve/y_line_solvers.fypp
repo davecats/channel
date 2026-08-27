@@ -420,6 +420,8 @@ module y_line_solvers
   logical, save :: ys_forced_chunk_nx_initialized = .false.
   logical, save :: ys_force_custom_gpsv = .false.
   logical, save :: ys_force_custom_gpsv_initialized = .false.
+  logical, save :: ys_schur_comm_stats = .false.
+  logical, save :: ys_schur_comm_stats_initialized = .false.
 
 contains
 
@@ -567,6 +569,22 @@ contains
     end if
     ys_use_custom_gpsv = ys_force_custom_gpsv
   end function ys_use_custom_gpsv
+
+  ! CHANNEL_Y_SCHUR_TIMING, the Schur counterpart of CHANNEL_Y_PIPELINE_TIMING.
+  ! The Schur solver has always carried its own per-level instrumentation
+  ! (ys_schur_report_comm_stats), but comm_stats_enabled was an optional
+  ! argument no caller ever passed, so none of it could be reached.  One line
+  ! per exchange per rank, so use it with a short nstep -- at npy=8 the medium
+  ! deck emits roughly fifty lines per step per rank.
+  logical function ys_schur_comm_stats_requested()
+    implicit none
+
+    if (.not. ys_schur_comm_stats_initialized) then
+      call env_flag("CHANNEL_Y_SCHUR_TIMING", ys_schur_comm_stats)
+      ys_schur_comm_stats_initialized = .true.
+    end if
+    ys_schur_comm_stats_requested = ys_schur_comm_stats
+  end function ys_schur_comm_stats_requested
 
   ! Single description of the y-solver workspace layout.
   !
@@ -718,10 +736,12 @@ contains
     integer(C_INT) :: active_n
     type(ys_schur_config) :: cfg
     logical :: prepare_schur_value
+    logical :: schur_comm_stats
 
     active_n = row_end - row_start + 1
     prepare_schur_value = .true.
     if (present(prepare_schur)) prepare_schur_value = prepare_schur
+    schur_comm_stats = ys_schur_comm_stats_requested()
 
     if (associated(ys_gpsv_rhs_store)) error stop "ys_allocate_workspace called with core workspace already allocated"
     if (associated(ys_batch_ds)) error stop "ys_allocate_workspace called with batch workspace already allocated"
@@ -744,7 +764,8 @@ contains
       ys_reduced_pass_counts = schur_pass_counts
       ys_reduced_exchange_mode = schur_exchange_mode
 
-      call ys_schur_configure(cfg, schur_pass_counts, exchange_mode=schur_exchange_mode)
+      call ys_schur_configure(cfg, schur_pass_counts, comm_stats_enabled=schur_comm_stats, &
+                              exchange_mode=schur_exchange_mode)
       call ys_schur_prepare(ys_reduced_schur_ws, cfg, nlines, npy_grid)
 
       !$omp target enter data map(alloc: ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values, &
