@@ -463,6 +463,7 @@ contains
     type(MPI_Request) :: request
     type(MPI_Status) :: status
     integer :: ierr, iter, nrepeat
+    logical :: local_fft_ok
     real(C_DOUBLE) :: t0, forward_elapsed, back_elapsed, global_elapsed
 
     call init_MPI(nxpp, nz, ny, nzd, nphi, overlapping, npy, .true.)
@@ -473,7 +474,13 @@ contains
 #elif defined(HAVE_FFTW)
     call init_fft(nxd, nxB, nzd, nzB, nphi, overlapping)
 #endif
-    fft_ok = fft_plans_ok()
+    ! Globalise before anyone acts on it.  fft_plans_ok() is per-rank, and the
+    ! callers use this to `return` early -- so if the ranks disagree, some
+    ! return while the rest walk into the next collective alone and the run
+    ! hangs.  MPI_LAND makes every rank reject the candidate or none do, the
+    ! same way the y_ok path reduces bad_local before deciding.
+    local_fft_ok = fft_plans_ok()
+    call MPI_Allreduce(local_fft_ok, fft_ok, 1, MPI_LOGICAL, MPI_LAND, MPI_COMM_WORLD, ierr)
 
     nrepeat = tune_repeats()
     forward_elapsed = 0.0_C_DOUBLE
