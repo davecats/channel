@@ -80,6 +80,54 @@ def _get_convvelo_runtime_config(directory):
     }
 
 
+def _read_convvelo_timing_sidecars(paths):
+    """Timestep metadata for the direct convection velocity, if the run wrote it.
+
+    Each snapshot carries a `<name>.timing` text sidecar with the step sizes the
+    finite-difference triplets actually saw. It is a sidecar rather than a header
+    field because the 24-byte binary header is read positionally. Runs without
+    direct mode have none, and the caller simply gets an empty dict.
+    """
+    triplets, weighted_h, dropped, rates = 0, 0.0, 0, None
+    min_h, max_h = None, None
+    for path in paths:
+        sidecar = Path(str(path) + ".timing")
+        if not sidecar.exists():
+            continue
+        parsed = {}
+        for raw_line in open(sidecar):
+            line = raw_line.split("#", 1)[0].strip()
+            if not line or ":" not in line:
+                continue
+            key, values = line.split(":", 1)
+            parsed[key.strip().lower()] = values.split()
+        n = int(parsed.get("n_triplets", ["0"])[0])
+        if n <= 0:
+            continue
+        triplets += n
+        dropped += int(parsed.get("n_dropped_triggers", ["0"])[0])
+        weighted_h += n * float(parsed["mean_h"][0])
+        this_min, this_max = float(parsed["min_h"][0]), float(parsed["max_h"][0])
+        min_h = this_min if min_h is None else min(min_h, this_min)
+        max_h = this_max if max_h is None else max(max_h, this_max)
+        if "energy_rate" in parsed:
+            values = np.array([float(v) for v in parsed["energy_rate"]])
+            rates = values * n if rates is None else rates + values * n
+
+    if triplets == 0:
+        return {}
+    out = {
+        "convvelo_n_triplets": triplets,
+        "convvelo_n_dropped_triggers": dropped,
+        "convvelo_mean_h": weighted_h / triplets,
+        "convvelo_min_h": min_h,
+        "convvelo_max_h": max_h,
+    }
+    if rates is not None:
+        out["convvelo_energy_rate"] = tuple(rates / triplets)
+    return out
+
+
 def _read_convvelo_field_sidecar(layout_base_path):
     sidecar = layout_base_path.with_suffix(layout_base_path.suffix + ".fields")
     if not sidecar.exists():
@@ -350,6 +398,7 @@ def load_convvelo_runtime(directory, metadata, *, chunks_x=-1):
         "convvelo_velocity_fields": tuple(velocity_fields),
         "convvelo_scalar_fields": tuple(scalar_fields),
         **{k: v for k, v in metadata.items() if not isinstance(v, np.ndarray)},
+        **_read_convvelo_timing_sidecars(paths),
     }
     return _average_convvelo_steps(ds)
 

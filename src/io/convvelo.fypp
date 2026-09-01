@@ -4,14 +4,15 @@
 module convvelo
 
   use, intrinsic :: iso_c_binding
-  use config, only: ini_config, has_section, get_string, get_real
+  use config, only: ini_config, has_section, get_string, get_real, get_logical
   use case_setup, only: V, nPhi, nz, ny, nxd, izd, factor, &
                      apply_dy, apply_d2y, has_terminal, &
                      time, deltat, overlapping
   use pressure_output, only: compute_poisson, compute_dpdy
   use channel_grid, only: ny0, nyN, nx0, nxN, nxB, nzB, has_average, nzd
   use channel_transforms, only: spectral_field_to_real_x, real_x_to_spectral_field
-  use convvelo_io, only: write_convvelo_raw_file, write_convvelo_layout_file, average_convvelo_field
+  use convvelo_io, only: write_convvelo_raw_file, write_convvelo_layout_file, average_convvelo_field, &
+                         average_convvelo_direct_field, write_convvelo_timing_file
   use ffts, only: VVdz
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
   use ffts, only: get_fft_workspace_bytes, get_fft_workspace_bytes_for_dims, &
@@ -45,6 +46,17 @@ module convvelo
   $:convvelo_field_ids('is_', CONVVELO_SCALAR_FIELDS)
   $:convvelo_subset_ids('minimal_velocity_field_ids', CONVVELO_MINIMAL_VELOCITY_FIELDS, CONVVELO_VELOCITY_FIELDS)
   $:convvelo_subset_ids('minimal_scalar_field_ids', CONVVELO_MINIMAL_SCALAR_FIELDS, CONVVELO_SCALAR_FIELDS)
+  $:convvelo_subset_ids('direct_velocity_field_ids', CONVVELO_DIRECT_VELOCITY_FIELDS, CONVVELO_VELOCITY_FIELDS)
+  $:convvelo_subset_ids('direct_scalar_field_ids', CONVVELO_DIRECT_SCALAR_FIELDS, CONVVELO_SCALAR_FIELDS)
+  $:convvelo_subset_ids('dt_velocity_field_ids', CONVVELO_DT_VELOCITY_FIELDS, CONVVELO_VELOCITY_FIELDS)
+  $:convvelo_subset_ids('dt_scalar_field_ids', CONVVELO_DT_SCALAR_FIELDS, CONVVELO_SCALAR_FIELDS)
+
+  ! The direct convection velocity walks a three-step burst around each
+  ! dt_compute trigger: the trigger step becomes n-1, so the sample centres one
+  ! deltat later than the nominal trigger time.
+  integer(C_INT), parameter :: cvv_idle = 0_C_INT
+  integer(C_INT), parameter :: cvv_armed = 1_C_INT
+  integer(C_INT), parameter :: cvv_middle = 2_C_INT
 
   logical, save :: convvelo_initialized = .false.
   logical, save :: convvelo_dirty = .false.
@@ -65,9 +77,30 @@ module convvelo
   integer(C_INT), allocatable, save :: convvelo_field_map(:)
   integer(C_INT64_T), save :: n_mean_samples = 0_C_INT64_T
 
+  ! Direct mode.  convvelo_output_source(i) says where output field i lives:
+  ! a positive value is a slot in convvelo_stats, a negative one is minus a slot
+  ! in convvelo_direct.  The two arrays are disjoint, which is the whole point --
+  ! only the imaginary part of <u* du/dt> is kept, so it is stored real.
+  logical, save, public :: convvelo_direct_enabled = .false.
+  integer(C_INT), save :: n_convvelo_stats_fields = 0_C_INT
+  integer(C_INT), save :: n_convvelo_direct_fields = 0_C_INT
+  integer(C_INT), allocatable, save :: convvelo_output_source(:)
+  integer(C_INT), allocatable, save, public :: convvelo_direct_output(:)
+  integer(C_INT), save :: convvelo_direct_state = cvv_idle
+  real(C_DOUBLE), save :: convvelo_t1 = 0.0d0, convvelo_t2 = 0.0d0
+  logical, save :: convvelo_write_pending = .false.
+  integer(C_INT64_T), save :: convvelo_n_triplets = 0_C_INT64_T
+  integer(C_INT64_T), save :: convvelo_n_dropped = 0_C_INT64_T
+  real(C_DOUBLE), save :: convvelo_sum_h1 = 0.0d0, convvelo_sum_h2 = 0.0d0
+  real(C_DOUBLE), save :: convvelo_min_h = 0.0d0, convvelo_max_h = 0.0d0
+  real(C_DOUBLE), allocatable, save :: convvelo_energy_rate(:)
+
   complex(C_DOUBLE_COMPLEX), allocatable, save, public :: convvelo_stats(:, :, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable, save, public :: convvelo_work(:, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable, save, public :: component_means(:, :)
+  complex(C_DOUBLE_COMPLEX), allocatable, save, public :: convvelo_prev1(:, :, :, :)
+  complex(C_DOUBLE_COMPLEX), allocatable, save, public :: convvelo_prev2(:, :, :, :)
+  real(C_DOUBLE), allocatable, save, public :: convvelo_direct(:, :, :, :)
   real(C_DOUBLE), pointer, contiguous, save :: convvelo_real0(:, :, :) => null()
   real(C_DOUBLE), pointer, contiguous, save :: convvelo_real1(:, :, :) => null()
   real(C_DOUBLE), pointer, contiguous, save :: convvelo_real_prod(:, :, :) => null()
@@ -81,6 +114,9 @@ module convvelo
   public :: configure_convvelo
   public :: copy_convvelo_field_average
   public :: fill_convvelo_synthetic_state_for_test
+  ! Exposed so test_convvelo_direct can drive the three-level estimator with a
+  ! field whose exact answer is known, without a time loop.
+  public :: save_convvelo_time_level, accumulate_direct_numerator, convvelo_direct_output
 
 contains
 
@@ -92,6 +128,7 @@ contains
 
     convvelo_enabled = .false.
     convvelo_write_full_fields = .true.
+    convvelo_direct_enabled = .false.
     convvelo_t_start = time
     convvelo_dt_compute = -1.0d0
     convvelo_dt_write = -1.0d0
@@ -106,6 +143,7 @@ contains
     convvelo_mode = convvelo_output_mode
     call get_string(cfg, "convvelo", "output_mode", convvelo_mode, found)
     if (found) convvelo_output_mode = trim(convvelo_mode)
+    call get_logical(cfg, "convvelo", "direct", convvelo_direct_enabled, found)
     call get_real(cfg, "convvelo", "t_start", convvelo_t_start, found)
     call get_real(cfg, "convvelo", "dt_compute", convvelo_dt_compute, found)
     call get_real(cfg, "convvelo", "dt_write", convvelo_dt_write, found)
@@ -117,13 +155,23 @@ contains
     case ("minimal")
       convvelo_write_full_fields = .false.
       convvelo_output_mode = "minimal"
+    case ("none")
+      convvelo_write_full_fields = .false.
+      convvelo_output_mode = "none"
     case default
-      error stop "configure_convvelo: convvelo_output_mode must be 'full' or 'minimal'"
+      error stop "configure_convvelo: convvelo_output_mode must be 'full', 'minimal' or 'none'"
     end select
+
+    if (convvelo_output_mode == "none" .and. .not. convvelo_direct_enabled) then
+      error stop "configure_convvelo: output_mode = 'none' asks for no fields; set direct = true or pick another mode"
+    end if
 
     if (convvelo_dt_compute <= 0.0d0) then
       error stop "configure_convvelo: convvelo_dt_compute must be > 0 when convection velocity output is enabled"
     end if
+
+    ! The memory estimate runs before init_convvelo, and needs the field counts.
+    call init_convvelo_field_layout()
 
   end subroutine configure_convvelo
 
@@ -140,16 +188,19 @@ contains
     local_y = int(nyN - ny0 + 5, C_INT64_T)
     spectral_planes = local_y*int(2*nz + 1, C_INT64_T)*int(nxN - nx0 + 1, C_INT64_T)
     component_planes = local_y*int(3 + nPhi, C_INT64_T)
-    if (convvelo_write_full_fields) then
-      n_fields = int(n_convvelo_velocity_fields_total + nPhi*n_convvelo_scalar_fields_total, C_INT64_T)
-    else
-      n_fields = int(n_convvelo_velocity_fields_minimal_total + nPhi*n_convvelo_scalar_fields_minimal_total, C_INT64_T)
-    end if
+    ! configure_convvelo has already run the layout, so these are the counts
+    ! this run will actually allocate rather than a worst case.
+    n_fields = int(n_convvelo_stats_fields, C_INT64_T)
 
     n_floats = 0_C_INT64_T
     n_floats = n_floats + 2_C_INT64_T*spectral_planes*n_fields
     n_floats = n_floats + 2_C_INT64_T*spectral_planes
     n_floats = n_floats + 2_C_INT64_T*component_planes
+    if (convvelo_direct_enabled) then
+      ! One real plane per component for the numerator, two complex time levels.
+      n_floats = n_floats + spectral_planes*int(3 + nPhi, C_INT64_T)
+      n_floats = n_floats + 4_C_INT64_T*spectral_planes*int(3 + nPhi, C_INT64_T)
+    end if
   end subroutine get_convvelo_memory_estimate
 
   subroutine get_convvelo_workspace_estimate(nbytes)
@@ -182,7 +233,7 @@ contains
 
     call init_convvelo_field_layout()
 
-    allocate (convvelo_stats(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, n_convvelo_fields))
+    allocate (convvelo_stats(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, max(n_convvelo_stats_fields, 1)))
     allocate (convvelo_work(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
     allocate (component_means(ny0 - 2:nyN + 2, 1:3 + nPhi))
     nullify (convvelo_real0, convvelo_real1, convvelo_real_prod)
@@ -195,6 +246,18 @@ contains
 
     !$omp target enter data map(to: convvelo_stats, convvelo_work, component_means)
 
+    if (convvelo_direct_enabled) then
+      allocate (convvelo_direct(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3 + nPhi))
+      allocate (convvelo_prev1(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3 + nPhi))
+      allocate (convvelo_prev2(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3 + nPhi))
+      allocate (convvelo_energy_rate(3 + nPhi))
+      convvelo_direct = 0.0d0
+      convvelo_prev1 = (0.0d0, 0.0d0)
+      convvelo_prev2 = (0.0d0, 0.0d0)
+      convvelo_energy_rate = 0.0d0
+      !$omp target enter data map(to: convvelo_direct, convvelo_prev1, convvelo_prev2)
+    end if
+
     n_mean_samples = 0_C_INT64_T
     convvelo_last_write_index = -1_C_INT64_T
     convvelo_average_start_time = 0.0d0
@@ -203,42 +266,157 @@ contains
     convvelo_initialized = .true.
   end subroutine init_convvelo
 
+  ! Decides which catalogue entries this run stores, in file order, and where
+  ! each one lives.  output_mode picks the reconstruction set; direct = true
+  ! unions in the numerator fields and the energies they are divided by.  The
+  ! dt fields are never part of full or minimal: they are accumulated from three
+  ! time levels rather than by acc_convvelo_stats, and they are stored real.
   subroutine init_convvelo_field_layout()
     implicit none
-    integer(C_INT) :: i, raw_field_index
+    integer(C_INT) :: i, iPhi, raw_field_index, out_index, stats_slot, component
+    integer(C_INT) :: vel_ids(n_convvelo_velocity_fields_total)
+    integer(C_INT) :: scal_ids(n_convvelo_scalar_fields_total)
+    integer(C_INT) :: n_vel, n_scal
 
     if (allocated(convvelo_velocity_field_ids)) deallocate (convvelo_velocity_field_ids)
     if (allocated(convvelo_scalar_field_ids)) deallocate (convvelo_scalar_field_ids)
     if (allocated(convvelo_field_map)) deallocate (convvelo_field_map)
+    if (allocated(convvelo_output_source)) deallocate (convvelo_output_source)
+    if (allocated(convvelo_direct_output)) deallocate (convvelo_direct_output)
 
-    if (convvelo_write_full_fields) then
-      allocate (convvelo_velocity_field_ids(n_convvelo_velocity_fields_total))
-      allocate (convvelo_scalar_field_ids(n_convvelo_scalar_fields_total))
-      convvelo_velocity_field_ids = [(i, i=1, n_convvelo_velocity_fields_total)]
-      convvelo_scalar_field_ids = [(i, i=1, n_convvelo_scalar_fields_total)]
-    else
-      allocate (convvelo_velocity_field_ids(n_convvelo_velocity_fields_minimal_total))
-      allocate (convvelo_scalar_field_ids(n_convvelo_scalar_fields_minimal_total))
-      convvelo_velocity_field_ids = minimal_velocity_field_ids
-      convvelo_scalar_field_ids = minimal_scalar_field_ids
+    ! Order is the file order, and it is load-bearing: the reference data and the
+    ! post-processing tools read fields positionally.  Build the list by walking
+    ! each set in the order it is DECLARED -- minimal is not in catalogue order,
+    ! and sorting it would silently rewrite every minimal file ever written.
+    n_vel = 0_C_INT
+    n_scal = 0_C_INT
+    if (convvelo_output_mode == "full") then
+      ! Catalogue order minus the dt fields: acc_convvelo_stats does not make
+      ! those, so full has never included them and still does not.
+      do i = 1, n_convvelo_velocity_fields_total
+        if (dt_velocity_component(i) == 0) call append_field_id(vel_ids, n_vel, i)
+      end do
+      do i = 1, n_convvelo_scalar_fields_total
+        if (.not. is_dt_scalar_id(i)) call append_field_id(scal_ids, n_scal, i)
+      end do
+    else if (convvelo_output_mode == "minimal") then
+      do i = 1, size(minimal_velocity_field_ids)
+        call append_field_id(vel_ids, n_vel, minimal_velocity_field_ids(i))
+      end do
+      do i = 1, size(minimal_scalar_field_ids)
+        call append_field_id(scal_ids, n_scal, minimal_scalar_field_ids(i))
+      end do
     end if
+
+    ! The direct set unions in, appended in its own declared order.  The energies
+    ! it needs are already in full and minimal, so in practice only the dt fields
+    ! land at the end -- which leaves every pre-existing field where it was.
+    if (convvelo_direct_enabled) then
+      do i = 1, size(direct_velocity_field_ids)
+        call append_field_id(vel_ids, n_vel, direct_velocity_field_ids(i))
+      end do
+      do i = 1, size(direct_scalar_field_ids)
+        call append_field_id(scal_ids, n_scal, direct_scalar_field_ids(i))
+      end do
+    end if
+
+    allocate (convvelo_velocity_field_ids(n_vel))
+    allocate (convvelo_scalar_field_ids(n_scal))
+    convvelo_velocity_field_ids = vel_ids(1:n_vel)
+    convvelo_scalar_field_ids = scal_ids(1:n_scal)
 
     n_convvelo_velocity_fields = size(convvelo_velocity_field_ids)
     n_convvelo_scalar_fields = size(convvelo_scalar_field_ids)
     n_convvelo_fields = n_convvelo_velocity_fields + nPhi*n_convvelo_scalar_fields
-    allocate (convvelo_field_map(n_convvelo_velocity_fields_total + nPhi*n_convvelo_scalar_fields_total))
-    convvelo_field_map = 0_C_INT
 
-    do i = 1, size(convvelo_velocity_field_ids)
+    allocate (convvelo_field_map(n_convvelo_velocity_fields_total + nPhi*n_convvelo_scalar_fields_total))
+    allocate (convvelo_output_source(max(n_convvelo_fields, 1)))
+    allocate (convvelo_direct_output(3 + nPhi))
+    convvelo_field_map = 0_C_INT
+    convvelo_output_source = 0_C_INT
+    convvelo_direct_output = 0_C_INT
+
+    do i = 1, n_convvelo_velocity_fields
       convvelo_field_map(convvelo_velocity_field_ids(i)) = i
     end do
-    do i = 1, nPhi
-      do raw_field_index = 1, size(convvelo_scalar_field_ids)
-        convvelo_field_map(n_convvelo_velocity_fields_total + (i - 1)*n_convvelo_scalar_fields_total + convvelo_scalar_field_ids(raw_field_index)) = &
-          size(convvelo_velocity_field_ids) + (i - 1)*size(convvelo_scalar_field_ids) + raw_field_index
+    do iPhi = 1, nPhi
+      do raw_field_index = 1, n_convvelo_scalar_fields
+        convvelo_field_map(n_convvelo_velocity_fields_total + (iPhi - 1)*n_convvelo_scalar_fields_total + &
+                           convvelo_scalar_field_ids(raw_field_index)) = &
+          n_convvelo_velocity_fields + (iPhi - 1)*n_convvelo_scalar_fields + raw_field_index
       end do
     end do
+
+    ! Walk the output fields in file order, handing each a slot in whichever
+    ! array holds it.  Direct slots are numbered by component, u v w phi1..phiN,
+    ! so accumulate_direct_numerator can index them without a lookup.
+    n_convvelo_direct_fields = 0_C_INT
+    if (convvelo_direct_enabled) n_convvelo_direct_fields = 3_C_INT + nPhi
+    stats_slot = 0_C_INT
+
+    do i = 1, n_convvelo_velocity_fields
+      out_index = i
+      component = dt_velocity_component(convvelo_velocity_field_ids(i))
+      if (component > 0) then
+        convvelo_output_source(out_index) = -component
+        convvelo_direct_output(component) = out_index
+      else
+        stats_slot = stats_slot + 1_C_INT
+        convvelo_output_source(out_index) = stats_slot
+      end if
+    end do
+    do iPhi = 1, nPhi
+      do raw_field_index = 1, n_convvelo_scalar_fields
+        out_index = n_convvelo_velocity_fields + (iPhi - 1)*n_convvelo_scalar_fields + raw_field_index
+        if (is_dt_scalar_id(convvelo_scalar_field_ids(raw_field_index))) then
+          component = 3_C_INT + iPhi
+          convvelo_output_source(out_index) = -component
+          convvelo_direct_output(component) = out_index
+        else
+          stats_slot = stats_slot + 1_C_INT
+          convvelo_output_source(out_index) = stats_slot
+        end if
+      end do
+    end do
+    n_convvelo_stats_fields = stats_slot
   end subroutine init_convvelo_field_layout
+
+  ! Appends a field id unless it is already in the list, so unioning the direct
+  ! set into full or minimal never duplicates the energies they share.
+  subroutine append_field_id(ids, n, id)
+    implicit none
+    integer(C_INT), intent(inout) :: ids(:)
+    integer(C_INT), intent(inout) :: n
+    integer(C_INT), intent(in) :: id
+
+    if (n > 0) then
+      if (any(ids(1:n) == id)) return
+    end if
+    n = n + 1_C_INT
+    ids(n) = id
+  end subroutine append_field_id
+
+  ! Which velocity component a dt field belongs to, or 0 if it is not one.
+  integer(C_INT) function dt_velocity_component(field_id)
+    implicit none
+    integer(C_INT), intent(in) :: field_id
+    integer(C_INT) :: i
+
+    dt_velocity_component = 0_C_INT
+    do i = 1, size(dt_velocity_field_ids)
+      if (field_id == dt_velocity_field_ids(i)) then
+        dt_velocity_component = i
+        return
+      end if
+    end do
+  end function dt_velocity_component
+
+  logical function is_dt_scalar_id(field_id)
+    implicit none
+    integer(C_INT), intent(in) :: field_id
+
+    is_dt_scalar_id = any(dt_scalar_field_ids == field_id)
+  end function is_dt_scalar_id
 
   subroutine reset_convvelo_stats()
     implicit none
@@ -247,8 +425,8 @@ contains
     if (.not. convvelo_initialized) return
 
     !$omp target teams distribute parallel do collapse(4) &
-    !$omp shared(convvelo_stats, n_convvelo_fields, ny0, nyN, nx0, nxN, nz) private(field_index, ix, iz, iy)
-    do field_index = 1, n_convvelo_fields
+    !$omp shared(convvelo_stats, n_convvelo_stats_fields, ny0, nyN, nx0, nxN, nz) private(field_index, ix, iz, iy)
+    do field_index = 1, n_convvelo_stats_fields
       do ix = nx0, nxN
         do iz = -nz, nz
           do iy = ny0 - 2, nyN + 2
@@ -266,6 +444,30 @@ contains
       end do
     end do
     n_field_samples = 0_C_INT64_T
+
+    if (convvelo_direct_enabled) then
+      !$omp target teams distribute parallel do collapse(4) &
+      !$omp shared(convvelo_direct, nPhi, ny0, nyN, nx0, nxN, nz) private(ic, ix, iz, iy)
+      do ic = 1, 3 + nPhi
+        do ix = nx0, nxN
+          do iz = -nz, nz
+            do iy = ny0 - 2, nyN + 2
+              convvelo_direct(iy, iz, ix, ic) = 0.0d0
+            end do
+          end do
+        end do
+      end do
+      convvelo_energy_rate = 0.0d0
+      convvelo_n_triplets = 0_C_INT64_T
+      convvelo_n_dropped = 0_C_INT64_T
+      convvelo_sum_h1 = 0.0d0
+      convvelo_sum_h2 = 0.0d0
+      convvelo_min_h = 0.0d0
+      convvelo_max_h = 0.0d0
+      ! A half-built triplet does not survive a reset: its n-1 and n levels
+      ! belong to an averaging window that no longer exists.
+      convvelo_direct_state = cvv_idle
+    end if
 
     n_mean_samples = 0_C_INT64_T
     convvelo_average_start_time = 0.0d0
@@ -370,17 +572,21 @@ contains
     implicit none
 
     integer(C_INT), intent(in) :: field_index
-    integer(C_INT) :: storage_index
+    integer(C_INT) :: output_index, storage_index
     integer(C_INT) :: ix, iy, iz
 
     if (.not. convvelo_initialized) call init_convvelo()
     if (field_index < 1 .or. field_index > size(convvelo_field_map)) then
       error stop "finish_convvelo_field: field_index out of range"
     end if
-    storage_index = convvelo_field_map(field_index)
-    if (storage_index == 0) return
+    output_index = convvelo_field_map(field_index)
+    if (output_index == 0) return
+    storage_index = convvelo_output_source(output_index)
+    if (storage_index <= 0) then
+      error stop "finish_convvelo_field: a dt field cannot be accumulated this way"
+    end if
 
-    n_field_samples(storage_index) = n_field_samples(storage_index) + 1_C_INT64_T
+    n_field_samples(output_index) = n_field_samples(output_index) + 1_C_INT64_T
     !$omp target teams distribute parallel do collapse(3) &
     !$omp shared(convvelo_stats, convvelo_work, storage_index, ny0, nyN, nz, nx0, nxN) private(ix, iz, iy)
     do ix = nx0, nxN
@@ -391,6 +597,91 @@ contains
       end do
     end do
   end subroutine finish_convvelo_field
+
+  ! Copies the current spectral field into one of the two saved time levels.
+  subroutine save_convvelo_time_level(level)
+    implicit none
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: level(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:3 + nPhi)
+    integer(C_INT) :: ic, ix, iz, iy
+
+    !$omp target teams distribute parallel do collapse(4) &
+    !$omp shared(level, V, nPhi, ny0, nyN, nz, nx0, nxN) private(ic, ix, iz, iy)
+    do ic = 1, 3 + nPhi
+      do ix = nx0, nxN
+        do iz = -nz, nz
+          do iy = ny0 - 2, nyN + 2
+            level(iy, iz, ix, ic) = V(iy, iz, ix, ic)
+          end do
+        end do
+      end do
+    end do
+  end subroutine save_convvelo_time_level
+
+  ! The direct estimator.  With the three time levels n-1, n, n+1 at spacings
+  ! h1 = t_n - t_(n-1) and h2 = t_(n+1) - t_n, the second-order derivative at the
+  ! middle node is the exact Lagrange one,
+  !
+  !   du/dt|n = a u_(n-1) + b u_n + c u_(n+1)
+  !   a = -h2/(h1(h1+h2))   b = (h2-h1)/(h1 h2)   c = h1/(h2(h1+h2))
+  !
+  ! which collapses to (u_(n+1) - u_(n-1))/2h when h1 = h2 and stays second
+  ! order when they differ, because a h1^2 + c h2^2 vanishes by construction.
+  ! deltat is therefore never frozen for our benefit.
+  !
+  ! Only Im<u* du/dt> is kept: it is the whole numerator of the convection
+  ! velocity, and storing it real rather than complex is what lets the direct
+  ! fields live outside convvelo_stats.  The real part -- half the rate of change
+  ! of the modal energy -- is summed globally as a cheap check that the operator
+  ! is assembled correctly, and lands in the .timing sidecar.
+  subroutine accumulate_direct_numerator(h1, h2)
+    implicit none
+    real(C_DOUBLE), intent(in) :: h1, h2
+    real(C_DOUBLE) :: ca, cb, cc, rate
+    complex(C_DOUBLE_COMPLEX) :: centre, dudt
+    integer(C_INT) :: ic, ix, iz, iy, output_index
+
+    if (h1 <= 0.0d0 .or. h2 <= 0.0d0) then
+      error stop "accumulate_direct_numerator: non-positive step inside a triplet"
+    end if
+
+    ca = -h2/(h1*(h1 + h2))
+    cb = (h2 - h1)/(h1*h2)
+    cc = h1/(h2*(h1 + h2))
+
+    do ic = 1, 3 + nPhi
+      output_index = convvelo_direct_output(ic)
+      if (output_index == 0) cycle
+      n_field_samples(output_index) = n_field_samples(output_index) + 1_C_INT64_T
+      rate = 0.0d0
+      !$omp target teams distribute parallel do collapse(3) reduction(+: rate) &
+      !$omp shared(convvelo_direct, convvelo_prev1, convvelo_prev2, V, ca, cb, cc, ic, &
+      !$omp        ny0, nyN, nz, nx0, nxN) private(ix, iz, iy, centre, dudt)
+      do ix = nx0, nxN
+        do iz = -nz, nz
+          do iy = ny0 - 2, nyN + 2
+            centre = convvelo_prev2(iy, iz, ix, ic)
+            dudt = ca*convvelo_prev1(iy, iz, ix, ic) + cb*centre + cc*V(iy, iz, ix, ic)
+            dudt = conjg(centre)*dudt
+            convvelo_direct(iy, iz, ix, ic) = convvelo_direct(iy, iz, ix, ic) + aimag(dudt)
+            rate = rate + real(dudt, C_DOUBLE)
+          end do
+        end do
+      end do
+      convvelo_energy_rate(ic) = convvelo_energy_rate(ic) + rate
+    end do
+
+    convvelo_n_triplets = convvelo_n_triplets + 1_C_INT64_T
+    convvelo_sum_h1 = convvelo_sum_h1 + h1
+    convvelo_sum_h2 = convvelo_sum_h2 + h2
+    if (convvelo_n_triplets == 1_C_INT64_T) then
+      convvelo_min_h = min(h1, h2)
+      convvelo_max_h = max(h1, h2)
+    else
+      convvelo_min_h = min(convvelo_min_h, h1, h2)
+      convvelo_max_h = max(convvelo_max_h, h1, h2)
+    end if
+    convvelo_dirty = .true.
+  end subroutine accumulate_direct_numerator
 
   subroutine load_component_to_work(component_index)
     implicit none
@@ -650,10 +941,21 @@ contains
 
     !$omp target exit data map(delete: convvelo_stats, convvelo_work, component_means)
     deallocate (convvelo_stats, convvelo_work, component_means, n_field_samples)
+    if (allocated(convvelo_direct)) then
+      !$omp target exit data map(delete: convvelo_direct, convvelo_prev1, convvelo_prev2)
+      deallocate (convvelo_direct, convvelo_prev1, convvelo_prev2)
+    end if
+    if (allocated(convvelo_energy_rate)) deallocate (convvelo_energy_rate)
     if (allocated(convvelo_velocity_field_ids)) deallocate (convvelo_velocity_field_ids)
     if (allocated(convvelo_scalar_field_ids)) deallocate (convvelo_scalar_field_ids)
     if (allocated(convvelo_field_map)) deallocate (convvelo_field_map)
+    if (allocated(convvelo_output_source)) deallocate (convvelo_output_source)
+    if (allocated(convvelo_direct_output)) deallocate (convvelo_direct_output)
 
+    convvelo_direct_state = cvv_idle
+    convvelo_write_pending = .false.
+    n_convvelo_stats_fields = 0
+    n_convvelo_direct_fields = 0
     n_convvelo_fields = 0
     n_convvelo_velocity_fields = 0
     n_convvelo_scalar_fields = 0
@@ -691,19 +993,56 @@ contains
 
   subroutine advance_convvelo_runtime()
     implicit none
+    logical :: trigger
 
     if (.not. convvelo_enabled) return
 
-    if (crossed_convvelo_interval(convvelo_dt_compute, convvelo_t_start)) then
-      if (has_terminal) write (*, *) "Computing convvelo stats at time ", time
-      call update_convvelo_component_means()
-      call acc_convvelo_stats()
+    trigger = crossed_convvelo_interval(convvelo_dt_compute, convvelo_t_start)
+
+    if (convvelo_direct_enabled) then
+      ! One trigger becomes a three-step burst.  The trigger step is taken as
+      ! n-1, so the sample centres one deltat after the nominal trigger time --
+      ! negligible against dt_compute, and it avoids having to predict the
+      ! trigger a step ahead, which adaptive deltat makes unreliable.
+      select case (convvelo_direct_state)
+      case (cvv_idle)
+        if (trigger) then
+          call save_convvelo_time_level(convvelo_prev1)
+          convvelo_t1 = time
+          convvelo_direct_state = cvv_armed
+        end if
+      case (cvv_armed)
+        if (trigger) convvelo_n_dropped = convvelo_n_dropped + 1_C_INT64_T
+        call save_convvelo_time_level(convvelo_prev2)
+        convvelo_t2 = time
+        ! The reconstruction is accumulated here, at the centre of the triplet,
+        ! so both estimates share a time and a denominator.
+        if (has_terminal) write (*, *) "Computing convvelo stats at time ", time
+        call update_convvelo_component_means()
+        call acc_convvelo_stats()
+        convvelo_direct_state = cvv_middle
+      case (cvv_middle)
+        if (trigger) convvelo_n_dropped = convvelo_n_dropped + 1_C_INT64_T
+        call accumulate_direct_numerator(convvelo_t2 - convvelo_t1, time - convvelo_t2)
+        convvelo_direct_state = cvv_idle
+      end select
+    else
+      if (trigger) then
+        if (has_terminal) write (*, *) "Computing convvelo stats at time ", time
+        call update_convvelo_component_means()
+        call acc_convvelo_stats()
+      end if
     end if
 
     if (convvelo_dt_write > 0.0d0) then
-      if (convvelo_has_pending_output() .and. crossed_convvelo_interval(convvelo_dt_write, convvelo_t_start)) then
+      ! crossed_convvelo_interval is an edge detector, so the crossing has to be
+      ! latched: a write that lands mid-triplet is deferred until the triplet
+      ! closes, at most two steps, rather than resetting a half-built one.
+      if (crossed_convvelo_interval(convvelo_dt_write, convvelo_t_start)) convvelo_write_pending = .true.
+      if (convvelo_write_pending .and. convvelo_direct_state == cvv_idle .and. convvelo_has_pending_output()) then
         if (has_terminal) write (*, *) "Writing convvelo snapshot at time ", time
         call write_convvelo_runtime_snapshot()
+        convvelo_write_pending = .false.
       end if
     end if
   end subroutine advance_convvelo_runtime
@@ -750,9 +1089,22 @@ contains
 
     call update_convvelo_stats_from_device()
     !$omp target update from(component_means)
-    call write_convvelo_raw_file(filename, n_convvelo_fields, convvelo_stats, n_field_samples, &
-                                 component_means, n_mean_samples, &
-                                 convvelo_average_start_time, convvelo_average_end_time)
+    if (convvelo_direct_enabled) then
+      !$omp target update from(convvelo_direct)
+      call write_convvelo_raw_file(filename, n_convvelo_fields, convvelo_output_source, &
+                                   convvelo_stats, max(n_convvelo_stats_fields, 1), n_field_samples, &
+                                   component_means, n_mean_samples, &
+                                   convvelo_average_start_time, convvelo_average_end_time, &
+                                   direct=convvelo_direct)
+      call write_convvelo_timing_file(filename, convvelo_n_triplets, convvelo_n_dropped, &
+                                      convvelo_sum_h1, convvelo_sum_h2, convvelo_min_h, convvelo_max_h, &
+                                      convvelo_energy_rate)
+    else
+      call write_convvelo_raw_file(filename, n_convvelo_fields, convvelo_output_source, &
+                                   convvelo_stats, max(n_convvelo_stats_fields, 1), n_field_samples, &
+                                   component_means, n_mean_samples, &
+                                   convvelo_average_start_time, convvelo_average_end_time)
+    end if
   end subroutine write_convvelo_raw_stats
 
   subroutine update_convvelo_stats_from_device()
@@ -824,7 +1176,14 @@ contains
     complex(C_DOUBLE_COMPLEX), intent(out) :: field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
 
     call update_convvelo_stats_from_device()
-    call average_convvelo_field(n_convvelo_fields, convvelo_stats, n_field_samples, field_index, field)
+    if (convvelo_output_source(field_index) > 0) then
+      call average_convvelo_field(max(n_convvelo_stats_fields, 1), convvelo_stats, &
+                                  n_field_samples(field_index), convvelo_output_source(field_index), field)
+    else
+      !$omp target update from(convvelo_direct)
+      call average_convvelo_direct_field(convvelo_direct, n_field_samples(field_index), &
+                                         -convvelo_output_source(field_index), field)
+    end if
   end subroutine copy_convvelo_field_average
 
   ! Raw field id of scalar `scalar_id` for the i_phi-th scalar: the scalar

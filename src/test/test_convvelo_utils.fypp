@@ -14,8 +14,13 @@ module test_convvelo_utils
   character(len=*), parameter, public :: convvelo_reference_snapshots(3) = [character(len=32) :: &
                            "tests/convvelo/Dati.cart.39.out", "tests/convvelo/Dati.cart.40.out", "tests/convvelo/Dati.cart.41.out" &
                                                                             ]
-  integer(C_INT), parameter, public :: n_convvelo_velocity_fields = ${len(CONVVELO_VELOCITY_FIELDS)}$
-  integer(C_INT), parameter, public :: n_convvelo_scalar_fields = ${len(CONVVELO_SCALAR_FIELDS)}$
+  ! The accumulated set, not the whole catalogue.  The dt fields are appended to
+  ! the catalogue but produced by the three-level estimator rather than by
+  ! acc_convvelo_stats, so a run never stores them unless direct = true -- and
+  ! the reference data these tests read has no place for them.  Counting the
+  ! catalogue here would walk the tests straight off the end of the field list.
+  integer(C_INT), parameter, public :: n_convvelo_velocity_fields = ${len(CONVVELO_ACCUMULATED_VELOCITY_FIELDS)}$
+  integer(C_INT), parameter, public :: n_convvelo_scalar_fields = ${len(CONVVELO_ACCUMULATED_SCALAR_FIELDS)}$
   integer(C_INT), parameter, public :: n_convvelo_velocity_fields_minimal = ${len(CONVVELO_MINIMAL_VELOCITY_FIELDS)}$
   integer(C_INT), parameter, public :: n_convvelo_scalar_fields_minimal = ${len(CONVVELO_MINIMAL_SCALAR_FIELDS)}$
 

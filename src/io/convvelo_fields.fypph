@@ -20,12 +20,13 @@
     'u_cross_p', 'v_cross_dpdy', 'w_cross_p',                         &
     'u_cross_uu', 'u_cross_uw', 'v_cross_uv', 'v_cross_vw',           &
     'w_cross_uw', 'w_cross_ww',                                       &
-    'u_cross_dyuv', 'v_cross_dyvv', 'w_cross_dyvw']
+    'u_cross_dyuv', 'v_cross_dyvv', 'w_cross_dyvw',                   &
+    'u_cross_dtu', 'v_cross_dtv', 'w_cross_dtw']
 
 #:set CONVVELO_SCALAR_FIELDS = [                                      &
     't_cross_t', 't_cross_u', 't_cross_v', 't_cross_w', 't_cross_tu', &
     't_cross_tw', 't_cross_dyyt', 't_cross_dytv', 't_cross_dyt',      &
-    't_cross_dyv']
+    't_cross_dyv', 't_cross_dtt']
 
 #! Minimal mode stores only the reduced zero-crossflow subset.
 #:set CONVVELO_MINIMAL_VELOCITY_FIELDS = [                            &
@@ -39,6 +40,29 @@
 #:set CONVVELO_MINIMAL_SCALAR_FIELDS = [                              &
     't_cross_t', 't_cross_u', 't_cross_v', 't_cross_w', 't_cross_tu', &
     't_cross_tw', 't_cross_dyyt', 't_cross_dytv', 't_cross_dyv']
+
+#! The direct convection-velocity set.  Numerator plus the energy it is
+#! divided by, for every component.  Selected by [convvelo] direct = true and
+#! unioned with whatever output_mode asks for; never part of full or minimal,
+#! because the dt fields are accumulated from three time levels rather than
+#! by acc_convvelo_stats.
+#:set CONVVELO_DIRECT_VELOCITY_FIELDS = [                             &
+    'u_cross_u', 'v_cross_v', 'w_cross_w',                            &
+    'u_cross_dtu', 'v_cross_dtv', 'w_cross_dtw']
+
+#:set CONVVELO_DIRECT_SCALAR_FIELDS = ['t_cross_t', 't_cross_dtt']
+
+#! The dt fields, in component order u, v, w, phi1..phiN -- which is the order
+#! of the real accumulator they live in, not the order they appear in the file.
+#:set CONVVELO_DT_VELOCITY_FIELDS = ['u_cross_dtu', 'v_cross_dtv', 'w_cross_dtw']
+#:set CONVVELO_DT_SCALAR_FIELDS = ['t_cross_dtt']
+
+#! The fields acc_convvelo_stats produces -- the catalogue minus the dt ones,
+#! which come from three time levels instead.  This is what full resolves to and
+#! what the reference-data tests iterate; it must not grow when a dt field is
+#! appended to the catalogue.
+#:set CONVVELO_ACCUMULATED_VELOCITY_FIELDS = [f for f in CONVVELO_VELOCITY_FIELDS if f not in CONVVELO_DT_VELOCITY_FIELDS]
+#:set CONVVELO_ACCUMULATED_SCALAR_FIELDS = [f for f in CONVVELO_SCALAR_FIELDS if f not in CONVVELO_DT_SCALAR_FIELDS]
 
 #:set CONVVELO_PROFILE_FIELDS = ['mean_u', 'mean_v', 'mean_w', 'mean_t']
 

@@ -228,6 +228,9 @@ target_link_libraries(test_convvelo_utils PUBLIC channel_core)
 add_executable(test_convvelo_stats ${CHANNEL_SOURCE_DIR}/test/test_convvelo_stats.f90)
 target_link_libraries(test_convvelo_stats PRIVATE test_convvelo_utils)
 
+add_executable(test_convvelo_direct ${CHANNEL_SOURCE_DIR}/test/test_convvelo_direct.f90)
+target_link_libraries(test_convvelo_direct PRIVATE channel_core)
+
 add_executable(test_convvelo_runtime ${CHANNEL_SOURCE_DIR}/test/test_convvelo_runtime.f90)
 target_link_libraries(test_convvelo_runtime PRIVATE test_convvelo_utils)
 

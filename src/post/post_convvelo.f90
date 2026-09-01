@@ -3,7 +3,8 @@
 program post_convvelo
   use, intrinsic :: iso_c_binding
   use case_setup, only: iproc, read_restart_file, free_memory, V
-  use convvelo, only: convvelo_enabled, free_convvelo, reset_convvelo_stats, update_convvelo_component_means, &
+  use convvelo, only: convvelo_enabled, convvelo_direct_enabled, free_convvelo, reset_convvelo_stats, &
+                      update_convvelo_component_means, &
                       acc_convvelo_stats, convvelo_has_pending_output, write_convvelo_runtime_snapshot
   use pressure_output, only: free_pressure_output
   use driver, only: initialize
@@ -26,6 +27,15 @@ program post_convvelo
   call initialize(config_file, trim(restart_files(1)), .false.)
   if (.not. convvelo_enabled) then
     write (*, *) "post_convvelo: convvelo output is not enabled in dns.in."
+    stop 1
+  end if
+  ! The direct estimator differences three CONSECUTIVE timesteps.  Saved fields
+  ! are dt_field apart, which is orders of magnitude too coarse, so there is no
+  ! honest way to compute it here -- and silently writing zeros would look like
+  ! an answer.  It has to be accumulated online.
+  if (convvelo_direct_enabled) then
+    write (*, *) "post_convvelo: direct = true cannot be reconstructed offline. Saved fields are dt_field apart,"
+    write (*, *) "               not one timestep, so du/dt is not resolvable from them. Run it online instead."
     stop 1
   end if
 

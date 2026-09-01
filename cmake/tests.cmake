@@ -141,6 +141,20 @@ add_channel_mpi_test(
 )
 
 add_channel_mpi_test(
+    NAME convvelo_direct_1rank
+    TARGET test_convvelo_direct
+    NPROCS 1
+    PROCESSORS 1
+)
+
+add_channel_mpi_test(
+    NAME convvelo_direct_2rank
+    TARGET test_convvelo_direct
+    NPROCS 2
+    PROCESSORS 2
+)
+
+add_channel_mpi_test(
     NAME convvelo_runtime_1rank
     TARGET test_convvelo_runtime
     NPROCS 1

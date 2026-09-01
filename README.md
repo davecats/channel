@@ -255,13 +255,33 @@ the run:
 ```ini
 [convvelo]
 output_mode = minimal
+direct = false
 t_start = 100.0
 dt_compute = 1.0
 dt_write = 50.0
 ```
 
-`output_mode` may be `full` or `minimal`. The output files are `convvelo.bin` or
-`convvelo.<i>.bin`, with a companion `*.fields` layout file.
+`output_mode` may be `full`, `minimal` or `none`. The output files are
+`convvelo.bin` or `convvelo.<i>.bin`, with a companion `*.fields` layout file.
+
+`direct = true` additionally accumulates the convection velocity numerator
+`<u* du/dt>` online, with `du/dt` from a three-point centred difference over
+consecutive timesteps. Each `dt_compute` trigger becomes a three-step burst
+(the trigger step is taken as `n-1`, so the sample centres one timestep later),
+and the reconstruction statistics move to the centre step so both estimates
+share a time and a denominator. It adds `u_cross_dtu`, `v_cross_dtv`,
+`w_cross_dtw` and `t_cross_dtt` to the field set, unions in the energies they
+are divided by, and writes a `<name>.timing` text sidecar with the step sizes
+the triplets saw. `output_mode = none` with `direct = true` gives a direct-only
+run, which is roughly three times cheaper in memory than `full`.
+
+Only the imaginary part of `<u* du/dt>` is kept -- it is the whole numerator --
+so the dt fields go to disk as purely imaginary complex numbers. Note the
+estimator is band limited: for a mode travelling at `c`, the difference returns
+`c*sinc(kx*c*deltat)`, so it underestimates the small scales.
+`postpro/evaluate_convvelo.py` inverts that in closed form and masks the modes
+where `kx*c*deltat` exceeds `pi/2`, which cannot be corrected. `post_convvelo`
+refuses `direct = true`: saved fields are `dt_field` apart, not one timestep.
 
 ## Runtime Environment
 

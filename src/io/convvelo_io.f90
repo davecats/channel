@@ -32,21 +32,29 @@ module convvelo_io
   integer(C_INT64_T), parameter, public :: convvelo_file_header_bytes = 2_C_INT64_T*8_C_INT64_T + 8_C_INT64_T
 
   public :: write_convvelo_raw_file, write_convvelo_layout_file, average_convvelo_field
+  public :: average_convvelo_direct_field, write_convvelo_timing_file
 
 contains
 
   ! Writes the header, the mean profiles and every accumulated field.
-  subroutine write_convvelo_raw_file(filename, n_fields, stats, n_field_samples, means, &
-                                     n_mean_samples, average_start_time, average_end_time)
+  ! output_source(i) says where output field i lives: a positive value is a slot
+  ! in stats, a negative one is minus a slot in direct.  The file layout does not
+  ! know the difference -- a direct field is written as a purely imaginary
+  ! complex number, so readers see the same shape either way.
+  subroutine write_convvelo_raw_file(filename, n_fields, output_source, stats, n_stats_fields, &
+                                     n_field_samples, means, &
+                                     n_mean_samples, average_start_time, average_end_time, direct)
     implicit none
 
     character(len=*), intent(in) :: filename
-    integer(C_INT), intent(in) :: n_fields
+    integer(C_INT), intent(in) :: n_fields, n_stats_fields
+    integer(C_INT), intent(in) :: output_source(n_fields)
     integer(C_INT64_T), intent(in) :: n_field_samples(n_fields)
     integer(C_INT64_T), intent(in) :: n_mean_samples
     real(C_DOUBLE), intent(in) :: average_start_time, average_end_time
-    complex(C_DOUBLE_COMPLEX), intent(in) :: stats(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, n_fields)
+    complex(C_DOUBLE_COMPLEX), intent(in) :: stats(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, n_stats_fields)
     complex(C_DOUBLE_COMPLEX), intent(in) :: means(ny0 - 2:nyN + 2, 1:3 + nPhi)
+    real(C_DOUBLE), intent(in), optional :: direct(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, *)
 
     integer(C_INT) :: field_index, i_profile, n_profiles
     real(C_DOUBLE) :: header_times(2)
@@ -131,7 +139,16 @@ contains
       disp = convvelo_file_header_bytes + int(n_profiles, MPI_OFFSET_KIND)*profile_bytes + &
              int(field_index - 1, MPI_OFFSET_KIND)*field_bytes
       call MPI_File_set_view(fh, disp, MPI_DOUBLE_COMPLEX, file_type, 'native', MPI_INFO_NULL)
-      call average_convvelo_field(n_fields, stats, n_field_samples, field_index, field_out)
+      if (output_source(field_index) > 0) then
+        call average_convvelo_field(n_stats_fields, stats, n_field_samples(field_index), &
+                                    output_source(field_index), field_out)
+      else
+        if (.not. present(direct)) then
+          error stop "write_convvelo_raw_file: a direct field was selected but no direct array was passed"
+        end if
+        call average_convvelo_direct_field(direct, n_field_samples(field_index), &
+                                           -output_source(field_index), field_out)
+      end if
       call MPI_File_write_all(fh, field_out, 1, mem_type, status)
     end do
     call roctxPop("MPI_File_write_all convvelo_fields")
@@ -162,29 +179,98 @@ contains
   ! Divides one accumulated field by its own sample count.  A field nothing
   ! was ever accumulated into comes back zero rather than as a division by
   ! zero, which is what a run that never reached its start time produces.
-  subroutine average_convvelo_field(n_fields, stats, n_field_samples, field_index, field)
+  subroutine average_convvelo_field(n_stats_fields, stats, n_samples, storage_index, field)
     implicit none
-    integer(C_INT), intent(in) :: n_fields, field_index
-    integer(C_INT64_T), intent(in) :: n_field_samples(n_fields)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: stats(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, n_fields)
+    integer(C_INT), intent(in) :: n_stats_fields, storage_index
+    integer(C_INT64_T), intent(in) :: n_samples
+    complex(C_DOUBLE_COMPLEX), intent(in) :: stats(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, n_stats_fields)
     complex(C_DOUBLE_COMPLEX), intent(out) :: field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
     real(C_DOUBLE) :: inv_samples
     integer(C_INT) :: ix, iy, iz
 
-    if (n_field_samples(field_index) <= 0_C_INT64_T) then
+    if (n_samples <= 0_C_INT64_T) then
       field = (0.0d0, 0.0d0)
       return
     end if
 
-    inv_samples = 1.0d0/dble(n_field_samples(field_index))
+    inv_samples = 1.0d0/dble(n_samples)
     do ix = nx0, nxN
       do iz = -nz, nz
         do iy = ny0 - 2, nyN + 2
-          field(iy, iz, ix) = inv_samples*stats(iy, iz, ix, field_index)
+          field(iy, iz, ix) = inv_samples*stats(iy, iz, ix, storage_index)
         end do
       end do
     end do
   end subroutine average_convvelo_field
+
+  ! The direct accumulator holds only Im<u* du/dt>, since that is the whole
+  ! numerator of the convection velocity.  It goes out in the imaginary slot of
+  ! a complex field, so a reader takes .imag from a dt field exactly as it would
+  ! from a full complex accumulator, and the file format does not change.
+  subroutine average_convvelo_direct_field(direct, n_samples, storage_index, field)
+    implicit none
+    integer(C_INT), intent(in) :: storage_index
+    integer(C_INT64_T), intent(in) :: n_samples
+    real(C_DOUBLE), intent(in) :: direct(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, *)
+    complex(C_DOUBLE_COMPLEX), intent(out) :: field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN)
+    real(C_DOUBLE) :: inv_samples
+    integer(C_INT) :: ix, iy, iz
+
+    if (n_samples <= 0_C_INT64_T) then
+      field = (0.0d0, 0.0d0)
+      return
+    end if
+
+    inv_samples = 1.0d0/dble(n_samples)
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        do iy = ny0 - 2, nyN + 2
+          field(iy, iz, ix) = cmplx(0.0d0, inv_samples*direct(iy, iz, ix, storage_index), C_DOUBLE_COMPLEX)
+        end do
+      end do
+    end do
+  end subroutine average_convvelo_direct_field
+
+  ! What post-processing needs to judge the finite difference: the step sizes the
+  ! triplets actually saw, and the globally summed Re<u* du/dt> as an
+  ! implementation check against d<|u|^2>/dt.  A text sidecar rather than a
+  ! header field, because the 24-byte header is read positionally.
+  subroutine write_convvelo_timing_file(filename, n_triplets, n_dropped, sum_h1, sum_h2, &
+                                        min_h, max_h, energy_rate)
+    implicit none
+    character(len=*), intent(in) :: filename
+    integer(C_INT64_T), intent(in) :: n_triplets, n_dropped
+    real(C_DOUBLE), intent(in) :: sum_h1, sum_h2, min_h, max_h
+    real(C_DOUBLE), intent(in) :: energy_rate(:)
+    real(C_DOUBLE) :: global_rate(size(energy_rate))
+    character(len=512) :: timing_filename
+    integer :: io, i
+
+    call MPI_Reduce(energy_rate, global_rate, size(energy_rate), MPI_DOUBLE_PRECISION, MPI_SUM, 0, MPI_COMM_WORLD)
+    if (iproc /= 0) return
+
+    timing_filename = trim(filename)//".timing"
+    open (unit=97, file=trim(timing_filename), status='replace', action='write', iostat=io)
+    if (io /= 0) then
+      write (*, *) 'ERROR: could not open convvelo timing file: ', trim(timing_filename)
+      return
+    end if
+    write (97, '(A,I0)') 'n_triplets: ', n_triplets
+    write (97, '(A,I0)') 'n_dropped_triggers: ', n_dropped
+    if (n_triplets > 0_C_INT64_T) then
+      write (97, '(A,ES23.16)') 'mean_h1: ', sum_h1/dble(n_triplets)
+      write (97, '(A,ES23.16)') 'mean_h2: ', sum_h2/dble(n_triplets)
+      write (97, '(A,ES23.16)') 'mean_h: ', 0.5d0*(sum_h1 + sum_h2)/dble(n_triplets)
+      write (97, '(A,ES23.16)') 'min_h: ', min_h
+      write (97, '(A,ES23.16)') 'max_h: ', max_h
+      write (97, '(A)', advance='no') 'energy_rate:'
+      do i = 1, size(global_rate)
+        write (97, '(1X,ES23.16)', advance='no') global_rate(i)/dble(n_triplets)
+      end do
+      write (97, *)
+    end if
+    close (97)
+  end subroutine write_convvelo_timing_file
 
   ! Names the profiles and fields, in file order, next to the file itself.
   subroutine write_convvelo_layout_file(filename, profile_names, velocity_names, scalar_names)

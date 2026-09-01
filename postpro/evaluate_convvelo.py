@@ -213,6 +213,95 @@ def contrib_t(cvv: xr.Dataset, contrib: xr.Dataset | None = None) -> xr.Dataset:
     return contrib
 
 
+DIRECT_COMPONENTS = (
+    ("u", "u_cross_dtu", "u_cross_u"),
+    ("v", "v_cross_dtv", "v_cross_v"),
+    ("w", "w_cross_dtw", "w_cross_w"),
+    ("t", "t_cross_dtt", "t_cross_t"),
+)
+
+
+def has_direct(cvv: xr.Dataset) -> bool:
+    """True if the run accumulated <u* du/dt> online."""
+    return "u_cross_dtu" in cvv
+
+
+def contrib_direct(cvv: xr.Dataset, contrib: xr.Dataset | None = None) -> xr.Dataset:
+    """The convection velocity straight from a finite-differenced du/dt.
+
+        c = -Im<u* du/dt> / (kx <u* u>)
+
+    No reconstruction, no assumption about the right-hand side -- but band
+    limited in frequency, see deconvolve_direct. The numerator is stored as a
+    purely imaginary field (only Im is kept; the run holds it real), so .imag
+    reads it exactly as it would a full complex accumulator.
+
+    Nothing is added back for mean advection: the difference sees the total time
+    derivative, so u_uc_direct is directly comparable to u_uc including its
+    +u_c0 term.
+    """
+    if contrib is None:
+        contrib = cvv.copy()
+
+    for name, numerator, energy in DIRECT_COMPONENTS:
+        if numerator not in cvv:
+            continue
+        contrib[f"{name}_uc_direct"] = (
+            -cvv[numerator].imag / _kx_masked(cvv.kx_folded * cvv[energy].real, cvv)
+        )
+    return contrib
+
+
+def deconvolve_direct(cvv: xr.Dataset, h: float | None = None, contrib: xr.Dataset | None = None) -> xr.Dataset:
+    """Undo the finite difference's systematic underestimate of c.
+
+    For a travelling mode the centred difference returns, exactly,
+
+        du/dt|est = -i sin(omega*h)/h * u,   omega = kx*c
+
+    so the measured velocity is c*sinc(omega*h) -- tens of percent low at the
+    small scales, where omega*h approaches one. Since kx*h*c_meas = sin(omega*h),
+    it inverts in closed form:
+
+        omega*h = arcsin(kx*h*c_meas),   c = arcsin(kx*h*c_meas)/(kx*h)
+
+    and it is self-diagnosing: where |kx*h*c_meas| > 1 there is no solution, the
+    mode is temporally aliased, and it is masked rather than corrected. That is
+    the same statement as omega*h > pi/2.
+
+    Exact only for a monochromatic mode. Real turbulence carries a band of
+    frequencies at each (kx, kz, y), so this is a leading-order correction, not a
+    truth. The direction of the bias and the location of the failure are robust;
+    the corrected value is not exact.
+
+    `h` defaults to the mean step recorded in the .timing sidecar. Under adaptive
+    deltat the relevant scale is sqrt(h1*h2), which the sidecar's mean_h tracks
+    to well within the correction's own accuracy at the sub-percent asymmetry
+    CFL control actually produces.
+    """
+    if contrib is None:
+        contrib = cvv.copy()
+    if h is None:
+        h = cvv.attrs.get("convvelo_mean_h")
+    if h is None:
+        raise ValueError(
+            "deconvolve_direct needs the timestep: no convvelo_mean_h attribute "
+            "(the run wrote no .timing sidecar). Pass h explicitly."
+        )
+
+    for name, numerator, _energy in DIRECT_COMPONENTS:
+        measured = f"{name}_uc_direct"
+        if measured not in contrib:
+            continue
+        omega_h_measured = cvv.kx_folded * h * contrib[measured]
+        resolved = abs(omega_h_measured) < 1.0
+        contrib[f"{name}_uc_direct_resolved"] = resolved
+        contrib[f"{name}_uc_direct_corrected"] = (
+            np.arcsin(omega_h_measured.where(resolved)) / _kx_masked(cvv.kx_folded * h, cvv)
+        )
+    return contrib
+
+
 def evaluate_convvelo(cvv: xr.Dataset) -> xr.Dataset:
     result = reconstruct_parts(cvv)
     result = contrib_u(result, result)
@@ -220,6 +309,10 @@ def evaluate_convvelo(cvv: xr.Dataset) -> xr.Dataset:
     result = contrib_w(result, result)
     if "mean_t" in result:
         result = contrib_t(result, result)
+    if has_direct(result):
+        result = contrib_direct(result, result)
+        if result.attrs.get("convvelo_mean_h") is not None:
+            result = deconvolve_direct(result, contrib=result)
     return result
 
 
@@ -239,6 +332,11 @@ def _evaluated_uc_fields(cvv: xr.Dataset) -> xr.Dataset:
     field_names = ["u_uc", "v_uc", "w_uc"]
     if "t_uc" in result:
         field_names.append("t_uc")
+    field_names += [
+        name
+        for name in result
+        if isinstance(name, str) and name.endswith(("_uc_direct", "_uc_direct_corrected", "_uc_direct_resolved"))
+    ]
     return result[field_names]
 
 
