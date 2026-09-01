@@ -124,6 +124,17 @@ def reconstruct_parts(cvv: xr.Dataset) -> xr.Dataset:
     return result
 
 
+def _kx_masked(denominator: xr.DataArray, cvv: xr.Dataset) -> xr.DataArray:
+    """Blank the kx = 0 plane out of a convection-velocity denominator.
+
+    c = -Im<u* du/dt> / (kx <u* u>) is undefined at kx = 0: a mode with no
+    streamwise phase has no streamwise phase speed, and the ratio is 0/0.
+    Masking the denominator propagates NaN into uc without the division
+    itself raising, and leaves the cN diagnostics untouched.
+    """
+    return denominator.where(cvv.kx_folded != 0)
+
+
 def contrib_u(cvv: xr.Dataset, contrib: xr.Dataset | None = None) -> xr.Dataset:
     if contrib is None:
         contrib = cvv.copy()
@@ -138,7 +149,7 @@ def contrib_u(cvv: xr.Dataset, contrib: xr.Dataset | None = None) -> xr.Dataset:
     contrib["u_c7"] = cvv.kx_folded * cvv["u_p7"].real
     contrib["u_uc"] = (
         (contrib["u_c1"] + contrib["u_c2"] + contrib["u_c3"] + contrib["u_c4"] + contrib["u_c5"] + contrib["u_c6"])
-        / contrib["u_c7"]
+        / _kx_masked(contrib["u_c7"], cvv)
         + contrib["u_c0"]
     )
     return contrib
@@ -157,7 +168,7 @@ def contrib_v(cvv: xr.Dataset, contrib: xr.Dataset | None = None) -> xr.Dataset:
     contrib["v_c6"] = cvv.kx_folded * cvv["v_p6"].real
     contrib["v_uc"] = (
         (contrib["v_c1"] + contrib["v_c2"] + contrib["v_c3"] + contrib["v_c4"] + contrib["v_c5"])
-        / contrib["v_c6"]
+        / _kx_masked(contrib["v_c6"], cvv)
         + contrib["v_c0"]
     )
     return contrib
@@ -176,7 +187,7 @@ def contrib_w(cvv: xr.Dataset, contrib: xr.Dataset | None = None) -> xr.Dataset:
     contrib["w_c6"] = cvv.kx_folded * cvv["w_p6"].real
     contrib["w_uc"] = (
         (contrib["w_c1"] + contrib["w_c2"] + contrib["w_c3"] + contrib["w_c4"] + contrib["w_c5"])
-        / contrib["w_c6"]
+        / _kx_masked(contrib["w_c6"], cvv)
         + contrib["w_c0"]
     )
     return contrib
@@ -196,7 +207,7 @@ def contrib_t(cvv: xr.Dataset, contrib: xr.Dataset | None = None) -> xr.Dataset:
     contrib["forcing"] = -cvv["t_forcing"].imag
     contrib["t_uc"] = (
         (contrib["t_c1"] + contrib["t_c2"] + contrib["t_c3"] + contrib["t_c4"] + contrib["t_c5"] + contrib["forcing"])
-        / contrib["t_c6"]
+        / _kx_masked(contrib["t_c6"], cvv)
         + contrib["t_c0"]
     )
     return contrib
