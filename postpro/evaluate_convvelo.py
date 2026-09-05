@@ -17,6 +17,16 @@ def _uses_full_reconstruction(cvv: xr.Dataset) -> bool:
     return "v_cross_u" in cvv
 
 
+def has_reconstruction(cvv: xr.Dataset) -> bool:
+    """True if the run stored the momentum-equation terms uc is rebuilt from.
+
+    A direct-only run (`output_mode = none, direct = true`) stores just the dt
+    numerators and the energies they divide by, so there is nothing to
+    reconstruct -- only to measure.
+    """
+    return "u_cross_p" in cvv
+
+
 def _with_mean_derivatives(cvv: xr.Dataset) -> xr.Dataset:
     result = cvv.copy()
     d0_banded, d1_banded, _ = get_banded_derivative_operators(result.attrs, result.y)
@@ -114,6 +124,10 @@ def reconstruct_parts(cvv: xr.Dataset) -> xr.Dataset:
         result["t_p6"] = result["t_cross_t"]
         result["t_forcing"] = xr.zeros_like(result["t_p6"])
 
+    return _add_energies(result)
+
+
+def _add_energies(result: xr.Dataset) -> xr.Dataset:
     scale = 1.0 / (result.attrs["alfa0"] * result.attrs["beta0"])
     result["energy_u"] = (scale * result["u_cross_u"]).real
     result["energy_v"] = (scale * result["v_cross_v"]).real
@@ -252,6 +266,57 @@ def contrib_direct(cvv: xr.Dataset, contrib: xr.Dataset | None = None) -> xr.Dat
     return contrib
 
 
+def aggregate_convection_velocity(res: xr.Dataset, component: str = "u", *,
+                                  weighting: str = "leastsquares",
+                                  dims=("kx_folded", "kz"),
+                                  corrected: bool = True) -> xr.DataArray:
+    """One convection velocity from many modes, weighted by their energy.
+
+    Per mode, c = -Im<u* du/dt> / (kx <u* u>).  Collapsing that over a set of
+    modes needs a weight, and the two usual choices are both computable from
+    what a direct-only run stores -- the numerator and the energy are the only
+    two things it keeps:
+
+      weighting="energy"        c_E  = sum(E c) / sum(E)
+                                     = sum(-Im<u* du/dt>/kx) / sum(<u* u>)
+
+      weighting="leastsquares"  c_LS = sum(kx^2 E c) / sum(kx^2 E)
+                                     = sum(-kx Im<u* du/dt>) / sum(kx^2 <u* u>)
+
+    c_LS is the aggregate form of -<du/dt du/dx>/<(du/dx)^2>, and it is the
+    better-conditioned of the two: c carries a 1/kx, so the low-kx modes are
+    the noisiest, and energy weighting gives exactly those modes the most
+    weight.  The kx^2 in c_LS cancels that amplification.  Hence the default.
+
+    kx = 0 carries no phase speed and is excluded from both sums.
+
+    `corrected=True` aggregates the sinc-deconvolved per-mode velocities, which
+    is the right order: deconvolve per mode, then weight.  Weighting first and
+    correcting the aggregate would apply one sinc factor to a mixture of modes
+    that each had their own.
+    """
+    energy_of = {c: e for c, _n, e in DIRECT_COMPONENTS}
+    if component not in energy_of:
+        raise ValueError(f"unknown component {component!r}; expected one of {sorted(energy_of)}")
+    name = f"{component}_uc_direct" + ("_corrected" if corrected else "")
+    if name not in res:
+        raise ValueError(f"{name} is not in the dataset; run evaluate_convvelo first"
+                         + (" (and the .timing sidecar is needed for the correction)" if corrected else ""))
+
+    c = res[name]
+    energy = res[energy_of[component]].real
+    kx = res.kx_folded
+    if weighting == "energy":
+        w = energy
+    elif weighting == "leastsquares":
+        w = kx**2 * energy
+    else:
+        raise ValueError(f"weighting must be 'energy' or 'leastsquares', not {weighting!r}")
+
+    w = w.where(kx != 0).where(c.notnull())
+    return (c * w).sum(dim=dims, skipna=True) / w.sum(dim=dims, skipna=True)
+
+
 def deconvolve_direct(cvv: xr.Dataset, h: float | None = None, contrib: xr.Dataset | None = None) -> xr.Dataset:
     """Undo the finite difference's systematic underestimate of c.
 
@@ -303,12 +368,18 @@ def deconvolve_direct(cvv: xr.Dataset, h: float | None = None, contrib: xr.Datas
 
 
 def evaluate_convvelo(cvv: xr.Dataset) -> xr.Dataset:
-    result = reconstruct_parts(cvv)
-    result = contrib_u(result, result)
-    result = contrib_v(result, result)
-    result = contrib_w(result, result)
-    if "mean_t" in result:
-        result = contrib_t(result, result)
+    if has_reconstruction(cvv):
+        result = reconstruct_parts(cvv)
+        result = contrib_u(result, result)
+        result = contrib_v(result, result)
+        result = contrib_w(result, result)
+        if "mean_t" in result:
+            result = contrib_t(result, result)
+    else:
+        # Direct-only: nothing to reconstruct, and the mean y-derivatives the
+        # reconstruction needs are not wanted either.
+        result = _add_energies(cvv.copy())
+        result.attrs["convvelo_reconstruction_mode"] = "none"
     if has_direct(result):
         result = contrib_direct(result, result)
         if result.attrs.get("convvelo_mean_h") is not None:
@@ -329,9 +400,7 @@ def _ensure_convvelo_store(path: Path, *, chunks_x: int = -1) -> xr.Dataset:
 
 def _evaluated_uc_fields(cvv: xr.Dataset) -> xr.Dataset:
     result = evaluate_convvelo(cvv)
-    field_names = ["u_uc", "v_uc", "w_uc"]
-    if "t_uc" in result:
-        field_names.append("t_uc")
+    field_names = [n for n in ("u_uc", "v_uc", "w_uc", "t_uc") if n in result]
     field_names += [
         name
         for name in result
