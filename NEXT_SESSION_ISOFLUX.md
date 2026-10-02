@@ -49,6 +49,18 @@ established; the plan file carries the evidence.
   explicit Neumann closure gives `alpha*dt/dy_1^2 = 2.1 … 21` at Pr = 0.025.
   Unconditionally unstable there, marginal at Pr = 0.4. The row must stay in the
   implicit banded system, which is where the code already puts it.
+- **Neumann at both walls is still uniquely solvable**, at every mode including
+  `k = 0`. The per-substep operator is a Helmholtz `lambda - alpha*(D^2 - k^2)`
+  with `lambda = RK_rai(1,i)/deltat = O(1/deltat)`, not a Laplacian; the
+  pure-Neumann null space exists only at `lambda = 0`, which the scalars never
+  solve. Row-equilibrated condition number 15.9 against 13.3 for the Dirichlet
+  system running today, all four closure pivots nonzero, prescribed gradients
+  recovered to 1.4e-14, and `yintegr(tcor)` (which `corrtx` divides by) is a
+  fatter pivot under Neumann than under Dirichlet. Rerun it with
+  `python3 tools/check_scalar_wall_closure.py`, and `--lambda 0` to see the null
+  space appear. Do not re-argue this from "pure Neumann is singular" — that is a
+  true statement about an operator this code does not solve.
+
 - **No change is needed in `channel_equations.fypp`.**
   `solve_wall_normal_component` already reconstructs `phi(0)`, `phi(-1)`,
   `phi(ny)`, `phi(ny+1)` after every solve, and `build_products` already loops

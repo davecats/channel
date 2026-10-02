@@ -148,6 +148,62 @@ mirror it — i.e. simply not to override `phinp1bc` at all:
 
 That is the entire Stage 0 change: one deleted assignment.
 
+### Is the system still solvable with Neumann at both walls? Yes.
+
+Worth settling explicitly, because "pure Neumann is singular" is a true
+statement about the wrong operator. What the scalars solve each substep is a
+**Helmholtz**, not a Laplacian:
+
+```
+lambda*phi - alpha*(D^2 - k^2) phi = rhs ,   lambda = RK_rai(1,i)/deltat
+```
+
+and `RK_rai(1,i)` is `{3.75, 15, 6}`, so `lambda` is `O(1/deltat)` — never zero.
+Multiplying the homogeneous problem by `phi` and integrating gives
+`lambda*INT(phi^2) + alpha*INT(phi'^2) = 0` under homogeneous Neumann rows,
+hence `phi = 0`: the operator is coercive and the solve is unique at **every**
+mode, `k = 0` included. The familiar null space is the `lambda = 0` limit, which
+the scalars never reach. (`apply_dy`/`apply_d2y` do pass `lambda = 0`, but they
+use a different assembly and their own boundary callback, not these rows.)
+
+Verified numerically on the production mesh by
+`tools/check_scalar_wall_closure.py`, which rebuilds the stencils and assembles
+the same system:
+
+| | rank at k=0 | cond (row-equilibrated) |
+|---|---|---|
+| Dirichlet / Dirichlet (today) | 503/503 | 13.3 |
+| Neumann / Neumann (fixed rows) | 503/503 | 15.9 |
+| Neumann / Neumann at `lambda = 0` | 502/503 | 1.4e16 |
+
+So Neumann is no worse conditioned than what is running today, and the
+`lambda = 0` row is there only to show where the null space *would* be — its
+smallest singular value is `1.7e-16` with exactly one null direction, the
+constant. (Compare the raw condition numbers at your peril: they are `2e13` and
+`3e10` and are dominated by the `1e12`-scale `D^4` ghost rows, which is a row
+scaling, not conditioning.)
+
+Three further things the same tool checks, because solvability of the operator
+is not the same as solvability of what the code actually factorises:
+
+- **All four closure pivots stay nonzero.** The fold/eliminate/reconstruct
+  sequence divides by `eqm1(-2)`, the folded `eq0(-1)`, `eqnp1(+2)` and the
+  folded `eqn(+1)`. Under Neumann the folded wall pivots are `-1.89e3` and
+  `+1.89e3` where Dirichlet has `1.0` — different magnitude, nowhere near zero.
+  Only the in-tree top ghost row gives exactly `0`, which is §3.
+- **The prescribed gradients come back.** Solving with `t0 = +37`, `tN = -37`
+  and re-applying `d140`/`d14n` to the result returns them to `1.4e-14`. The row
+  is genuinely enforced, not merely present.
+- **`corrtx` stays well defined.** `linsolve_scalar` divides by
+  `yintegr(tcor)`, and under homogeneous *Neumann* rows `tcor` is
+  `approx 1/lambda` across the channel rather than a bump vanishing at the
+  walls, giving `INT(tcor) = 2.13e-3 approx 2/lambda` — nonzero, and in fact a
+  fatter pivot than the Dirichlet case.
+
+What Neumann at both walls does *not* determine is the long-time **mean level**,
+since `d/dt INT(phi) dy = alpha*(phi'(2) - phi'(0))`. That is a stationarity and
+gauge question, not a solvability one, and section 5 is where it is settled.
+
 ---
 
 ## 4. Why it must stay implicit (the "explicit will not run" warning, quantified)
