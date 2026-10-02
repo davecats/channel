@@ -1,6 +1,11 @@
 # Local constant wall heat flux (H2) for the passive scalars — implementation plan
 
-Status: plan only, no code changed.
+Status: **Stages 0 to 4 are implemented, tested and committed.** The code is
+ready to run; what is left is the production run and the choices in §5 that are
+the user's, not the code's. Stage 5 is untouched and still optional. Sections 1
+to 5 below are the reference — the physics, the papers and the reasoning — and
+are unchanged. §9 records what landed.
+
 Target: run the existing Re_tau = 1000 / Pr = {0.025, 0.4, 1} scalar campaign a
 second time with a **local, instantaneous** constant wall heat flux, so the wall
 temperature fluctuates — the "isoflux" / "H2" condition of Kong, Choi & Lee
@@ -459,3 +464,72 @@ is the natural place to hang its coefficient.
 Then do Stage 2 before committing the full campaign — the per-scalar switch is
 what buys the H1/H2 comparison on one velocity realisation, and it is a few
 dozen lines.
+
+---
+
+## 9. What landed
+
+Six commits, each independently verified; CPU `ctest` is 37/37 at every one of
+them and the default build is bit-identical to its parent.
+
+| commit | what |
+|---|---|
+| `Fix the GNU build, which has been broken since the direct convvelo work` | `convvelo_direct_output` carried `public` twice; gfortran rejects that, so every GNU build had failed to compile since `8dfb13f` — i.e. gate leg 1 was unrunnable on any box whose CPU reference is gfortran |
+| `Unblock the Neumann scalar wall condition at the top wall` | Stage 0: the one deleted assignment of §3 |
+| `Test the scalar wall closure against an exact quartic, both conditions` | Stage 1: `scalar_wall_closure`, 8 cases, round-off assertions |
+| `Choose the scalar wall condition per scalar, in the deck` | Stage 2: `[scalars] bc`, per scalar; `CHANNEL_PHI_NEUMANN` retired; `scalar_isoflux_balance` |
+| `Write the mean scalar wall value to Runtimedata.phi` | Stage 3 |
+| `Refuse a restart file with the wrong number of scalars, and convert one` | Stage 4: the size check and `postpro/add_restart_scalars.py` |
+
+### What the verification actually established
+
+- **The row is enforced on the instantaneous field, exactly.** `Runtimedata.phi`
+  reports the imposed gradient at both walls to within 1.1e-15 at every step of
+  every Neumann run made here, and `scalar_wall_closure` recovers an exact
+  quartic through the whole closure to 8.2e-15 at `lambda = 3.75/deltat` with
+  Neumann rows at both walls — including the ghost reconstruction that §3 was
+  about.
+- **The global balance closes.** `d/dt INT(phi) dy = alpha*(phi'(2) - phi'(0))`
+  measures -1.99951e-3 against the exact -2.0e-3 at ny = 64, deltat = 2.5e-3,
+  i.e. to 0.024%. In the flux-through configuration, where the exact answer is
+  zero, the residual falls 8.3e-4 → 5.3e-5 → 1.0e-5 as ny goes 16 → 32 → 64
+  (fourth order) and 1.0e-5 → 2.5e-6 → 1.5e-6 as deltat goes 1e-2 → 2.5e-3
+  (second order). So it is truncation error, not a leak at the wall. This is
+  `scalar_isoflux_balance`, which asserts the same thing to 1% on a 6 s run.
+- **The bulk-pinning source adds no wall flux**, as §5 and the risk register
+  predicted: with `meantb = 2` on, the bulk column holds 2.0 and the imposed
+  gradients stay exact.
+- **Both conditions in one run work.** nPhi = 4, `bc = dirichlet neumann
+  dirichlet neumann` at Pr = 0.5, 0.5, 2, 2: the Neumann scalars hold ±1 at the
+  walls while the Dirichlet ones' gradients run 3.01 → 3.24 and 41.4 → 38.6.
+- **nvfortran builds all 20 targets** with `-mp=gpu`, and `apply_wall_values`
+  still generates its two GPU kernels, so the per-scalar `t0s(iPhi)` inside the
+  target region is fine. The GPU suite has **not** been run — this box is a
+  login node with no GPU — so gate leg 2 is outstanding.
+
+### The g_i to use, measured
+
+From the isothermal campaign's own `Runtimedata.phi`
+(`newcases_direct/re1000_Pr_0.025_1`, 90001 records over t = 3618.8 .. 3825.2),
+time-averaged over the second half and symmetrised between the two walls:
+
+| Pr | `<dphi/dy>` at y = 0 | at y = 2 | **g_i** | `Re_tau*Pr` | `phi_tau = g/(Re_tau*Pr)` |
+|---|---|---|---|---|---|
+| 0.025 | 5.3631 | -5.3592 | **5.361** | 25 | 0.214 |
+| 0.4 | 30.7782 | -30.6551 | **30.717** | 400 | 0.0768 |
+| 1 | 51.8264 | -51.5751 | **51.701** | 1000 | 0.0517 |
+
+Averaging over the last 20% instead moves these by less than 0.4%, so they are
+converged for this purpose.
+
+This settles §5's "choose g_i from the isothermal run" quantitatively, and shows
+how much the tidy alternative would cost: `g = Re_tau*Pr` is 4.7x, 13x and 19.3x
+the equilibrium gradient, so the mean profile would have to grow by that factor
+before anything could be sampled. Use the measured g_i and rescale offline by
+`phi_tau_i` if Hetsroni's `theta+` normalisation is wanted.
+
+As a cross-check that the isothermal database itself balances: the source
+strength `corrtx` is 2.1445e-2, 7.6812e-3 and 5.1734e-3, and
+`2*alpha*g_i = 2*(ni/Pr)*g_i` is 2.1444e-2, 7.6792e-3 and 5.1701e-3. Those agree
+to 0.06%, which is the same balance the isoflux runs will have to satisfy with
+the roles of flux and temperature swapped.
