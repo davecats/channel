@@ -26,6 +26,12 @@ contains
   SUBROUTINE outstats()
     IMPLICIT NONE
     real(C_DOUBLE) :: runtime_global, dudy(1:2 + nPhi, 1:2)   !cfl
+    ! Mean scalar value *at* each wall, (iPhi, lower/upper).  Under Dirichlet it
+    ! is whatever the deck set and the wall gradient is the result; under
+    ! Neumann the roles swap -- the gradient columns are constants, and this is
+    ! the quantity that moves, and that gives Nu and the wall-to-bulk
+    ! difference.  So both are written, whatever the condition.
+    real(C_DOUBLE) :: phi_wall(1:nPhi, 1:2)
     character(len=40) :: istring, filename
     integer :: iPhi
     complex(C_DOUBLE_COMPLEX) :: mean_line_u(-1:ny + 1), mean_line_w(-1:ny + 1), mean_line_scalar(-1:ny + 1)
@@ -48,6 +54,11 @@ contains
         call gather_full_y_line(ny, V(:, 0, 0, 3 + iPhi), mean_line_scalar)
         dudy(2 + iPhi, 2) = ${at_upper_wall_real('d14n', 'mean_line_scalar')}$
         dudy(2 + iPhi, 1) = ${at_lower_wall_real('d140', 'mean_line_scalar')}$
+        ! The wall planes themselves: solve_wall_normal_component reconstructs
+        ! phi(0) and phi(ny) after every solve, so these are the solution there
+        ! and not an extrapolation.
+        phi_wall(iPhi, 1) = dreal(mean_line_scalar(0))
+        phi_wall(iPhi, 2) = dreal(mean_line_scalar(ny))
       END DO
       dudy(1, 1) = ${at_lower_wall_real('d140', 'mean_line_u')}$
       dudy(2, 1) = ${at_lower_wall_real('d140', 'mean_line_w')}$
@@ -57,7 +68,13 @@ contains
       WRITE (*, "(F10.4,3X,4(F11.6,3X),4(F9.4,3X),2(F9.6,3X))") &
            time,dudy(1,1),dudy(1,2),dudy(2,1),dudy(2,2),fr(1)+corrpx*fr(3),meanpx+corrpx,fr(2)+corrpz*fr(3),meanpz+corrpz,runtime_global*deltat,deltat
       WRITE(121,*) time,dudy(1,1),dudy(1,2),dudy(2,1),dudy(2,2),fr(1)+corrpx*fr(3),meanpx+corrpx,fr(2)+corrpz*fr(3),meanpz+corrpz,runtime_global*deltat,deltat
-      WRITE (195, *) time, dudy(3:, 1), dudy(3:, 2), fr(4:3 + nPhi) + corrtx(:)*fr(3 + nPhi + 1:3 + 2*nPhi), corrtx + meantx
+      ! Runtimedata.phi, nPhi columns per group:
+      !   time | dphi/dy at y0 | dphi/dy at yN | INT(phi) dy | corrtx + meantx
+      !        | <phi> at y0   | <phi> at yN
+      ! The two wall-value groups are appended rather than inserted, so a
+      ! reader written against the older file keeps working.
+      WRITE (195, *) time, dudy(3:, 1), dudy(3:, 2), fr(4:3 + nPhi) + corrtx(:)*fr(3 + nPhi + 1:3 + 2*nPhi), &
+        corrtx + meantx, phi_wall(:, 1), phi_wall(:, 2)
       FLUSH (121); FLUSH (195)
     END IF
     runtime_global = 0
