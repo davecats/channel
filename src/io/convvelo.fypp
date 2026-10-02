@@ -85,7 +85,7 @@ module convvelo
   integer(C_INT), save :: n_convvelo_stats_fields = 0_C_INT
   integer(C_INT), save :: n_convvelo_direct_fields = 0_C_INT
   integer(C_INT), allocatable, save :: convvelo_output_source(:)
-  integer(C_INT), allocatable, save, public :: convvelo_direct_output(:)
+  integer(C_INT), allocatable, save :: convvelo_direct_output(:)   ! public below
   integer(C_INT), save :: convvelo_direct_state = cvv_idle
   real(C_DOUBLE), save :: convvelo_t1 = 0.0d0, convvelo_t2 = 0.0d0
   logical, save :: convvelo_write_pending = .false.
