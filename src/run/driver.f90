@@ -192,9 +192,13 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
       WRITE (*, "(A,F11.6,A,F11.6)") "   meanpx =", meanpx, "      meanpz =", meanpz
       WRITE (*, "(A,F11.6,A,F11.6)") "   meanflowx =", meanflowx, "   meanflowz =", meanflowz
       WRITE (*, "(A,I6,A,L1)") "   nsteps =", nstep, "   time_from_restart =", time_from_restart
-      WRITE (*, *) "NUM_SCALARS", nPhi, "PRANDTL NUMBERS:"
+      WRITE (*, *) "NUM_SCALARS", nPhi, "PRANDTL NUMBERS AND WALL CONDITIONS:"
       do iPhi = 1, nPhi
-        write (*, '(F10.4)') 1/pra(iPhi)
+        if (phi_bc_kind(iPhi) == PHI_BC_NEUMANN) then
+          write (*, '(F10.4,A,F11.6,A,F11.6,A)') 1/pra(iPhi), "   neumann    dphi/dy =", t0s(iPhi), " at y0,", tNs(iPhi), " at yN"
+        else
+          write (*, '(F10.4,A,F11.6,A,F11.6,A)') 1/pra(iPhi), "   dirichlet  phi     =", t0s(iPhi), " at y0,", tNs(iPhi), " at yN"
+        end if
       end do
       WRITE (*, *) " "
 
@@ -345,9 +349,9 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
   SUBROUTINE finalize()
     USE case_setup, only: disable_restart_write, has_terminal, time, save_restart_file, V, &
 #ifdef HAVE_FFTW
-                       VVdz, VVdx, rVVdx, &
+                          VVdz, VVdx, rVVdx, &
 #endif
-                       free_memory
+                          free_memory
     USE convvelo, only: finalize_convvelo_runtime
     USE pressure_output, only: free_pressure_output
     USE byte_workspace, only: workspace_finalize

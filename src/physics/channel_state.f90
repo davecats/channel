@@ -41,17 +41,30 @@ module channel_state
   ! setup_boundary_conditions from the compact stencils.
   real(C_DOUBLE), dimension(-2:2) :: v0bc, v0m1bc, vnbc, vnp1bc
   real(C_DOUBLE), dimension(-2:2) :: eta0bc, eta0m1bc, etanbc, etanp1bc
-  real(C_DOUBLE), dimension(-2:2) :: phi0bc, phi0m1bc, phinbc, phinp1bc
+  ! The scalars carry one row set each, (-2:2, 1:nPhi): which pair of physical
+  ! rows a scalar gets is its own choice, so a single run can hold isothermal
+  ! and isoflux scalars side by side in the same velocity field.
+  real(C_DOUBLE), allocatable :: phi0bc(:, :), phi0m1bc(:, :), phinbc(:, :), phinp1bc(:, :)
+
+  ! Which condition each scalar's wall rows enforce, from [scalars] bc.
+  !   Dirichlet: phi = t0 at the wall                  (isothermal, H1)
+  !   Neumann:   dphi/dy = t0 at the wall              (isoflux,    H2)
+  ! Both are rows on the total instantaneous field, uniform in x, z and t.
+  integer(C_INT), parameter :: PHI_BC_DIRICHLET = 0_C_INT, PHI_BC_NEUMANN = 1_C_INT
+  integer(C_INT), allocatable :: phi_bc_kind(:)
 
   !-------------------------------------------------------------------------
   ! Physical parameters.  ni is the inverse Reynolds number; pra holds the
-  ! inverse Prandtl number of each scalar.  u0/uN and t0/tN are the wall
-  ! values driving Couette-like and scalar boundary conditions.
+  ! inverse Prandtl number of each scalar.  u0/uN are the wall velocities
+  ! driving Couette-like cases; t0s/tNs are the per-scalar wall values, read
+  ! through that scalar's rows -- a temperature under Dirichlet, a gradient
+  ! under Neumann.
   !-------------------------------------------------------------------------
   real(C_DOUBLE) :: ni, gamma
   !$omp declare target(ni)
-  real(C_DOUBLE) :: u0, uN, t0, tN
-  !$omp declare target(u0, uN, t0, tN)
+  real(C_DOUBLE) :: u0, uN
+  !$omp declare target(u0, uN)
+  real(C_DOUBLE), allocatable :: t0s(:), tNs(:)
   real(C_DOUBLE), allocatable :: pra(:)
   real(C_DOUBLE) :: perturbation_amplitude = 5.54d-5
   ! Seed for the perturbation of a generated start field, from [velocity] seed.

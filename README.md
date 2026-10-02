@@ -135,17 +135,21 @@ For LLVM Flang, the current CMake path is configured for AMD offload and uses
 
 ### Physics Options
 
-Two choices about the problem are made at build time rather than in `dns.in`,
-because each selects which stencil rows close the wall:
+One choice about the problem is made at build time rather than in `dns.in`,
+because it selects which stencil rows close the wall and how the mesh is
+stretched:
 
 ```bash
 cmake -S . -B build -DCHANNEL_HALF_CHANNEL=ON   # half channel
-cmake -S . -B build -DCHANNEL_PHI_NEUMANN=ON    # Neumann scalars at the wall
 ```
 
-Both default to `OFF`. The `physics_options_compile` test keeps the guarded
-code building, but nothing checks that the numbers either option produces are
-correct; validate against a known case before relying on them.
+It defaults to `OFF`. The `physics_options_compile` test keeps the guarded code
+building, but nothing checks that the numbers it produces are correct; validate
+against a known case before relying on it.
+
+The scalar wall condition used to be a second such option,
+`CHANNEL_PHI_NEUMANN`. It is `[scalars] bc` in the deck now, per scalar — see
+*Input File* below.
 
 ## Running
 
@@ -199,6 +203,7 @@ meantx = 0.0
 meantb = 0.0
 t0 = 0.0
 tN = 0.0
+bc = dirichlet
 
 [timestepping]
 deltat = 0.0
@@ -246,6 +251,33 @@ Important fields:
 
 For passive scalars, set `nPhi > 0` and add `pr = ...` with one Prandtl number per
 scalar.
+
+- `bc`: the wall condition on each scalar, `dirichlet` (equivalently
+  `isothermal`) or `neumann` (`isoflux`). Optional; `dirichlet` if absent.
+- `t0`, `tN`: what the wall rows are set to at the lower and upper wall. Under
+  `dirichlet` that is the wall value of the scalar; under `neumann` it is
+  `dphi/dy` there, in the global `+y` sense at both walls — so uniformly cooled
+  walls with a volumetric source are `t0 = +g`, `tN = -g`. Either way the row
+  constrains the total instantaneous field, uniformly in `x`, `z` and `t`.
+- `bc`, `t0` and `tN` take **either one value, meaning the same for every
+  scalar, or one per scalar**. Any other count is an error rather than a
+  silently truncated list:
+
+  ```ini
+  [scalars]
+  nPhi = 6
+  pr   = 0.025 0.4 1 0.025 0.4 1
+  bc   = dirichlet dirichlet dirichlet neumann neumann neumann
+  t0   = 0 0 0   25  400  1000
+  tN   = 0 0 0  -25 -400 -1000
+  ```
+
+  which carries both conditions over the same velocity field, so the two can be
+  compared without also comparing two samples.
+- `meantb`: if nonzero, the bulk `INT(phi) dy` of every scalar is held at this
+  value by a uniform volumetric source. The correction field solves the same
+  Helmholtz problem with *homogeneous* rows, which under `neumann` means
+  zero-gradient, so it adds no wall flux and the imposed `t0`/`tN` stay exact.
 
 ## Optional Convvelo Output
 

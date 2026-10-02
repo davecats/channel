@@ -6,7 +6,7 @@
 ! zero coefficient on the ghost node ny+1, and four places in the closure divide
 ! by exactly that entry, so the Neumann leg produced NaN rather than a number.
 ! `ctest` was green throughout, because nothing solved a scalar line with
-! Neumann rows and nothing ran the binary with -DphiNeumann.
+! Neumann rows and nothing ran a binary that selected them.
 !
 ! Why a quartic and not the cosh/sinh solution of the Helmholtz problem.  The
 ! compact stencils are built by requiring exactness on polynomials of degree 4
@@ -30,10 +30,13 @@
 ! passes, and the one that makes the wall layer unresolved on this mesh.
 ! Dirichlet is included so a passing Neumann leg means something: the same
 ! assertions, the same right-hand side, only the two physical rows swapped.
+! The deck asks for one scalar of each kind, so the rows the run assembled are
+! checked against both legs as well.
 program test_scalar_neumann
   use, intrinsic :: iso_c_binding
-  use case_setup, only: ny, der, ni, y, d040, d140, d04n, d14n, iproc, &
-                        phi0bc, phi0m1bc, phinbc, phinp1bc, free_memory
+  use case_setup, only: ny, der, ni, y, d040, d140, d04n, d14n, iproc, nPhi, &
+                        phi0bc, phi0m1bc, phinbc, phinp1bc, phi_bc_kind, &
+                        PHI_BC_DIRICHLET, PHI_BC_NEUMANN, free_memory
   use driver, only: initialize
   use mpi_transpose, only: ierr, MPI_Abort, MPI_Finalize, MPI_COMM_WORLD
   use compact_line_solvers, only: solve_full_line_compact
@@ -53,12 +56,13 @@ program test_scalar_neumann
   real(C_DOUBLE) :: lower_ghost(-2:2), upper_ghost(-2:2)
   real(C_DOUBLE) :: lambda, alpha, k2v, worst, err, g0, gn
   real(C_DOUBLE) :: rhs_lower, rhs_upper, rhs_ghost_lower, rhs_ghost_upper
-  integer(C_INT) :: iy, ikind, ik, ilam
+  integer(C_INT) :: iy, iPhi, ikind, ik, ilam
   logical :: failed
   character(len=9) :: kind_name(2) = ["Dirichlet", "Neumann  "]
 
-  config_file = "tests/data/dns_test_npy2.in"
-  restart_in = "tests/data/start_field.out"
+  ! A deck with scalars, so there are production rows to check against.
+  config_file = "tests/data/dns_test_scalar_bc.in"
+  restart_in = "tests/data/start_field_scalar.out"
 
   call initialize(config_file, restart_in)
 
@@ -66,11 +70,24 @@ program test_scalar_neumann
   failed = .false.
   lower_ghost = der(1, 3, :); upper_ghost = der(ny - 1, 3, :)
 
-  ! The rows the production code assembles must be the rows tested below.
-  call check_row("phi0bc  ", phi0bc, merge_row(d140, d040))
-  call check_row("phinbc  ", phinbc, merge_row(d14n, d04n))
-  call check_row("phi0m1bc", phi0m1bc, lower_ghost)
-  call check_row("phinp1bc", phinp1bc, upper_ghost)
+  ! The rows the production code assembled, per scalar, must be the rows tested
+  ! below -- and the deck asks for one of each, so both legs are live.
+  if (nPhi < 2 .or. phi_bc_kind(1) /= PHI_BC_DIRICHLET .or. phi_bc_kind(2) /= PHI_BC_NEUMANN) then
+    if (iproc == 0) write (*, *) "Deck must give at least two scalars, bc = dirichlet neumann"
+    failed = .true.
+  else
+    do iPhi = 1, 2
+      if (phi_bc_kind(iPhi) == PHI_BC_NEUMANN) then
+        call check_row("phi0bc  ", phi0bc(:, iPhi), d140)
+        call check_row("phinbc  ", phinbc(:, iPhi), d14n)
+      else
+        call check_row("phi0bc  ", phi0bc(:, iPhi), d040)
+        call check_row("phinbc  ", phinbc(:, iPhi), d04n)
+      end if
+      call check_row("phi0m1bc", phi0m1bc(:, iPhi), lower_ghost)
+      call check_row("phinp1bc", phinp1bc(:, iPhi), upper_ghost)
+    end do
+  end if
 
   do ikind = 1, 2
     if (ikind == 1) then
@@ -159,18 +176,6 @@ contains
     real(C_DOUBLE), intent(in) :: yy
     p2 = 2*c(2) + yy*(6*c(3) + yy*12*c(4))
   end function p2
-
-  ! The row the build in hand is expected to use: the first under phiNeumann,
-  ! the second otherwise.
-  function merge_row(neumann_row, dirichlet_row) result(expected)
-    real(C_DOUBLE), intent(in) :: neumann_row(-2:2), dirichlet_row(-2:2)
-    real(C_DOUBLE) :: expected(-2:2)
-#ifdef phiNeumann
-    expected = neumann_row
-#else
-    expected = dirichlet_row
-#endif
-  end function merge_row
 
   subroutine check_row(name, actual, expected)
     character(len=*), intent(in) :: name

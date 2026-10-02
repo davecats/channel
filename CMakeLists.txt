@@ -169,22 +169,36 @@ target_include_directories(channel_core PUBLIC "${CHANNEL_SOURCE_DIR}/util")
 # --------------------------------------------------------------------
 # Physics options
 # --------------------------------------------------------------------
-# These change the problem being solved, so they are options here rather than
-# #defines a user has to edit into a source header.  They stay compile-time
-# because they select which stencil rows close the wall and how the mesh is
+# This changes the problem being solved, so it is an option here rather than a
+# #define a user has to edit into a source header.  It stays compile-time
+# because it selects which stencil rows close the wall and how the mesh is
 # stretched; a runtime switch would put a branch in kernels that run every
 # mode, every substep.  PUBLIC so every target that includes build_options.h
-# agrees about them.
+# agrees about it.
 option(CHANNEL_HALF_CHANNEL "Solve a half channel instead of a full one" OFF)
-option(CHANNEL_PHI_NEUMANN "Neumann wall condition on the passive scalars" OFF)
 
 if(CHANNEL_HALF_CHANNEL)
     target_compile_definitions(channel_core PUBLIC halfchannel)
     message(STATUS "Physics option: half channel")
 endif()
+
+# The scalar wall condition used to be the compile-time option
+# CHANNEL_PHI_NEUMANN, all scalars or none.  It is a deck setting now, per
+# scalar -- `[scalars] bc = dirichlet neumann ...` -- because a run that
+# carries both conditions over the same velocity field is the only way to
+# compare them without also comparing two samples.  Fail loudly rather than
+# ignore a flag that no longer does anything.
 if(CHANNEL_PHI_NEUMANN)
-    target_compile_definitions(channel_core PUBLIC phiNeumann)
-    message(STATUS "Physics option: Neumann scalar wall condition")
+    message(FATAL_ERROR
+        "CHANNEL_PHI_NEUMANN is gone.  Set the condition per scalar in the deck:\n"
+        "    [scalars]\n"
+        "    bc = dirichlet neumann    # one word, or one per scalar\n"
+        "Then reconfigure without -DCHANNEL_PHI_NEUMANN.")
+elseif(DEFINED CHANNEL_PHI_NEUMANN)
+    # A build tree configured before the option was retired still caches it as
+    # OFF.  That meant nothing then and means nothing now, so drop it quietly
+    # rather than making an old tree unconfigurable.
+    unset(CHANNEL_PHI_NEUMANN CACHE)
 endif()
 
 # --------------------------------------------------------------------

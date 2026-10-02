@@ -328,3 +328,15 @@ add_test(NAME seeded_start_field
         ${MPIEXEC_EXECUTABLE}
 )
 set_tests_properties(seeded_start_field PROPERTIES PROCESSORS 2)
+
+# Also drives the binary: the isoflux wall condition is a property of a whole
+# run (the row has to survive the explicit half of the time step, and the global
+# balance only exists in time), and scalar_wall_closure can only see one solve.
+# Runs in its own temporary directory, so no RESOURCE_LOCK.
+add_test(NAME scalar_isoflux_balance
+    COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_SOURCE_DIR}/tests/check_scalar_isoflux.py
+        $<TARGET_FILE:channel>
+        ${MPIEXEC_EXECUTABLE}
+)
+set_tests_properties(scalar_isoflux_balance PROPERTIES PROCESSORS 1)

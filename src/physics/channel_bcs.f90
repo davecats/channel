@@ -20,10 +20,9 @@
 !
 !   v    : Dirichlet on v and on dv/dy (no-slip, impermeable)
 !   eta  : Dirichlet on the wall-normal vorticity
-!   phi  : Dirichlet by default, Neumann under -DphiNeumann
+!   phi  : Dirichlet or Neumann, per scalar, from [scalars] bc in the deck
 !
-! Half-channel and body-force variants are selected by the cpp switches, as
-! before.
+! The half-channel variant is still selected by a cpp switch.
 !
 ! A time-dependent or wall-parallel-varying condition -- an oscillating wall,
 ! blowing and suction, a modulated scalar flux -- is a change to
@@ -45,14 +44,10 @@ contains
 
   SUBROUTINE setup_boundary_conditions()
     IMPLICIT NONE
-    integer :: ix, iz
+    integer :: iPhi, ix, iz
     ! Bottom wall
     v0bc = d040; v0m1bc = d140; eta0bc = d040
     eta0m1bc = der(1, 3, :)
-    phi0bc = d040; phi0m1bc = der(1, 3, :)        ! Dirichlet
-#ifdef phiNeumann
-    phi0bc = d140; phi0m1bc = der(1, 3, :)        ! Neumann
-#endif
     ! Top wall
 #ifdef halfchannel
     vnbc = d04n; vnp1bc = d24n; etanbc = d14n
@@ -60,15 +55,23 @@ contains
     vnbc = d04n; vnp1bc = d14n; etanbc = d04n
 #endif
     etanp1bc = der(ny - 1, 3, :)
-    phinbc = d04n; phinp1bc = der(ny - 1, 3, :) ! Dirichlet
-#ifdef phiNeumann
-    ! Neumann.  phinp1bc stays der(ny-1, 3, :) -- the compact fourth-derivative
-    ! relation at iy = ny-1, which is BC-independent and mirrors the bottom
-    ! wall.  It must not be overridden with d04n: that row carries a zero
-    ! coefficient on the ghost node ny+1, and the wall closure divides by it.
-    phinbc = d14n
-#endif
-    !$omp target enter data map(to: v0bc, v0m1bc, vnbc, vnp1bc, eta0bc, eta0m1bc, etanbc, etanp1bc, phinbc, phi0bc, phi0m1bc, phinp1bc)
+    ! One row set per scalar, so a run can carry both conditions over the same
+    ! velocity field.  Only the two *physical* rows differ: the ghost rows are
+    ! the compact fourth-derivative relations at iy = 1 and iy = ny-1, which are
+    ! BC-independent.  d04n in particular must not be used as the upper ghost
+    ! row -- it carries a zero coefficient on the ghost node ny+1, and the wall
+    ! closure divides by exactly that entry.
+    DO iPhi = 1, nPhi
+      IF (phi_bc_kind(iPhi) == PHI_BC_NEUMANN) THEN
+        phi0bc(:, iPhi) = d140; phinbc(:, iPhi) = d14n
+      ELSE
+        phi0bc(:, iPhi) = d040; phinbc(:, iPhi) = d04n
+      END IF
+      phi0m1bc(:, iPhi) = der(1, 3, :); phinp1bc(:, iPhi) = der(ny - 1, 3, :)
+    END DO
+    ! Only the v rows are read inside the kernel below; the eta and phi rows are
+    ! copied into the assembly context on the host, before any target region.
+    !$omp target enter data map(to: v0bc, v0m1bc, vnbc, vnp1bc, eta0bc, eta0m1bc, etanbc, etanp1bc)
 
     !precompute bc0 and bcn
     !$omp target teams distribute parallel do collapse(2) default(none) &
@@ -118,8 +121,8 @@ contains
       DO ix = nx0, nxN
         DO iz = -nz, nz
           IF (ix == 0 .and. iz == 0) THEN
-            bc0(iz, ix, 5 + iPhi) = t0
-            bcn(iz, ix, 5 + iPhi) = tn
+            bc0(iz, ix, 5 + iPhi) = t0s(iPhi)
+            bcn(iz, ix, 5 + iPhi) = tNs(iPhi)
           ELSE
             bc0(iz, ix, 5 + iPhi) = 0
             bcn(iz, ix, 5 + iPhi) = 0

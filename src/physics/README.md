@@ -14,7 +14,8 @@ changes there is exactly one.
 | make that field reproducible | nothing here — `[velocity] seed` in `dns.in` |
 | the viscous operators | `channel_operators.fypph` |
 | the nonlinear terms, the right-hand side, the mean-flow correction | `channel_equations.fypp` |
-| half channel, or Neumann scalars at the wall | neither — CMake options, see below |
+| the wall condition on a scalar — isothermal or isoflux | nothing here — `[scalars] bc`, see the README's *Input File* section |
+| half channel | neither — a CMake option, see below |
 
 `channel_state.f90` is the run state itself (fields, physical parameters,
 clock). You read it constantly; you rarely change it.
@@ -40,18 +41,24 @@ silently not the other. **Change the operator there and both halves follow.**
 
 ## Compile-time options
 
-Two choices are made at build time, not in the deck:
+One choice is made at build time, not in the deck:
 
 ```bash
 cmake -S . -B build -DCHANNEL_HALF_CHANNEL=ON   # half channel
-cmake -S . -B build -DCHANNEL_PHI_NEUMANN=ON    # Neumann scalars at the wall
 ```
 
-They stay compile-time because each selects which stencil rows close the wall;
-making them runtime would put a branch in kernels that execute for every mode
-on every substep. The `physics_options_compile` test keeps the guarded branches
-building, but **nothing checks that their numbers are right** — if you rely on
-either, validate it against a case you know.
+It stays compile-time because it selects which stencil rows close the wall and
+how the mesh is stretched; making it runtime would put a branch in kernels that
+execute for every mode on every substep. The `physics_options_compile` test
+keeps the guarded branches building, but **nothing checks that their numbers are
+right** — if you rely on it, validate it against a case you know.
+
+The scalar wall condition was a second such option, `CHANNEL_PHI_NEUMANN`. It is
+now `[scalars] bc` in the deck, chosen per scalar, because the rows are
+assembled on the host once per run and no kernel ever branches on them — so
+there was nothing to pay for it. `scalar_wall_closure` and
+`scalar_isoflux_balance` check that both conditions produce the right numbers,
+which the compile-only check never did.
 
 ## Two rules that are not style
 
@@ -79,8 +86,8 @@ having to benchmark.
 ## After you change something
 
 Almost every test drives its own `test_*` program rather than the `channel`
-binary — `seeded_start_field` is the one exception — so a green `ctest` is
-necessary and not sufficient. Run the binary on your own case and check its exit
+binary — `seeded_start_field` and `scalar_isoflux_balance` are the exceptions —
+so a green `ctest` is necessary and not sufficient. Run the binary on your own case and check its exit
 status too:
 
 ```bash

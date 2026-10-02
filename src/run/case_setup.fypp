@@ -31,7 +31,7 @@ MODULE case_setup
 
   USE, intrinsic :: iso_c_binding
   USE config
-  USE env_options, only: env_flag
+  USE env_options, only: env_flag, lowercase
   USE banded_lu
   USE channel_grid
   USE channel_state
@@ -77,6 +77,8 @@ CONTAINS
     type(ini_config), intent(in) :: cfg
     integer(C_INT) :: nstep_in
     logical :: found
+    real(C_DOUBLE) :: unused_wall_value
+    character(len=32), allocatable :: bc_names(:)
 
     call require_integer(cfg, "mesh", "nx", nx)
     call require_integer(cfg, "mesh", "ny", ny)
@@ -114,17 +116,38 @@ CONTAINS
     call require_integer(cfg, "scalars", "nphi", nPhi)
     call require_real(cfg, "scalars", "meantx", meantx)
     call require_real(cfg, "scalars", "meantb", meantb)
-    call require_real(cfg, "scalars", "t0", t0)
-    call require_real(cfg, "scalars", "tn", tN)
-    !$omp target update to(u0, uN, t0, tN)
-    allocate (pra(nPhi))
+    !$omp target update to(u0, uN)
+    allocate (pra(nPhi), t0s(nPhi), tNs(nPhi), phi_bc_kind(nPhi), bc_names(nPhi))
     if (nPhi > 0) then
       call require_real_vector(cfg, "scalars", "pr", pra(1:nPhi))
       DO iPhi = 1, nPhi
         pra(iPhi) = 1/pra(iPhi)
       END DO
+      ! t0/tn and bc take either one value for all the scalars or one each, so
+      ! a deck written before the scalars could differ still means what it said.
+      call require_real_vector_or_scalar(cfg, "scalars", "t0", t0s)
+      call require_real_vector_or_scalar(cfg, "scalars", "tn", tNs)
+      bc_names = "dirichlet"                ! the condition the campaign has used so far
+      call get_string_vector_or_scalar(cfg, "scalars", "bc", bc_names, found)
+      DO iPhi = 1, nPhi
+        select case (trim(lowercase(bc_names(iPhi))))
+        case ("dirichlet", "isothermal")
+          phi_bc_kind(iPhi) = PHI_BC_DIRICHLET
+        case ("neumann", "isoflux")
+          phi_bc_kind(iPhi) = PHI_BC_NEUMANN
+        case default
+          if (has_terminal) print *, "ERROR: [scalars] bc must be dirichlet or neumann; got ", &
+            trim(bc_names(iPhi))
+          error stop "invalid scalar boundary condition"
+        end select
+      END DO
+    else
+      ! Still required, and still parsed, so a deck with no scalars is checked
+      ! exactly as it was before these keys could be vectors.
+      call require_real(cfg, "scalars", "t0", unused_wall_value)
+      call require_real(cfg, "scalars", "tn", unused_wall_value)
     end if
-    !$omp target enter data map(to: pra)
+    !$omp target enter data map(to: pra, t0s, tNs)
 
     overlapping = .false.
     call env_flag("CHANNEL_OVERLAPPING", overlapping)
@@ -167,6 +190,9 @@ CONTAINS
       !$omp target enter data map(to: memrhs, oldrhs)
     END IF
     ALLOCATE (der(1:ny - 1, 0:3, -2:2)); der = 0.0
+    ! One wall row set per scalar; setup_boundary_conditions fills them.
+    ALLOCATE (phi0bc(-2:2, 1:nPhi), phi0m1bc(-2:2, 1:nPhi), phinbc(-2:2, 1:nPhi), phinp1bc(-2:2, 1:nPhi))
+    phi0bc = 0.0; phi0m1bc = 0.0; phinbc = 0.0; phinp1bc = 0.0
     allocate (corrtx(1:nPhi)); corrtx = 0.0d0
     allocate (ucor(ny0 - 2:nyN + 2), tcor(ny0 - 2:nyN + 2, 1:nPhi))
     ALLOCATE (y(-1:ny + 1), dy(1:ny - 1))

@@ -7,6 +7,10 @@ module config
   public :: ini_config, config_entry, read_ini_file, has_section
   public :: require_integer, require_real, require_logical, require_real_vector
   public :: get_integer, get_real, get_logical, get_string, get_real_vector
+  ! One value or one per element -- for keys that describe a list of things
+  ! (the scalars) and are usually, but not always, the same for all of them.
+  public :: require_real_vector_or_scalar, require_string_vector_or_scalar
+  public :: get_real_vector_or_scalar, get_string_vector_or_scalar
 
   type :: config_entry
     character(len=64) :: section = ""
@@ -109,6 +113,94 @@ contains
     call get_real_vector(cfg, section, key, target, found)
     if (.not. found) call missing_key(section, key)
   end subroutine require_real_vector
+
+  ! A key that may be written either once, meaning the same value for every
+  ! element of target, or once per element.  Any other count is an error: with
+  ! the broadcast rule in place, a list of the wrong length is a typo, and
+  ! reading its first entry and silently dropping the rest would hide it.
+  subroutine get_real_vector_or_scalar(cfg, section, key, target, found)
+    type(ini_config), intent(in) :: cfg
+    character(len=*), intent(in) :: section, key
+    real(C_DOUBLE), intent(inout) :: target(:)
+    logical, intent(out) :: found
+
+    integer :: stat, ntok
+    real(C_DOUBLE) :: single
+    character(len=256) :: value
+
+    stat = 0
+
+    call lookup_value(cfg, section, key, value, found)
+    if (.not. found) return
+    if (size(target) == 0) return
+
+    ntok = count_tokens(value)
+    if (ntok == 1) then
+      read (value, *, iostat=stat) single
+      if (stat == 0) target = single
+    else if (ntok == size(target)) then
+      read (value, *, iostat=stat) target
+    else
+      call wrong_count(section, key, ntok, size(target))
+    end if
+    if (stat /= 0) then
+      print *, "error: could not parse real value(s) for", trim(section)//"."//trim(key)
+      error stop "invalid real value"
+    end if
+  end subroutine get_real_vector_or_scalar
+
+  subroutine require_real_vector_or_scalar(cfg, section, key, target)
+    type(ini_config), intent(in) :: cfg
+    character(len=*), intent(in) :: section, key
+    real(C_DOUBLE), intent(out) :: target(:)
+
+    logical :: found
+
+    call get_real_vector_or_scalar(cfg, section, key, target, found)
+    if (.not. found) call missing_key(section, key)
+  end subroutine require_real_vector_or_scalar
+
+  ! The same rule for words.  Split by hand rather than by list-directed read:
+  ! an unquoted character sequence is not portable list-directed input, and a
+  ! deck should not have to quote `neumann`.
+  subroutine get_string_vector_or_scalar(cfg, section, key, target, found)
+    type(ini_config), intent(in) :: cfg
+    character(len=*), intent(in) :: section, key
+    character(len=*), intent(inout) :: target(:)
+    logical, intent(out) :: found
+
+    integer :: ntok, itok, pos, first, last
+    character(len=256) :: value
+
+    call lookup_value(cfg, section, key, value, found)
+    if (.not. found) return
+    if (size(target) == 0) return
+
+    ntok = count_tokens(value)
+    if (ntok /= 1 .and. ntok /= size(target)) call wrong_count(section, key, ntok, size(target))
+
+    pos = 0
+    do itok = 1, ntok
+      call next_token(value, pos, first, last)
+      pos = last
+      if (ntok == 1) then
+        target = value(first:last)
+      else
+        target(itok) = value(first:last)
+      end if
+    end do
+  end subroutine get_string_vector_or_scalar
+
+  subroutine require_string_vector_or_scalar(cfg, section, key, target)
+    type(ini_config), intent(in) :: cfg
+    character(len=*), intent(in) :: section, key
+    character(len=*), intent(out) :: target(:)
+
+    logical :: found
+
+    call get_string_vector_or_scalar(cfg, section, key, target, found)
+    if (.not. found) call missing_key(section, key)
+  end subroutine require_string_vector_or_scalar
 
   subroutine get_integer(cfg, section, key, target, found)
     type(ini_config), intent(in) :: cfg
@@ -343,6 +435,62 @@ contains
 
     out = tmp(:min(len(out), n))
   end subroutine clean_string
+
+  ! Blank- and comma-separated groups, which is how the decks write lists.
+  integer function count_tokens(text)
+    character(len=*), intent(in) :: text
+
+    integer :: pos, first, last
+
+    count_tokens = 0
+    pos = 0
+    do
+      call next_token(text, pos, first, last)
+      if (first == 0) return
+      pos = last
+      count_tokens = count_tokens + 1
+    end do
+  end function count_tokens
+
+  ! The first token of text starting after position `from`; first = 0 if there
+  ! is none.  Separators are blanks, tabs and commas.
+  subroutine next_token(text, from, first, last)
+    character(len=*), intent(in) :: text
+    integer, intent(in) :: from
+    integer, intent(out) :: first, last
+
+    integer :: i, n
+
+    n = len_trim(text)
+    first = 0; last = from
+    i = from + 1
+    do while (i <= n)
+      if (.not. is_separator(text(i:i))) exit
+      i = i + 1
+    end do
+    if (i > n) return
+    first = i
+    do while (i <= n)
+      if (is_separator(text(i:i))) exit
+      i = i + 1
+    end do
+    last = i - 1
+  end subroutine next_token
+
+  logical function is_separator(ch)
+    character, intent(in) :: ch
+
+    is_separator = (ch == " " .or. ch == "," .or. ch == achar(9))
+  end function is_separator
+
+  subroutine wrong_count(section, key, got, expected)
+    character(len=*), intent(in) :: section, key
+    integer, intent(in) :: got, expected
+
+    print *, "error: ", trim(section)//"."//trim(key), " has", got, &
+      "values; expected 1 or", expected
+    error stop "wrong number of config values"
+  end subroutine wrong_count
 
   subroutine missing_key(section, key)
     character(len=*), intent(in) :: section, key
