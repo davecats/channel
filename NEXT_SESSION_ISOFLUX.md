@@ -55,6 +55,12 @@ that, these are now measured facts rather than expectations:
   closed.
 - **Both conditions in one run work**, at the same Prandtl number over the same
   velocity field.
+- **`Runtimedata.phi` carries the settling monitors**: the mean wall value and
+  the wall temperature variance, per scalar, per wall, every step. The variance
+  is the one to read — it starts at exactly zero on a restart from an isothermal
+  field and has to grow to a plateau. The gradient, bulk and `corrtx` columns are
+  all pinned by the condition and say nothing about settling; §9 of the plan
+  tabulates which signal does what, and why `corrtx` in particular is a trap.
 - **`CHANNEL_PHI_NEUMANN` is gone.** Configuring with it is a FATAL_ERROR that
   names the deck keys. Do not look for it.
 

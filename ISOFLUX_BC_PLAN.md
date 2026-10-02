@@ -479,6 +479,7 @@ them and the default build is bit-identical to its parent.
 | `Test the scalar wall closure against an exact quartic, both conditions` | Stage 1: `scalar_wall_closure`, 8 cases, round-off assertions |
 | `Choose the scalar wall condition per scalar, in the deck` | Stage 2: `[scalars] bc`, per scalar; `CHANNEL_PHI_NEUMANN` retired; `scalar_isoflux_balance` |
 | `Write the mean scalar wall value to Runtimedata.phi` | Stage 3 |
+| `Write the wall temperature variance to Runtimedata.phi` | Stage 3, second half: the H2 signature itself, and the settling monitor the campaign needs |
 | `Refuse a restart file with the wrong number of scalars, and convert one` | Stage 4: the size check and `postpro/add_restart_scalars.py` |
 
 ### What the verification actually established
@@ -506,6 +507,37 @@ them and the default build is bit-identical to its parent.
   still generates its two GPU kernels, so the per-scalar `t0s(iPhi)` inside the
   target region is fine. The GPU suite has **not** been run — this box is a
   login node with no GPU — so gate leg 2 is outstanding.
+- **The wall temperature variance is right to 12 digits** against an independent
+  numpy mode sum over the restart a run wrote, which is what checks the Parseval
+  weights (kx > 0 counting twice), the mean-mode exclusion, the y indices and the
+  reduction across ranks. It is exactly zero for every Dirichlet scalar at every
+  step, and grows from exactly zero for every Neumann one.
+
+### How to tell an isoflux run has settled
+
+Worth writing down, because three of the obvious candidates are useless and the
+reason is structural rather than numerical.
+
+Under Neumann the wall gradient is the imposed constant; `INT(phi) dy` is pinned
+by `meantb`; and `corrtx` is fixed by the wall flux alone — the isothermal
+campaign measured it at `2*alpha*g_i` to four figures (2.1445e-2 against
+2.1444e-2, 7.6812e-3 against 7.6792e-3, 5.1734e-3 against 5.1701e-3), with a
+0.6–0.9% scatter that is turbulence and not drift. Since `g` is exact under
+Neumann, `corrtx` is pinned from the first step whatever the field is doing.
+
+What is left, and what the two Stage 3 commits add:
+
+| signal | starts at | settles to | why it works |
+|---|---|---|---|
+| `<phi>` at the wall | the isothermal profile's value | a nearby plateau | the only free mean quantity, but a *small* transient when `g_i` comes from the isothermal run |
+| `<phi'^2>` at the wall | **exactly zero** | a plateau | a Dirichlet row holds every mode but the mean at zero, so an isoflux run restarted from an isothermal field has to build the wall fluctuation from nothing. Large signal, known initial condition, obvious stopping test — and it *is* the H2 signature |
+| mean profile shape | the isothermal profile | a nearby profile | not in any per-step column; `postpro/scalar_mean_profiles.py` reads it from the snapshots, 503 complex numbers out of each 50 GB file. Its drift floor on the converged isothermal campaign is **1e-4 per time unit**, which is the number to fall to |
+
+At Pr = 0.025 both the mean and the variance are slow: the diffusive time across
+the half-channel is `h^2/alpha = 500` time units, and at low Prandtl number the
+fluctuation field carries real energy at large scales, which relax on the same
+clock. So the variance is not a purely fast near-wall quantity there, which is
+what makes it worth having rather than redundant.
 
 ### The g_i to use, measured
 
