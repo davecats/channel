@@ -1,5 +1,10 @@
 # Prompt for the next session
 
+> **There is a second, independent workstream:** the local constant wall
+> heat flux (H2) boundary condition for the passive scalars. Its handoff is
+> `NEXT_SESSION_ISOFLUX.md` and its plan is `ISOFLUX_BC_PLAN.md`. The two
+> are unrelated; do not mix them in one commit.
+
 > **Note (Aug 4 2026): the source tree was reorganised after most of this file
 > was written.** `src/core/` no longer exists; sources now live under
 > `src/physics/`, `src/numerics/`, `src/io/`, `src/run/` and `src/util/`, and
