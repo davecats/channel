@@ -62,7 +62,11 @@ contains
     etanp1bc = der(ny - 1, 3, :)
     phinbc = d04n; phinp1bc = der(ny - 1, 3, :) ! Dirichlet
 #ifdef phiNeumann
-    phinbc = d14n; phinp1bc = d04n
+    ! Neumann.  phinp1bc stays der(ny-1, 3, :) -- the compact fourth-derivative
+    ! relation at iy = ny-1, which is BC-independent and mirrors the bottom
+    ! wall.  It must not be overridden with d04n: that row carries a zero
+    ! coefficient on the ghost node ny+1, and the wall closure divides by it.
+    phinbc = d14n
 #endif
     !$omp target enter data map(to: v0bc, v0m1bc, vnbc, vnp1bc, eta0bc, eta0m1bc, etanbc, etanp1bc, phinbc, phi0bc, phi0m1bc, phinp1bc)
 
