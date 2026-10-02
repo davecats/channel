@@ -2,8 +2,8 @@
 """Checks the isoflux scalar wall condition in a whole run, next to an isothermal one.
 
 One run, two scalars at the same Prandtl number over the same velocity field,
-`bc = dirichlet neumann`.  Three properties, each of which the unit test on the
-line solver cannot see:
+`bc = dirichlet neumann`.  Four properties, none of which the unit test on the
+line solver can see:
 
   1. the Neumann scalar's wall gradient is the value the deck asked for, at
      every step and at both walls, to round-off -- the condition is enforced on
@@ -12,10 +12,17 @@ line solver cannot see:
      scalars really took different rows in the same run
   3. the global balance closes: d/dt INT(phi) dy = alpha*(phi'(2) - phi'(0)),
      which is what says the imposed flux is the only flux
+  4. the wall temperature variance is identically zero for the isothermal scalar
+     and grows from zero for the isoflux one -- the H2 signature itself, and the
+     one thing a wall condition cannot fake
 
 Property 3 is the one that catches a wall condition that is enforced but wrong,
 e.g. a sign or a factor in the row.  It is checked to 1%, which is the spatial
 and temporal truncation error of the deck below; refining either tightens it.
+Property 4 is the physics the whole exercise is for, and it is a clean assertion
+rather than a tolerance: the start field is uniform in x and z, so both scalars
+begin with a wall variance of exactly zero, and only the isoflux one can grow
+one.
 
 `meantb = 0`: the bulk-pinning correction would add to INT(phi) deliberately,
 and property 3 is about what the wall does.
@@ -96,9 +103,10 @@ def run(channel, mpiexec):
             raise SystemExit("no Runtimedata.phi written")
         with open(path) as fh:
             rows = [[float(w) for w in line.split()] for line in fh if line.strip()]
-        # Columns: time | dphi/dy lower (nPhi) | upper (nPhi) | bulk (nPhi) |
-        # corrtx (nPhi).  The first row is the start field, written before the
-        # first solve, so its scalar still carries the initial profile's gradient.
+        # Columns, nPhi each: time | dphi/dy at y0 | at yN | INT(phi) dy |
+        # corrtx | <phi> at y0 | <phi> at yN | <phi'^2> at y0 | <phi'^2> at yN.
+        # The first row is the start field, written before the first solve, so its
+        # scalar still carries the initial profile's gradient.
         if len(rows) < 3:
             raise SystemExit(f"Runtimedata.phi has only {len(rows)} rows")
         return rows[1:]
@@ -117,6 +125,8 @@ def main():
     dirichlet_g0, neumann_g0 = [r[1] for r in rows], [r[2] for r in rows]
     dirichlet_gN, neumann_gN = [r[3] for r in rows], [r[4] for r in rows]
     neumann_bulk = [r[6] for r in rows]
+    dirichlet_var = [max(abs(r[13]), abs(r[15])) for r in rows]
+    neumann_var = [min(r[14], r[16]) for r in rows]
 
     failures = []
 
@@ -132,6 +142,17 @@ def main():
         failures.append(f"Dirichlet scalar: wall gradient varies by only {spread:.3e} over the run "
                         "(both scalars appear to be taking the same rows)")
 
+    if max(dirichlet_var) != 0.0:
+        failures.append(f"Dirichlet scalar: wall variance reaches {max(dirichlet_var):.3e}, "
+                        "but a value row holds every mode but the mean at zero, so it must be "
+                        "exactly 0")
+
+    # The start field is uniform in x and z, so both scalars begin with no wall
+    # fluctuation at all; only the isoflux one can grow one.
+    if not neumann_var[-1] > 10.0 * max(neumann_var[0], 1.0e-300):
+        failures.append(f"Neumann scalar: wall variance went {neumann_var[0]:.3e} -> "
+                        f"{neumann_var[-1]:.3e}, i.e. the wall temperature is not fluctuating")
+
     measured = (neumann_bulk[-1] - neumann_bulk[0]) / (time[-1] - time[0])
     expected = ALPHA * (-G - G)
     if not abs(measured - expected) <= 0.01 * abs(expected):
@@ -144,7 +165,8 @@ def main():
         raise SystemExit(1)
     print(f"scalar isoflux: wall gradient held to {worst:.2e}, "
           f"global balance closes to {abs(measured / expected - 1.0):.2%}, "
-          f"isothermal scalar's gradient free over {spread:.2e}")
+          f"isothermal scalar's gradient free over {spread:.2e}, "
+          f"wall variance 0 vs {neumann_var[-1]:.2e}")
 
 
 if __name__ == "__main__":

@@ -23,6 +23,46 @@ module runtime_diagnostics
 
 contains
 
+  ! Plane variance of one component on one wall plane: <phi'^2>_{x,z} there.
+  !
+  ! Identically zero under a Dirichlet wall -- every mode but the mean is held at
+  ! zero -- and the headline H2 quantity under a Neumann one, where the wall
+  ! temperature fluctuates.  It is also the cleanest settling signal an isoflux
+  ! run has: a run started from an isothermal field begins at *exactly* zero and
+  ! has to build the wall fluctuation up to a plateau, so unlike the mean profile
+  ! (which starts near equilibrium when g is chosen from the isothermal run)
+  ! there is no ambiguity between a residual transient and sampling noise.
+  !
+  ! Parseval, in the solver's own convention: the stored (0,0) coefficient is the
+  ! plane average -- outstats and yintegr use it as such -- so the coefficients
+  ! are the amplitudes of exp(i(alpha*x + beta*z)) and the plane variance is the
+  ! sum of their squared moduli over every mode but that one.  Only kx >= 0 is
+  ! stored, so a mode with kx > 0 counts twice, once for its conjugate at -kx;
+  ! the kx = 0 row holds both signs of kz explicitly and counts once.
+  real(C_DOUBLE) function wall_plane_variance(component, iy)
+    IMPLICIT NONE
+    integer(C_INT), intent(in) :: component, iy
+    real(C_DOUBLE) :: acc
+    integer(C_INT) :: ix, iz, weight
+
+    acc = 0.0d0
+    !$omp target teams distribute parallel do collapse(2) reduction(+: acc) &
+    !$omp shared(V, nx0, nxN, nz, component, iy) private(ix, iz, weight)
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        if (ix == 0 .and. iz == 0) then
+          weight = 0                      ! the mean mode is not a fluctuation
+        else if (ix == 0) then
+          weight = 1
+        else
+          weight = 2
+        end if
+        acc = acc + weight*(dreal(V(iy, iz, ix, component))**2 + dimag(V(iy, iz, ix, component))**2)
+      end do
+    end do
+    wall_plane_variance = acc
+  end function wall_plane_variance
+
   SUBROUTINE outstats()
     IMPLICIT NONE
     real(C_DOUBLE) :: runtime_global, dudy(1:2 + nPhi, 1:2)   !cfl
@@ -32,6 +72,10 @@ contains
     ! the quantity that moves, and that gives Nu and the wall-to-bulk
     ! difference.  So both are written, whatever the condition.
     real(C_DOUBLE) :: phi_wall(1:nPhi, 1:2)
+    ! Plane variance of the wall temperature, (iPhi, lower/upper).  Zero under
+    ! Dirichlet by construction; under Neumann it is the H2 signature and the
+    ! settling monitor -- see wall_plane_variance above.
+    real(C_DOUBLE) :: phi_wall_var(1:nPhi, 1:2)
     character(len=40) :: istring, filename
     integer :: iPhi
     complex(C_DOUBLE_COMPLEX) :: mean_line_u(-1:ny + 1), mean_line_w(-1:ny + 1), mean_line_scalar(-1:ny + 1)
@@ -63,6 +107,19 @@ contains
       dudy(1, 1) = ${at_lower_wall_real('d140', 'mean_line_u')}$
       dudy(2, 1) = ${at_lower_wall_real('d140', 'mean_line_w')}$
     END IF
+    ! The wall planes live on the ranks owning the first and last interior slab
+    ! (ny0 == 1, nyN == ny-1), and are spread over every rank in xz, so every
+    ! rank contributes its own modes or nothing and one reduction collects them.
+    phi_wall_var = 0.0d0
+    DO iPhi = 1, nPhi
+      IF (ny0 == 1) phi_wall_var(iPhi, 1) = wall_plane_variance(3 + iPhi, 0)
+      IF (nyN == ny - 1) phi_wall_var(iPhi, 2) = wall_plane_variance(3 + iPhi, ny)
+    END DO
+    IF (nPhi > 0) THEN
+      call roctxPush("MPI_Allreduce outstats_wall_var")
+      CALL MPI_Allreduce(MPI_IN_PLACE, phi_wall_var, 2*nPhi, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, ierr)
+      call roctxPop("MPI_Allreduce outstats_wall_var")
+    END IF
     IF (has_terminal) THEN
       !$omp target update from(fr)
       WRITE (*, "(F10.4,3X,4(F11.6,3X),4(F9.4,3X),2(F9.6,3X))") &
@@ -71,10 +128,11 @@ contains
       ! Runtimedata.phi, nPhi columns per group:
       !   time | dphi/dy at y0 | dphi/dy at yN | INT(phi) dy | corrtx + meantx
       !        | <phi> at y0   | <phi> at yN
-      ! The two wall-value groups are appended rather than inserted, so a
-      ! reader written against the older file keeps working.
+      !        | <phi'^2> at y0 | <phi'^2> at yN
+      ! Groups are appended rather than inserted, so a reader written against an
+      ! older file keeps working.
       WRITE (195, *) time, dudy(3:, 1), dudy(3:, 2), fr(4:3 + nPhi) + corrtx(:)*fr(3 + nPhi + 1:3 + 2*nPhi), &
-        corrtx + meantx, phi_wall(:, 1), phi_wall(:, 2)
+        corrtx + meantx, phi_wall(:, 1), phi_wall(:, 2), phi_wall_var(:, 1), phi_wall_var(:, 2)
       FLUSH (121); FLUSH (195)
     END IF
     runtime_global = 0
