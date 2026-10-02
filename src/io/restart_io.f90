@@ -7,6 +7,11 @@
 ! an MPI-IO subarray view.  The reader validates the header against the current
 ! configuration and stops on a mismatch.
 !
+! The header does not record nPhi; the file's size does, since the components
+! are whole (ny+3, 2nz+1, nx+1) blocks one after another.  The reader checks
+! that too, because the view it builds is sized from the deck's nPhi and would
+! otherwise read past the end of a file with fewer scalars and say nothing.
+!
 ! Everything the header needs beyond the grid (ni, time) is passed in rather
 ! than read from the DNS state module, so that this module sits below it and
 ! the dependency runs one way.
@@ -39,18 +44,15 @@ contains
     integer(C_INT) :: r_nx, r_ny, r_nz
     real(C_DOUBLE) :: r_alfa0, r_beta0, r_ni, r_a, r_ymin, r_ymax
     INTEGER(MPI_OFFSET_KIND) :: disp = 3*C_INT + 7*C_DOUBLE
+    integer(C_SIZE_T) :: file_size, component_bytes, payload_bytes
     TYPE(MPI_File) :: fh
 
     OPEN (UNIT=120, FILE=TRIM(filename), access="stream", status="old", action="read", iostat=io)
     IF (io == 0) THEN
       if (has_terminal) print *, "Reading from file "//filename
       READ (120, POS=1) r_nx, r_ny, r_nz, r_alfa0, r_beta0, r_ni, r_a, r_ymin, r_ymax, time
-      call MPI_file_open(MPI_COMM_WORLD, TRIM(filename), MPI_MODE_RDONLY, MPI_INFO_NULL, fh)
-      call MPI_file_set_view(fh, disp, MPI_DOUBLE_COMPLEX, vel_read_type, 'native', MPI_INFO_NULL)
-      call roctxPush("MPI_File_read_all restart")
-      call MPI_file_read_all(fh, R, 1, vel_field_type, MPI_STATUS_IGNORE)
-      call roctxPop("MPI_File_read_all restart")
-      call MPI_file_close(fh)
+      ! Checked before the read, not after it: there is no point moving tens of
+      ! gigabytes to then report that the mesh is wrong.
       IF (r_nx /= nx .OR. r_ny /= ny .OR. r_nz /= nz .OR. r_alfa0 /= alfa0 .OR. r_beta0 /= beta0 .OR. r_ni /= ni .OR. r_a /= a .OR. r_ymin /= ymin .OR. r_ymax /= ymax) THEN
         IF (has_terminal) THEN
           PRINT *, "ERROR: mismatch in metadata between restart file and dns.in. Stopping."
@@ -61,6 +63,35 @@ contains
         END IF
         STOP
       END IF
+      ! The header records the mesh but not nPhi, while the MPI-IO view below is
+      ! built for 3 + nPhi components.  Raise nPhi against an older file and the
+      ! read runs past the end of it with no diagnostic whatever -- the extra
+      ! scalars come back as zeros, or as whatever MPI felt like, and the run
+      ! continues.  The size is what the file does record about its component
+      ! count, so check it: each component is a whole (ny+3, 2nz+1, nx+1) block.
+      INQUIRE (UNIT=120, SIZE=file_size)
+      component_bytes = int(ny + 3, C_SIZE_T)*int(2*nz + 1, C_SIZE_T)*int(nx + 1, C_SIZE_T)*2_C_SIZE_T*int(C_DOUBLE, C_SIZE_T)
+      payload_bytes = file_size - int(disp, C_SIZE_T)
+      IF (file_size < 0 .OR. payload_bytes /= int(3 + nPhi, C_SIZE_T)*component_bytes) THEN
+        IF (has_terminal) THEN
+          PRINT *, "ERROR: restart file "//TRIM(filename)//" holds the wrong number of components."
+          PRINT *, "   dns.in asks for 3 + nPhi =", 3 + nPhi
+          IF (file_size >= 0 .AND. payload_bytes > 0 .AND. MOD(payload_bytes, component_bytes) == 0) THEN
+            PRINT *, "   the file holds             ", payload_bytes/component_bytes
+            PRINT *, "   i.e. nPhi =", payload_bytes/component_bytes - 3
+            PRINT *, "   postpro/add_restart_scalars.py appends copies of the scalars it has."
+          ELSE
+            PRINT *, "   its size,", file_size, "bytes, is not a whole number of components of", component_bytes
+          END IF
+        END IF
+        STOP
+      END IF
+      call MPI_file_open(MPI_COMM_WORLD, TRIM(filename), MPI_MODE_RDONLY, MPI_INFO_NULL, fh)
+      call MPI_file_set_view(fh, disp, MPI_DOUBLE_COMPLEX, vel_read_type, 'native', MPI_INFO_NULL)
+      call roctxPush("MPI_File_read_all restart")
+      call MPI_file_read_all(fh, R, 1, vel_field_type, MPI_STATUS_IGNORE)
+      call roctxPop("MPI_File_read_all restart")
+      call MPI_file_close(fh)
     ELSE
       IF (has_terminal) PRINT *, "Restart file "//filename//" not found"
       ! What that field is is a physics choice, and lives in physics/.

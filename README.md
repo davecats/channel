@@ -367,6 +367,21 @@ Restart files are binary stream files containing a small metadata header followe
 the complex spectral field. The metadata must match `dns.in`; the code stops on
 mismatch.
 
+The header records the mesh but **not** `nPhi`, so the reader checks the file's
+size instead: the components are whole `(ny+3, 2*nz+1, nx+1)` blocks, and the
+size says how many of them there are. Raising `nPhi` against an older file used
+to read past the end of it silently. To grow (or shrink, or reorder) the scalars
+of an existing restart without touching the mesh:
+
+```bash
+postpro/add_restart_scalars.py Dati.cart.out Dati.cart.6phi.out --scalars 1 2 3 1 2 3
+```
+
+which here gives six scalars, the new three starting from copies of the old
+three — near equilibrium rather than from a profile that has to relax. `0` in
+place of an index gives a zero-filled scalar. Use `postpro/interpolate_restart.py`
+instead when the mesh changes.
+
 ## Post-Processing Executables
 
 `post_pressure` scans the current directory for `Dati.cart.*.out`, computes pressure
