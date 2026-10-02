@@ -249,6 +249,9 @@ target_link_libraries(test_mean_correction PRIVATE channel_core)
 add_executable(test_mpi_autotune_candidates ${CHANNEL_SOURCE_DIR}/test/test_mpi_autotune_candidates.f90)
 target_link_libraries(test_mpi_autotune_candidates PRIVATE channel_core)
 
+add_executable(test_scalar_neumann ${CHANNEL_SOURCE_DIR}/test/test_scalar_neumann.f90)
+target_link_libraries(test_scalar_neumann PRIVATE channel_core)
+
 # Add a CTest target
 enable_testing()
 include(cmake/tests.cmake)

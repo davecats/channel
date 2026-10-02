@@ -283,6 +283,26 @@ add_channel_mpi_test(
     ENVIRONMENT CHANNEL_NPY=2
 )
 
+# Solves one wall-normal scalar line against an exact quartic, with the value
+# rows and with the gradient rows, at both k = 0 and k /= 0 and at both a mild
+# and the production lambda.  Independent of -DCHANNEL_PHI_NEUMANN: it builds
+# both row sets itself, and separately checks that the rows the build assembles
+# are the ones it pins.
+add_channel_mpi_test(
+    NAME scalar_wall_closure_1rank
+    TARGET test_scalar_neumann
+    NPROCS 1
+    PROCESSORS 1
+)
+
+add_channel_mpi_test(
+    NAME scalar_wall_closure_npy2_2rank
+    TARGET test_scalar_neumann
+    NPROCS 2
+    PROCESSORS 2
+    ENVIRONMENT CHANNEL_NPY=2
+)
+
 add_test(NAME mpi_autotune_candidate_generation
     COMMAND $<TARGET_FILE:test_mpi_autotune_candidates>
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
