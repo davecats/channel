@@ -27,7 +27,6 @@ towards the level set by turbulent sampling noise; that is the run settling.
 from __future__ import annotations
 
 import argparse
-import re
 from pathlib import Path
 
 import numpy as np
@@ -138,6 +137,11 @@ def main() -> None:
         header += f" | {'<phi>_w0':>10} {'<phi>_wN':>10} {'INT phi':>9} {'g0':>9} {'|drift|':>9}"
     print(header)
 
+    if args.csv:
+        with args.csv.open("w") as fh:
+            fh.write(",".join(["time", "dt"] + [f"{name}_{i + 1}" for i in range(nphi)
+                                                for name in ("w0", "wN", "int", "g0", "drift")]) + "\n")
+
     prev = None
     for h, profiles, path in rows:
         ny = h["ny"]
@@ -157,11 +161,10 @@ def main() -> None:
             line += f" | {w0:10.5f} {wn:10.5f} {bulk:9.5f} {g0:9.4f} {drift:9.2e}"
             csv_row += [w0, wn, bulk, g0, drift]
         print(line)
-        rows_csv = csv_row
         prev = (h, profiles)
         if args.csv:
             with args.csv.open("a") as fh:
-                fh.write(",".join(f"{v:.10e}" for v in rows_csv) + "\n")
+                fh.write(",".join(f"{v:.10e}" for v in csv_row) + "\n")
 
     print("\n|drift| is max|d<phi>/dt| over the profile, divided by the wall-to-bulk")
     print("difference -- an inverse time.  It falling towards a floor is the run settling;")
