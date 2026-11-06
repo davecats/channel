@@ -87,6 +87,17 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
     end if
 
     call omp_set_default_device(dev)
+#ifdef HAVE_HIP
+    ! hipSPARSE/hipFFT/RCCL follow the HIP current device, not the OpenMP default.
+    block
+      use hipfort, only: hipSetDevice
+      use hipfort_enums, only: hipSuccess
+      if (hipSetDevice(dev) /= hipSuccess) then
+        print *, "ERROR: rank", iproc, "hipSetDevice failed for device", dev
+        call MPI_Abort(MPI_COMM_WORLD, 1, ierr)
+      end if
+    end block
+#endif
 
     print *, 'Rank', iproc, 'of', nproc, 'local rank', local_rank, 'using device', dev, 'out of', num_dev
 
