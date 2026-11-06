@@ -1208,9 +1208,10 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       ! the interior block lands on the band of the same offset; one outside it
       ! only matters to a response system, as the rhs of the exposed interface
       ! unknown it responds to (the last matching column wins, as before).
-      ! Written with scalars and no private array or select case so the offload
-      ! compiler keeps the row in registers: the array form spilled to scratch
-      ! and made this pack loop the most expensive kernel of the y-solve.
+      ! Written with scalars: amdflang heap-allocated the old array-constructor
+      ! row per thread (malloc/free in every iteration), which made this pack
+      ! loop the most expensive kernel of the y-solve; see
+      ! tools/amdflang_bugs/private_array_scratch.
       !$omp target teams distribute parallel do collapse(2) default(none) &
       !$omp shared(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, &
       !$omp& ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x, &
@@ -1344,8 +1345,13 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
           if (.not. has_left_interface) slot = iface + 2
           local_idx = merge(slot - 1, active_n + slot - 5, slot <= 2)
           actual_p = int(local_idx, C_INT64_T)*int(nlines, C_INT64_T) + int(iline, C_INT64_T)
-          row_coeffs = (/ys_gpsv_ds(actual_p), ys_gpsv_dl(actual_p), ys_gpsv_d(actual_p), &
-                         ys_gpsv_du(actual_p), ys_gpsv_dw(actual_p)/)
+          ! Element-wise: amdflang heap-allocates an array-constructor temporary per
+          ! thread inside target regions (tools/amdflang_bugs/private_array_scratch).
+          row_coeffs(-2) = ys_gpsv_ds(actual_p)
+          row_coeffs(-1) = ys_gpsv_dl(actual_p)
+          row_coeffs(0) = ys_gpsv_d(actual_p)
+          row_coeffs(1) = ys_gpsv_du(actual_p)
+          row_coeffs(2) = ys_gpsv_dw(actual_p)
           rhs4(iface, 1) = ys_gpsv_x(actual_p)
 
           do col = -2, 2

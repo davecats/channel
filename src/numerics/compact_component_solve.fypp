@@ -436,9 +436,12 @@ contains
     ctx%has_lower_boundary = has_lower_boundary
     ctx%has_upper_boundary = has_upper_boundary
     if (present(derivative_order)) ctx%derivative_order = derivative_order
+    ! Only the Schur solver needs its reduction levels.  Building them for the
+    ! pipelined solver too stopped runs whose line count does not divide by
+    ! npy (e.g. 512*509 lines on npy=3), a split the autotuner never offers Schur.
     call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, nxB*(2*nz + 1), &
                                         schur_pass_counts, schur_exchange_mode, &
-                                        prepare_schur=.true.)
+                                        prepare_schur=(ys_selected_solver == Y_SOLVER_SCHUR))
     ! Only now are the solver's views bound, so point the context at them here
     ! rather than in the caller.  This is the whole of what a callback needs to
     ! know about where its results go.
