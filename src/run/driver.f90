@@ -273,20 +273,22 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
     USE case_setup
     USE channel_transforms, only: transform_to_physical, transform_back_and_build_rhs, compute_cfl
     USE convvelo, only: advance_convvelo_runtime
+    USE mpi_f08, only: MPI_Wtime
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
     USE ffts, only: acquire_fft_workspace, release_fft_workspace
 #endif
     IMPLICIT NONE
     integer:: iPhi, i
 #ifdef chron
-    REAL timei, timee, elapsed_run_time
+    ! Wall time: CPU_TIME stops while the host waits on the GPU.
+    DOUBLE PRECISION timei, timee, elapsed_run_time
 
-    elapsed_run_time = 0.0
+    elapsed_run_time = 0.0d0
 #endif
 
     DO WHILE ((time < t_max - deltat/2.0) .AND. (istep < nstep))
 #ifdef chron
-      CALL CPU_TIME(timei)
+      timei = MPI_Wtime()
 #endif
       call roctxPush("timestep")
       CALL apply_wall_values()
@@ -346,7 +348,7 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
       call roctxPop("outstats")
 
 #ifdef chron
-      CALL CPU_TIME(timee)
+      timee = MPI_Wtime()
       elapsed_run_time = elapsed_run_time + (timee - timei)
       if (has_terminal) then
         write (*, '(A,I0,A,I0,A,F12.6,A,F12.6)') "STEP ", istep, "/", nstep, " TIME PER TIMESTEP ", timee - timei, &
