@@ -34,79 +34,85 @@ program test_convvelo_direct
   integer(C_INT) :: ic, ix, iy, iz, it, output_index, nfail
   real(C_DOUBLE) :: t_level(3)
 
-  t_level = [0.0d0, h1, h1 + h2]
-  ca = -h2/(h1*(h1 + h2))
-  cb = (h2 - h1)/(h1*h2)
-  cc = h1/(h2*(h1 + h2))
+  ! Run from a contained procedure: CCE zeroes constant array constructors in the
+  ! main program itself, see tools/cray_bugs/main-program-array-constructor.
+  call run()
 
-  nfail = 0
-  worst = 0.0d0
+contains
 
-  call initialize(config_file, restart_in)
-  ! configure_convvelo has already run and left this off, since the test deck
-  ! carries no [convvelo] section.  Turn it on before the layout is built.
-  convvelo_direct_enabled = .true.
-  call init_convvelo()
-  call reset_convvelo_stats()
+  subroutine run()
+    t_level = [0.0d0, h1, h1 + h2]
+    ca = -h2/(h1*(h1 + h2))
+    cb = (h2 - h1)/(h1*h2)
+    cc = h1/(h2*(h1 + h2))
 
-  do it = 1, 3
+    nfail = 0
+    worst = 0.0d0
+
+    call initialize(config_file, restart_in)
+    ! configure_convvelo has already run and left this off, since the test deck
+    ! carries no [convvelo] section.  Turn it on before the layout is built.
+    convvelo_direct_enabled = .true.
+    call init_convvelo()
+    call reset_convvelo_stats()
+
+    do it = 1, 3
+      do ic = 1, 3 + nPhi
+        omega = mode_frequency(ic)
+        phase = exp(cmplx(0.0d0, -omega*t_level(it), C_DOUBLE_COMPLEX))
+        do ix = nx0, nxN
+          do iz = -nz, nz
+            do iy = ny0 - 2, nyN + 2
+              V(iy, iz, ix, ic) = amplitude(iy, iz, ix, ic)*phase
+            end do
+          end do
+        end do
+      end do
+      call sync_velocity_to_device()
+      if (it == 1) call save_convvelo_time_level(convvelo_prev1)
+      if (it == 2) call save_convvelo_time_level(convvelo_prev2)
+      if (it == 3) call accumulate_direct_numerator(h1, h2)
+    end do
+
+    allocate (field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
+
     do ic = 1, 3 + nPhi
+      output_index = convvelo_direct_output(ic)
+      if (output_index == 0) then
+        write (*, *) "FAIL: no dt output field for component ", ic
+        nfail = nfail + 1
+        cycle
+      end if
       omega = mode_frequency(ic)
-      phase = exp(cmplx(0.0d0, -omega*t_level(it), C_DOUBLE_COMPLEX))
+      g_response = ca*exp(cmplx(0.0d0, omega*h1, C_DOUBLE_COMPLEX)) + cb + &
+                   cc*exp(cmplx(0.0d0, -omega*h2, C_DOUBLE_COMPLEX))
+      call copy_convvelo_field_average(output_index, field)
       do ix = nx0, nxN
         do iz = -nz, nz
           do iy = ny0 - 2, nyN + 2
-            V(iy, iz, ix, ic) = amplitude(iy, iz, ix, ic)*phase
+            expected = cmplx(0.0d0, abs(amplitude(iy, iz, ix, ic))**2*aimag(g_response), C_DOUBLE_COMPLEX)
+            err = abs(field(iy, iz, ix) - expected)/max(abs(expected), 1.0d0)
+            worst = max(worst, err)
+            if (err > tol) nfail = nfail + 1
           end do
         end do
       end do
     end do
-    call sync_velocity_to_device()
-    if (it == 1) call save_convvelo_time_level(convvelo_prev1)
-    if (it == 2) call save_convvelo_time_level(convvelo_prev2)
-    if (it == 3) call accumulate_direct_numerator(h1, h2)
-  end do
 
-  allocate (field(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN))
-
-  do ic = 1, 3 + nPhi
-    output_index = convvelo_direct_output(ic)
-    if (output_index == 0) then
-      write (*, *) "FAIL: no dt output field for component ", ic
-      nfail = nfail + 1
-      cycle
+    write (*, '(A,ES12.5)') " worst relative error = ", worst
+    if (nfail == 0) then
+      write (*, *) "Convvelo direct estimator PASSED"
+    else
+      write (*, *) "Convvelo direct estimator FAILED, mismatching points = ", nfail
     end if
-    omega = mode_frequency(ic)
-    g_response = ca*exp(cmplx(0.0d0, omega*h1, C_DOUBLE_COMPLEX)) + cb + &
-                 cc*exp(cmplx(0.0d0, -omega*h2, C_DOUBLE_COMPLEX))
-    call copy_convvelo_field_average(output_index, field)
-    do ix = nx0, nxN
-      do iz = -nz, nz
-        do iy = ny0 - 2, nyN + 2
-          expected = cmplx(0.0d0, abs(amplitude(iy, iz, ix, ic))**2*aimag(g_response), C_DOUBLE_COMPLEX)
-          err = abs(field(iy, iz, ix) - expected)/max(abs(expected), 1.0d0)
-          worst = max(worst, err)
-          if (err > tol) nfail = nfail + 1
-        end do
-      end do
-    end do
-  end do
 
-  write (*, '(A,ES12.5)') " worst relative error = ", worst
-  if (nfail == 0) then
-    write (*, *) "Convvelo direct estimator PASSED"
-  else
-    write (*, *) "Convvelo direct estimator FAILED, mismatching points = ", nfail
-  end if
-
-  deallocate (field)
-  call free_pressure_output()
-  call free_convvelo()
-  call free_memory(.true.)
-  call MPI_Finalize()
-  if (nfail /= 0) error stop 1
-
-contains
+    deallocate (field)
+    call free_pressure_output()
+    call free_convvelo()
+    call free_memory(.true.)
+    call MPI_Finalize()
+    if (nfail /= 0) error stop 1
+  end subroutine run
 
   ! Distinct per component so a swapped component shows up as a failure.
   real(C_DOUBLE) function mode_frequency(component)
