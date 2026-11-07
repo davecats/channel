@@ -450,16 +450,25 @@
       implicit none
       complex(C_DOUBLE_COMPLEX), intent(in) :: Vz(1:, 1:, :)
       complex(C_DOUBLE_COMPLEX), intent(out) :: Vx(1:, 1:, :)
-      integer(C_SIZE_T) :: iy, ix, iz
+      integer(C_INT) :: iy, ix, iz, ixb, izb, ixi, izi
       integer(C_INT) :: ny_batch
-
+      ! 4 (z) x 16 (x) tiles per wavefront, z fastest: each instruction reads
+      ! full z-lines of Vz and writes full x-lines of Vx (2x faster than z-only).
+      integer(C_INT), parameter :: TZ = 4, TX = 16
       ny_batch = size(Vz, 3)
-      !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(Vz, Vx) shared(ny_batch, nxB, nzd) private(iy, ix, iz)
+      !$omp target teams distribute parallel do collapse(5) default(none) &
+      !$omp shared(Vz, Vx) shared(ny_batch, nxB, nzd) private(iy, ix, iz, ixb, izb, ixi, izi)
       do iy = 1, ny_batch
-        do ix = 1, nxB
-          do iz = 1, nzd
-            Vx(ix, iz, iy) = Vz(iz, ix, iy)
+        do ixb = 0, (nxB - 1)/TX
+          do izb = 0, (nzd - 1)/TZ
+            do ixi = 0, TX - 1
+              do izi = 0, TZ - 1
+                iz = izb*TZ + izi + 1
+                ix = ixb*TX + ixi + 1
+                if (iz > nzd .or. ix > nxB) cycle
+                Vx(ix, iz, iy) = Vz(iz, ix, iy)
+              end do
+            end do
           end do
         end do
       end do
@@ -470,16 +479,25 @@
       implicit none
       complex(C_DOUBLE_COMPLEX), intent(in) :: Vx(1:, 1:, :)
       complex(C_DOUBLE_COMPLEX), intent(out) :: Vz(1:, 1:, :)
-      integer(C_SIZE_T) :: iy, ix, iz
+      integer(C_INT) :: iy, ix, iz, ixb, izb, ixi, izi
       integer(C_INT) :: ny_batch
-
+      ! 8 x 8 (z, x) tiles per wavefront, x fastest: full x-lines of Vx are read
+      ! and full z-lines of Vz written per instruction (2.5x faster than x-only).
+      integer(C_INT), parameter :: T = 8
       ny_batch = size(Vx, 3)
-      !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp shared(Vx, Vz) shared(ny_batch, nxB, nzd) private(iy, ix, iz)
+      !$omp target teams distribute parallel do collapse(5) default(none) &
+      !$omp shared(Vx, Vz) shared(ny_batch, nxB, nzd) private(iy, ix, iz, ixb, izb, ixi, izi)
       do iy = 1, ny_batch
-        do iz = 1, nzd
-          do ix = 1, nxB
-            Vz(iz, ix, iy) = Vx(ix, iz, iy)
+        do izb = 0, (nzd - 1)/T
+          do ixb = 0, (nxB - 1)/T
+            do izi = 0, T - 1
+              do ixi = 0, T - 1
+                iz = izb*T + izi + 1
+                ix = ixb*T + ixi + 1
+                if (iz > nzd .or. ix > nxB) cycle
+                Vz(iz, ix, iy) = Vx(ix, iz, iy)
+              end do
+            end do
           end do
         end do
       end do

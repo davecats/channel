@@ -162,6 +162,11 @@ contains
     else
       call ys_schur_default_pass_counts(npy_out, passes)
     end if
+    ! On one y rank both solvers reduce to a direct banded solve.  The pipelined
+    ! path does it in place on the assembled system and copies the solution out;
+    ! the Schur path packs and reconstructs around the same solve (~17 ms/step
+    ! more on 251x250x257).  An explicit CHANNEL_Y_SOLVER still wins.
+    if (npy_out == 1_C_INT .and. .not. has_y_solver) ys_selected_solver = Y_SOLVER_PIPELINED_LU
     if (.not. applied) call apply_comm_env_override()
     if (rank == 0 .and. applied) &
       call print_config("MPI autotune selected", npxz_out, npy_out, passes, int(size(passes), C_INT), exchange, &

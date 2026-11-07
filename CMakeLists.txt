@@ -436,8 +436,8 @@ elseif (CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
 elseif (CMAKE_Fortran_COMPILER_ID MATCHES "Cray")
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -e Z -O2 -hfp0 -homp -lrocprofiler-sdk-roctx")
 
-    find_package(hipfort REQUIRED COMPONENTS hip hipfft hipsparse)
-    target_link_libraries(channel_core PRIVATE hipfort::hip hipfort::hipfft hipfort::hipsparse)
+    find_package(hipfort REQUIRED COMPONENTS hip hipfft)
+    target_link_libraries(channel_core PRIVATE hipfort::hip hipfort::hipfft)
     find_path(RCCL_INCLUDE_DIR
         NAMES rccl/rccl.h nccl.h
         HINTS ENV RCCL_HOME ENV ROCM_PATH /opt/rocm
@@ -467,8 +467,8 @@ elseif (CMAKE_Fortran_COMPILER_ID MATCHES "Cray")
 elseif (CMAKE_Fortran_COMPILER_ID MATCHES "LLVMFlang")
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cpp -O2 -fopenmp -fopenmp -fopenmp-targets=amdgcn-amd-amdhsa --offload-arch=gfx942")
 
-    find_package(hipfort REQUIRED COMPONENTS hip hipfft hipsparse)
-    target_link_libraries(channel_core PUBLIC hipfort::hip hipfort::hipfft hipfort::hipsparse)
+    find_package(hipfort REQUIRED COMPONENTS hip hipfft)
+    target_link_libraries(channel_core PUBLIC hipfort::hip hipfort::hipfft)
     find_path(RCCL_INCLUDE_DIR
         NAMES rccl/rccl.h nccl.h
         HINTS ENV RCCL_HOME ENV ROCM_PATH /opt/rocm

@@ -213,14 +213,16 @@ contains
     y_last = nyN
 
     call roctxPush("linsolve recover_u_w")
-    !$omp target teams distribute parallel do collapse(2) default(none) &
+    ! collapse(3) with y innermost: V is y-fastest, so a wavefront walks contiguous
+    ! lines (with collapse(2) each thread walked its own column, 4 KB from the next).
+    !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp shared(ny, y_first, y_last, nz, nx0, nxN) &
     !$omp shared(V, k2, ialfa, ibeta) &
     !$omp private(ix, iz, j, temp)
     DO ix = nx0, nxN
       DO iz = -nz, nz
-        if (ix == 0 .and. iz == 0) cycle
         do j = y_first - 2, y_last + 2
+          if (ix == 0 .and. iz == 0) cycle
           temp = (ialfa(ix)*V(j, iz, ix, 3) - ibeta(iz)*V(j, iz, ix, 1))/k2(iz, ix)
           V(j, iz, ix, 3) = (ibeta(iz)*V(j, iz, ix, 3) + ialfa(ix)*V(j, iz, ix, 1))/k2(iz, ix)
           V(j, iz, ix, 1) = temp
@@ -398,158 +400,128 @@ contains
 
   END SUBROUTINE buildrhs_prepare
 
+#! ===================================================================
+#! buildrhs kernels: every VVdz product is one tiled target region; only the
+#! expressions differ.  Each wavefront covers an 8x8 tile of (iz, iy), iz
+#! fastest: VVdz is z-fastest while V and oldrhs are y-fastest, so with iy
+#! alone fastest every VVdz load hit a different 4 MB-strided line.  A tile
+#! reads 8 full z-lines of VVdz and updates 8 full y-lines of V and oldrhs.
+#! ===================================================================
+#:def tile_zy_open()
+      DO ix = nx0, nxN
+        DO izb = 0, (2*nz)/RHS_TILE
+          DO iyb = 0, (y_last - y_first)/RHS_TILE
+            DO iyi = 0, RHS_TILE - 1
+              DO izi = 0, RHS_TILE - 1
+                iz = -nz + izb*RHS_TILE + izi
+                iy = y_first + iyb*RHS_TILE + iyi
+                IF (iz > nz .OR. iy > y_last) CYCLE
+#:enddef
+#:def tile_zy_close()
+              END DO
+            END DO
+          END DO
+        END DO
+      END DO
+#:enddef
+#! Velocity products: expl feeds the d2v equation; rhsu/rhsw, when given,
+#! feed the eta equation (and the mean flow for ix = iz = 0).  The kernels add
+#! only to oldrhs; buildrhs_finish adds ODE(2) times the sum to V once, which
+#! halves the traffic of each of these kernels (V and oldrhs got the same terms).
+#:def rhs_velocity_kernel(expl, rhsu=None, rhsw=None)
+      !$omp target teams distribute parallel do collapse(5) default(none) &
+      !$omp private(rhsu, rhsw, expl, iz, ix, iy, izb, iyb, izi, iyi) &
+      !$omp shared(nz, nx0, nxN, ny, y_first, y_last, from, ialfa, ibeta, der, V, oldrhs, izd, ode, k2, VVdz)
+$:tile_zy_open()
+                ! All VVdz loads before the first store: VVdz points into the shared
+                ! workspace, so a store to V or oldrhs would force them to be reloaded.
+#:if rhsu is not None
+                rhsu = ${rhsu}$
+                rhsw = ${rhsw}$
+#:endif
+                expl = ${expl}$
+                $:accum_d2v(None, 'expl')
+#:if rhsu is not None
+                $:accum_eta_uw(None, 'rhsu', 'rhsw')
+#:endif
+$:tile_zy_close()
+#:enddef
+#! Scalar products u*phi, v*phi, w*phi for scalar iPhi.
+#:def rhs_scalar_kernel(rhst)
+      !$omp target teams distribute parallel do collapse(5) default(none) &
+      !$omp private(rhst, iz, ix, iy, izb, iyb, izi, iyi) &
+      !$omp shared(nz, nx0, nxN, ny, y_first, y_last, ialfa, ibeta, V, ode, der, oldrhs, iPhi, VVdz, izd, from)
+$:tile_zy_open()
+                rhst = ${rhst}$
+                $:rk_accum(None, 'oldrhs(iy, iz, ix, 2 + iPhi)', 'rhst')
+$:tile_zy_close()
+#:enddef
   SUBROUTINE buildrhs(ODE, component, from)
     IMPLICIT NONE
     real(C_DOUBLE), intent(in) :: ODE(1:3)
     integer(C_INT), intent(in) :: component, from
     integer(C_INT) :: iy, iz, ix, iPhi, y_first, y_last
+    integer(C_INT) :: izb, iyb, izi, iyi
+    integer(C_INT), parameter :: RHS_TILE = 8
     complex(C_DOUBLE_COMPLEX) :: rhsu, rhsw, rhst, expl
     y_first = ny0
     y_last = nyN
 
+    ! component = the VVdz product held in VVdz(:, :, :, from):
+    ! (uu, vv, ww, uv, vw, uw) = (1 .. 6), then (u, v, w)*phi per scalar.
     SELECT CASE (component)
     CASE (1)
-      !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
-      !$omp shared(nz, nx0, nxN, ny, y_first, y_last, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, VVdz)
-      DO iz = -nz, nz
-        DO ix = nx0, nxN
-          DO iy = y_first, y_last
-
-            rhsu = -ialfa(ix)*${apply_d_vvdz(0, 'from')}$; rhsw = 0.0
-            expl = ialfa(ix)*ialfa(ix)*${apply_d_vvdz(1, 'from')}$
-
-            $:accum_d2v('V', 'expl')
-            $:accum_eta_uw('V', 'rhsu', 'rhsw')
-          END DO
-        END DO
-      END DO
+$:rhs_velocity_kernel(expl='ialfa(ix)*ialfa(ix)*' + apply_d_vvdz(1, 'from'), rhsu='-ialfa(ix)*' + apply_d_vvdz(0, 'from'), rhsw='0.0')
     CASE (2)
-      !contribution from VVdz(:,:,:,2)
-      !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
-      !$omp shared(nz, nx0, nxN, ny, y_first, y_last, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2, VVdz)
-      DO iz = -nz, nz
-        DO ix = nx0, nxN
-          DO iy = y_first, y_last
-
-            expl = ${apply_d_vvdz(1, 'from')}$*k2(iz, ix)
-            $:accum_d2v('V', 'expl')
-          END DO
-        END DO
-      END DO
+$:rhs_velocity_kernel(expl=apply_d_vvdz(1, 'from') + '*k2(iz, ix)')
     CASE (3)
-      !contribution from VVdz(:,:,:,3)
-      !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
-      !$omp shared(nz, nx0, nxN, ny, y_first, y_last, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2, VVdz)
-      DO iz = -nz, nz
-        DO ix = nx0, nxN
-          DO iy = y_first, y_last
-            rhsw = -ibeta(iz)*${apply_d_vvdz(0, 'from')}$; rhsu = 0.0
-            expl = ibeta(iz)*ibeta(iz)*${apply_d_vvdz(1, 'from')}$
-
-            $:accum_d2v('V', 'expl')
-            $:accum_eta_uw('V', 'rhsu', 'rhsw')
-          END DO
-        END DO
-      END DO
+$:rhs_velocity_kernel(expl='ibeta(iz)*ibeta(iz)*' + apply_d_vvdz(1, 'from'), rhsu='0.0', rhsw='-ibeta(iz)*' + apply_d_vvdz(0, 'from'))
     CASE (4)
-      !contribution from VVdz(:,:,:,4)
-      !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
-      !$omp shared(nz, nx0, nxN, ny, y_first, y_last, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2, VVdz)
-      DO iz = -nz, nz
-        DO ix = nx0, nxN
-          DO iy = y_first, y_last
-
-            rhsu = -${apply_d_vvdz(1, 'from')}$; rhsw = 0.0
-            expl = ialfa(ix)*${apply_d_vvdz(2, 'from')}$+ialfa(ix)*${apply_d_vvdz(0, 'from')}$*k2(iz, ix)
-
-            $:accum_d2v('V', 'expl')
-            $:accum_eta_uw('V', 'rhsu', 'rhsw')
-          END DO
-        END DO
-      END DO
+$:rhs_velocity_kernel(expl='ialfa(ix)*' + apply_d_vvdz(2, 'from') + '+ialfa(ix)*' + apply_d_vvdz(0, 'from') + '*k2(iz, ix)', rhsu='-' + apply_d_vvdz(1, 'from'), rhsw='0.0')
     CASE (5)
-      !contribution from VVdz(:,:,:,5)
-      !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
-      !$omp shared(nz, nx0, nxN, ny, y_first, y_last, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2, VVdz)
-      DO iz = -nz, nz
-        DO ix = nx0, nxN
-          DO iy = y_first, y_last
-
-            ! contribution from VVdz(:,:,:,5)
-            rhsw = -${apply_d_vvdz(1, 'from')}$; rhsu = 0.0
-            expl = ibeta(iz)*${apply_d_vvdz(2, 'from')}$+ibeta(iz)*${apply_d_vvdz(0, 'from')}$*k2(iz, ix)
-
-            $:accum_d2v('V', 'expl')
-            $:accum_eta_uw('V', 'rhsu', 'rhsw')
-          END DO
-        END DO
-      END DO
+$:rhs_velocity_kernel(expl='ibeta(iz)*' + apply_d_vvdz(2, 'from') + '+ibeta(iz)*' + apply_d_vvdz(0, 'from') + '*k2(iz, ix)', rhsu='0.0', rhsw='-' + apply_d_vvdz(1, 'from'))
     CASE (6)
-      !contribution from VVdz(:,:,:,6)
-      !$omp target teams distribute parallel do collapse(3) default(none) &
-      !$omp private(rhsu, rhsw, expl) private(iz, ix, iy) &
-      !$omp shared(nz, nx0, nxN, ny, y_first, y_last, from) shared(ialfa, ibeta) shared(der) shared(V, oldrhs, izd, ode, k2, VVdz)
-      DO iz = -nz, nz
-        DO ix = nx0, nxN
-          DO iy = y_first, y_last
-
-            rhsu = -ibeta(iz)*${apply_d_vvdz(0, 'from')}$
-            rhsw = -ialfa(ix)*${apply_d_vvdz(0, 'from')}$
-            expl = 2*ialfa(ix)*ibeta(iz)*${apply_d_vvdz(1, 'from')}$
-
-            $:accum_d2v('V', 'expl')
-            $:accum_eta_uw('V', 'rhsu', 'rhsw')
-
-          END DO
-        END DO
-      END DO
+$:rhs_velocity_kernel(expl='2*ialfa(ix)*ibeta(iz)*' + apply_d_vvdz(1, 'from'), rhsu='-ibeta(iz)*' + apply_d_vvdz(0, 'from'), rhsw='-ialfa(ix)*' + apply_d_vvdz(0, 'from'))
     CASE DEFAULT
       iPhi = (component - 4)/3
       SELECT CASE (MODULO((component - 4), 3) + 1)
       CASE (1)
-        !$omp target teams distribute parallel do collapse(3) default(none) &
-        !$omp private(rhst, iz, ix, iy) &
-        !$omp shared(nz, nx0, nxN, ny, y_first, y_last, ialfa, V, ode, der, oldrhs, iphi, VVdz, izd, from)
-        DO iz = -nz, nz
-          DO ix = nx0, nxN
-            DO iy = y_first, y_last
-              rhst = -ialfa(ix)*${apply_d_vvdz(0, 'from')}$
-              $:rk_accum('V(iy, iz, ix, 3 + iPhi)', 'oldrhs(iy, iz, ix, 2 + iPhi)', 'rhst')
-            END DO
-          END DO
-        END DO
+$:rhs_scalar_kernel('-ialfa(ix)*' + apply_d_vvdz(0, 'from'))
       CASE (2)
-        !$omp target teams distribute parallel do collapse(3) default(none) &
-        !$omp private(rhst, iz, ix, iy) &
-        !$omp shared(nz, nx0, nxN, ny, y_first, y_last, V, ode, der, oldrhs, iphi, VVdz, izd, from)
-        DO iz = -nz, nz
-          DO ix = nx0, nxN
-            DO iy = y_first, y_last
-
-              rhst = -${apply_d_vvdz(1, 'from')}$
-              $:rk_accum('V(iy, iz, ix, 3 + iPhi)', 'oldrhs(iy, iz, ix, 2 + iPhi)', 'rhst')
-            END DO
-          END DO
-        END DO
+$:rhs_scalar_kernel('-' + apply_d_vvdz(1, 'from'))
       CASE (3)
-        !$omp target teams distribute parallel do collapse(3) default(none) &
-        !$omp private(rhst, iz, ix, iy) &
-        !$omp shared(nz, nx0, nxN, ny, y_first, y_last, ibeta,V, ode, der, oldrhs, iphi, VVdz, izd, from)
-        DO iz = -nz, nz
-          DO ix = nx0, nxN
-            DO iy = y_first, y_last
-              rhst = -ibeta(iz)*${apply_d_vvdz(0, 'from')}$
-              $:rk_accum('V(iy, iz, ix, 3 + iPhi)', 'oldrhs(iy, iz, ix, 2 + iPhi)', 'rhst')
-            END DO
-          END DO
-        END DO
+$:rhs_scalar_kernel('-ibeta(iz)*' + apply_d_vvdz(0, 'from'))
       END SELECT
     END SELECT
-
   END SUBROUTINE buildrhs
+
+  ! After all buildrhs calls of a substep: V += ODE(2)*(what buildrhs added to
+  ! oldrhs).  buildrhs_prepare left oldrhs zero in these components except the
+  ! mean pressure drive in the (0,0) mode of component 1, which V already holds.
+  SUBROUTINE buildrhs_finish(ODE)
+    IMPLICIT NONE
+    real(C_DOUBLE), intent(in) :: ODE(1:3)
+    integer(C_INT) :: iy, iz, ix, iPhi, y_first, y_last
+    complex(C_DOUBLE_COMPLEX) :: mean_drive
+    y_first = ny0
+    y_last = nyN
+    mean_drive = dcmplx(meanpx, meanpz)
+    !$omp target teams distribute parallel do collapse(3) default(none) &
+    !$omp shared(V, oldrhs, ODE, mean_drive, nz, nx0, nxN, y_first, y_last, nPhi) private(iy, iz, ix, iPhi)
+    DO ix = nx0, nxN
+      DO iz = -nz, nz
+        DO iy = y_first, y_last
+          if (ix == 0 .AND. iz == 0) then
+            V(iy, iz, ix, 1) = V(iy, iz, ix, 1) + ODE(2)*(oldrhs(iy, iz, ix, 1) - mean_drive)
+          else
+            V(iy, iz, ix, 1) = V(iy, iz, ix, 1) + ODE(2)*oldrhs(iy, iz, ix, 1)
+          end if
+          V(iy, iz, ix, 2) = V(iy, iz, ix, 2) + ODE(2)*oldrhs(iy, iz, ix, 2)
+          DO iPhi = 1, nPhi
+            V(iy, iz, ix, 3 + iPhi) = V(iy, iz, ix, 3 + iPhi) + ODE(2)*oldrhs(iy, iz, ix, 2 + iPhi)
+          END DO
+        END DO
+      END DO
+    END DO
+  END SUBROUTINE buildrhs_finish
 end module channel_equations

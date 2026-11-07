@@ -86,13 +86,19 @@ ${rhs}$ = ODE(1)*(${unkn}$)/deltat + (${impl}$) + ODE(2)*(${expl}$) - ODE(3)*(${
 #:enddef
 
 #! Add a further explicit contribution to a substep already opened.
+#! rhs=None accumulates into old only: buildrhs does that and lets
+#! buildrhs_finish add ODE(2) times the total to the field once.
 #:def rk_accum(rhs, old, expl)
+#:if rhs is None
+${old}$ = ${old}$ + (${expl}$)
+#:else
 ${rhs}$ = ${rhs}$ + ODE(2)*(${expl}$); ${old}$ = ${old}$ + (${expl}$)
+#:endif
 #:enddef
 
 #! Accumulate into the d2v (component 2) equation.
 #:def accum_d2v(field, expl)
-$:rk_accum('{}(iy, iz, ix, 2)'.format(field), 'oldrhs(iy, iz, ix, 2)', expl)
+$:rk_accum(None if field is None else '{}(iy, iz, ix, 2)'.format(field), 'oldrhs(iy, iz, ix, 2)', expl)
 #:enddef
 
 #! Accumulate into the eta (component 1) equation.  The (0,0) mean mode carries
@@ -100,9 +106,9 @@ $:rk_accum('{}(iy, iz, ix, 2)'.format(field), 'oldrhs(iy, iz, ix, 2)', expl)
 #! from the general mode.
 #:def accum_eta(field, expl_general, expl_mean)
 if (ix == 0 .AND. iz == 0) then
-  $:rk_accum('{}(iy, iz, ix, 1)'.format(field), 'oldrhs(iy, iz, ix, 1)', expl_mean)
+  $:rk_accum(None if field is None else '{}(iy, iz, ix, 1)'.format(field), 'oldrhs(iy, iz, ix, 1)', expl_mean)
 else
-  $:rk_accum('{}(iy, iz, ix, 1)'.format(field), 'oldrhs(iy, iz, ix, 1)', expl_general)
+  $:rk_accum(None if field is None else '{}(iy, iz, ix, 1)'.format(field), 'oldrhs(iy, iz, ix, 1)', expl_general)
 end if
 #:enddef
 

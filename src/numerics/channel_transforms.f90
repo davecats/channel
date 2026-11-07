@@ -20,7 +20,7 @@ module channel_transforms
   use, intrinsic :: iso_c_binding
   use channel_grid
   use channel_state
-  use channel_equations, only: build_products, buildrhs
+  use channel_equations, only: build_products, buildrhs, buildrhs_finish
   use mpi_transpose
   use roctx, only: roctxPush, roctxPop
   use ffts
@@ -31,25 +31,24 @@ CONTAINS
 
   SUBROUTINE assemble_vvdz(m, to)
     IMPLICIT NONE
-    integer(C_INT) :: i, j, k, y_first, y_last
+    integer(C_INT) :: i, j, k, y_first, y_last, ib, kb, ii, ki
     integer(C_INT), intent(in) :: m, to
     y_first = ny0
     y_last = nyN
 
-    !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(V, VVdz) shared(nxB, nzd, nx0, nxN, y_first, y_last, nz, m, to) private(i,j,k)
-    DO i = y_first - 2, y_last + 2
-      DO j = 1, nxB
-        DO k = 1, nzd
-          VVdz(k, j, i, to) = 0.0d0
-        END DO
-      END DO
-    END DO
-    !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(V, VVdz) shared(nx0, nxN, nz, nzd, y_first, y_last, m, to) private(i,j,k)
-    DO i = y_first - 2, y_last + 2
-      DO j = nx0, nxN
-        DO k = 1, nzd
+    ! Every VVdz element is written below (the dealiasing band as zero), so no
+    ! separate zeroing pass.  8x8 (k, i) tiles, k fastest: VVdz is z-fastest and V
+    ! is y-fastest, so a wavefront writes full z-lines and reads full y-lines.
+    !$omp target teams distribute parallel do collapse(5) default(none) &
+    !$omp shared(V, VVdz) shared(nx0, nxN, nz, nzd, y_first, y_last, m, to) private(i, j, k, ib, kb, ii, ki)
+    DO j = nx0, nxN
+    DO ib = 0, (y_last - y_first + 4)/8
+    DO kb = 0, (nzd - 1)/8
+    DO ii = 0, 7
+    DO ki = 0, 7
+        i = y_first - 2 + ib*8 + ii
+        k = kb*8 + ki + 1
+        IF (i > y_last + 2 .OR. k > nzd) CYCLE
           IF (k <= nz + 1) THEN
             VVdz(k, j - nx0 + 1, i, to) = V(i, k - 1, j, m)
           ELSEIF (k >= nz + 2 .AND. k <= nzd - nz) THEN
@@ -57,8 +56,10 @@ CONTAINS
           ELSE
             VVdz(k, j - nx0 + 1, i, to) = V(i, k - nzd - 1, j, m)
           END IF
-        END DO
-      END DO
+    END DO
+    END DO
+    END DO
+    END DO
     END DO
   END SUBROUTINE assemble_vvdz
 
@@ -88,9 +89,11 @@ CONTAINS
     !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp private(i,j,k,tmp) reduction(max:cfl) &
     !$omp shared(rVVdx, dx, dy, dz, ny, y_first, y_last, nxd, nzB)
-    do j = 1, 2*nxd
+    ! x (j) innermost: rVVdx is x-fastest, so a wavefront reads contiguous lines.
+    ! With y innermost every thread read three values 6 MB apart (20 ms -> ~1.5 ms).
+    do i = max(y_first - 2, 1_C_INT), min(y_last + 2, ny - 1)
       do k = 1, nzB
-        do i = max(y_first - 2, 1_C_INT), min(y_last + 2, ny - 1)
+        do j = 1, 2*nxd
           tmp = abs(rVVdx(j, k, i, 1))/dx + abs(rVVdx(j, k, i, 2))/dy(i) + abs(rVVdx(j, k, i, 3))/dz
           cfl = max(cfl, tmp)
         end do
@@ -203,6 +206,9 @@ CONTAINS
         call roctxPop("transform_back buildrhs")
       end if
     END DO
+    call roctxPush("transform_back buildrhs_finish")
+    call buildrhs_finish(ODE)
+    call roctxPop("transform_back buildrhs_finish")
   END SUBROUTINE transform_back_and_build_rhs
 
   ! The same round trip for a single field, without the pipelining above: one

@@ -14,17 +14,50 @@
 #! every expansion does the same.
 #! ===================================================================
 
-#! The hand-written batched solve, used on CPU and when
-#! CHANNEL_YS_FORCE_CUSTOM_GPSV selects it over the vendor library.
+#! The hand-written batched solve: the only one on HIP and CPU, selectable on
+#! CUDA (instead of cuSPARSE) with CHANNEL_YS_FORCE_CUSTOM_GPSV.  One thread per system, LU without pivoting as in the
+#! distributed pipelined solve, in a single forward sweep that eliminates the
+#! matrix and the right-hand side together with the two previous reduced rows
+#! held in registers, then one backward sweep.  Each row is read once and only
+#! its two upper coefficients and partial solution are written back: 13 array
+#! accesses per row against ~27 for separate factor/forward/backward passes and
+#! ~40 for rocSPARSE's Givens-QR gpsv (which also clears two fill-in arrays per
+#! call), so HIP builds no longer use hipSPARSE at all: ~3x faster on MI300A.
+#! It overwrites du, dw and x; the arrays are per-call scratch, as they
+#! already were for the vendor routine.
 #:def custom_penta_kernel(ds, dl, d, du, dw, x)
       !$omp target teams distribute parallel do default(none) &
       !$omp shared(${ds}$, ${dl}$, ${d}$, ${du}$, ${dw}$, ${x}$, n, batch_count) &
-      !$omp private(iline)
+      !$omp private(iline, pr_i, pr_p, pr_a, pr_b, pr_c, pr_e, pr_f, pr_r, pr_inv, &
+      !$omp& pr_u1m2, pr_u2m2, pr_ym2, pr_u1m1, pr_u2m1, pr_ym1, pr_u1, pr_u2, pr_y, pr_xn1, pr_xn2)
       do iline = 1, batch_count
-        call ys_factor_penta_interleaved(${ds}$, ${dl}$, ${d}$, ${du}$, ${dw}$, &
-                                         batch_count, iline, n, .false.)
-        call ys_solve_factored_penta_interleaved(${x}$, ${ds}$, ${dl}$, ${d}$, ${du}$, ${dw}$, &
-                                                 batch_count, iline, n)
+        pr_u1m2 = (0.0d0, 0.0d0); pr_u2m2 = (0.0d0, 0.0d0); pr_ym2 = (0.0d0, 0.0d0)
+        pr_u1m1 = (0.0d0, 0.0d0); pr_u2m1 = (0.0d0, 0.0d0); pr_ym1 = (0.0d0, 0.0d0)
+        do pr_i = 0, n - 1
+          pr_p = int(iline, C_INT64_T) + int(pr_i, C_INT64_T)*int(batch_count, C_INT64_T)
+          ! Row pr_i: pr_a*x(i-2) + pr_b*x(i-1) + pr_c*x(i) + pr_e*x(i+1) + pr_f*x(i+2) = pr_r.
+          pr_a = merge(${ds}$(pr_p), (0.0d0, 0.0d0), pr_i >= 2)
+          pr_b = merge(${dl}$(pr_p), (0.0d0, 0.0d0), pr_i >= 1)
+          pr_c = ${d}$(pr_p)
+          pr_e = merge(${du}$(pr_p), (0.0d0, 0.0d0), pr_i <= n - 2)
+          pr_f = merge(${dw}$(pr_p), (0.0d0, 0.0d0), pr_i <= n - 3)
+          pr_r = ${x}$(pr_p)
+          ! Eliminate x(i-2), then x(i-1), with the reduced rows i-2 and i-1.
+          pr_b = pr_b - pr_a*pr_u1m2; pr_c = pr_c - pr_a*pr_u2m2; pr_r = pr_r - pr_a*pr_ym2
+          pr_c = pr_c - pr_b*pr_u1m1; pr_e = pr_e - pr_b*pr_u2m1; pr_r = pr_r - pr_b*pr_ym1
+          pr_inv = 1.0d0/pr_c
+          pr_u1 = pr_e*pr_inv; pr_u2 = pr_f*pr_inv; pr_y = pr_r*pr_inv
+          ${du}$(pr_p) = pr_u1; ${dw}$(pr_p) = pr_u2; ${x}$(pr_p) = pr_y
+          pr_u1m2 = pr_u1m1; pr_u2m2 = pr_u2m1; pr_ym2 = pr_ym1
+          pr_u1m1 = pr_u1; pr_u2m1 = pr_u2; pr_ym1 = pr_y
+        end do
+        pr_xn1 = (0.0d0, 0.0d0); pr_xn2 = (0.0d0, 0.0d0)
+        do pr_i = n - 1, 0, -1
+          pr_p = int(iline, C_INT64_T) + int(pr_i, C_INT64_T)*int(batch_count, C_INT64_T)
+          pr_y = ${x}$(pr_p) - ${du}$(pr_p)*pr_xn1 - ${dw}$(pr_p)*pr_xn2
+          ${x}$(pr_p) = pr_y
+          pr_xn2 = pr_xn1; pr_xn1 = pr_y
+        end do
       end do
       !$omp end target teams distribute parallel do
 #:enddef
@@ -36,13 +69,17 @@
     integer(C_INT), intent(in) :: n, batch_count
     character(*), intent(in) :: label
     integer(C_INT) :: iline
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    integer(C_INT) :: pr_i
+    integer(C_INT64_T) :: pr_p
+    complex(C_DOUBLE_COMPLEX) :: pr_a, pr_b, pr_c, pr_e, pr_f, pr_r, pr_inv, pr_u1, pr_u2, pr_y
+    complex(C_DOUBLE_COMPLEX) :: pr_u1m2, pr_u2m2, pr_ym2, pr_u1m1, pr_u2m1, pr_ym1, pr_xn1, pr_xn2
+#if defined(HAVE_CUDA)
     integer(C_INT64_T) :: p, p1
     complex(C_DOUBLE_COMPLEX) :: d0inv, d1inv, lfac, rhs0, rhs1
 #endif
 
     call roctxPush(label)
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+#if defined(HAVE_CUDA)
     ! ROCSparse fails if the system size is 1: https://github.com/ROCm/rocSPARSE/blob/develop_deprecated/library/src/precond/rocsparse_gtsv.cpp
     if (ys_use_custom_gpsv()) then
 $:custom_penta_kernel(ds, dl, d, du, dw, x)
@@ -240,52 +277,11 @@ module y_line_solvers
   use mpi_f08
 #ifdef HAVE_CUDA
   use cusparse
-#elif defined(HAVE_HIP)
-  use omp_lib
-  use hipfort_hipsparse
 #endif
 
   implicit none
   private
 
-#ifdef HAVE_HIP
-  interface hipsparseZgpsvInterleavedBatch_bufferSizeExt
-    function hipsparseZgpsvInterleavedBatch_bufferSizeExt_(handle, algo, m, ds, dl, d, du, dw, x, &
-                                                           batch_count, pBufferSizeInBytes) &
-      bind(c, name="hipsparseZgpsvInterleavedBatch_bufferSizeExt")
-      use, intrinsic :: iso_c_binding
-      use hipfort_hipsparse_enums
-      implicit none
-      integer(kind(HIPSPARSE_STATUS_SUCCESS)) :: hipsparseZgpsvInterleavedBatch_bufferSizeExt_
-      type(c_ptr), value :: handle
-      integer(c_int), value :: algo, m, batch_count
-      type(c_ptr), value :: ds, dl, d, du, dw, x
-      integer(c_size_t) :: pBufferSizeInBytes
-    end function hipsparseZgpsvInterleavedBatch_bufferSizeExt_
-  end interface
-
-  interface hipsparseZgpsvInterleavedBatch
-    function hipsparseZgpsvInterleavedBatch_(handle, algo, m, ds, dl, d, du, dw, x, batch_count, pBuffer) &
-      bind(c, name="hipsparseZgpsvInterleavedBatch")
-      use, intrinsic :: iso_c_binding
-      use hipfort_hipsparse_enums
-      implicit none
-      integer(kind(HIPSPARSE_STATUS_SUCCESS)) :: hipsparseZgpsvInterleavedBatch_
-      type(c_ptr), value :: handle
-      integer(c_int), value :: algo, m, batch_count
-      type(c_ptr), value :: ds, dl, d, du, dw, x, pBuffer
-    end function hipsparseZgpsvInterleavedBatch_
-  end interface
-
-  interface
-    function hipDeviceSynchronize() bind(c, name="hipDeviceSynchronize")
-      use, intrinsic :: iso_c_binding
-      implicit none
-      integer(c_int) :: hipDeviceSynchronize
-    end function hipDeviceSynchronize
-  end interface
-
-#endif
 
   ! Which wall-normal solver to use, and how many pipeline batches.
   !
@@ -336,7 +332,7 @@ module y_line_solvers
   integer(C_INT), save :: ys_workspace_nlines = 0
   integer(C_INT), save :: ys_workspace_active_n = 0
   integer(C_INT), save :: ys_workspace_reduced_node_size = -1
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+#if defined(HAVE_CUDA)
   logical, save :: ys_gpsv_buffer_reported = .false.
 #endif
   integer(C_INT), save :: ys_owner_nz = 0
@@ -384,22 +380,15 @@ module y_line_solvers
 #ifdef HAVE_CUDA
   type(cusparseHandle), save :: ys_gpsv_handle
   logical, save :: ys_gpsv_handle_created = .false.
-#elif defined(HAVE_HIP)
-  type(c_ptr), save :: ys_gpsv_handle = c_null_ptr
-  type(c_ptr), save :: ys_gpsv_buffer = c_null_ptr
-  logical, save :: ys_gpsv_handle_created = .false.
 #endif
   integer(C_INT), save :: ys_gpsv_n = -1, ys_gpsv_batch = -1
   integer(C_INT64_T), save :: ys_batch_capacity = 0_C_INT64_T
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+#if defined(HAVE_CUDA)
   integer(C_SIZE_T), save :: ys_gpsv_buffer_peak_bytes = 0_C_SIZE_T
 #endif
 #if defined(HAVE_CUDA)
   integer(8), save :: ys_gpsv_buffer_size = 0_8
   integer(8), save :: ys_gpsv_buffer_capacity = 0_8
-#elif defined(HAVE_HIP)
-  integer(C_SIZE_T), save :: ys_gpsv_buffer_size = 0_C_SIZE_T
-  integer(C_SIZE_T), save :: ys_gpsv_buffer_capacity = 0_C_SIZE_T
 #endif
  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_batch_ds(:) => null(), ys_batch_dl(:) => null(), ys_batch_d(:) => null()
  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_batch_du(:) => null(), ys_batch_dw(:) => null(), ys_batch_x(:) => null()
@@ -720,7 +709,7 @@ contains
     implicit none
     integer(C_SIZE_T), intent(out) :: nbytes
 
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+#if defined(HAVE_CUDA)
     nbytes = ys_gpsv_buffer_peak_bytes
 #else
     nbytes = 0_C_SIZE_T
@@ -867,7 +856,7 @@ call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pas
     if (release_byte_workspace) then
       call workspace_release("y_line_solver")
     end if
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+#if defined(HAVE_CUDA)
     if (release_external) then
       call ys_release_gpusparse_external()
       call ys_destroy_gpusparse_handle()
@@ -880,16 +869,12 @@ call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pas
 #ifdef HAVE_CUDA
       ys_gpsv_buffer_size = 0_8
       ys_gpsv_buffer_capacity = 0_8
-#elif defined(HAVE_HIP)
-      ys_gpsv_buffer_size = 0_C_SIZE_T
-      ys_gpsv_buffer_capacity = 0_C_SIZE_T
-      ys_gpsv_buffer = c_null_ptr
 #endif
     end if
     call ys_reset_workspace_state()
   end subroutine ys_release_workspace
 
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+#if defined(HAVE_CUDA)
   subroutine ys_release_gpusparse_external()
     implicit none
 #ifdef HAVE_CUDA
@@ -898,12 +883,6 @@ call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pas
       deallocate (ys_gpsv_buffer)
     end if
     ys_gpsv_buffer_capacity = 0_8
-#elif defined(HAVE_HIP)
-    if (c_associated(ys_gpsv_buffer)) then
-      call omp_target_free(ys_gpsv_buffer, omp_get_default_device())
-      ys_gpsv_buffer = c_null_ptr
-    end if
-    ys_gpsv_buffer_capacity = 0_C_SIZE_T
 #endif
   end subroutine ys_release_gpusparse_external
 
@@ -916,25 +895,9 @@ call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pas
       print *, "cuSPARSE error in ", trim(where), ": status=", status
       error stop
     end if
-#elif defined(HAVE_HIP)
-    if (status /= HIPSPARSE_STATUS_SUCCESS) then
-      print *, "hipSPARSE error in ", trim(where), ": status=", status
-      error stop
-    end if
 #endif
   end subroutine ys_check_gpusparse
 
-#ifdef HAVE_HIP
-  subroutine ys_check_hip(status, where)
-    integer(C_INT), intent(in) :: status
-    character(*), intent(in) :: where
-
-    if (status /= 0_C_INT) then
-      print *, "HIP runtime error in ", trim(where), ": status=", status
-      error stop
-    end if
-  end subroutine ys_check_hip
-#endif
 
   subroutine ys_create_gpusparse_handle()
     implicit none
@@ -945,9 +908,6 @@ call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pas
 #ifdef HAVE_CUDA
     status = cusparseCreate(ys_gpsv_handle)
     call ys_check_gpusparse(status, "cusparseCreate")
-#elif defined(HAVE_HIP)
-    status = hipsparseCreate(ys_gpsv_handle)
-    call ys_check_gpusparse(status, "hipsparseCreate")
 #endif
     ys_gpsv_handle_created = .true.
   end subroutine ys_create_gpusparse_handle
@@ -961,10 +921,6 @@ call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pas
 #ifdef HAVE_CUDA
     status = cusparseDestroy(ys_gpsv_handle)
     call ys_check_gpusparse(status, "cusparseDestroy")
-#elif defined(HAVE_HIP)
-    status = hipsparseDestroy(ys_gpsv_handle)
-    call ys_check_gpusparse(status, "hipsparseDestroy")
-    ys_gpsv_handle = c_null_ptr
 #endif
     ys_gpsv_handle_created = .false.
   end subroutine ys_destroy_gpusparse_handle
@@ -975,8 +931,6 @@ call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pas
     integer(C_INT), intent(in) :: n, batch_count
 #ifdef HAVE_CUDA
     integer(8), intent(out) :: buffer_size
-#elif defined(HAVE_HIP)
-    integer(C_SIZE_T), intent(out) :: buffer_size
 #endif
     integer(C_INT) :: status
 
@@ -984,12 +938,6 @@ call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pas
 #ifdef HAVE_CUDA
     status = cusparseZgpsvInterleavedBatch_bufferSize(ys_gpsv_handle, 0_C_INT, n, ds, dl, d, du, dw, x, &
                                                       batch_count, buffer_size)
-#elif defined(HAVE_HIP)
-    call ys_check_hip(hipDeviceSynchronize(), "hipDeviceSynchronize before gpsvInterleavedBatch_bufferSize")
-    status = hipsparseZgpsvInterleavedBatch_bufferSizeExt(ys_gpsv_handle, 0_C_INT, n, c_loc(ds(1)), c_loc(dl(1)), &
-                                                          c_loc(d(1)), c_loc(du(1)), c_loc(dw(1)), c_loc(x(1)), &
-                                                          batch_count, buffer_size)
-    call ys_check_hip(hipDeviceSynchronize(), "hipDeviceSynchronize after gpsvInterleavedBatch_bufferSize")
 #endif
     !$omp end target data
     call ys_check_gpusparse(status, "gpsvInterleavedBatch_bufferSize")
@@ -1008,27 +956,17 @@ call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pas
                                            batch_count, ys_gpsv_buffer)
     call ys_check_gpusparse(status, "cusparseZgpsvInterleavedBatch "//trim(label))
     !$omp end target data
-#elif defined(HAVE_HIP)
-    !$omp target data use_device_addr(ds, dl, d, du, dw, x)
-    call ys_check_hip(hipDeviceSynchronize(), "hipDeviceSynchronize before "//trim(label))
-    status = hipsparseZgpsvInterleavedBatch(ys_gpsv_handle, 0_C_INT, n, c_loc(ds(1)), c_loc(dl(1)), c_loc(d(1)), &
-                                            c_loc(du(1)), c_loc(dw(1)), c_loc(x(1)), batch_count, ys_gpsv_buffer)
-    call ys_check_gpusparse(status, "hipsparseZgpsvInterleavedBatch "//trim(label))
-    call ys_check_hip(hipDeviceSynchronize(), "hipDeviceSynchronize after "//trim(label))
-    !$omp end target data
 #endif
   end subroutine ys_call_gpsv_interleaved
 #endif
 
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+#if defined(HAVE_CUDA)
   subroutine ys_prepare_gpusparse_workspace(n, batch_count, ds, dl, d, du, dw, x)
     implicit none
     integer(C_INT), intent(in) :: n, batch_count
     complex(C_DOUBLE_COMPLEX), intent(inout), target :: ds(:), dl(:), d(:), du(:), dw(:), x(:)
 #ifdef HAVE_CUDA
     integer(8) :: buffer_size
-#elif defined(HAVE_HIP)
-    integer(C_SIZE_T) :: buffer_size
 #endif
 
     ! Small systems are solved inline in ys_solve_interleaved_pentadiagonal, and
@@ -1042,8 +980,6 @@ call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pas
     if (ys_gpsv_n == n .and. ys_gpsv_batch == batch_count &
 #ifdef HAVE_CUDA
         .and. allocated(ys_gpsv_buffer) &
-#elif defined(HAVE_HIP)
-        .and. c_associated(ys_gpsv_buffer) &
 #endif
         ) return
 
@@ -1063,20 +999,6 @@ call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pas
       call ys_release_gpusparse_external()
       allocate (ys_gpsv_buffer(max(1_8, buffer_size)))
       !$omp target enter data map(alloc: ys_gpsv_buffer)
-      ys_gpsv_buffer_capacity = buffer_size
-    end if
-#elif defined(HAVE_HIP)
-    ! On MI300A, hipSPARSE gpsv rejects a workspace buffer created by mapping a
-    ! Fortran character array with OpenMP target data, even though the operand
-    ! arrays from use_device_addr() are accepted. omp_target_alloc() and hipMalloc()
-    ! both work for this buffer; use the OpenMP allocator here to match mpi_transpose.
-    if (.not. c_associated(ys_gpsv_buffer) .or. ys_gpsv_buffer_capacity < buffer_size) then
-      call ys_release_gpusparse_external()
-      ys_gpsv_buffer = omp_target_alloc(max(1_C_SIZE_T, buffer_size), omp_get_default_device())
-      if (.not. c_associated(ys_gpsv_buffer)) then
-        print *, "OpenMP target allocation failed in ys_prepare_gpusparse_workspace"
-        error stop
-      end if
       ys_gpsv_buffer_capacity = buffer_size
     end if
 #endif
@@ -1649,51 +1571,28 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       call roctxPush("ys_pipeline forward_batch")
       call ys_pipeline_batch_slice(batch, nbatches, nlines, batch_max_lines, first_line, line_count, &
                                    factor_count, solve_count, factor_offset, forward_offset, backward_offset)
+      ! One message and one kernel per batch: the fused sweep factors the local
+      ! rows and eliminates the right-hand side together, seeded by the two
+      ! reduced rows of the rank below, and leaves its own last two reduced rows
+      ! (u1, u2, y each: YS_PIPELINE_FACTOR_ELEMS values per line) in the send
+      ! buffer.  It replaced five synchronous kernels and two messages per batch.
       if (ipy > 0_C_INT) then
 #:call timed_comm_post('ycomm_recvbuf')
         call MPI_Irecv(ycomm_recvbuf(factor_offset + 1), factor_count, &
                        MPI_DOUBLE_COMPLEX, ipy - 1_C_INT, TAG_FACTOR + batch, MPI_COMM_Y, factor_recv_req, ierr)
-        call MPI_Irecv(ycomm_recvbuf(forward_offset + 1), solve_count, &
-                       MPI_DOUBLE_COMPLEX, ipy - 1_C_INT, TAG_FORWARD + batch, MPI_COMM_Y, forward_recv_req, ierr)
 #:endcall
 #:call timed_step('MPI_Wait factor_recv', 'T_FACTOR_WAIT')
         call MPI_Wait(factor_recv_req, status, ierr)
 #:endcall
-#:call timed_step('apply_factor_continuation', 'T_FACTOR_KERNEL')
-        call ys_apply_factor_continuation(first_line, line_count, active_n, factor_offset)
-#:endcall
       end if
-#:call timed_step('factor_batch', 'T_FACTOR_KERNEL')
-      call ys_factor_pipelined_batch(first_line, line_count, active_n, ipy < npy_grid - 1_C_INT)
+#:call timed_step('forward_fused', 'T_FACTOR_KERNEL')
+      call ys_pipelined_forward_fused(first_line, line_count, active_n, ipy > 0_C_INT, ipy < npy_grid - 1_C_INT, &
+                                      factor_offset)
 #:endcall
       if (ipy < npy_grid - 1_C_INT) then
-#:call timed_step('pack_factor_state', 'T_PACK')
-        call ys_pack_factor_state(first_line, line_count, active_n, factor_offset)
-#:endcall
 #:call timed_comm_post('ycomm_sendbuf', label='MPI_Isend factor_state')
         call MPI_Isend(ycomm_sendbuf(factor_offset + 1), factor_count, &
                        MPI_DOUBLE_COMPLEX, ipy + 1_C_INT, TAG_FACTOR + batch, MPI_COMM_Y, factor_send_req(batch), ierr)
-#:endcall
-      end if
-      if (ipy > 0_C_INT) then
-#:call timed_step('MPI_Wait forward_recv', 'T_FORWARD_WAIT')
-        call MPI_Wait(forward_recv_req, status, ierr)
-#:endcall
-#:call timed_step('forward_continue', 'T_FORWARD_KERNEL')
-        call ys_forward_pipelined_batch_continue(first_line, line_count, active_n, forward_offset)
-#:endcall
-      else
-#:call timed_step('forward_first_rank', 'T_FORWARD_KERNEL')
-        call ys_forward_pipelined_batch(first_line, line_count, active_n)
-#:endcall
-      end if
-      if (ipy < npy_grid - 1_C_INT) then
-#:call timed_step('pack_forward_state', 'T_PACK')
-        call ys_pack_forward_state(first_line, line_count, active_n, forward_offset)
-#:endcall
-#:call timed_comm_post('ycomm_sendbuf', label='MPI_Isend forward_state')
-        call MPI_Isend(ycomm_sendbuf(forward_offset + 1), solve_count, &
-                       MPI_DOUBLE_COMPLEX, ipy + 1_C_INT, TAG_FORWARD + batch, MPI_COMM_Y, forward_send_req(batch), ierr)
 #:endcall
       end if
       call roctxPush("ys_pipeline drain_backward_nonblocking")
@@ -1792,24 +1691,14 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
             call roctxPop("ys_pipeline MPI_Test backward_recv")
           end if
           if (.not. ready) exit
-#:call timed_step('backward_continue', 'T_BACKWARD_KERNEL')
-          call ys_backward_pipelined_batch_continue(first_line, line_count, active_n, backward_offset)
-#:endcall
-        else
-#:call timed_step('backward_top_rank', 'T_BACKWARD_KERNEL')
-          call ys_backward_pipelined_batch(first_line, line_count, active_n)
-#:endcall
         end if
-
+        ! Fused backward sweep: seeded by the first two solution values of the
+        ! rank above, it also leaves this rank's first two in the send buffer.
+#:call timed_step('backward_fused', 'T_BACKWARD_KERNEL')
+        call ys_pipelined_backward_fused(first_line, line_count, active_n, ipy > 0_C_INT, ipy < npy_grid - 1_C_INT, &
+                                         backward_offset, forward_offset)
+#:endcall
         if (ipy > 0_C_INT) then
-          if (ipy < npy_grid - 1_C_INT) then
-#:call timed_step('MPI_Wait forward_send_reuse', 'T_COMM_POST')
-            call MPI_Wait(forward_send_req(next_backward), status, ierr)
-#:endcall
-          end if
-#:call timed_step('pack_backward_state', 'T_PACK')
-          call ys_pack_backward_state(first_line, line_count, forward_offset)
-#:endcall
 #:call timed_comm_post('ycomm_sendbuf', label='MPI_Isend backward_state')
           call MPI_Isend(ycomm_sendbuf(forward_offset + 1), solve_count, &
                          MPI_DOUBLE_COMPLEX, ipy - 1_C_INT, TAG_BACKWARD + next_backward, &
@@ -2222,6 +2111,94 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     end do
     !$omp end target teams distribute parallel do
   end subroutine ys_pack_backward_state
+
+  ! Forward stage of the MPI pipelined solve, fused (the same normalized LU
+  ! sweep as custom_penta_kernel): each line's rows are eliminated top-down,
+  ! seeded with the two reduced rows (u1, u2, y) of the rank below when there
+  ! is one, and with the couplings to the rank above kept when there is one.
+  ! du, dw and x receive each row's u1, u2 and y for the backward sweep; the
+  ! last two reduced rows go to the send buffer at offset.
+  subroutine ys_pipelined_forward_fused(first_line, line_count, active_n, has_left, has_right, offset)
+    implicit none
+    integer(C_INT), intent(in) :: first_line, line_count, active_n, offset
+    logical, intent(in) :: has_left, has_right
+    integer(C_INT) :: local_line, iline, stride, i
+    integer(C_INT64_T) :: p, q
+    complex(C_DOUBLE_COMPLEX) :: a, b, c, e, f, r, inv, u1, u2, y, u1m2, u2m2, ym2, u1m1, u2m1, ym1
+    stride = ys_workspace_nlines
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, ycomm_recvbuf, ycomm_sendbuf) &
+    !$omp shared(stride, first_line, line_count, active_n, has_left, has_right, offset) &
+    !$omp private(local_line, iline, i, p, q, a, b, c, e, f, r, inv, u1, u2, y, u1m2, u2m2, ym2, u1m1, u2m1, ym1)
+    do local_line = 1_C_INT, line_count
+      iline = first_line + local_line - 1_C_INT
+      q = int(offset + YS_PIPELINE_FACTOR_ELEMS*(local_line - 1_C_INT), C_INT64_T)
+      if (has_left) then
+        u1m2 = ycomm_recvbuf(q + 1_C_INT64_T); u2m2 = ycomm_recvbuf(q + 2_C_INT64_T); ym2 = ycomm_recvbuf(q + 3_C_INT64_T)
+        u1m1 = ycomm_recvbuf(q + 4_C_INT64_T); u2m1 = ycomm_recvbuf(q + 5_C_INT64_T); ym1 = ycomm_recvbuf(q + 6_C_INT64_T)
+      else
+        u1m2 = (0.0d0, 0.0d0); u2m2 = (0.0d0, 0.0d0); ym2 = (0.0d0, 0.0d0)
+        u1m1 = (0.0d0, 0.0d0); u2m1 = (0.0d0, 0.0d0); ym1 = (0.0d0, 0.0d0)
+      end if
+      do i = 0, active_n - 1
+        p = int(iline, C_INT64_T) + int(i, C_INT64_T)*int(stride, C_INT64_T)
+        a = merge(ys_gpsv_ds(p), (0.0d0, 0.0d0), i >= 2 .or. has_left)
+        b = merge(ys_gpsv_dl(p), (0.0d0, 0.0d0), i >= 1 .or. has_left)
+        c = ys_gpsv_d(p)
+        e = merge(ys_gpsv_du(p), (0.0d0, 0.0d0), i <= active_n - 2 .or. has_right)
+        f = merge(ys_gpsv_dw(p), (0.0d0, 0.0d0), i <= active_n - 3 .or. has_right)
+        r = ys_gpsv_x(p)
+        b = b - a*u1m2; c = c - a*u2m2; r = r - a*ym2
+        c = c - b*u1m1; e = e - b*u2m1; r = r - b*ym1
+        inv = 1.0d0/c
+        u1 = e*inv; u2 = f*inv; y = r*inv
+        ys_gpsv_du(p) = u1; ys_gpsv_dw(p) = u2; ys_gpsv_x(p) = y
+        u1m2 = u1m1; u2m2 = u2m1; ym2 = ym1
+        u1m1 = u1; u2m1 = u2; ym1 = y
+      end do
+      if (has_right) then
+        ycomm_sendbuf(q + 1_C_INT64_T) = u1m2; ycomm_sendbuf(q + 2_C_INT64_T) = u2m2; ycomm_sendbuf(q + 3_C_INT64_T) = ym2
+        ycomm_sendbuf(q + 4_C_INT64_T) = u1m1; ycomm_sendbuf(q + 5_C_INT64_T) = u2m1; ycomm_sendbuf(q + 6_C_INT64_T) = ym1
+      end if
+    end do
+    !$omp end target teams distribute parallel do
+  end subroutine ys_pipelined_forward_fused
+
+  ! Backward stage, fused: rows bottom-up from the rank above's first two
+  ! solution values (recv_offset); this rank's first two go to send_offset.
+  subroutine ys_pipelined_backward_fused(first_line, line_count, active_n, has_left, has_right, recv_offset, send_offset)
+    implicit none
+    integer(C_INT), intent(in) :: first_line, line_count, active_n, recv_offset, send_offset
+    logical, intent(in) :: has_left, has_right
+    integer(C_INT) :: local_line, iline, stride, i
+    integer(C_INT64_T) :: p, q
+    complex(C_DOUBLE_COMPLEX) :: y, xn1, xn2
+    stride = ys_workspace_nlines
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, ycomm_recvbuf, ycomm_sendbuf) &
+    !$omp shared(stride, first_line, line_count, active_n, has_left, has_right, recv_offset, send_offset) &
+    !$omp private(local_line, iline, i, p, q, y, xn1, xn2)
+    do local_line = 1_C_INT, line_count
+      iline = first_line + local_line - 1_C_INT
+      if (has_right) then
+        q = int(recv_offset + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
+        xn1 = ycomm_recvbuf(q + 1_C_INT64_T); xn2 = ycomm_recvbuf(q + 2_C_INT64_T)
+      else
+        xn1 = (0.0d0, 0.0d0); xn2 = (0.0d0, 0.0d0)
+      end if
+      do i = active_n - 1, 0, -1
+        p = int(iline, C_INT64_T) + int(i, C_INT64_T)*int(stride, C_INT64_T)
+        y = ys_gpsv_x(p) - ys_gpsv_du(p)*xn1 - ys_gpsv_dw(p)*xn2
+        ys_gpsv_x(p) = y
+        xn2 = xn1; xn1 = y
+      end do
+      if (has_left) then
+        q = int(send_offset + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
+        ycomm_sendbuf(q + 1_C_INT64_T) = xn1; ycomm_sendbuf(q + 2_C_INT64_T) = xn2
+      end if
+    end do
+    !$omp end target teams distribute parallel do
+  end subroutine ys_pipelined_backward_fused
 
   subroutine ys_unpack_pipelined_solution(dst, active_n, nlines, nlines_z, nx_count, dst_row_base)
     implicit none
