@@ -2204,21 +2204,31 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     implicit none
     complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
     integer(C_INT), intent(in) :: active_n, nlines, nlines_z, nx_count, dst_row_base
-    integer(C_INT) :: ix, iz_index, irow, iline
+    integer(C_INT) :: ix, iz_index, irow, iline, izb, irb, izi, iri
     integer(C_INT64_T) :: p
     logical :: has_padded_dst, has_left_interface, has_right_interface
-
+    ! 8x8 (z, row) tiles, z fastest: ys_gpsv_x is line(z)-fastest and dst is
+    ! row(y)-fastest, so each instruction reads and writes full lines.
+    integer(C_INT), parameter :: T = 8
     has_padded_dst = (dst_row_base == 3_C_INT)
     has_left_interface = (ipy > 0_C_INT)
     has_right_interface = (ipy < npy_grid - 1_C_INT)
-    !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(dst, ys_gpsv_x, active_n, nlines, nlines_z, nx_count, dst_row_base) private(ix, iz_index, irow, iline, p)
+    !$omp target teams distribute parallel do collapse(5) default(none) &
+    !$omp shared(dst, ys_gpsv_x, active_n, nlines, nlines_z, nx_count, dst_row_base) &
+    !$omp private(ix, iz_index, irow, iline, p, izb, irb, izi, iri)
     do ix = 1_C_INT, nx_count
-      do iz_index = 1_C_INT, nlines_z
-        do irow = 1_C_INT, active_n
-          iline = (ix - 1_C_INT)*nlines_z + iz_index
-          p = int(irow - 1_C_INT, C_INT64_T)*int(nlines, C_INT64_T) + int(iline, C_INT64_T)
-          dst(irow - 1_C_INT + dst_row_base, iz_index, ix) = ys_gpsv_x(p)
+      do izb = 0_C_INT, (nlines_z - 1_C_INT)/T
+        do irb = 0_C_INT, (active_n - 1_C_INT)/T
+          do iri = 0_C_INT, T - 1_C_INT
+            do izi = 0_C_INT, T - 1_C_INT
+              iz_index = izb*T + izi + 1_C_INT
+              irow = irb*T + iri + 1_C_INT
+              if (iz_index > nlines_z .or. irow > active_n) cycle
+              iline = (ix - 1_C_INT)*nlines_z + iz_index
+              p = int(irow - 1_C_INT, C_INT64_T)*int(nlines, C_INT64_T) + int(iline, C_INT64_T)
+              dst(irow - 1_C_INT + dst_row_base, iz_index, ix) = ys_gpsv_x(p)
+            end do
+          end do
         end do
       end do
     end do

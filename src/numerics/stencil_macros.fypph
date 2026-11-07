@@ -116,3 +116,30 @@ end if
 #:def accum_eta_uw(field, rhsu, rhsw)
 $:accum_eta(field, 'ibeta(iz)*({}) - ialfa(ix)*({})'.format(rhsu, rhsw), 'dcmplx(dreal({}), dreal({}))'.format(rhsu, rhsw))
 #:enddef
+
+#! ===================================================================
+#! A loop nest over (ix, iz, iy) whose wavefronts each cover an 8x8 tile of
+#! (iz, iy), iz fastest.  For kernels that read or write a y-fastest array
+#! (V, oldrhs, a field) and a z- or line-fastest one (VVdz, the solver's
+#! system) in the same iteration: with iy alone fastest, every access to the
+#! second array hits a different, widely strided line.  The enclosing
+#! target region is collapse(5) and lists iz, ix, iy, izb, iyb, izi, iyi as
+#! private; RHS_TILE is the tile edge.
+#! ===================================================================
+#:def tile_zy_open(ix0='nx0', ix1='nxN', y0='y_first', y1='y_last')
+      DO ix = ${ix0}$, ${ix1}$
+        DO izb = 0, (2*nz)/RHS_TILE
+          DO iyb = 0, (${y1}$ - (${y0}$))/RHS_TILE
+            DO iyi = 0, RHS_TILE - 1
+              DO izi = 0, RHS_TILE - 1
+                iz = -nz + izb*RHS_TILE + izi
+                iy = ${y0}$ + iyb*RHS_TILE + iyi
+                IF (iz > nz .OR. iy > ${y1}$) CYCLE
+#:enddef
+#:def tile_zy_close()
+              END DO
+            END DO
+          END DO
+        END DO
+      END DO
+#:enddef
