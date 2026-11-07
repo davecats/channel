@@ -13,6 +13,10 @@ if [[ -z "$launcher" || "$launcher" == /opt/pbs/* ]]; then
     echo "hunter_mpiexec.sh: mpiexec is '${launcher:-missing}', not Cray PALS; source tools/hunter_env.sh" >&2
     exit 1
 fi
+# ROCm 7.0.2's RCCL (used by the CCE build) segfaults in ncclIbInit on these
+# nodes, which have libibverbs but no InfiniBand; the network is Slingshot,
+# so RCCL never needs its IB transport here.
+export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
 args=("$@"); n=""
 for ((i = 0; i < ${#args[@]} - 1; i++)); do
     case "${args[i]}" in -n | -np | --np) n="${args[i + 1]}" ;; esac
