@@ -7,9 +7,9 @@ module mpi_autotune
   use mpi_transpose, only: init_MPI, free_MPI, fft_transpose_is_local, repack_zTOx_local, pack_zTOx, alltoall, &
                            unpack_zTOx, repack_xTOz_local, pack_xTOz, unpack_xTOz, sendbuf, recvbuf
 #ifdef HAVE_CUDA
-  use ffts, only: init_cufft, free_fft, VVdz, VVdx, rVVdx, fft_plans_ok
+  use ffts, only: init_cufft, free_fft, acquire_fft_workspace, release_fft_workspace, VVdz, VVdx, rVVdx, fft_plans_ok
 #elif defined(HAVE_HIP)
-  use ffts, only: init_hipfft, free_fft, VVdz, VVdx, rVVdx, fft_plans_ok
+  use ffts, only: init_hipfft, free_fft, acquire_fft_workspace, release_fft_workspace, VVdz, VVdx, rVVdx, fft_plans_ok
 #elif defined(HAVE_FFTW)
   use ffts, only: init_fft, free_fft, VVdz, VVdx, rVVdx, fft_plans_ok
 #endif
@@ -481,8 +481,13 @@ contains
     ! same way the y_ok path reduces bad_local before deciding.
     local_fft_ok = fft_plans_ok()
     call MPI_Allreduce(local_fft_ok, fft_ok, 1, MPI_LOGICAL, MPI_LAND, MPI_COMM_WORLD, ierr)
+#if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    ! VVdz/VVdx are views into the shared workspace and stay null until bound.
+    if (fft_ok) call acquire_fft_workspace("autotune_xz_sweep")
+#endif
 
     nrepeat = tune_repeats()
+    if (.not. fft_ok) nrepeat = -1  ! no workspace: skip timing, candidate is rejected
     forward_elapsed = 0.0_C_DOUBLE
     back_elapsed = 0.0_C_DOUBLE
     do iter = 0, nrepeat
@@ -522,6 +527,7 @@ contains
     back_cost = global_elapsed
 
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
+    if (fft_ok) call release_fft_workspace("autotune_xz_sweep")
     call free_fft()
 #elif defined(HAVE_FFTW)
     call free_fft()

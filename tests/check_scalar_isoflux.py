@@ -29,6 +29,7 @@ and property 3 is about what the wall does.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -38,6 +39,8 @@ NI = 1000.0          # the deck's [velocity] ni, i.e. 1/ni in code units
 PR = 1.0
 ALPHA = (1.0 / NI) / PR
 G = 1.0              # imposed dphi/dy: +G at the lower wall, -G at the upper
+NPHI = 2
+ROW_LENGTH = 1 + 8 * NPHI   # time + eight groups of nPhi columns, see run()
 
 DECK = f"""\
 [mesh]
@@ -82,6 +85,25 @@ nstep = 200
 """
 
 
+def read_list_directed(text, row_length):
+    """Rows of a file written with Fortran list-directed output (`WRITE (u, *)`).
+
+    How such a record looks is up to the compiler: values may be separated by
+    commas as well as blanks (Cray writes `0.,`), equal neighbours may be
+    folded into a repeat count `r*c`, and a long record may be broken over
+    several lines.  So read the file as one stream of values and cut it into
+    rows of the known length.
+    """
+    values = []
+    for token in re.split(r"[,\s]+", text.strip()):
+        count, star, value = token.rpartition("*")
+        values.extend([float(value)] * (int(count) if star else 1))
+    if len(values) % row_length:
+        raise SystemExit(f"Runtimedata.phi holds {len(values)} values, "
+                         f"not a multiple of the {row_length} per row")
+    return [values[i:i + row_length] for i in range(0, len(values), row_length)]
+
+
 def run(channel, mpiexec):
     """Run channel from a seeded cold start; return the rows of Runtimedata.phi."""
     workdir = tempfile.mkdtemp(prefix="scalar_isoflux_")
@@ -102,7 +124,7 @@ def run(channel, mpiexec):
             sys.stderr.write(proc.stdout + proc.stderr)
             raise SystemExit("no Runtimedata.phi written")
         with open(path) as fh:
-            rows = [[float(w) for w in line.split()] for line in fh if line.strip()]
+            rows = read_list_directed(fh.read(), ROW_LENGTH)
         # Columns, nPhi each: time | dphi/dy at y0 | at yN | INT(phi) dy |
         # corrtx | <phi> at y0 | <phi> at yN | <phi'^2> at y0 | <phi'^2> at yN.
         # The first row is the start field, written before the first solve, so its

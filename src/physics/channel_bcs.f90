@@ -112,11 +112,16 @@ contains
 
     call roctxPush("boundary_conditions")
     IF (has_average) THEN
-      !$omp target
+      ! A one-team region rather than a bare `target`, which takes no default
+      ! clause: every target construct in this file says default(none), see
+      ! tools/cray_bugs/default-none-leak.
+      !$omp target teams num_teams(1) default(none) shared(bc0, bcn, u0, uN)
       bc0(0, 0, 1) = u0; bcn(0, 0, 1) = uN
-      !$omp end target
+      !$omp end target teams
     END IF
-    !$omp target teams distribute parallel do collapse(3) private(iPhi, ix, iz)
+    !$omp target teams distribute parallel do collapse(3) default(none) &
+    !$omp shared(bc0, bcn, t0s, tNs, nPhi, nx0, nxN, nz) &
+    !$omp private(iPhi, ix, iz)
     DO iPhi = 1, nPhi
       DO ix = nx0, nxN
         DO iz = -nz, nz

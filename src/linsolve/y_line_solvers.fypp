@@ -1195,24 +1195,30 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     subroutine solve_endpoint_chunk(ix0_chunk, nx_chunk)
       implicit none
       integer(C_INT), intent(in) :: ix0_chunk, nx_chunk
-      complex(C_DOUBLE_COMPLEX) :: rhs_value, coeff, row_coeffs(-2:2)
+      complex(C_DOUBLE_COMPLEX) :: rhs_value, c_m2, c_m1, c_0, c_p1, c_p2
       integer(C_INT) :: line_first, line_count, response_count, chunk_batch_count
-      integer(C_INT) :: sys, iline, ref_iline, resp, local_i, local_idx, col, coupled_row
-      integer(C_INT) :: j, offset, response_slot, exposed_slot
+      integer(C_INT) :: sys, iline, ref_iline, resp, local_i, local_idx, coupled_row
+      integer(C_INT) :: response_slot, exposed_slot
       integer(C_INT) :: ix_local, abs_iz
       integer(C_INT64_T) :: p, actual_p
       logical :: is_actual
-
       call endpoint_chunk_shape(ix0_chunk, nx_chunk, line_first, line_count, response_count, chunk_batch_count)
-
       call roctxPush("ys_endpoint_pack_plus_response")
+      ! Row local_i couples to columns local_i-2..local_i+2.  A coupling inside
+      ! the interior block lands on the band of the same offset; one outside it
+      ! only matters to a response system, as the rhs of the exposed interface
+      ! unknown it responds to (the last matching column wins, as before).
+      ! Written with scalars: amdflang heap-allocated the old array-constructor
+      ! row per thread (malloc/free in every iteration), which made this pack
+      ! loop the most expensive kernel of the y-solve; see
+      ! tools/amdflang_bugs/private_array_scratch.
       !$omp target teams distribute parallel do collapse(2) default(none) &
       !$omp shared(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, &
       !$omp& ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x, &
       !$omp& active_n, nI, nlines, nlines_z, nz, response_count, chunk_batch_count, response_mode, &
-      !$omp& line_first, line_count, ix0_chunk, has_left_interface, has_right_interface, left_count, exposed_n, interior_base) &
-      !$omp private(sys, iline, ref_iline, resp, local_i, local_idx, col, coupled_row, p, j, offset, &
-      !$omp& actual_p, response_slot, exposed_slot, ix_local, abs_iz, rhs_value, coeff, row_coeffs, is_actual)
+      !$omp& line_first, line_count, ix0_chunk, has_left_interface, has_right_interface, left_count, interior_base) &
+      !$omp private(sys, iline, ref_iline, resp, local_i, local_idx, coupled_row, p, actual_p, &
+      !$omp& response_slot, exposed_slot, ix_local, abs_iz, rhs_value, c_m2, c_m1, c_0, c_p1, c_p2, is_actual)
       do local_i = 0, nI - 1
         do sys = 1, chunk_batch_count
           is_actual = (sys <= line_count)
@@ -1233,53 +1239,61 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
             end select
             iline = ref_iline
           end if
-
           local_idx = interior_base + local_i
           actual_p = int(local_idx, C_INT64_T)*int(nlines, C_INT64_T) + int(ref_iline, C_INT64_T)
-          row_coeffs = (/ys_gpsv_ds(actual_p), ys_gpsv_dl(actual_p), ys_gpsv_d(actual_p), &
-                         ys_gpsv_du(actual_p), ys_gpsv_dw(actual_p)/)
-          rhs_value = (0.0d0, 0.0d0)
-          if (is_actual) rhs_value = ys_gpsv_x(actual_p)
-
+          c_m2 = ys_gpsv_ds(actual_p)
+          c_m1 = ys_gpsv_dl(actual_p)
+          c_0 = ys_gpsv_d(actual_p)
+          c_p1 = ys_gpsv_du(actual_p)
+          c_p2 = ys_gpsv_dw(actual_p)
           p = int(local_i, C_INT64_T)*int(chunk_batch_count, C_INT64_T) + int(sys, C_INT64_T)
-          ys_batch_ds(p) = (0.0d0, 0.0d0)
-          ys_batch_dl(p) = (0.0d0, 0.0d0)
-          ys_batch_d(p) = (0.0d0, 0.0d0)
-          ys_batch_du(p) = (0.0d0, 0.0d0)
-          ys_batch_dw(p) = (0.0d0, 0.0d0)
-
-          do col = -2, 2
-            coeff = row_coeffs(col)
-            if (coeff == (0.0d0, 0.0d0)) cycle
-            coupled_row = local_idx + col
-            if (coupled_row >= interior_base .and. coupled_row <= interior_base + nI - 1) then
-              j = coupled_row - interior_base
-              offset = j - local_i
-              select case (offset)
-              case (-2)
-                ys_batch_ds(p) = coeff
-              case (-1)
-                ys_batch_dl(p) = coeff
-              case (0)
-                ys_batch_d(p) = coeff
-              case (1)
-                ys_batch_du(p) = coeff
-              case (2)
-                ys_batch_dw(p) = coeff
-              end select
-            else if (.not. is_actual) then
+          ys_batch_ds(p) = merge(c_m2, (0.0d0, 0.0d0), local_i >= 2)
+          ys_batch_dl(p) = merge(c_m1, (0.0d0, 0.0d0), local_i >= 1)
+          ys_batch_d(p) = c_0
+          ys_batch_du(p) = merge(c_p1, (0.0d0, 0.0d0), local_i <= nI - 2)
+          ys_batch_dw(p) = merge(c_p2, (0.0d0, 0.0d0), local_i <= nI - 3)
+          rhs_value = (0.0d0, 0.0d0)
+          if (is_actual) then
+            rhs_value = ys_gpsv_x(actual_p)
+          else if (local_i < 2 .or. local_i > nI - 3) then
+            ! Columns in order -2, -1, +1, +2; column 0 is always interior.
+            if (local_i < 2 .and. c_m2 /= (0.0d0, 0.0d0)) then
+              coupled_row = local_idx - 2_C_INT
               exposed_slot = 0_C_INT
-              if (has_left_interface) then
-                if (coupled_row == 0) exposed_slot = 1_C_INT
-                if (coupled_row == 1) exposed_slot = 2_C_INT
-              end if
-              if (has_right_interface) then
-                if (coupled_row == active_n - 2) exposed_slot = left_count + 1
-                if (coupled_row == active_n - 1) exposed_slot = left_count + 2
-              end if
-              if (exposed_slot == response_slot) rhs_value = coeff
+              if (has_left_interface .and. coupled_row == 0) exposed_slot = 1_C_INT
+              if (has_left_interface .and. coupled_row == 1) exposed_slot = 2_C_INT
+              if (has_right_interface .and. coupled_row == active_n - 2) exposed_slot = left_count + 1
+              if (has_right_interface .and. coupled_row == active_n - 1) exposed_slot = left_count + 2
+              if (exposed_slot == response_slot) rhs_value = c_m2
             end if
-          end do
+            if (local_i < 1 .and. c_m1 /= (0.0d0, 0.0d0)) then
+              coupled_row = local_idx - 1_C_INT
+              exposed_slot = 0_C_INT
+              if (has_left_interface .and. coupled_row == 0) exposed_slot = 1_C_INT
+              if (has_left_interface .and. coupled_row == 1) exposed_slot = 2_C_INT
+              if (has_right_interface .and. coupled_row == active_n - 2) exposed_slot = left_count + 1
+              if (has_right_interface .and. coupled_row == active_n - 1) exposed_slot = left_count + 2
+              if (exposed_slot == response_slot) rhs_value = c_m1
+            end if
+            if (local_i > nI - 2 .and. c_p1 /= (0.0d0, 0.0d0)) then
+              coupled_row = local_idx + 1_C_INT
+              exposed_slot = 0_C_INT
+              if (has_left_interface .and. coupled_row == 0) exposed_slot = 1_C_INT
+              if (has_left_interface .and. coupled_row == 1) exposed_slot = 2_C_INT
+              if (has_right_interface .and. coupled_row == active_n - 2) exposed_slot = left_count + 1
+              if (has_right_interface .and. coupled_row == active_n - 1) exposed_slot = left_count + 2
+              if (exposed_slot == response_slot) rhs_value = c_p1
+            end if
+            if (local_i > nI - 3 .and. c_p2 /= (0.0d0, 0.0d0)) then
+              coupled_row = local_idx + 2_C_INT
+              exposed_slot = 0_C_INT
+              if (has_left_interface .and. coupled_row == 0) exposed_slot = 1_C_INT
+              if (has_left_interface .and. coupled_row == 1) exposed_slot = 2_C_INT
+              if (has_right_interface .and. coupled_row == active_n - 2) exposed_slot = left_count + 1
+              if (has_right_interface .and. coupled_row == active_n - 1) exposed_slot = left_count + 2
+              if (exposed_slot == response_slot) rhs_value = c_p2
+            end if
+          end if
           ys_batch_x(p) = rhs_value
         end do
       end do
@@ -1331,8 +1345,13 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
           if (.not. has_left_interface) slot = iface + 2
           local_idx = merge(slot - 1, active_n + slot - 5, slot <= 2)
           actual_p = int(local_idx, C_INT64_T)*int(nlines, C_INT64_T) + int(iline, C_INT64_T)
-          row_coeffs = (/ys_gpsv_ds(actual_p), ys_gpsv_dl(actual_p), ys_gpsv_d(actual_p), &
-                         ys_gpsv_du(actual_p), ys_gpsv_dw(actual_p)/)
+          ! Element-wise: amdflang heap-allocates an array-constructor temporary per
+          ! thread inside target regions (tools/amdflang_bugs/private_array_scratch).
+          row_coeffs(-2) = ys_gpsv_ds(actual_p)
+          row_coeffs(-1) = ys_gpsv_dl(actual_p)
+          row_coeffs(0) = ys_gpsv_d(actual_p)
+          row_coeffs(1) = ys_gpsv_du(actual_p)
+          row_coeffs(2) = ys_gpsv_dw(actual_p)
           rhs4(iface, 1) = ys_gpsv_x(actual_p)
 
           do col = -2, 2

@@ -1,0 +1,24 @@
+#!/bin/bash
+# Example PBS job for channel on HLRS Hunter (MI300A, 4 APUs per node).
+# Submit from the case directory (the one holding dns.in):
+#   qsub -v CHANNEL_REPO=/path/to/channel,NPROCS=4 /path/to/channel/tools/hunter_job.pbs
+# Optional: TOOLCHAIN=cray (default amd), CHANNEL_EXE=<binary>, and any
+# CHANNEL_* runtime variable, e.g. CHANNEL_MPI_AUTOTUNE=off.
+# For more nodes, raise select=; NPROCS is at most 4 per node.
+#PBS -N channel
+#PBS -l select=1:node_type=mi300a:mpiprocs=4
+#PBS -l walltime=01:00:00
+#PBS -j oe
+set -eo pipefail
+cd "${PBS_O_WORKDIR:-.}"
+repo="${CHANNEL_REPO:?pass -v CHANNEL_REPO=/path/to/channel}"
+nprocs="${NPROCS:-4}"
+case "${TOOLCHAIN:-amd}" in
+    amd) source "$repo/tools/hunter_env.sh"; exe="$repo/build-amd/channel" ;;
+    cray) source "$repo/tools/hunter_cray_env.sh"; exe="$repo/build-cray/channel" ;;
+    *) echo "TOOLCHAIN must be amd or cray" >&2; exit 1 ;;
+esac
+exe="${CHANNEL_EXE:-$exe}"
+echo "channel: $exe on $nprocs ranks, $(git -C "$repo" log --oneline -1 2>/dev/null)"
+# One APU (cores + GPU) per rank; --line-buffer, or PALS holds stdout until exit.
+"$repo/tools/hunter_mpiexec.sh" --line-buffer -np "$nprocs" "$exe"

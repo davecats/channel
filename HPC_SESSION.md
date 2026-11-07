@@ -99,9 +99,9 @@ Then, in order:
    production binary multi-rank, and it fails here purely environmentally.
 2. **The three y-solver paths, each multi-rank.** They are independent code:
    ```bash
-   CHANNEL_Y_SOLVER=schur        CHANNEL_NPY=4 mpirun -np 4 ./channel
-   CHANNEL_Y_SOLVER=pipelined_lu CHANNEL_NPY=4 mpirun -np 4 ./channel
-   CHANNEL_NPXZ=4 CHANNEL_NPY=1  mpirun -np 4 ./channel
+   CHANNEL_Y_SOLVER=schur        CHANNEL_NPY=4 $REPO/tools/hunter_mpiexec.sh -np 4 ./channel
+   CHANNEL_Y_SOLVER=pipelined_lu CHANNEL_NPY=4 $REPO/tools/hunter_mpiexec.sh -np 4 ./channel
+   CHANNEL_NPXZ=4 CHANNEL_NPY=1  $REPO/tools/hunter_mpiexec.sh -np 4 ./channel
    ```
 3. **Both transports**, since NCCL and MPI differ in *schedule*, not just
    transport: `CHANNEL_COMM=mpi` and `CHANNEL_COMM=nccl`. NCCL needs **one GPU
@@ -168,6 +168,13 @@ export CHANNEL_DISABLE_RESTART_WRITE=1   # skip the final write
 and set `nstep` to something small and fixed rather than using `t_max`.
 
 ## Step 4 — performance
+
+**Bind every rank to its own APU.** Launch through `tools/hunter_mpiexec.sh`
+(`mpiexec -np N --cpu-bind list:0-23:24-47:48-71:72-95 --gpu-bind list:0:1:2:3`,
+extended to N ranks). Unbound, all ranks run on APU 0's cores and, with
+`HSA_XNACK=1`, their arrays live in APU 0's memory: on 2 and 4 ranks the
+251x250x257 case ran 957 and ~500 ms/step instead of 218 and 135. The
+`build_hunter_amd.sh` configure points ctest at the same launcher.
 
 `#define chron` is on by default, so every step prints
 `STEP n/N TIME PER TIMESTEP x ELAPSED RUN TIME y`. **Discard the first few
