@@ -24,6 +24,12 @@
 #define channelStreamSynchronize hipStreamSynchronize
 #define channelStreamDestroy hipStreamDestroy
 #define channelSuccess hipSuccess
+#define channelEvent_t hipEvent_t
+#define channelEventCreateWithFlags hipEventCreateWithFlags
+#define channelEventDisableTiming hipEventDisableTiming
+#define channelEventRecord hipEventRecord
+#define channelEventSynchronize hipEventSynchronize
+#define channelEventDestroy hipEventDestroy
 #else
 #include <cuda_runtime_api.h>
 #include <nccl.h>
@@ -34,12 +40,23 @@
 #define channelStreamSynchronize cudaStreamSynchronize
 #define channelStreamDestroy cudaStreamDestroy
 #define channelSuccess cudaSuccess
+#define channelEvent_t cudaEvent_t
+#define channelEventCreateWithFlags cudaEventCreateWithFlags
+#define channelEventDisableTiming cudaEventDisableTiming
+#define channelEventRecord cudaEventRecord
+#define channelEventSynchronize cudaEventSynchronize
+#define channelEventDestroy cudaEventDestroy
 #endif
 
+#define CHANNEL_NCCL_SLOTS 4
 typedef struct {
   ncclComm_t comm;
   channelStream_t stream;
   int nranks;
+  /* Completion events of asynchronous alltoalls, one per buffer slot, so a
+     wait for slot s does not also wait for a later collective on the stream. */
+  channelEvent_t slot_event[CHANNEL_NCCL_SLOTS];
+  int slot_pending[CHANNEL_NCCL_SLOTS];
 } channel_nccl_context;
 
 static channel_nccl_context *channel_nccl_default_context = NULL;
@@ -71,6 +88,11 @@ int channel_nccl_context_create(int nranks, int rank, const void *id_bytes, void
   channelError_t stream_status = channelStreamCreateWithFlags(&ctx->stream, channelStreamNonBlocking);
   if (stream_status != channelSuccess) return 100000 + (int)stream_status;
   ctx->nranks = nranks;
+  for (int s = 0; s < CHANNEL_NCCL_SLOTS; ++s) {
+    ctx->slot_pending[s] = 0;
+    stream_status = channelEventCreateWithFlags(&ctx->slot_event[s], channelEventDisableTiming);
+    if (stream_status != channelSuccess) return 100000 + (int)stream_status;
+  }
   *ctx_out = ctx;
   return 0;
 }
@@ -99,26 +121,19 @@ int channel_nccl_context_sendrecv(void *ctx_ptr, const void *sendbuf, size_t sen
   return 0;
 }
 
-int channel_nccl_context_alltoall(void *ctx_ptr, const void *sendbuf, void *recvbuf, size_t count_elems) {
-#if defined(HAVE_NCCL_ALLTOALL)
+/* Enqueue an alltoall on the context stream without waiting for it. */
+static int channel_nccl_enqueue_alltoall(channel_nccl_context *ctx, const void *sendbuf, void *recvbuf,
+                                         size_t count_elems) {
   int status;
   size_t count_bytes = count_elems*16;
-  channel_nccl_context *ctx = (channel_nccl_context *)ctx_ptr;
-  if (ctx == NULL) return -1;
+#if defined(HAVE_NCCL_ALLTOALL)
   status = channel_nccl_check(ncclAlltoAll(sendbuf, recvbuf, count_bytes,
                                            ncclUint8, ctx->comm, ctx->stream));
-  if (status != 0) return status;
-  channelError_t stream_status = channelStreamSynchronize(ctx->stream);
-  if (stream_status != channelSuccess) return 100000 + (int)stream_status;
-  return 0;
+  return status;
 #else
   int peer;
-  int status;
   const char *send_bytes = (const char *)sendbuf;
   char *recv_bytes = (char *)recvbuf;
-  size_t count_bytes = count_elems*16;
-  channel_nccl_context *ctx = (channel_nccl_context *)ctx_ptr;
-  if (ctx == NULL) return -1;
   status = channel_nccl_check(ncclGroupStart());
   if (status != 0) return status;
   for (peer = 0; peer < ctx->nranks; ++peer) {
@@ -129,12 +144,48 @@ int channel_nccl_context_alltoall(void *ctx_ptr, const void *sendbuf, void *recv
                                          ncclUint8, peer, ctx->comm, ctx->stream));
     if (status != 0) return status;
   }
-  status = channel_nccl_check(ncclGroupEnd());
+  return channel_nccl_check(ncclGroupEnd());
+#endif
+}
+
+int channel_nccl_context_alltoall(void *ctx_ptr, const void *sendbuf, void *recvbuf, size_t count_elems) {
+  int status;
+  channel_nccl_context *ctx = (channel_nccl_context *)ctx_ptr;
+  if (ctx == NULL) return -1;
+  status = channel_nccl_enqueue_alltoall(ctx, sendbuf, recvbuf, count_elems);
   if (status != 0) return status;
   channelError_t stream_status = channelStreamSynchronize(ctx->stream);
   if (stream_status != channelSuccess) return 100000 + (int)stream_status;
   return 0;
-#endif
+}
+
+/* Asynchronous form: enqueue, record the slot's event and return at once.
+   channel_nccl_context_wait_slot blocks until that collective has finished.
+   The send buffer must be complete before the call (OpenMP target regions
+   and the FFT wrappers synchronise before returning). */
+int channel_nccl_context_alltoall_start(void *ctx_ptr, const void *sendbuf, void *recvbuf, size_t count_elems,
+                                        int slot) {
+  int status;
+  channel_nccl_context *ctx = (channel_nccl_context *)ctx_ptr;
+  if (ctx == NULL) return -1;
+  if (slot < 0 || slot >= CHANNEL_NCCL_SLOTS) return -4;
+  status = channel_nccl_enqueue_alltoall(ctx, sendbuf, recvbuf, count_elems);
+  if (status != 0) return status;
+  channelError_t ev_status = channelEventRecord(ctx->slot_event[slot], ctx->stream);
+  if (ev_status != channelSuccess) return 100000 + (int)ev_status;
+  ctx->slot_pending[slot] = 1;
+  return 0;
+}
+
+int channel_nccl_context_wait_slot(void *ctx_ptr, int slot) {
+  channel_nccl_context *ctx = (channel_nccl_context *)ctx_ptr;
+  if (ctx == NULL) return 0;
+  if (slot < 0 || slot >= CHANNEL_NCCL_SLOTS) return -4;
+  if (!ctx->slot_pending[slot]) return 0;
+  channelError_t ev_status = channelEventSynchronize(ctx->slot_event[slot]);
+  if (ev_status != channelSuccess) return 100000 + (int)ev_status;
+  ctx->slot_pending[slot] = 0;
+  return 0;
 }
 
 /* Unlike the alltoall above -- which NCCL only provides natively behind
@@ -161,6 +212,7 @@ int channel_nccl_context_destroy(void *ctx_ptr) {
   channel_nccl_context *ctx = (channel_nccl_context *)ctx_ptr;
   if (ctx == NULL) return 0;
   channelStreamSynchronize(ctx->stream);
+  for (int s = 0; s < CHANNEL_NCCL_SLOTS; ++s) channelEventDestroy(ctx->slot_event[s]);
   channelStreamDestroy(ctx->stream);
   ncclCommDestroy(ctx->comm);
   free(ctx);

@@ -20,7 +20,7 @@ module channel_transforms
   use, intrinsic :: iso_c_binding
   use channel_grid
   use channel_state
-  use channel_equations, only: build_products, buildrhs, buildrhs_finish
+  use channel_equations, only: build_products, product_factors, buildrhs, buildrhs_finish
   use mpi_transpose
   use roctx, only: roctxPush, roctxPop
   use ffts
@@ -105,7 +105,8 @@ CONTAINS
     IMPLICIT NONE
     integer(C_INT) ::  m, to, from, mm1
     type(MPI_Request), dimension(:) :: requests(3 + nPhi)
-    type(MPI_Status)  :: status
+    logical :: use_cb
+    use_cb = xz_callbacks_enabled()
     DO m = 1, MERGE(3 + nPhi + 1, 3 + nPhi, overlapping)
 
       ! Compute indices depending on overlap mode
@@ -118,10 +119,19 @@ CONTAINS
         call roctxPush("transform_to_physical assemble_vvdz")
         CALL assemble_vvdz(m, to)
         call roctxPop("transform_to_physical assemble_vvdz")
+        if (use_cb .and. .not. fft_transpose_is_local) then
+          ! IFT writes the send buffer itself (no pack kernel)
+          call roctxPush("transform_to_physical IFT_pack")
+          call IFT_pack(VVdz(:, :, :, to), c_loc(sendbuf(1, to)))
+          call roctxPop("transform_to_physical IFT_pack")
+          CALL alltoall(sendbuf(:, to), recvbuf(:, to), requests(m), "zTOx transform_to_physical", to)
+        else
         call roctxPush("transform_to_physical IFT")
         CALL IFT(VVdz(:, :, :, to))
         call roctxPop("transform_to_physical IFT")
-        if (fft_transpose_is_local) then
+        if (use_cb) then
+          ! local transpose: RFT_unpack reads VVdz directly
+        else if (fft_transpose_is_local) then
           call roctxPush("transform_to_physical repack_zTOx_local")
           call repack_zTOx_local(VVdz(:, :, :, to), VVdx(:, :, :, to))
           call roctxPop("transform_to_physical repack_zTOx_local")
@@ -129,7 +139,8 @@ CONTAINS
           call roctxPush("transform_to_physical pack_zTOx")
           CALL pack_zTOx(VVdz(:, :, :, to), sendbuf(:, to))
           call roctxPop("transform_to_physical pack_zTOx")
-          CALL alltoall(sendbuf(:, to), recvbuf(:, to), requests(m), "zTOx transform_to_physical")
+          CALL alltoall(sendbuf(:, to), recvbuf(:, to), requests(m), "zTOx transform_to_physical", to)
+        end if
         end if
       end if
 
@@ -137,8 +148,21 @@ CONTAINS
       if (MERGE(m > 1, .true., overlapping)) then
         if (.not. fft_transpose_is_local) then
           call roctxPush("MPI_Wait zTOx transform_to_physical")
-          CALL MPI_WAIT(requests(mm1), status, ierr)
+          CALL alltoall_wait(requests(mm1), from)
           call roctxPop("MPI_Wait zTOx transform_to_physical")
+        end if
+        if (use_cb) then
+          ! RFT reads the received blocks (or VVdz) and zero-pads x itself
+          call roctxPush("transform_to_physical RFT_unpack")
+          if (fft_transpose_is_local) then
+            CALL RFT_unpack(c_loc(VVdz(1, 1, ny0 - 2, from)), VVdx(:, :, :, from), rVVdx(:, :, :, mm1))
+          else
+            CALL RFT_unpack(c_loc(recvbuf(1, from)), VVdx(:, :, :, from), rVVdx(:, :, :, mm1))
+          end if
+          call roctxPop("transform_to_physical RFT_unpack")
+          cycle
+        end if
+        if (.not. fft_transpose_is_local) then
           call roctxPush("transform_to_physical unpack_zTOx")
           CALL unpack_zTOx(recvbuf(:, from), VVdx(:, :, :, from))
           call roctxPop("transform_to_physical unpack_zTOx")
@@ -155,10 +179,16 @@ CONTAINS
 
   SUBROUTINE transform_back_and_build_rhs(ODE)
     IMPLICIT NONE
-    integer(C_INT) ::  m, mm1, to, from
+    integer(C_INT) ::  m, mm1, to, from, fa, fb
     real(C_DOUBLE), intent(in) :: ODE(1:3)
     type(MPI_Request), dimension(:) :: requests(6 + 3*nPhi)
-    type(MPI_Status)  :: status
+    logical :: use_cb, use_cb_products
+    type(c_ptr) :: xbuf
+    use_cb = xz_callbacks_enabled()
+    use_cb_products = xz_callbacks_products()
+    ! Local transposes keep the compact x-pencil copy in products(:,:,:,to),
+    ! which is then busy as the HFT input unless the callback forms the products.
+    if (fft_transpose_is_local .and. .not. use_cb_products) use_cb = .false.
     ! Reverse pass to build rVVdx
     DO m = 1, MERGE(6 + 3*nPhi + 1, 6 + 3*nPhi, overlapping)
 
@@ -169,7 +199,30 @@ CONTAINS
       from = MERGE(mod(m, 2) + 1, 1, overlapping)
 
       ! Step 1: Build, HFT, pack, and post alltoall
-      if (m <= 6 + 3*nPhi) then
+      if (m <= 6 + 3*nPhi .and. use_cb) then
+        ! The HFT forms the product in its load callback and writes the send
+        ! buffer (or, local, a compact copy in products(:,:,:,to)) itself.
+        if (fft_transpose_is_local) then
+          xbuf = c_loc(products(1, 1, ny0 - 2, to))
+        else
+          xbuf = c_loc(sendbuf(1, to))
+        end if
+        if (use_cb_products) then
+          call product_factors(m, fa, fb)
+          call roctxPush("transform_back HFT_products")
+          call HFT_products(rVVdx, fa, fb, factor, VVdx(:, :, :, to), xbuf)
+          call roctxPop("transform_back HFT_products")
+        else
+          call roctxPush("transform_back build_products")
+          call build_products(m, to)
+          call roctxPop("transform_back build_products")
+          call roctxPush("transform_back HFT_pack")
+          call HFT_pack(products(:, :, :, to), VVdx(:, :, :, to), xbuf)
+          call roctxPop("transform_back HFT_pack")
+        end if
+        if (.not. fft_transpose_is_local) &
+          call alltoall(sendbuf(:, to), recvbuf(:, to), requests(m), "xTOz transform_back_and_build_rhs", to)
+      else if (m <= 6 + 3*nPhi) then
         call roctxPush("transform_back build_products")
         call build_products(m, to)
         call roctxPop("transform_back build_products")
@@ -184,7 +237,7 @@ CONTAINS
           call roctxPush("transform_back pack_xTOz")
           call pack_xTOz(VVdx(:, :, :, to), sendbuf(:, to))
           call roctxPop("transform_back pack_xTOz")
-          call alltoall(sendbuf(:, to), recvbuf(:, to), requests(m), "xTOz transform_back_and_build_rhs")
+          call alltoall(sendbuf(:, to), recvbuf(:, to), requests(m), "xTOz transform_back_and_build_rhs", to)
         end if
       end if
 
@@ -192,8 +245,19 @@ CONTAINS
       if (MERGE(m > 1, .true., overlapping)) then
         if (.not. fft_transpose_is_local) then
           call roctxPush("MPI_Wait xTOz transform_back_and_build_rhs")
-          call MPI_WAIT(requests(mm1), status, ierr)
+          call alltoall_wait(requests(mm1), from)
           call roctxPop("MPI_Wait xTOz transform_back_and_build_rhs")
+        end if
+        if (use_cb) then
+          call roctxPush("transform_back FFT_unpack")
+          if (fft_transpose_is_local) then
+            call FFT_unpack(c_loc(products(1, 1, ny0 - 2, from)), VVdz(:, :, :, from))
+          else
+            call FFT_unpack(c_loc(recvbuf(1, from)), VVdz(:, :, :, from))
+          end if
+          call roctxPop("transform_back FFT_unpack")
+        else
+        if (.not. fft_transpose_is_local) then
           call roctxPush("transform_back unpack_xTOz")
           call unpack_xTOz(recvbuf(:, from), VVdz(:, :, :, from))
           call roctxPop("transform_back unpack_xTOz")
@@ -201,6 +265,7 @@ CONTAINS
         call roctxPush("transform_back FFT")
         call FFT(VVdz(:, :, :, from))
         call roctxPop("transform_back FFT")
+        end if
         call roctxPush("transform_back buildrhs")
         call buildrhs(ODE, mm1, from)
         call roctxPop("transform_back buildrhs")

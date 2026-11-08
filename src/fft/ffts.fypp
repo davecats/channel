@@ -51,9 +51,9 @@
     !$omp end target data
 #elif defined(HAVE_HIP)
     !$omp target data use_device_addr(x)
-    istat = hipDeviceSynchronize()
+    istat = hipStreamSynchronize(c_null_ptr)
     istat = hipfftExecZ2Z(hip_p${name}$, c_loc(x(1, 1, y0)), c_loc(x(1, 1, y0)), HIPFFT_${direction}$)
-    istat = hipDeviceSynchronize()
+    istat = hipStreamSynchronize(c_null_ptr)
     !$omp end target data
 #elif defined(HAVE_FFTW)
     DO i = fft_y0, fft_yN
@@ -127,6 +127,42 @@ MODULE ffts
   integer :: cu_pFFT, cu_pIFT, cu_pRFT, cu_pHFT
 #elif HAVE_HIP
   type(c_ptr) :: hip_pFFT, hip_pIFT, hip_pRFT, hip_pHFT
+#endif
+#ifdef HAVE_XZ_CALLBACKS
+  ! Plans whose JIT load/store callbacks (hipfft_xz_callbacks.hip) do the xz
+  ! transpose packing and the nonlinear products inside the FFTs.  Created on
+  ! first use (rocFFT compiles them at run time), see xz_callbacks_enabled.
+  type(c_ptr), save :: hip_pIFTcb = c_null_ptr, hip_pFFTcb = c_null_ptr
+  type(c_ptr), save :: hip_pRFTcb = c_null_ptr, hip_pHFTcb = c_null_ptr
+  integer, save :: xz_cb_state = 0   ! 0: undecided, 1: plans ready, -1: off
+  interface
+    function channel_xz_cb_create(nzd, nxB, nzB, nxd, nyb, pIFT, pFFT, pRFT, pHFT) &
+      bind(c, name="channel_xz_cb_create")
+      import :: c_int, c_ptr
+      integer(c_int) :: channel_xz_cb_create
+      integer(c_int), value :: nzd, nxB, nzB, nxd, nyb
+      type(c_ptr) :: pIFT, pFFT, pRFT, pHFT
+    end function channel_xz_cb_create
+    function channel_xz_cb_set_buffers(zbuf, xbuf) bind(c, name="channel_xz_cb_set_buffers")
+      import :: c_int, c_ptr
+      integer(c_int) :: channel_xz_cb_set_buffers
+      type(c_ptr), value :: zbuf, xbuf
+    end function channel_xz_cb_set_buffers
+    function channel_xz_cb_set_products(a_off, b_off, factor) bind(c, name="channel_xz_cb_set_products")
+      import :: c_int, c_long_long, c_double
+      integer(c_int) :: channel_xz_cb_set_products
+      integer(c_long_long), value :: a_off, b_off
+      real(c_double), value :: factor
+    end function channel_xz_cb_set_products
+    function channel_xz_cb_hft_products() bind(c, name="channel_xz_cb_hft_products")
+      import :: c_int
+      integer(c_int) :: channel_xz_cb_hft_products
+    end function channel_xz_cb_hft_products
+    subroutine channel_xz_cb_destroy(pIFT, pFFT, pRFT, pHFT) bind(c, name="channel_xz_cb_destroy")
+      import :: c_ptr
+      type(c_ptr), value :: pIFT, pFFT, pRFT, pHFT
+    end subroutine channel_xz_cb_destroy
+  end interface
 #endif
   integer(C_INT), save :: fft_y0, fft_yN, fft_ny
   integer(C_INT), save :: fft_nxd = 0, fft_nxB = 0, fft_nzd = 0, fft_nzB = 0, fft_nPhi = 0, fft_nflds = 0
@@ -507,9 +543,9 @@ $:z2z_transform('IFT', 'INVERSE')
     !$omp end target data
 #elif defined(HAVE_HIP)
     !$omp target data use_device_addr(x, rx)
-    istat = hipDeviceSynchronize()
+    istat = hipStreamSynchronize(c_null_ptr)
     istat = hipfftExecZ2D(hip_pRFT, c_loc(x(1, 1, x_y0)), c_loc(rx(1, 1, rx_y0)))
-    istat = hipDeviceSynchronize()
+    istat = hipStreamSynchronize(c_null_ptr)
     if (nreal < size(rx, 1)) then
       !$omp target teams distribute parallel do collapse(3) default(none) shared(rx, nreal) private(i, j, k)
       do k = lbound(rx, 3), ubound(rx, 3)
@@ -555,9 +591,9 @@ $:z2z_transform('IFT', 'INVERSE')
     !$omp end target data
 #elif defined(HAVE_HIP)
     !$omp target data use_device_addr(rx, x)
-    istat = hipDeviceSynchronize()
+    istat = hipStreamSynchronize(c_null_ptr)
     istat = hipfftExecD2Z(hip_pHFT, c_loc(rx(1, 1, rx_y0)), c_loc(x(1, 1, x_y0)))
-    istat = hipDeviceSynchronize()
+    istat = hipStreamSynchronize(c_null_ptr)
     !$omp end target data
 #elif defined(HAVE_FFTW)
     DO i = fft_y0, fft_yN
@@ -565,6 +601,161 @@ $:z2z_transform('IFT', 'INVERSE')
     END DO
 #endif
   END SUBROUTINE HFT
+
+  ! ------------------------------------------------------------------
+  ! xz transposes folded into the FFTs (HAVE_XZ_CALLBACKS, see
+  ! hipfft_xz_callbacks.hip).  CHANNEL_FFT_CALLBACKS=0 turns them off.
+  ! ------------------------------------------------------------------
+  ! .true. when the callback HFT forms the nonlinear products itself; else
+  ! HFT_products must be given the product (build_products) as component a=b=1
+  ! of a one-component array and factor 1 -- see HFT_pack.
+  logical function xz_callbacks_products()
+#ifdef HAVE_XZ_CALLBACKS
+    xz_callbacks_products = xz_callbacks_enabled()
+    if (xz_callbacks_products) xz_callbacks_products = (channel_xz_cb_hft_products() == 1)
+#else
+    xz_callbacks_products = .false.
+#endif
+  end function xz_callbacks_products
+
+  logical function xz_callbacks_enabled()
+#ifdef HAVE_XZ_CALLBACKS
+    use env_options, only: env_flag
+    logical :: want
+    integer(C_INT) :: fails
+    if (xz_cb_state == 0) then
+      want = .true.
+      call env_flag("CHANNEL_FFT_CALLBACKS", want)
+      xz_cb_state = -1
+      if (want) then
+        fails = channel_xz_cb_create(fft_nzd, fft_nxB, fft_nzB, fft_nxd, fft_ny, &
+                                     hip_pIFTcb, hip_pFFTcb, hip_pRFTcb, hip_pHFTcb)
+        if (fails == 0) then
+          xz_cb_state = 1
+        else
+          print *, "ffts: hipFFT callback plans failed (", fails, "), using pack/unpack kernels"
+          call channel_xz_cb_destroy(hip_pIFTcb, hip_pFFTcb, hip_pRFTcb, hip_pHFTcb)
+          hip_pIFTcb = c_null_ptr; hip_pFFTcb = c_null_ptr; hip_pRFTcb = c_null_ptr; hip_pHFTcb = c_null_ptr
+        end if
+      end if
+    end if
+    xz_callbacks_enabled = (xz_cb_state == 1)
+#else
+    xz_callbacks_enabled = .false.
+#endif
+  end function xz_callbacks_enabled
+
+  ! IFT of x (VVdz layout) whose output goes straight into the zTOx send
+  ! buffer `send` (pack_zTOx layout); x itself is left unchanged.
+  SUBROUTINE IFT_pack(x, send)
+    complex(C_DOUBLE_COMPLEX), intent(inout), target :: x(:, :, ny0 - 2:)
+    type(c_ptr), intent(in) :: send
+    integer :: istat, y0
+    y0 = lbound(x, 3)
+#ifdef HAVE_XZ_CALLBACKS
+    !$omp target data use_device_addr(x)
+    istat = channel_xz_cb_set_buffers(send, c_null_ptr)
+    istat = hipfftExecZ2Z(hip_pIFTcb, c_loc(x(1, 1, y0)), c_loc(x(1, 1, y0)), HIPFFT_INVERSE)
+    istat = hipStreamSynchronize(c_null_ptr)
+    !$omp end target data
+#else
+    error stop "this build has no hipFFT xz callbacks"
+#endif
+  END SUBROUTINE IFT_pack
+
+  ! FFT into x (VVdz layout) reading its input from the xTOz receive buffer.
+  SUBROUTINE FFT_unpack(recv, x)
+    type(c_ptr), intent(in) :: recv
+    complex(C_DOUBLE_COMPLEX), intent(inout), target :: x(:, :, ny0 - 2:)
+    integer :: istat, y0
+    y0 = lbound(x, 3)
+#ifdef HAVE_XZ_CALLBACKS
+    !$omp target data use_device_addr(x)
+    istat = channel_xz_cb_set_buffers(recv, c_null_ptr)
+    istat = hipfftExecZ2Z(hip_pFFTcb, c_loc(x(1, 1, y0)), c_loc(x(1, 1, y0)), HIPFFT_FORWARD)
+    istat = hipStreamSynchronize(c_null_ptr)
+    !$omp end target data
+#else
+    error stop "this build has no hipFFT xz callbacks"
+#endif
+  END SUBROUTINE FFT_unpack
+
+  ! RFT whose input is read from the zTOx receive buffer (x padding as zero);
+  ! x is only the plan's nominal input and is not read.
+  SUBROUTINE RFT_unpack(recv, x, rx)
+    type(c_ptr), intent(in) :: recv
+    complex(C_DOUBLE_COMPLEX), target :: x(:, :, ny0 - 2:)
+    real(C_DOUBLE), target :: rx(:, :, ny0 - 2:)
+    integer :: istat, x_y0, rx_y0, nreal, i, j, k
+    x_y0 = lbound(x, 3)
+    rx_y0 = lbound(rx, 3)
+    nreal = 2*(size(x, 1) - 1)
+#ifdef HAVE_XZ_CALLBACKS
+    !$omp target data use_device_addr(x, rx)
+    istat = channel_xz_cb_set_buffers(c_null_ptr, recv)
+    istat = hipfftExecZ2D(hip_pRFTcb, c_loc(x(1, 1, x_y0)), c_loc(rx(1, 1, rx_y0)))
+    istat = hipStreamSynchronize(c_null_ptr)
+    !$omp end target data
+#else
+    error stop "this build has no hipFFT xz callbacks"
+#endif
+    if (nreal < size(rx, 1)) then
+      !$omp target teams distribute parallel do collapse(3) default(none) shared(rx, nreal) private(i, j, k)
+      do k = lbound(rx, 3), ubound(rx, 3)
+        do j = 1, size(rx, 2)
+          do i = nreal + 1, size(rx, 1)
+            rx(i, j, k) = 0.0d0
+          end do
+        end do
+      end do
+    end if
+  END SUBROUTINE RFT_unpack
+
+  ! HFT of the product rx(:,:,:,a)*rx(:,:,:,b)*factor, formed in the load
+  ! callback, with the output going straight into the xTOz send buffer
+  ! (pack_xTOz layout).  x is the plan's nominal output and is not written.
+  SUBROUTINE HFT_products(rx, a, b, factor, x, send)
+    real(C_DOUBLE), target :: rx(:, :, ny0 - 2:, :)
+    integer(C_INT), intent(in) :: a, b
+    real(C_DOUBLE), intent(in) :: factor
+    complex(C_DOUBLE_COMPLEX), target :: x(:, :, ny0 - 2:)
+    type(c_ptr), intent(in) :: send
+    integer :: istat, x_y0, rx_y0
+    integer(c_long_long) :: comp
+    x_y0 = lbound(x, 3)
+    rx_y0 = lbound(rx, 3)
+    comp = int(size(rx, 1), c_long_long)*int(size(rx, 2), c_long_long)*int(size(rx, 3), c_long_long)
+#ifdef HAVE_XZ_CALLBACKS
+    !$omp target data use_device_addr(x, rx)
+    istat = channel_xz_cb_set_products(int(a - 1, c_long_long)*comp, int(b - 1, c_long_long)*comp, factor)
+    istat = channel_xz_cb_set_buffers(c_null_ptr, send)
+    istat = hipfftExecD2Z(hip_pHFTcb, c_loc(rx(1, 1, rx_y0, 1)), c_loc(x(1, 1, x_y0)))
+    istat = hipStreamSynchronize(c_null_ptr)
+    !$omp end target data
+#else
+    error stop "this build has no hipFFT xz callbacks"
+#endif
+  END SUBROUTINE HFT_products
+
+  ! HFT of rx with the output going straight into the xTOz send buffer
+  ! (store callback only; used when the products callback is unavailable).
+  SUBROUTINE HFT_pack(rx, x, send)
+    real(C_DOUBLE), target :: rx(:, :, ny0 - 2:)
+    complex(C_DOUBLE_COMPLEX), target :: x(:, :, ny0 - 2:)
+    type(c_ptr), intent(in) :: send
+    integer :: istat, x_y0, rx_y0
+    x_y0 = lbound(x, 3)
+    rx_y0 = lbound(rx, 3)
+#ifdef HAVE_XZ_CALLBACKS
+    !$omp target data use_device_addr(x, rx)
+    istat = channel_xz_cb_set_buffers(c_null_ptr, send)
+    istat = hipfftExecD2Z(hip_pHFTcb, c_loc(rx(1, 1, rx_y0)), c_loc(x(1, 1, x_y0)))
+    istat = hipStreamSynchronize(c_null_ptr)
+    !$omp end target data
+#else
+    error stop "this build has no hipFFT xz callbacks"
+#endif
+  END SUBROUTINE HFT_pack
 
 #if defined(HAVE_FFTW)
   SUBROUTINE free_fft()
@@ -596,6 +787,11 @@ $:z2z_transform('IFT', 'INVERSE')
     istat = hipfftDestroy(hip_pIFT)
     istat = hipfftDestroy(hip_pRFT)
     istat = hipfftDestroy(hip_pHFT)
+#ifdef HAVE_XZ_CALLBACKS
+    if (xz_cb_state == 1) call channel_xz_cb_destroy(hip_pIFTcb, hip_pFFTcb, hip_pRFTcb, hip_pHFTcb)
+    hip_pIFTcb = c_null_ptr; hip_pFFTcb = c_null_ptr; hip_pRFTcb = c_null_ptr; hip_pHFTcb = c_null_ptr
+    xz_cb_state = 0
+#endif
     call unbind_fft_workspace()
   END SUBROUTINE free_fft
 #endif

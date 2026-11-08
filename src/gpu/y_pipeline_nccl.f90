@@ -25,7 +25,7 @@ module y_pipeline_nccl
   public :: channel_comm_use_nccl, channel_comm_available
   public :: channel_comm_backend_from_env, channel_comm_backend_name
   public :: channel_comm_set_backend_override, channel_comm_clear_backend_override
-  public :: channel_comm_alltoall_complex, channel_comm_allgather_complex
+  public :: channel_comm_alltoall_complex, channel_comm_allgather_complex, channel_comm_alltoall_wait
   public :: channel_comm_p2p_ensure, channel_comm_send, channel_comm_recv, channel_comm_sendrecv
   public :: channel_comm_context_reset
 
@@ -78,6 +78,24 @@ module y_pipeline_nccl
       type(c_ptr), value :: ctx, sendbuf, recvbuf
       integer(c_size_t), value :: count_elems
     end function channel_nccl_context_alltoall
+
+    function channel_nccl_context_alltoall_start(ctx, sendbuf, recvbuf, count_elems, slot) &
+      bind(c, name="channel_nccl_context_alltoall_start")
+      use, intrinsic :: iso_c_binding
+      implicit none
+      integer(c_int) :: channel_nccl_context_alltoall_start
+      type(c_ptr), value :: ctx, sendbuf, recvbuf
+      integer(c_size_t), value :: count_elems
+      integer(c_int), value :: slot
+    end function channel_nccl_context_alltoall_start
+
+    function channel_nccl_context_wait_slot(ctx, slot) bind(c, name="channel_nccl_context_wait_slot")
+      use, intrinsic :: iso_c_binding
+      implicit none
+      integer(c_int) :: channel_nccl_context_wait_slot
+      type(c_ptr), value :: ctx
+      integer(c_int), value :: slot
+    end function channel_nccl_context_wait_slot
 
     function channel_nccl_context_allgather(ctx, sendbuf, recvbuf, count_elems) bind(c, name="channel_nccl_context_allgather")
       use, intrinsic :: iso_c_binding
@@ -265,13 +283,18 @@ contains
 #endif
   end subroutine channel_comm_ensure_context
 
-  subroutine channel_comm_alltoall_complex(sendbuf, recvbuf, count, comm, comm_ctx, request)
+  ! With `slot` (0..3) and NCCL, the alltoall is only enqueued: it runs on the
+  ! context's stream while the caller computes, and channel_comm_alltoall_wait
+  ! with the same slot completes it.  Without `slot` NCCL blocks as before.
+  ! On MPI, `request` alone makes it nonblocking.
+  subroutine channel_comm_alltoall_complex(sendbuf, recvbuf, count, comm, comm_ctx, request, slot)
     complex(c_double_complex), intent(in), target, contiguous :: sendbuf(:)
     complex(c_double_complex), intent(out), target, contiguous :: recvbuf(:)
     integer(c_int), intent(in), value :: count
     type(MPI_Comm), intent(in) :: comm
     type(c_ptr), intent(inout) :: comm_ctx
     type(MPI_Request), intent(inout), optional :: request
+    integer(c_int), intent(in), optional :: slot
     integer :: ierr
 
     if (channel_comm_use_nccl()) then
@@ -280,7 +303,13 @@ contains
 #ifndef HAVE_HIP
       !$omp target data use_device_addr(sendbuf, recvbuf)
 #endif
-      call channel_nccl_alltoall(comm_ctx, c_loc(sendbuf(1)), c_loc(recvbuf(1)), count)
+      if (present(slot)) then
+        ierr = channel_nccl_context_alltoall_start(comm_ctx, c_loc(sendbuf(1)), c_loc(recvbuf(1)), &
+                                                   int(count, c_size_t), slot)
+        if (ierr /= 0) error stop "channel_nccl_context_alltoall_start failed"
+      else
+        call channel_nccl_alltoall(comm_ctx, c_loc(sendbuf(1)), c_loc(recvbuf(1)), count)
+      end if
 #ifndef HAVE_HIP
       !$omp end target data
 #endif
@@ -305,6 +334,23 @@ contains
       if (ierr /= MPI_SUCCESS) error stop "channel_comm_alltoall_complex MPI failed"
     end if
   end subroutine channel_comm_alltoall_complex
+
+  ! Completes an alltoall started by channel_comm_alltoall_complex: the MPI
+  ! request, and on NCCL the collective enqueued with `slot`.
+  subroutine channel_comm_alltoall_wait(comm_ctx, request, slot)
+    type(c_ptr), intent(in) :: comm_ctx
+    type(MPI_Request), intent(inout) :: request
+    integer(c_int), intent(in) :: slot
+    integer :: ierr
+
+    call MPI_Wait(request, MPI_STATUS_IGNORE, ierr)
+#ifdef HAVE_NCCL
+    if (c_associated(comm_ctx)) then
+      ierr = channel_nccl_context_wait_slot(comm_ctx, slot)
+      if (ierr /= 0) error stop "channel_nccl_context_wait_slot failed"
+    end if
+#endif
+  end subroutine channel_comm_alltoall_wait
 
   ! count is the per-rank contribution; recvbuf holds comm_size times that.
   ! Mirrors channel_comm_alltoall_complex, including the MPI fallback, so the

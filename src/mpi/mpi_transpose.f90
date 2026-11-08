@@ -38,7 +38,7 @@
 #endif
     use roctx
     use channel_grid
-    use y_pipeline_nccl, only: channel_comm_alltoall_complex, channel_comm_cache, &
+    use y_pipeline_nccl, only: channel_comm_alltoall_complex, channel_comm_alltoall_wait, channel_comm_cache, &
                                channel_comm_cache_reserve, channel_comm_cache_finalize
 
     IMPLICIT NONE
@@ -532,18 +532,31 @@
       implicit none
       complex(C_DOUBLE_COMPLEX), intent(in)  :: recv(:)
       complex(C_DOUBLE_COMPLEX), intent(out) :: Vx(1:, 1:, :)
-      integer(C_SIZE_T) :: iy, ix, iz, src, p
+      integer(C_SIZE_T) :: p
+      integer(C_INT) :: iy, ix, iz, src, ixb, izb, ixi, izi
       integer(C_INT) :: ny_batch
+      ! Tiled like repack_zTOx_local (4 z x 16 x per wavefront, z fastest):
+      ! the read runs along z in recv, the write along x in Vx.
+      integer(C_INT), parameter :: TZ = 4, TX = 16
 
       ny_batch = size(Vx, 3)
-      !$omp target teams distribute parallel do collapse(4) default(none) &
-      !$omp shared(Vx, recv) shared(ny_batch, nxB, nzB, npxz, sendcount) private(iy, ix, iz, src, p)
+      !$omp target teams distribute parallel do collapse(6) default(none) &
+      !$omp shared(Vx, recv) shared(ny_batch, nxB, nzB, npxz, sendcount) &
+      !$omp private(iy, ix, iz, src, p, ixb, izb, ixi, izi)
       do src = 0, npxz - 1
         do iy = 1, ny_batch
-          do ix = 1, nxB
-            do iz = 1, nzB
-              p = src*sendcount + iz + (nzB*(ix - 1)) + (nzB*nxB*(iy - 1))
-              Vx(ix + src*nxB, iz, iy) = recv(p)
+          do ixb = 0, (nxB - 1)/TX
+            do izb = 0, (nzB - 1)/TZ
+              do ixi = 0, TX - 1
+                do izi = 0, TZ - 1
+                  iz = izb*TZ + izi + 1
+                  ix = ixb*TX + ixi + 1
+                  if (iz > nzB .or. ix > nxB) cycle
+                  p = int(src, C_SIZE_T)*sendcount + iz + (int(nzB, C_SIZE_T)*(ix - 1)) &
+                      + (int(nzB, C_SIZE_T)*nxB*(iy - 1))
+                  Vx(ix + src*nxB, iz, iy) = recv(p)
+                end do
+              end do
             end do
           end do
         end do
@@ -578,40 +591,66 @@
       implicit none
       complex(C_DOUBLE_COMPLEX), intent(in)  :: recv(:)
       complex(C_DOUBLE_COMPLEX), intent(out) :: Vz(1:, 1:, :)
-      integer(C_SIZE_T) :: iy, ix, iz, src, p
+      integer(C_SIZE_T) :: p
+      integer(C_INT) :: iy, ix, iz, src, ixb, izb, ixi, izi
       integer(C_INT) :: ny_batch
+      ! Tiled like repack_xTOz_local (8 x 8 per wavefront, x fastest): the
+      ! read runs along x in recv, the write along z in Vz.
+      integer(C_INT), parameter :: T = 8
 
       ny_batch = size(Vz, 3)
-      !$omp target teams distribute parallel do collapse(4) default(none) &
-      !$omp shared(Vz, recv) shared(ny_batch, nxB, nzB, npxz, sendcount) private(iy, ix, iz, src, p)
+      !$omp target teams distribute parallel do collapse(6) default(none) &
+      !$omp shared(Vz, recv) shared(ny_batch, nxB, nzB, npxz, sendcount) &
+      !$omp private(iy, ix, iz, src, p, ixb, izb, ixi, izi)
       do src = 0, npxz - 1
         do iy = 1, ny_batch
-          do iz = 1, nzB
-            do ix = 1, nxB
-              p = src*sendcount + ix + (nxB*(iz - 1)) + (nxB*nzB*(iy - 1))
-              Vz(iz + src*nzB, ix, iy) = recv(p)
+          do izb = 0, (nzB - 1)/T
+            do ixb = 0, (nxB - 1)/T
+              do izi = 0, T - 1
+                do ixi = 0, T - 1
+                  iz = izb*T + izi + 1
+                  ix = ixb*T + ixi + 1
+                  if (iz > nzB .or. ix > nxB) cycle
+                  p = int(src, C_SIZE_T)*sendcount + ix + (int(nxB, C_SIZE_T)*(iz - 1)) &
+                      + (int(nxB, C_SIZE_T)*nzB*(iy - 1))
+                  Vz(iz + src*nzB, ix, iy) = recv(p)
+                end do
+              end do
             end do
           end do
         end do
       end do
     END SUBROUTINE unpack_xTOz
 
-    SUBROUTINE alltoall(send, recv, request, label)
+    ! With `slot` the NCCL backend only enqueues the exchange (MPI: always
+    ! nonblocking here); alltoall_wait(request, slot) completes it.
+    SUBROUTINE alltoall(send, recv, request, label, slot)
       IMPLICIT NONE
       complex(C_DOUBLE_COMPLEX), intent(out), target :: recv(:)
       complex(C_DOUBLE_COMPLEX), intent(in), target  :: send(:)
       type(MPI_Request), intent(inout) :: request
       character(len=*), intent(in), optional :: label
+      integer(C_INT), intent(in), optional :: slot
       character(len=96) :: range_name
 
       range_name = "channel_comm_alltoall fft_transpose"
       if (present(label)) range_name = "channel_comm_alltoall "//trim(label)
       call roctxPush(range_name)
       call channel_comm_cache_reserve(xcomm_nccl_contexts, npxz)
-      call channel_comm_alltoall_complex(send, recv, sendcount, MPI_COMM_X, xcomm_nccl_contexts%by_size(npxz), request)
+      call channel_comm_alltoall_complex(send, recv, sendcount, MPI_COMM_X, xcomm_nccl_contexts%by_size(npxz), &
+                                         request, slot)
       call roctxPop(range_name)
 
     END SUBROUTINE alltoall
+
+    SUBROUTINE alltoall_wait(request, slot)
+      IMPLICIT NONE
+      type(MPI_Request), intent(inout) :: request
+      integer(C_INT), intent(in) :: slot
+
+      call channel_comm_cache_reserve(xcomm_nccl_contexts, npxz)
+      call channel_comm_alltoall_wait(xcomm_nccl_contexts%by_size(npxz), request, slot)
+    END SUBROUTINE alltoall_wait
 
     ! The blocking form of the xz transpose: pack, post, wait, unpack -- or,
     ! when this rank already owns every z line, just repack in place and touch

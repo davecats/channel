@@ -496,6 +496,40 @@ elseif (CMAKE_Fortran_COMPILER_ID MATCHES "LLVMFlang")
     target_compile_definitions(channel_core PRIVATE HAVE_HIP)
     message(STATUS "hipfort_DIR = ${hipfort_DIR}")
 
+    # hipFFT JIT callbacks for the xz transposes (src/fft/hipfft_xz_*): the
+    # callbacks are compiled to SPIR-V, embedded into hipfft_xz_plans.c and
+    # linked into rocFFT's kernels at run time.  CHANNEL_FFT_CALLBACKS=0 turns
+    # them off at run time.
+    option(CHANNEL_HIPFFT_CALLBACKS "Fold the xz transpose packing into hipFFT JIT callbacks" ON)
+    find_program(CHANNEL_AMDCLANGXX amdclang++ HINTS ENV ROCM_PATH PATH_SUFFIXES bin llvm/bin)
+    find_path(CHANNEL_HIPFFTXT_INCLUDE_DIR NAMES hipfft/hipfftXt.h HINTS ENV ROCM_PATH /opt/rocm PATH_SUFFIXES include)
+    if(CHANNEL_HIPFFT_CALLBACKS AND CHANNEL_AMDCLANGXX AND CHANNEL_HIPFFTXT_INCLUDE_DIR)
+        set(_xz_cb_hip "${CHANNEL_SOURCE_DIR}/fft/hipfft_xz_callbacks.hip")
+        set(_xz_cb_spv "${CMAKE_CURRENT_BINARY_DIR}/hipfft_xz_callbacks.spv")
+        set(_xz_cb_c "${CHANNEL_SOURCE_DIR}/fft/hipfft_xz_plans.c")
+        set(_xz_cb_spv2 "${CMAKE_CURRENT_BINARY_DIR}/hipfft_xz_callbacks_hft_load.spv")
+        # CPLUS_INCLUDE_PATH of the Hunter TheRock module puts include/thrust
+        # first, whose limits.h then shadows the system one.
+        set(_xz_cb_cmd ${CMAKE_COMMAND} -E env --unset=CPLUS_INCLUDE_PATH --unset=CPATH
+                       "${CHANNEL_AMDCLANGXX}" -x hip --offload-arch=amdgcnspirv --offload-device-only -c -O3
+                       -D__HIP_PLATFORM_AMD__=1)
+        add_custom_command(OUTPUT "${_xz_cb_spv}"
+            COMMAND ${_xz_cb_cmd} "${_xz_cb_hip}" -o "${_xz_cb_spv}"
+            DEPENDS "${_xz_cb_hip}"
+            COMMENT "Compiling hipFFT xz callbacks to SPIR-V")
+        add_custom_command(OUTPUT "${_xz_cb_spv2}"
+            COMMAND ${_xz_cb_cmd} -DCHANNEL_CB_HFT_LOAD_ONLY "${_xz_cb_hip}" -o "${_xz_cb_spv2}"
+            DEPENDS "${_xz_cb_hip}"
+            COMMENT "Compiling the hipFFT products callback to SPIR-V")
+        set_source_files_properties("${_xz_cb_c}" PROPERTIES
+            OBJECT_DEPENDS "${_xz_cb_spv};${_xz_cb_spv2}"
+            COMPILE_DEFINITIONS "CHANNEL_XZ_CB_SPV=\"${_xz_cb_spv}\";CHANNEL_XZ_CB_HFT_LOAD_SPV=\"${_xz_cb_spv2}\";__HIP_PLATFORM_AMD__=1")
+        target_sources(channel_core PRIVATE "${_xz_cb_c}")
+        target_include_directories(channel_core PRIVATE "${CHANNEL_HIPFFTXT_INCLUDE_DIR}")
+        target_compile_definitions(channel_core PRIVATE HAVE_XZ_CALLBACKS)
+        message(STATUS "hipFFT xz callbacks enabled (${CHANNEL_AMDCLANGXX})")
+    endif()
+
 endif()
 
 # --------------------------------------------------------------------
