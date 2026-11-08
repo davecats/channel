@@ -167,21 +167,26 @@ $:tile_zy_close()
     integer(C_INT) :: ix, iz, j, y_first, y_last
     complex(C_DOUBLE_COMPLEX) :: temp
     complex(C_DOUBLE_COMPLEX) :: zero_mode_u(-1:ny + 1), zero_mode_w(-1:ny + 1), zero_mode_ucor(-1:ny + 1)
+    type(wall_normal_system) :: systems(2)
 
-    call roctxPush("linsolve solve_v")
-    call solve_wall_normal_component(V(:, :, :, 2), assemble_compact_biharmonic_system, assemble_selected_compact_component_boundaries, &
-                                                lambda, 1.0d0, V(:, :, :, 2), &
-                                                boundaries=compact_component_boundaries(v0bc, v0m1bc, vnbc, vnp1bc, &
-                                                                                        bc0(:, :, 2), bc0(:, :, 4), &
-                                                                                        bcn(:, :, 2), bcn(:, :, 4)))
-    call roctxPop("linsolve solve_v")
-    call roctxPush("linsolve solve_eta")
-    call solve_wall_normal_component(V(:, :, :, 1), assemble_compact_helmholtz_system, assemble_selected_compact_component_boundaries, &
-                                                lambda, 1.0d0, V(:, :, :, 1), &
-                                                boundaries=compact_component_boundaries(eta0bc, eta0m1bc, etanbc, etanp1bc, &
-                                                                                        bc0(:, :, 5), zero_bc, &
-                                                                                        bcn(:, :, 5), zero_bc))
-    call roctxPop("linsolve solve_eta")
+    ! v and eta are independent: one stacked solve (see solve_wall_normal_systems).
+    call roctxPush("linsolve solve_v_eta")
+    systems(1)%ctx = compact_component_boundaries(v0bc, v0m1bc, vnbc, vnp1bc, &
+                                                  bc0(:, :, 2), bc0(:, :, 4), bcn(:, :, 2), bcn(:, :, 4))
+    systems(1)%field => V(:, :, :, 2)
+    systems(1)%source => V(:, :, :, 2)
+    systems(1)%assemble => assemble_compact_biharmonic_system
+    systems(2)%ctx = compact_component_boundaries(eta0bc, eta0m1bc, etanbc, etanp1bc, &
+                                                  bc0(:, :, 5), zero_bc, bcn(:, :, 5), zero_bc)
+    systems(2)%field => V(:, :, :, 1)
+    systems(2)%source => V(:, :, :, 1)
+    systems(2)%assemble => assemble_compact_helmholtz_system
+    systems(:)%ctx%lambda = lambda
+    systems(:)%ctx%diffusion = 1.0d0
+    systems(1)%boundary => assemble_selected_compact_component_boundaries
+    systems(2)%boundary => assemble_selected_compact_component_boundaries
+    call solve_wall_normal_systems(systems)
+    call roctxPop("linsolve solve_v_eta")
     call roctxPush("linsolve d_v_dy")
     call apply_dy(V(:, :, :, 2), V(:, :, :, 3))
     call roctxPop("linsolve d_v_dy")
@@ -238,13 +243,52 @@ $:tile_zy_close()
     IMPLICIT NONE
     integer(C_INT), intent(in) :: iPhi
     real(C_DOUBLE), intent(in) :: lambda
+    type(wall_normal_system) :: systems(1)
+
+    call scalar_system(systems(1), lambda, iPhi)
+    call solve_wall_normal_systems(systems)
+    call correct_scalar_mean(lambda, iPhi)
+  END SUBROUTINE linsolve_scalar
+
+  ! All scalars at once: they are independent, so one stacked solve.
+  SUBROUTINE linsolve_scalars(lambda)
+    IMPLICIT NONE
+    real(C_DOUBLE), intent(in) :: lambda
+    type(wall_normal_system), allocatable :: systems(:)
+    integer(C_INT) :: iPhi
+
+    if (nPhi < 1) return
+    allocate (systems(nPhi))
+    do iPhi = 1, nPhi
+      call scalar_system(systems(iPhi), lambda, iPhi)
+    end do
+    call solve_wall_normal_systems(systems)
+    do iPhi = 1, nPhi
+      call correct_scalar_mean(lambda, iPhi)
+    end do
+  END SUBROUTINE linsolve_scalars
+
+  subroutine scalar_system(sys, lambda, iPhi)
+    IMPLICIT NONE
+    type(wall_normal_system), intent(out) :: sys
+    real(C_DOUBLE), intent(in) :: lambda
+    integer(C_INT), intent(in) :: iPhi
+
+    sys%ctx = compact_component_boundaries(phi0bc(:, iPhi), phi0m1bc(:, iPhi), phinbc(:, iPhi), phinp1bc(:, iPhi), &
+                                           bc0(:, :, 5 + iPhi), zero_bc, bcn(:, :, 5 + iPhi), zero_bc)
+    sys%ctx%lambda = lambda
+    sys%ctx%diffusion = pra(iPhi)
+    sys%field => V(:, :, :, 3 + iPhi)
+    sys%source => V(:, :, :, 3 + iPhi)
+    sys%assemble => assemble_compact_helmholtz_system
+    sys%boundary => assemble_selected_compact_component_boundaries
+  end subroutine scalar_system
+
+  SUBROUTINE correct_scalar_mean(lambda, iPhi)
+    IMPLICIT NONE
+    integer(C_INT), intent(in) :: iPhi
+    real(C_DOUBLE), intent(in) :: lambda
     complex(C_DOUBLE_COMPLEX) :: zero_mode_scalar(-1:ny + 1), zero_mode_tcor(-1:ny + 1)
-    call solve_wall_normal_component(V(:, :, :, 3 + iPhi), assemble_compact_helmholtz_system, assemble_selected_compact_component_boundaries, &
-                                                lambda, pra(iPhi), V(:, :, :, 3 + iPhi), &
-                                                boundaries=compact_component_boundaries(phi0bc(:, iPhi), phi0m1bc(:, iPhi), &
-                                                                                        phinbc(:, iPhi), phinp1bc(:, iPhi), &
-                                                                                        bc0(:, :, 5 + iPhi), zero_bc, &
-                                                                                        bcn(:, :, 5 + iPhi), zero_bc))
 
     if (nx0 == 0) then
       !$omp target update from(V(:, 0, 0, 3 + iPhi))
@@ -260,7 +304,7 @@ $:tile_zy_close()
       call scatter_full_y_line(zero_mode_scalar, V(:, 0, 0, 3 + iPhi))
       !$omp target update to(V(:, 0, 0, 3 + iPhi))
     end if
-  END SUBROUTINE linsolve_scalar
+  END SUBROUTINE correct_scalar_mean
 
   SUBROUTINE build_products(m, to)
     IMPLICIT NONE

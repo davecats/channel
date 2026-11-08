@@ -330,10 +330,8 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
         CALL linsolve(RK_rai(1, i)/deltat)
         call roctxPop("linsolve_velocity")
         call roctxPush("linsolve_scalar")
-        do iPhi = 1, nPhi
-          !depends on (V(:, :, :, 3+iPhi), updates V(:, :, :, 3+iPhi)
-          CALL linsolve_scalar(RK_rai(1, i)/deltat, iPhi)
-        end do
+        !depends on (V(:, :, :, 3+iPhi), updates V(:, :, :, 3+iPhi)
+        CALL linsolve_scalars(RK_rai(1, i)/deltat)
         call roctxPop("linsolve_scalar")
         call roctxPop("rk_substep")
       end do

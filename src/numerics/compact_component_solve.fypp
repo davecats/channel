@@ -84,6 +84,18 @@ module compact_component_solve
       type(compact_assembly_context), intent(in) :: ctx
     end subroutine compact_assembly_step
   end interface
+  ! One independent wall-normal problem for solve_wall_normal_systems: where
+  ! its solution goes, what it is assembled from, and the context carrying its
+  ! coefficients and boundary values (as compact_component_boundaries builds it,
+  ! plus lambda and diffusion).
+  type, public :: wall_normal_system
+    complex(C_DOUBLE_COMPLEX), pointer :: field(:, :, :) => null()
+    complex(C_DOUBLE_COMPLEX), pointer :: source(:, :, :) => null()
+    procedure(compact_assembly_step), pointer, nopass :: assemble => null()
+    procedure(compact_assembly_step), pointer, nopass :: boundary => null()
+    type(compact_assembly_context) :: ctx
+  end type wall_normal_system
+  integer(C_INT), save :: wall_normal_stack_max = -1_C_INT
 contains
 
   SUBROUTINE apply_dy(src, dst)
@@ -476,6 +488,99 @@ contains
     call reconstruct_assembled_boundaries(owner_dst, ny0, has_lower_boundary, has_upper_boundary)
     call ys_release_workspace()
   END SUBROUTINE solve_wall_normal_component
+
+  ! Several independent wall-normal problems solved as one.  The distributed
+  ! pipelined solve costs a fixed number of messages and pipeline stages per
+  ! call whatever the number of lines, so on npy > 1 it is latency bound:
+  ! stacking K systems along x in one workspace (K*nxB columns) pays that
+  ! latency once instead of K times.  Each system is assembled into its own
+  ! block of columns through views whose x bounds are rebased to nx0:nxN, so
+  ! the assembly callbacks are unchanged.  Falls back to one solve per system
+  ! for the Schur solver, and stacks at most CHANNEL_Y_STACK_MAX systems
+  ! (default 8 on npy > 1, 1 otherwise -- on one rank the solve is bandwidth
+  ! bound and stacking only costs workspace).
+  subroutine solve_wall_normal_systems(systems)
+    use env_options, only: env_int
+    use y_line_solvers, only: Y_SOLVER_PIPELINED_LU, ys_selected_solver
+    implicit none
+    type(wall_normal_system), intent(inout) :: systems(:)
+    integer(C_INT) :: first, last, nsys, requested
+
+    nsys = size(systems, kind=C_INT)
+    if (wall_normal_stack_max < 0_C_INT) then
+      wall_normal_stack_max = merge(8_C_INT, 1_C_INT, npy_grid > 1)
+      if (env_int("CHANNEL_Y_STACK_MAX", requested)) wall_normal_stack_max = max(1_C_INT, requested)
+    end if
+    first = 1_C_INT
+    do while (first <= nsys)
+      last = min(nsys, first + wall_normal_stack_max - 1_C_INT)
+      if (last == first .or. ys_selected_solver /= Y_SOLVER_PIPELINED_LU) then
+        last = first
+        call solve_wall_normal_component(systems(first)%field, systems(first)%assemble, systems(first)%boundary, &
+                                         systems(first)%ctx%lambda, systems(first)%ctx%diffusion, systems(first)%source, &
+                                         boundaries=systems(first)%ctx)
+      else
+        call solve_stacked_systems(systems(first:last))
+      end if
+      first = last + 1_C_INT
+    end do
+  end subroutine solve_wall_normal_systems
+
+  subroutine solve_stacked_systems(systems)
+    use y_line_solvers, only: ys_prepare_assembled_workspace, ys_release_workspace, &
+                              ys_solve_pipelined_lu_lines, ys_unpack_pipelined_columns, ys_selected_batches, &
+                              ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, ys_eqm1_owner, ys_eq0_owner, ys_eqn_owner, ys_eqnp1_owner, &
+                              ys_lower_ghost_owner, ys_lower_boundary_owner, ys_upper_boundary_owner, ys_upper_ghost_owner
+    implicit none
+    type(wall_normal_system), intent(inout) :: systems(:)
+    type(compact_assembly_context) :: ctx
+    complex(C_DOUBLE_COMPLEX), pointer :: owner_dst(:, :, :)
+    logical :: has_lower_boundary, has_upper_boundary
+    integer(C_INT) :: nsys, s, c0, c1
+
+    nsys = size(systems, kind=C_INT)
+    has_lower_boundary = (ny0 == 1)
+    has_upper_boundary = (nyN == ny - 1)
+    call roctxPush("solve_stacked_systems")
+    call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, nsys*nxB*(2*nz + 1), prepare_schur=.false.)
+    do s = 1, nsys
+      c0 = nx0 + (s - 1)*nxB
+      c1 = c0 + nxB - 1
+      ctx = systems(s)%ctx
+      ctx%src(ny0 - 2:, -nz:, nx0:) => systems(s)%source
+      ctx%row_start = ny0
+      ctx%row_end = nyN
+      ctx%has_lower_boundary = has_lower_boundary
+      ctx%has_upper_boundary = has_upper_boundary
+      ctx%system_matrix(-nz:, nx0:, ny0:, -2:) => ys_gpsv_owner_matrix(:, c0:c1, :, :)
+      ctx%system_rhs(-nz:, nx0:, ny0:) => ys_gpsv_owner_rhs(:, c0:c1, :)
+      ctx%lower_ghost_row(-2:, -nz:, nx0:) => ys_eqm1_owner(:, :, c0:c1)
+      ctx%lower_wall_row(-2:, -nz:, nx0:) => ys_eq0_owner(:, :, c0:c1)
+      ctx%upper_wall_row(-2:, -nz:, nx0:) => ys_eqn_owner(:, :, c0:c1)
+      ctx%upper_ghost_row(-2:, -nz:, nx0:) => ys_eqnp1_owner(:, :, c0:c1)
+      ctx%lower_ghost_value(-nz:, nx0:) => ys_lower_ghost_owner(:, c0:c1)
+      ctx%lower_wall_value(-nz:, nx0:) => ys_lower_boundary_owner(:, c0:c1)
+      ctx%upper_wall_value(-nz:, nx0:) => ys_upper_boundary_owner(:, c0:c1)
+      ctx%upper_ghost_value(-nz:, nx0:) => ys_upper_ghost_owner(:, c0:c1)
+      call systems(s)%assemble(ctx)
+      call systems(s)%boundary(ctx)
+    end do
+    call eliminate_assembled_boundaries(ny0, nyN, has_lower_boundary, has_upper_boundary)
+    if (ys_selected_batches >= 1_C_INT) then
+      call ys_solve_pipelined_lu_lines(ys_selected_batches)
+    else
+      call ys_solve_pipelined_lu_lines()
+    end if
+    do s = 1, nsys
+      c0 = nx0 + (s - 1)*nxB
+      owner_dst(ny0 - 2:, -nz:, nx0:) => systems(s)%field
+      call ys_unpack_pipelined_columns(owner_dst, (s - 1)*nxB)
+      call reconstruct_assembled_boundaries(owner_dst, ny0, has_lower_boundary, has_upper_boundary, &
+                                            ix_start=c0, ix_end=c0 + nxB - 1)
+    end do
+    call ys_release_workspace()
+    call roctxPop("solve_stacked_systems")
+  end subroutine solve_stacked_systems
 
   SUBROUTINE scatter_full_y_line(full_line, local_line)
     IMPLICIT NONE

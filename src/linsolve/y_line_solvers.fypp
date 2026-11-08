@@ -324,6 +324,7 @@ module y_line_solvers
   public :: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, ys_owner_nz, ys_owner_nx, ys_owner_ix0, ys_owner_ixN
   public :: ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x
   public :: ys_solve_packed_pentadiagonal, ys_solve_endpoint_schur, ys_solve_pipelined_lu
+  public :: ys_solve_pipelined_lu_lines, ys_unpack_pipelined_columns
   public :: ys_finalize_nccl_contexts
 
   integer(C_INT), save :: ys_workspace_ny = -1
@@ -1413,14 +1414,36 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     implicit none
     complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
     integer(C_INT), optional, intent(in) :: requested_batches
-    integer(C_INT) :: active_n, nlines, nlines_z, nx_count, dst_row_base
+
+    call ys_solve_pipelined_lu_lines(requested_batches)
+    call ys_unpack_pipelined_columns(dst, 0_C_INT)
+  end subroutine ys_solve_pipelined_lu
+
+  ! Copies the solved lines of columns column_offset+1 .. column_offset+size(dst,3)
+  ! of the workspace into dst.  With several systems stacked along x in one
+  ! workspace (solve_wall_normal_systems) each one is unpacked by its offset.
+  subroutine ys_unpack_pipelined_columns(dst, column_offset)
+    implicit none
+    complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
+    integer(C_INT), intent(in) :: column_offset
+    integer(C_INT) :: active_n, dst_row_base
+
+    active_n = ys_workspace_active_n
+    dst_row_base = merge(3_C_INT, 1_C_INT, size(dst, 1, kind=C_INT) == active_n + 4_C_INT)
+    call ys_unpack_pipelined_solution(dst, active_n, ys_workspace_nlines, size(dst, 2, kind=C_INT), &
+                                      size(dst, 3, kind=C_INT), dst_row_base, column_offset)
+  end subroutine ys_unpack_pipelined_columns
+
+  ! The solve on the bound workspace, leaving the solution in ys_gpsv_x (and
+  ! the interface rows in ys_left/right_interface_values).
+  subroutine ys_solve_pipelined_lu_lines(requested_batches)
+    implicit none
+    integer(C_INT), optional, intent(in) :: requested_batches
+    integer(C_INT) :: active_n, nlines
     integer(C_INT) :: nbatches, batch_max_lines
 
     active_n = ys_workspace_active_n
     nlines = ys_workspace_nlines
-    nlines_z = size(dst, 2, kind=C_INT)
-    nx_count = nlines/nlines_z
-    dst_row_base = merge(3_C_INT, 1_C_INT, size(dst, 1, kind=C_INT) == active_n + 4_C_INT)
 
     if (active_n < 1_C_INT) error stop "pipelined LU solve requires active rows"
     if (nlines < 1_C_INT) error stop "pipelined LU solve requires active lines"
@@ -1438,9 +1461,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     else
       call ys_solve_pipelined_lu_distributed(active_n, nlines, nbatches, batch_max_lines)
     end if
-
-    call ys_unpack_pipelined_solution(dst, active_n, nlines, nlines_z, nx_count, dst_row_base)
-  end subroutine ys_solve_pipelined_lu
+  end subroutine ys_solve_pipelined_lu_lines
 
   integer(C_INT) function ys_pipeline_batch_count(nlines)
     implicit none
@@ -1720,89 +1741,50 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     call ys_ensure_pipeline_buffers(nbatches, batch_max_lines)
     call ys_pipeline_nccl_context(nccl_ctx)
 
+    ! Same fused stages as the MPI path: one kernel and one message per batch
+    ! and direction.  The NCCL calls block, so the backward sweep cannot be
+    ! interleaved with the forward one as the MPI path does with MPI_Test.
     call roctxPush("ys_pipeline_nccl forward_sweep")
     do batch = 1_C_INT, nbatches
       call ys_pipeline_batch_slice(batch, nbatches, nlines, batch_max_lines, first_line, line_count, &
                                    factor_count, solve_count, factor_offset, forward_offset, backward_offset)
-
       if (ipy > 0_C_INT) then
         call roctxPush("ys_pipeline_nccl recv_factor")
         !$omp target data use_device_addr(ycomm_recvbuf)
         call channel_comm_recv(nccl_ctx, c_loc(ycomm_recvbuf(factor_offset + 1)), factor_count, ipy - 1_C_INT)
         !$omp end target data
         call roctxPop("ys_pipeline_nccl recv_factor")
-        call roctxPush("ys_pipeline_nccl apply_factor_continuation")
-        call ys_apply_factor_continuation(first_line, line_count, active_n, factor_offset)
-        call roctxPop("ys_pipeline_nccl apply_factor_continuation")
       end if
-
-      call roctxPush("ys_pipeline_nccl factor_batch")
-      call ys_factor_pipelined_batch(first_line, line_count, active_n, ipy < npy_grid - 1_C_INT)
-      call roctxPop("ys_pipeline_nccl factor_batch")
-
+      call roctxPush("ys_pipeline_nccl forward_fused")
+      call ys_pipelined_forward_fused(first_line, line_count, active_n, ipy > 0_C_INT, ipy < npy_grid - 1_C_INT, &
+                                      factor_offset)
+      call roctxPop("ys_pipeline_nccl forward_fused")
       if (ipy < npy_grid - 1_C_INT) then
-        call roctxPush("ys_pipeline_nccl pack_factor_state")
-        call ys_pack_factor_state(first_line, line_count, active_n, factor_offset)
-        call roctxPop("ys_pipeline_nccl pack_factor_state")
         call roctxPush("ys_pipeline_nccl send_factor")
         !$omp target data use_device_addr(ycomm_sendbuf)
         call channel_comm_send(nccl_ctx, c_loc(ycomm_sendbuf(factor_offset + 1)), factor_count, ipy + 1_C_INT)
         !$omp end target data
         call roctxPop("ys_pipeline_nccl send_factor")
       end if
-
-      if (ipy > 0_C_INT) then
-        call roctxPush("ys_pipeline_nccl recv_forward")
-        !$omp target data use_device_addr(ycomm_recvbuf)
-        call channel_comm_recv(nccl_ctx, c_loc(ycomm_recvbuf(forward_offset + 1)), solve_count, ipy - 1_C_INT)
-        !$omp end target data
-        call roctxPop("ys_pipeline_nccl recv_forward")
-        call roctxPush("ys_pipeline_nccl forward_continue")
-        call ys_forward_pipelined_batch_continue(first_line, line_count, active_n, forward_offset)
-        call roctxPop("ys_pipeline_nccl forward_continue")
-      else
-        call roctxPush("ys_pipeline_nccl forward_first_rank")
-        call ys_forward_pipelined_batch(first_line, line_count, active_n)
-        call roctxPop("ys_pipeline_nccl forward_first_rank")
-      end if
-
-      if (ipy < npy_grid - 1_C_INT) then
-        call roctxPush("ys_pipeline_nccl pack_forward_state")
-        call ys_pack_forward_state(first_line, line_count, active_n, forward_offset)
-        call roctxPop("ys_pipeline_nccl pack_forward_state")
-        call roctxPush("ys_pipeline_nccl send_forward")
-        !$omp target data use_device_addr(ycomm_sendbuf)
-        call channel_comm_send(nccl_ctx, c_loc(ycomm_sendbuf(forward_offset + 1)), solve_count, ipy + 1_C_INT)
-        !$omp end target data
-        call roctxPop("ys_pipeline_nccl send_forward")
-      end if
     end do
     call roctxPop("ys_pipeline_nccl forward_sweep")
 
     call roctxPush("ys_pipeline_nccl backward_sweep")
-    do batch = nbatches, 1_C_INT, -1_C_INT
+    do batch = 1_C_INT, nbatches
       call ys_pipeline_batch_slice(batch, nbatches, nlines, batch_max_lines, first_line, line_count, &
                                    factor_count, solve_count, factor_offset, forward_offset, backward_offset)
-
       if (ipy < npy_grid - 1_C_INT) then
         call roctxPush("ys_pipeline_nccl recv_backward")
         !$omp target data use_device_addr(ycomm_recvbuf)
         call channel_comm_recv(nccl_ctx, c_loc(ycomm_recvbuf(backward_offset + 1)), solve_count, ipy + 1_C_INT)
         !$omp end target data
         call roctxPop("ys_pipeline_nccl recv_backward")
-        call roctxPush("ys_pipeline_nccl backward_continue")
-        call ys_backward_pipelined_batch_continue(first_line, line_count, active_n, backward_offset)
-        call roctxPop("ys_pipeline_nccl backward_continue")
-      else
-        call roctxPush("ys_pipeline_nccl backward_top_rank")
-        call ys_backward_pipelined_batch(first_line, line_count, active_n)
-        call roctxPop("ys_pipeline_nccl backward_top_rank")
       end if
-
+      call roctxPush("ys_pipeline_nccl backward_fused")
+      call ys_pipelined_backward_fused(first_line, line_count, active_n, ipy > 0_C_INT, ipy < npy_grid - 1_C_INT, &
+                                       backward_offset, forward_offset)
+      call roctxPop("ys_pipeline_nccl backward_fused")
       if (ipy > 0_C_INT) then
-        call roctxPush("ys_pipeline_nccl pack_backward_state")
-        call ys_pack_backward_state(first_line, line_count, forward_offset)
-        call roctxPop("ys_pipeline_nccl pack_backward_state")
         call roctxPush("ys_pipeline_nccl send_backward")
         !$omp target data use_device_addr(ycomm_sendbuf)
         call channel_comm_send(nccl_ctx, c_loc(ycomm_sendbuf(forward_offset + 1)), solve_count, ipy - 1_C_INT)
@@ -2200,10 +2182,10 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     !$omp end target teams distribute parallel do
   end subroutine ys_pipelined_backward_fused
 
-  subroutine ys_unpack_pipelined_solution(dst, active_n, nlines, nlines_z, nx_count, dst_row_base)
+  subroutine ys_unpack_pipelined_solution(dst, active_n, nlines, nlines_z, nx_count, dst_row_base, column_offset)
     implicit none
     complex(C_DOUBLE_COMPLEX), intent(inout) :: dst(:, :, :)
-    integer(C_INT), intent(in) :: active_n, nlines, nlines_z, nx_count, dst_row_base
+    integer(C_INT), intent(in) :: active_n, nlines, nlines_z, nx_count, dst_row_base, column_offset
     integer(C_INT) :: ix, iz_index, irow, iline, izb, irb, izi, iri
     integer(C_INT64_T) :: p
     logical :: has_padded_dst, has_left_interface, has_right_interface
@@ -2214,7 +2196,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     has_left_interface = (ipy > 0_C_INT)
     has_right_interface = (ipy < npy_grid - 1_C_INT)
     !$omp target teams distribute parallel do collapse(5) default(none) &
-    !$omp shared(dst, ys_gpsv_x, active_n, nlines, nlines_z, nx_count, dst_row_base) &
+    !$omp shared(dst, ys_gpsv_x, active_n, nlines, nlines_z, nx_count, dst_row_base, column_offset) &
     !$omp private(ix, iz_index, irow, iline, p, izb, irb, izi, iri)
     do ix = 1_C_INT, nx_count
       do izb = 0_C_INT, (nlines_z - 1_C_INT)/T
@@ -2224,7 +2206,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
               iz_index = izb*T + izi + 1_C_INT
               irow = irb*T + iri + 1_C_INT
               if (iz_index > nlines_z .or. irow > active_n) cycle
-              iline = (ix - 1_C_INT)*nlines_z + iz_index
+              iline = (column_offset + ix - 1_C_INT)*nlines_z + iz_index
               p = int(irow - 1_C_INT, C_INT64_T)*int(nlines, C_INT64_T) + int(iline, C_INT64_T)
               dst(irow - 1_C_INT + dst_row_base, iz_index, ix) = ys_gpsv_x(p)
             end do
@@ -2237,10 +2219,10 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     if (has_padded_dst .and. npy_grid > 1_C_INT) then
       !$omp target teams distribute parallel do collapse(2) default(none) &
       !$omp shared(dst, ys_left_interface_values, ys_right_interface_values, active_n, nlines_z, nx_count, has_left_interface, has_right_interface) &
-      !$omp private(ix, iz_index, iline)
+      !$omp shared(column_offset) private(ix, iz_index, iline)
       do ix = 1_C_INT, nx_count
         do iz_index = 1_C_INT, nlines_z
-          iline = (ix - 1_C_INT)*nlines_z + iz_index
+          iline = (column_offset + ix - 1_C_INT)*nlines_z + iz_index
           if (has_left_interface) then
             dst(1, iz_index, ix) = ys_left_interface_values(1, iline)
             dst(2, iz_index, ix) = ys_left_interface_values(2, iline)
