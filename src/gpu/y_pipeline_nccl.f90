@@ -26,6 +26,7 @@ module y_pipeline_nccl
   public :: channel_comm_backend_from_env, channel_comm_backend_name
   public :: channel_comm_set_backend_override, channel_comm_clear_backend_override
   public :: channel_comm_alltoall_complex, channel_comm_allgather_complex, channel_comm_alltoall_wait
+  public :: channel_comm_xz_use_nccl
   public :: channel_comm_p2p_ensure, channel_comm_send, channel_comm_recv, channel_comm_sendrecv
   public :: channel_comm_context_reset
 
@@ -201,6 +202,24 @@ contains
     end select
   end function channel_comm_use_nccl
 
+  ! Backend of the xz-transpose alltoall: CHANNEL_COMM_XZ (mpi | nccl) when
+  ! set, so the node-local xz exchange can use NCCL while the y pipeline,
+  ! which may cross nodes, stays on MPI; otherwise the common backend.
+  logical function channel_comm_xz_use_nccl()
+    character(len=32) :: value
+
+    channel_comm_xz_use_nccl = channel_comm_use_nccl()
+    if (.not. env_text("CHANNEL_COMM_XZ", value)) return
+    select case (lowercase(trim(value)))
+    case ("mpi")
+      channel_comm_xz_use_nccl = .false.
+    case ("nccl", "rccl")
+      if (.not. channel_comm_available()) &
+        error stop "CHANNEL_COMM_XZ=nccl requested, but this build has no NCCL/RCCL support"
+      channel_comm_xz_use_nccl = .true.
+    end select
+  end function channel_comm_xz_use_nccl
+
   ! Makes sure cache%by_size(comm_size) exists; the slot itself starts null and
   ! is filled in lazily by whoever first needs a live context for it.
   subroutine channel_comm_cache_reserve(cache, comm_size)
@@ -287,7 +306,7 @@ contains
   ! context's stream while the caller computes, and channel_comm_alltoall_wait
   ! with the same slot completes it.  Without `slot` NCCL blocks as before.
   ! On MPI, `request` alone makes it nonblocking.
-  subroutine channel_comm_alltoall_complex(sendbuf, recvbuf, count, comm, comm_ctx, request, slot)
+  subroutine channel_comm_alltoall_complex(sendbuf, recvbuf, count, comm, comm_ctx, request, slot, xz)
     complex(c_double_complex), intent(in), target, contiguous :: sendbuf(:)
     complex(c_double_complex), intent(out), target, contiguous :: recvbuf(:)
     integer(c_int), intent(in), value :: count
@@ -295,9 +314,15 @@ contains
     type(c_ptr), intent(inout) :: comm_ctx
     type(MPI_Request), intent(inout), optional :: request
     integer(c_int), intent(in), optional :: slot
+    logical, intent(in), optional :: xz    ! the xz transpose: CHANNEL_COMM_XZ applies
     integer :: ierr
+    logical :: use_nccl
 
-    if (channel_comm_use_nccl()) then
+    use_nccl = channel_comm_use_nccl()
+    if (present(xz)) then
+      if (xz) use_nccl = channel_comm_xz_use_nccl()
+    end if
+    if (use_nccl) then
 #ifdef HAVE_NCCL
       call channel_comm_ensure_context(comm, comm_ctx)
 #ifndef HAVE_HIP

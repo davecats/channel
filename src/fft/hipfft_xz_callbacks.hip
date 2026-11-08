@@ -36,6 +36,18 @@ struct channel_xz_cb_info {
   double2* xbuf;                    // zTOx receive (RFT) / xTOz send (HFT) buffer
 };
 
+#ifdef CHANNEL_CB_HFT_LOAD_ONLY
+// HFT load: the product of two velocity / scalar components, computed from
+// rVVdx on the fly (buf is rVVdx(1, 1, y0, 1)).
+extern "C" __device__ double channel_cb_hft_load_products(double* buf, size_t offset, void* cbdata, void* shared) {
+  const channel_xz_cb_info* c = (const channel_xz_cb_info*)cbdata;
+  unsigned int o = (unsigned int)offset;
+  double a = buf[(size_t)o + c->a_off];
+  double b = buf[(size_t)o + c->b_off];
+  return a*b*c->factor;
+}
+
+#else
 // IFT store: z-pencil element (iz, ix, iy) of VVdz goes straight into the
 // zTOx send block of the rank owning iz.
 extern "C" __device__ void channel_cb_ift_store_pack(double2* buf, size_t offset, double2 e, void* cbdata,
@@ -66,18 +78,6 @@ extern "C" __device__ double2 channel_cb_rft_load_unpack(double2* buf, size_t of
   return c->xbuf[src*c->sendcount + iz + c->nzB*(ix + c->nxB*iy)];
 }
 
-#ifdef CHANNEL_CB_HFT_LOAD_ONLY
-// HFT load: the product of two velocity / scalar components, computed from
-// rVVdx on the fly (buf is rVVdx(1, 1, y0, 1)).
-extern "C" __device__ double channel_cb_hft_load_products(double* buf, size_t offset, void* cbdata, void* shared) {
-  const channel_xz_cb_info* c = (const channel_xz_cb_info*)cbdata;
-  unsigned int o = (unsigned int)offset;
-  double a = buf[(size_t)o + c->a_off];
-  double b = buf[(size_t)o + c->b_off];
-  return a*b*c->factor;
-}
-
-#else
 // HFT store: x-pencil element (ix, iz, iy) goes into the xTOz send block of
 // the rank owning ix; modes ix >= nx+1 are not sent.
 extern "C" __device__ void channel_cb_hft_store_pack(double2* buf, size_t offset, double2 e, void* cbdata,

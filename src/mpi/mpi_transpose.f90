@@ -638,7 +638,7 @@
       call roctxPush(range_name)
       call channel_comm_cache_reserve(xcomm_nccl_contexts, npxz)
       call channel_comm_alltoall_complex(send, recv, sendcount, MPI_COMM_X, xcomm_nccl_contexts%by_size(npxz), &
-                                         request, slot)
+                                         request, slot, xz=.true.)
       call roctxPop(range_name)
 
     END SUBROUTINE alltoall

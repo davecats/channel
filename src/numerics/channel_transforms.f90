@@ -106,7 +106,10 @@ CONTAINS
     integer(C_INT) ::  m, to, from, mm1
     type(MPI_Request), dimension(:) :: requests(3 + nPhi)
     logical :: use_cb
-    use_cb = xz_callbacks_enabled()
+    ! Local transposes: reading VVdz transposed in the RFT measured no faster
+    ! than repack_zTOx_local, so the callbacks are for npxz > 1 only.
+    use_cb = .not. fft_transpose_is_local
+    if (use_cb) use_cb = xz_callbacks_enabled()
     DO m = 1, MERGE(3 + nPhi + 1, 3 + nPhi, overlapping)
 
       ! Compute indices depending on overlap mode
@@ -184,8 +187,10 @@ CONTAINS
     type(MPI_Request), dimension(:) :: requests(6 + 3*nPhi)
     logical :: use_cb, use_cb_products
     type(c_ptr) :: xbuf
-    use_cb = xz_callbacks_enabled()
-    use_cb_products = xz_callbacks_products()
+    use_cb = .not. fft_transpose_is_local
+    if (use_cb) use_cb = xz_callbacks_enabled()
+    use_cb_products = .false.
+    if (use_cb) use_cb_products = xz_callbacks_products()
     ! Local transposes keep the compact x-pencil copy in products(:,:,:,to),
     ! which is then busy as the HFT input unless the callback forms the products.
     if (fft_transpose_is_local .and. .not. use_cb_products) use_cb = .false.
