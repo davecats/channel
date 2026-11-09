@@ -623,10 +623,11 @@ $:rhs_scalar_case(3)
     y_last = nyN
     slot = merge(component, MODULO(component - 4, 3) + 1, component <= 6)
     !$omp target teams distribute parallel do collapse(5) default(none) &
-    !$omp shared(rhs_stash, VVdz, izd, nz, nx0, nxN, y_first, y_last, slot, from) &
+    !$omp shared(rhs_stash, VVdz, nz, nzd, nx0, nxN, y_first, y_last, slot, from) &
     !$omp private(iz, ix, iy, izb, iyb, izi, iyi)
 $:tile_zy_open(y0='y_first - 2', y1='y_last + 2')
-                rhs_stash(iy, iz, ix, slot) = VVdz(izd(iz) + 1, ix + 1 - nx0, iy, from)
+                ! izd(iz) + 1 computed rather than looked up: one load less per element
+                rhs_stash(iy, iz, ix, slot) = VVdz(merge(iz + 1, nzd + iz + 1, iz >= 0), ix + 1 - nx0, iy, from)
 $:tile_zy_close()
   end subroutine buildrhs_stash
 
