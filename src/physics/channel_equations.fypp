@@ -66,7 +66,6 @@ contains
     implicit none
     type(compact_assembly_context), intent(in) :: ctx
     complex(C_DOUBLE_COMPLEX) :: rhs_value
-    real(C_DOUBLE) :: row_coeffs(-2:2)
     integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner, izb, iyb, izi, iyi
     integer(C_INT), parameter :: RHS_TILE = 8
     complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
@@ -87,7 +86,7 @@ contains
     ! Reads the y-fastest field, writes the z-fastest system: (iz, iy) tiles.
     !$omp target teams distribute parallel do collapse(5) default(none) &
     !$omp shared(owner_src, der, k2, ni, lambda_coeff, system_matrix, system_rhs, nz, ix0_owner, ixN_owner, row_start, row_end) &
-    !$omp private(ix, iz, iy, izb, iyb, izi, iyi, rhs_value, row_coeffs)
+    !$omp private(ix, iz, iy, izb, iyb, izi, iyi, rhs_value)
 $:tile_zy_open(ix0='ix0_owner', ix1='ixN_owner', y0='row_start', y1='row_end')
               rhs_value = owner_src(iy, iz, ix)
               ! v equation, implicit half:  lambda*(D^2 - k^2) - ni*(D^2 - k^2)^2
@@ -106,7 +105,6 @@ $:tile_zy_close()
     implicit none
     type(compact_assembly_context), intent(in) :: ctx
     complex(C_DOUBLE_COMPLEX) :: rhs_value
-    real(C_DOUBLE) :: row_coeffs(-2:2)
     integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner, izb, iyb, izi, iyi
     integer(C_INT), parameter :: RHS_TILE = 8
     complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
@@ -128,7 +126,7 @@ $:tile_zy_close()
     ! Reads the y-fastest field, writes the z-fastest system: (iz, iy) tiles.
     !$omp target teams distribute parallel do collapse(5) default(none) &
     !$omp shared(owner_src, der, k2, ni, lambda_coeff, diffusion_coeff, system_matrix, system_rhs, nz, ix0_owner, ixN_owner, row_start, row_end) &
-    !$omp private(ix, iz, iy, izb, iyb, izi, iyi, rhs_value, row_coeffs)
+    !$omp private(ix, iz, iy, izb, iyb, izi, iyi, rhs_value)
 $:tile_zy_open(ix0='ix0_owner', ix1='ixN_owner', y0='row_start', y1='row_end')
               rhs_value = owner_src(iy, iz, ix)
               ! eta / scalar equation, implicit half:  lambda - diffusion*ni*(D^2 - k^2)
@@ -382,8 +380,9 @@ $:tile_zy_close()
   SUBROUTINE buildrhs_prepare(ODE)
     IMPLICIT NONE
     real(C_DOUBLE), intent(in) :: ODE(1:3)
-    integer(C_INT) :: iy, iz, ix, k, iPhi, y_first, y_last
-    complex(C_DOUBLE_COMPLEX) :: tmp, unkn
+    integer(C_INT) :: iy, iz, ix, iPhi, y_first, y_last
+    complex(C_DOUBLE_COMPLEX) :: tmp, unkn, s0, s2, s4, w0, w1, w2, w3, w4
+    real(C_DOUBLE) :: kk
     y_first = ny0
     y_last = nyN
 
@@ -393,25 +392,28 @@ $:tile_zy_close()
     ! drive) only V(:, 1) and V(:, 3), so they are two kernels: fused, the
     ! kernel needed 116 VGPRs and ran latency-bound at 4 waves per SIMD; split,
     ! each holds half the live state and no array is read twice.
+    ! Three stencil sums (D^0, D^2, D^4 of v) give both terms: each V and
+    ! der value is loaded once instead of once per operator.
     !$omp target teams distribute parallel do collapse(3) default(none)  &
-    !$omp private(iz, ix, iy, tmp, k, unkn) &
+    !$omp private(iz, ix, iy, tmp, unkn, s0, s2, s4, kk) &
     !$omp shared(nz, nx0, nxN, ny, y_first, y_last) shared(k2, der) shared(memrhs, oldrhs) &
     !$omp shared(ni, deltat, ode) shared(v)
     DO iz = -nz, nz
       DO ix = nx0, nxN
         DO iy = y_first, y_last
-          unkn = ${apply_d('V', '2', 2)}$-k2(iz, ix)*${apply_d('V', '2', 0)}$
-          tmp = 0.0
-          DO k = -2, 2
-            tmp = tmp + ni*${biharmonic_op('iy', 'k')}$*V(iy + k, iz, ix, 2)
-          END DO
+          kk = k2(iz, ix)
+          s0 = ${apply_d('V', '2', 0)}$
+          s2 = ${apply_d('V', '2', 2)}$
+          s4 = ${apply_d('V', '2', 3)}$
+          unkn = s2 - kk*s0
+          tmp = ni*(s4 - 2.0d0*kk*s2 + kk*kk*s0)
           memrhs(iy, iz, ix, 2) = ODE(1)*unkn/deltat + tmp - ODE(3)*oldrhs(iy, iz, ix, 2)
           oldrhs(iy, iz, ix, 2) = 0.0
         END DO
       END DO
     END DO
     !$omp target teams distribute parallel do collapse(3) default(none)  &
-    !$omp private(iz, ix, iy, tmp, k, unkn) &
+    !$omp private(iz, ix, iy, tmp, unkn, s0, s2, w0, w1, w2, w3, w4) &
     !$omp shared(nz, nx0, nxN, ny, y_first, y_last) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) &
     !$omp shared(meanpx, meanpz, ni, deltat, ode) shared(v)
     DO iz = -nz, nz
@@ -421,11 +423,14 @@ $:tile_zy_close()
             unkn = ${apply_d_real_pair('V', '1', '3', 0)}$
             tmp = ni*${apply_d_real_pair('V', '1', '3', 2)}$
           ELSE
-            tmp = 0.0
-            DO k = -2, 2
-              tmp = tmp + ni*${helmholtz_op('iy', 'k')}$*(ibeta(iz)*V(iy + k, iz, ix, 1) - ialfa(ix)*V(iy + k, iz, ix, 3))
-            END DO
-            unkn = ibeta(iz)*${apply_d('V', '1', 0)}$-ialfa(ix)*${apply_d('V', '3', 0)}$
+            ! eta = i beta u - i alpha w: combine first, then two stencil sums.
+#:for j in range(-2, 3)
+            w${j+2}$ = ibeta(iz)*V(iy + (${j}$), iz, ix, 1) - ialfa(ix)*V(iy + (${j}$), iz, ix, 3)
+#:endfor
+            s0 = ${' + '.join('der(iy, 0, {})*w{}'.format(j, j+2) for j in range(-2,3))}$
+            s2 = ${' + '.join('der(iy, 2, {})*w{}'.format(j, j+2) for j in range(-2,3))}$
+            unkn = s0
+            tmp = ni*(s2 - k2(iz, ix)*s0)
           END IF
           memrhs(iy, iz, ix, 1) = ODE(1)*unkn/deltat + tmp - ODE(3)*oldrhs(iy, iz, ix, 1)
           oldrhs(iy, iz, ix, 1) = 0.0
@@ -440,16 +445,15 @@ $:tile_zy_close()
     !initialize phi
     DO iPhi = 1, nPhi
       !$omp target teams distribute parallel do collapse(3) default(none)  &
-      !$omp private(tmp, iz, ix, iy, k, unkn) &
+      !$omp private(tmp, iz, ix, iy, unkn, s0, s2) &
       !$omp shared(nz, nx0, nxN, ny, y_first, y_last, pra, V, memrhs, ode, deltat, oldrhs, iphi, der, k2, ni)
       DO iz = -nz, nz
         DO ix = nx0, nxN
           DO iy = y_first, y_last
-            tmp = 0.0
-            DO k = -2, 2
-              tmp = tmp + ni*${helmholtz_op('iy', 'k')}$*V(iy + k, iz, ix, 3 + iPhi)
-            END DO
-            unkn = ${apply_d('V', '3 + iPhi', 0)}$
+            s0 = ${apply_d('V', '3 + iPhi', 0)}$
+            s2 = ${apply_d('V', '3 + iPhi', 2)}$
+            tmp = ni*(s2 - k2(iz, ix)*s0)
+            unkn = s0
             memrhs(iy, iz, ix, 2 + iPhi) = ODE(1)*unkn/deltat + tmp*pra(iPhi) - ODE(3)*oldrhs(iy, iz, ix, 2 + iPhi)
             oldrhs(iy, iz, ix, 2 + iPhi) = 0.0
           END DO
