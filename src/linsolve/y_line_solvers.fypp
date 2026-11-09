@@ -42,11 +42,11 @@
         do pr_i = 0, n - 1
           pr_p = int(iline, C_INT64_T) + int(pr_i, C_INT64_T)*pr_s1
           ! Row pr_i: pr_a*x(i-2) + pr_b*x(i-1) + pr_c*x(i) + pr_e*x(i+1) + pr_f*x(i+2) = pr_r.
-          pr_a = merge(${ds}$(pr_p), (0.0d0, 0.0d0), pr_i >= 2)
-          pr_b = merge(${dl}$(pr_p), (0.0d0, 0.0d0), pr_i >= 1)
+          pr_a = merge(${ds}$(pr_p), YS_CZERO, pr_i >= 2)
+          pr_b = merge(${dl}$(pr_p), YS_CZERO, pr_i >= 1)
           pr_c = ${d}$(pr_p)
-          pr_e = merge(${du}$(pr_p), (0.0d0, 0.0d0), pr_i <= n - 2)
-          pr_f = merge(${dw}$(pr_p), (0.0d0, 0.0d0), pr_i <= n - 3)
+          pr_e = merge(${du}$(pr_p), YS_CZERO, pr_i <= n - 2)
+          pr_f = merge(${dw}$(pr_p), YS_CZERO, pr_i <= n - 3)
           pr_r = ${x}$(pr_p)
           ! Eliminate x(i-2), then x(i-1), with the reduced rows i-2 and i-1.
           if (pr_i >= 2) then
@@ -75,16 +75,16 @@
       !$omp private(iline, pr_i, pr_p, pr_a, pr_b, pr_c, pr_e, pr_f, pr_r, pr_inv, &
       !$omp& pr_u1m2, pr_u2m2, pr_ym2, pr_u1m1, pr_u2m1, pr_ym1, pr_u1, pr_u2, pr_y, pr_xn1, pr_xn2)
       do iline = 1, batch_count
-        pr_u1m2 = (0.0d0, 0.0d0); pr_u2m2 = (0.0d0, 0.0d0); pr_ym2 = (0.0d0, 0.0d0)
-        pr_u1m1 = (0.0d0, 0.0d0); pr_u2m1 = (0.0d0, 0.0d0); pr_ym1 = (0.0d0, 0.0d0)
+        pr_u1m2 = YS_CZERO; pr_u2m2 = YS_CZERO; pr_ym2 = (0.0d0, 0.0d0)
+        pr_u1m1 = YS_CZERO; pr_u2m1 = YS_CZERO; pr_ym1 = (0.0d0, 0.0d0)
         do pr_i = 0, n - 1
           pr_p = int(iline, C_INT64_T) + int(pr_i, C_INT64_T)*int(batch_count, C_INT64_T)
           ! Row pr_i: pr_a*x(i-2) + pr_b*x(i-1) + pr_c*x(i) + pr_e*x(i+1) + pr_f*x(i+2) = pr_r.
-          pr_a = merge(${ds}$(pr_p), (0.0d0, 0.0d0), pr_i >= 2)
-          pr_b = merge(${dl}$(pr_p), (0.0d0, 0.0d0), pr_i >= 1)
+          pr_a = merge(${ds}$(pr_p), YS_CZERO, pr_i >= 2)
+          pr_b = merge(${dl}$(pr_p), YS_CZERO, pr_i >= 1)
           pr_c = ${d}$(pr_p)
-          pr_e = merge(${du}$(pr_p), (0.0d0, 0.0d0), pr_i <= n - 2)
-          pr_f = merge(${dw}$(pr_p), (0.0d0, 0.0d0), pr_i <= n - 3)
+          pr_e = merge(${du}$(pr_p), YS_CZERO, pr_i <= n - 2)
+          pr_f = merge(${dw}$(pr_p), YS_CZERO, pr_i <= n - 3)
           pr_r = ${x}$(pr_p)
           ! Eliminate x(i-2), then x(i-1), with the reduced rows i-2 and i-1.
           pr_b = pr_b - pr_a*pr_u1m2; pr_c = pr_c - pr_a*pr_u2m2; pr_r = pr_r - pr_a*pr_ym2
@@ -116,8 +116,8 @@
     integer(C_INT) :: iline
     integer(C_INT) :: pr_i
     integer(C_INT64_T) :: pr_p
-    complex(C_DOUBLE_COMPLEX) :: pr_a, pr_b, pr_c, pr_e, pr_f, pr_r, pr_inv, pr_u1, pr_u2, pr_y
-    complex(C_DOUBLE_COMPLEX) :: pr_u1m2, pr_u2m2, pr_ym2, pr_u1m1, pr_u2m1, pr_ym1, pr_xn1, pr_xn2
+    YS_COEF :: pr_a, pr_b, pr_c, pr_e, pr_f, pr_inv, pr_u1, pr_u2, pr_u1m2, pr_u2m2, pr_u1m1, pr_u2m1
+    complex(C_DOUBLE_COMPLEX) :: pr_r, pr_y, pr_ym2, pr_ym1, pr_xn1, pr_xn2
     integer(C_INT64_T) :: pr_s1, pr_s2
 #if defined(HAVE_CUDA)
     integer(C_INT64_T) :: p, p1
@@ -167,96 +167,6 @@ $:custom_penta_kernel(ds, dl, d, du, dw, x)
   end subroutine ${name}$
 #:enddef
 
-#! ===================================================================
-#! The interior of the two pentadiagonal substitutions.
-#!
-#! Each substitution is written twice: one twin opens the recurrence at
-#! the wall, the other continues one seeded by the batch on the y rank
-#! below -- above, going backward.  Only that prologue differs.  From
-#! row 2 inward the twins ran character-identical loops, and those are
-#! the recurrence itself, so a change made to one twin and not the other
-#! would leave the single-rank and the multi-rank solve disagreeing in
-#! the arithmetic, silently.
-#!
-#! These have to be macros and not a shared device routine.  The leaves
-#! already receive their arrays as dummies, so passing them one level
-#! further -- into a declare-target call from inside a target region --
-#! is exactly the nvfortran failure described at the top of this file.
-#! A macro expands inline, so no dummy is created.
-#!
-#! Each reads the caller's rhs and diagonal dummies and its first /
-#! stride / n line descriptor, and uses i and p as scratch.  All four
-#! leaves declare those names already.
-#! ===================================================================
-#!
-#! Rows 2 .. n-1: each takes the two rows below it.
-#:def penta_forward_interior()
-    do i = 2, n - 1
-      p = int(first, C_INT64_T) + int(i, C_INT64_T)*int(stride, C_INT64_T)
-      rhs(p) = rhs(p) - ds(p)*rhs(int(first, C_INT64_T) + int(i - 2, C_INT64_T)*int(stride, C_INT64_T)) - &
-               dl(p)*rhs(int(first, C_INT64_T) + int(i - 1, C_INT64_T)*int(stride, C_INT64_T))
-    end do
-#:enddef
-#!
-#! Rows n-3 .. 0: each takes the two rows above it, then divides.
-#:def penta_backward_interior()
-    do i = n - 3, 0, -1
-      p = int(first, C_INT64_T) + int(i, C_INT64_T)*int(stride, C_INT64_T)
-      rhs(p) = (rhs(p) - du(p)*rhs(p + int(stride, C_INT64_T)) - &
-                dw(p)*rhs(p + 2_C_INT64_T*int(stride, C_INT64_T)))*d(p)
-    end do
-#:enddef
-#!
-#! ===================================================================
-#! The pipelined-LU batch wrappers.
-#!
-#! Six routines drive one leaf kernel over the lines of a batch, and all
-#! six spell the same scaffolding: the workspace stride, a target teams
-#! distribute over local_line with a default(none) shared list, the line
-#! index, and -- where the batch is seeded by the rank below -- the
-#! offset q into ycomm_recvbuf.  What differs is the leaf call and the
-#! names it needs shared, so the scaffolding is written here once and
-#! the call stays ordinary Fortran at the site.
-#!
-#! The body is a block and not an argument for a reason: each site has
-#! to name its ys_gpsv_* module arrays as text, since forwarding them as
-#! dummies is the nvfortran failure this file's first block describes.
-#!
-#! shared: the names this site adds to the shared list, arrays first.
-#! seed:   the per-line message stride, for a batch that reads the rank
-#!         below; the macro then shares ycomm_recvbuf and recv_offset
-#!         and expects q.  Omit it for a batch that opens its own lines.
-#!
-#! The shared list is emitted as two clauses to keep every generated
-#! line inside the free-form limit; one site was already at 131 columns.
-#!
-#! The three pack kernels are deliberately not expressed here.  They add
-#! private scratch and read send_offset, which would cost this macro
-#! more parameters than the scaffolding it would save them.
-#! ===================================================================
-#:def pipelined_line_loop(shared, body, seed=None)
-    stride = ys_workspace_nlines
-
-    !$omp target teams distribute parallel do default(none) &
-#:if seed is None
-    !$omp shared(${shared}$) &
-    !$omp shared(stride, first_line, line_count, active_n) &
-    !$omp private(local_line, iline)
-#:else
-    !$omp shared(${shared}$, ycomm_recvbuf) &
-    !$omp shared(stride, first_line, line_count, active_n, recv_offset) &
-    !$omp private(local_line, iline, q)
-#:endif
-    do local_line = 1_C_INT, line_count
-      iline = first_line + local_line - 1_C_INT
-#:if seed is not None
-      q = int(recv_offset + ${seed}$*(local_line - 1_C_INT), C_INT64_T)
-#:endif
-${body.rstrip()}$
-    end do
-    !$omp end target teams distribute parallel do
-#:enddef
-#!
 #! ===================================================================
 #! Instrumentation of the pipelined-LU solve.
 #!
@@ -392,11 +302,18 @@ module y_line_solvers
   integer(C_INT), save :: ys_pipeline_timing_solve_id = 0_C_INT
   type(channel_comm_cache), save :: ys_pipeline_nccl_contexts
 
-  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_gpsv_matrix_store(:) => null(), ys_gpsv_rhs_store(:) => null()
-  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_gpsv_ds(:), ys_gpsv_dl(:), ys_gpsv_d(:), ys_gpsv_du(:), ys_gpsv_dw(:), ys_gpsv_x(:)
-  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_gpsv_matrix(:, :, :, :), ys_gpsv_rhs(:, :, :)
-  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_gpsv_line_matrix(:, :, :), ys_gpsv_line_rhs(:, :)
-  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_gpsv_owner_matrix(:, :, :, :), ys_gpsv_owner_rhs(:, :, :)
+  ! The bands are YS_COEF (real except on CUDA, see build_options.h); the
+  ! right-hand sides and solutions are complex.
+  YS_COEF, pointer, contiguous, save :: ys_gpsv_matrix_store(:) => null()
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_gpsv_rhs_store(:) => null()
+  YS_COEF, pointer, contiguous, save :: ys_gpsv_ds(:), ys_gpsv_dl(:), ys_gpsv_d(:), ys_gpsv_du(:), ys_gpsv_dw(:)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_gpsv_x(:)
+  YS_COEF, pointer, contiguous, save :: ys_gpsv_matrix(:, :, :, :)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_gpsv_rhs(:, :, :)
+  YS_COEF, pointer, contiguous, save :: ys_gpsv_line_matrix(:, :, :)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_gpsv_line_rhs(:, :)
+  YS_COEF, pointer, contiguous, save :: ys_gpsv_owner_matrix(:, :, :, :)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_gpsv_owner_rhs(:, :, :)
 
   complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_lower_ghost_store(:) => null(), ys_lower_boundary_store(:) => null()
   complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_upper_boundary_store(:) => null(), ys_upper_ghost_store(:) => null()
@@ -437,20 +354,14 @@ module y_line_solvers
   integer(8), save :: ys_gpsv_buffer_size = 0_8
   integer(8), save :: ys_gpsv_buffer_capacity = 0_8
 #endif
- complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_batch_ds(:) => null(), ys_batch_dl(:) => null(), ys_batch_d(:) => null()
- complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_batch_du(:) => null(), ys_batch_dw(:) => null(), ys_batch_x(:) => null()
+ YS_COEF, pointer, contiguous, save :: ys_batch_ds(:) => null(), ys_batch_dl(:) => null(), ys_batch_d(:) => null()
+ YS_COEF, pointer, contiguous, save :: ys_batch_du(:) => null(), ys_batch_dw(:) => null()
+ complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_batch_x(:) => null()
 #if defined(HAVE_CUDA)
   character(c_char), allocatable, target, save :: ys_gpsv_buffer(:)
   ! Keep these in this translation unit: nvlink does not resolve device-side
   ! calls to declare-target routines pulled from another archive member, so
   ! moving the kernels into their own module breaks the NVHPC GPU link.
-  !$omp declare target(ys_factor_penta_interleaved)
-  !$omp declare target(ys_factor_penta_interleaved_continue)
-  !$omp declare target(ys_forward_substitute_penta_interleaved)
-  !$omp declare target(ys_forward_substitute_penta_interleaved_continue)
-  !$omp declare target(ys_backward_substitute_penta_interleaved)
-  !$omp declare target(ys_backward_substitute_penta_interleaved_continue)
-  !$omp declare target(ys_solve_factored_penta_interleaved)
 #endif
   integer(C_INT), save :: ys_forced_chunk_nx = 0_C_INT
   logical, save :: ys_forced_chunk_nx_initialized = .false.
@@ -637,16 +548,20 @@ contains
     type(C_PTR) :: ptr
     complex(C_DOUBLE_COMPLEX), pointer :: cbuf(:)
     real(C_DOUBLE), pointer :: rbuf(:)
+    YS_COEF, pointer :: kbuf(:)
+    YS_COEF, target :: coef_probe
     integer(C_SIZE_T) :: offset, nall, batch_capacity, n_complex, n_real
-    integer(C_SIZE_T) :: complex_bytes, real_bytes
+    integer(C_SIZE_T) :: complex_bytes, real_bytes, coef_bytes
 
     complex_bytes = int(C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE)), C_SIZE_T)
     real_bytes = int(C_SIZEOF(0.0_C_DOUBLE), C_SIZE_T)
+    coef_probe = YS_CZERO
+    coef_bytes = int(C_SIZEOF(coef_probe), C_SIZE_T)
     nall = int(nlines, C_SIZE_T)*int(active_n, C_SIZE_T)
     batch_capacity = ys_endpoint_batch_capacity(active_n, nlines, nz)
     offset = 0_C_SIZE_T
 
-    call slot_complex(5_C_SIZE_T*nall, ys_gpsv_matrix_store)
+    call slot_coef(5_C_SIZE_T*nall, ys_gpsv_matrix_store)
     call slot_complex(nall, ys_gpsv_rhs_store)
 
     n_complex = int(nlines, C_SIZE_T)
@@ -667,11 +582,11 @@ contains
     call slot_real(n_real, ys_boundary_lower_eq_store)
     call slot_real(n_real, ys_boundary_upper_eq_store)
 
-    call slot_complex(batch_capacity, ys_batch_ds)
-    call slot_complex(batch_capacity, ys_batch_dl)
-    call slot_complex(batch_capacity, ys_batch_d)
-    call slot_complex(batch_capacity, ys_batch_du)
-    call slot_complex(batch_capacity, ys_batch_dw)
+    call slot_coef(batch_capacity, ys_batch_ds)
+    call slot_coef(batch_capacity, ys_batch_dl)
+    call slot_coef(batch_capacity, ys_batch_d)
+    call slot_coef(batch_capacity, ys_batch_du)
+    call slot_coef(batch_capacity, ys_batch_dw)
     call slot_complex(batch_capacity, ys_batch_x)
 
     if (npy_grid > 1) then
@@ -695,6 +610,18 @@ contains
       end if
       offset = workspace_align_offset(offset + count*complex_bytes)
     end subroutine slot_complex
+
+    subroutine slot_coef(count, view)
+      integer(C_SIZE_T), intent(in) :: count
+      YS_COEF, pointer, contiguous, intent(inout) :: view(:)
+
+      if (bind) then
+        call workspace_slice(offset, ptr)
+        call c_f_pointer(ptr, kbuf, [int(count)])
+        view(1:int(count)) => kbuf
+      end if
+      offset = workspace_align_offset(offset + count*coef_bytes)
+    end subroutine slot_coef
 
     subroutine slot_real(count, view)
       integer(C_SIZE_T), intent(in) :: count
@@ -2111,145 +2038,14 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     !$omp end target teams distribute parallel do
   end subroutine ys_unpack_upper_solution_halo
 
-  subroutine ys_apply_factor_continuation(first_line, line_count, active_n, recv_offset)
-    implicit none
-    integer(C_INT), intent(in) :: first_line, line_count, active_n, recv_offset
-    integer(C_INT) :: local_line, iline, stride
-    integer(C_INT64_T) :: q
 
-#:call pipelined_line_loop('ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw', seed='YS_PIPELINE_FACTOR_ELEMS')
-      call ys_factor_penta_interleaved_continue(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, &
-                                                stride, iline, active_n, &
-                                                ycomm_recvbuf(q + 1_C_INT64_T), ycomm_recvbuf(q + 2_C_INT64_T), &
-                                                ycomm_recvbuf(q + 3_C_INT64_T), ycomm_recvbuf(q + 4_C_INT64_T), &
-                                                ycomm_recvbuf(q + 5_C_INT64_T), ycomm_recvbuf(q + 6_C_INT64_T))
-#:endcall
-  end subroutine ys_apply_factor_continuation
 
-  subroutine ys_factor_pipelined_batch(first_line, line_count, active_n, open_right)
-    implicit none
-    integer(C_INT), intent(in) :: first_line, line_count, active_n
-    logical, intent(in) :: open_right
-    integer(C_INT) :: local_line, iline, stride
 
-#:call pipelined_line_loop('ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, open_right')
-      call ys_factor_penta_interleaved(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, &
-                                       stride, iline, active_n, open_right)
-#:endcall
-  end subroutine ys_factor_pipelined_batch
 
-  subroutine ys_forward_pipelined_batch(first_line, line_count, active_n)
-    implicit none
-    integer(C_INT), intent(in) :: first_line, line_count, active_n
-    integer(C_INT) :: local_line, iline, stride
 
-#:call pipelined_line_loop('ys_gpsv_x, ys_gpsv_ds, ys_gpsv_dl')
-      call ys_forward_substitute_penta_interleaved(ys_gpsv_x, ys_gpsv_ds, ys_gpsv_dl, stride, iline, active_n)
-#:endcall
-  end subroutine ys_forward_pipelined_batch
 
-  subroutine ys_forward_pipelined_batch_continue(first_line, line_count, active_n, recv_offset)
-    implicit none
-    integer(C_INT), intent(in) :: first_line, line_count, active_n, recv_offset
-    integer(C_INT) :: local_line, iline, stride
-    integer(C_INT64_T) :: q
 
-#:call pipelined_line_loop('ys_gpsv_x, ys_gpsv_ds, ys_gpsv_dl', seed='YS_PIPELINE_SOLVE_ELEMS')
-      call ys_forward_substitute_penta_interleaved_continue(ys_gpsv_x, ys_gpsv_ds, ys_gpsv_dl, stride, iline, active_n, &
-                                                            ycomm_recvbuf(q + 1_C_INT64_T), ycomm_recvbuf(q + 2_C_INT64_T))
-#:endcall
-  end subroutine ys_forward_pipelined_batch_continue
 
-  subroutine ys_backward_pipelined_batch(first_line, line_count, active_n)
-    implicit none
-    integer(C_INT), intent(in) :: first_line, line_count, active_n
-    integer(C_INT) :: local_line, iline, stride
-
-#:call pipelined_line_loop('ys_gpsv_x, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw')
-      call ys_backward_substitute_penta_interleaved(ys_gpsv_x, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, stride, iline, active_n)
-#:endcall
-  end subroutine ys_backward_pipelined_batch
-
-  subroutine ys_backward_pipelined_batch_continue(first_line, line_count, active_n, recv_offset)
-    implicit none
-    integer(C_INT), intent(in) :: first_line, line_count, active_n, recv_offset
-    integer(C_INT) :: local_line, iline, stride
-    integer(C_INT64_T) :: q
-
-#:call pipelined_line_loop('ys_gpsv_x, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw', seed='YS_PIPELINE_SOLVE_ELEMS')
-      call ys_backward_substitute_penta_interleaved_continue(ys_gpsv_x, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, &
-                                                             stride, iline, active_n, &
-                                                             ycomm_recvbuf(q + 1_C_INT64_T), ycomm_recvbuf(q + 2_C_INT64_T))
-#:endcall
-  end subroutine ys_backward_pipelined_batch_continue
-
-  subroutine ys_pack_factor_state(first_line, line_count, active_n, send_offset)
-    implicit none
-    integer(C_INT), intent(in) :: first_line, line_count, active_n, send_offset
-    integer(C_INT) :: local_line, iline, stride
-    integer(C_INT64_T) :: p0, p1, q
-
-    stride = ys_workspace_nlines
-
-    !$omp target teams distribute parallel do default(none) &
-    !$omp shared(ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ycomm_sendbuf, stride, first_line, line_count, active_n, send_offset) &
-    !$omp private(local_line, iline, p0, p1, q)
-    do local_line = 1_C_INT, line_count
-      iline = first_line + local_line - 1_C_INT
-      p0 = int(iline, C_INT64_T) + int(active_n - 2_C_INT, C_INT64_T)*int(stride, C_INT64_T)
-      p1 = p0 + int(stride, C_INT64_T)
-      q = int(send_offset + YS_PIPELINE_FACTOR_ELEMS*(local_line - 1_C_INT), C_INT64_T)
-      ycomm_sendbuf(q + 1_C_INT64_T) = ys_gpsv_d(p0)
-      ycomm_sendbuf(q + 2_C_INT64_T) = ys_gpsv_du(p0)
-      ycomm_sendbuf(q + 3_C_INT64_T) = ys_gpsv_dw(p0)
-      ycomm_sendbuf(q + 4_C_INT64_T) = ys_gpsv_d(p1)
-      ycomm_sendbuf(q + 5_C_INT64_T) = ys_gpsv_du(p1)
-      ycomm_sendbuf(q + 6_C_INT64_T) = ys_gpsv_dw(p1)
-    end do
-    !$omp end target teams distribute parallel do
-  end subroutine ys_pack_factor_state
-
-  subroutine ys_pack_forward_state(first_line, line_count, active_n, send_offset)
-    implicit none
-    integer(C_INT), intent(in) :: first_line, line_count, active_n, send_offset
-    integer(C_INT) :: local_line, iline, stride
-    integer(C_INT64_T) :: p0, p1, q
-
-    stride = ys_workspace_nlines
-
-    !$omp target teams distribute parallel do default(none) &
-    !$omp shared(ys_gpsv_x, ycomm_sendbuf, stride, first_line, line_count, active_n, send_offset) private(local_line, iline, p0, p1, q)
-    do local_line = 1_C_INT, line_count
-      iline = first_line + local_line - 1_C_INT
-      p0 = int(iline, C_INT64_T) + int(active_n - 2_C_INT, C_INT64_T)*int(stride, C_INT64_T)
-      p1 = p0 + int(stride, C_INT64_T)
-      q = int(send_offset + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
-      ycomm_sendbuf(q + 1_C_INT64_T) = ys_gpsv_x(p0)
-      ycomm_sendbuf(q + 2_C_INT64_T) = ys_gpsv_x(p1)
-    end do
-    !$omp end target teams distribute parallel do
-  end subroutine ys_pack_forward_state
-
-  subroutine ys_pack_backward_state(first_line, line_count, send_offset)
-    implicit none
-    integer(C_INT), intent(in) :: first_line, line_count, send_offset
-    integer(C_INT) :: local_line, iline, stride
-    integer(C_INT64_T) :: p0, p1, q
-
-    stride = ys_workspace_nlines
-
-    !$omp target teams distribute parallel do default(none) &
-    !$omp shared(ys_gpsv_x, ycomm_sendbuf, stride, first_line, line_count, send_offset) private(local_line, iline, p0, p1, q)
-    do local_line = 1_C_INT, line_count
-      iline = first_line + local_line - 1_C_INT
-      p0 = int(iline, C_INT64_T)
-      p1 = p0 + int(stride, C_INT64_T)
-      q = int(send_offset + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
-      ycomm_sendbuf(q + 1_C_INT64_T) = ys_gpsv_x(p0)
-      ycomm_sendbuf(q + 2_C_INT64_T) = ys_gpsv_x(p1)
-    end do
-    !$omp end target teams distribute parallel do
-  end subroutine ys_pack_backward_state
 
   ! Forward stage of the MPI pipelined solve, fused (the same normalized LU
   ! sweep as custom_penta_kernel): each line's rows are eliminated top-down,
@@ -2283,7 +2079,8 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     logical, intent(in) :: has_left, has_right
     integer(C_INT) :: local_line, iline, stride, i
     integer(C_INT64_T) :: p, q
-    complex(C_DOUBLE_COMPLEX) :: a, b, c, e, f, r, inv, u1, u2, y, u1m2, u2m2, ym2, u1m1, u2m1, ym1
+    YS_COEF :: a, b, c, e, f, inv, u1, u2, u1m2, u2m2, u1m1, u2m1
+    complex(C_DOUBLE_COMPLEX) :: r, y, ym2, ym1
     integer(C_INT64_T) :: p2
     stride = ys_workspace_nlines
     !$omp target teams distribute parallel do default(none) &
@@ -2298,11 +2095,11 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       ! for the first two rows; no loop-carried copies (see custom_penta_kernel).
       do i = 0, active_n - 1
         p = int(iline, C_INT64_T) + int(${ROW}$, C_INT64_T)*int(stride, C_INT64_T)
-        a = merge(${AA}$(p), (0.0d0, 0.0d0), i >= 2 .or. has_left)
-        b = merge(${BB}$(p), (0.0d0, 0.0d0), i >= 1 .or. has_left)
+        a = merge(${AA}$(p), YS_CZERO, i >= 2 .or. has_left)
+        b = merge(${BB}$(p), YS_CZERO, i >= 1 .or. has_left)
         c = ys_gpsv_d(p)
-        e = merge(${EE}$(p), (0.0d0, 0.0d0), i <= active_n - 2 .or. has_right)
-        f = merge(${FF}$(p), (0.0d0, 0.0d0), i <= active_n - 3 .or. has_right)
+        e = merge(${EE}$(p), YS_CZERO, i <= active_n - 2 .or. has_right)
+        f = merge(${FF}$(p), YS_CZERO, i <= active_n - 3 .or. has_right)
         r = ys_gpsv_x(p)
         if (i >= 2) then
           p2 = p ${PREV}$ 2_C_INT64_T*int(stride, C_INT64_T)
@@ -2341,16 +2138,16 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
         u1m2 = ycomm_recvbuf(q + 1_C_INT64_T); u2m2 = ycomm_recvbuf(q + 2_C_INT64_T); ym2 = ycomm_recvbuf(q + 3_C_INT64_T)
         u1m1 = ycomm_recvbuf(q + 4_C_INT64_T); u2m1 = ycomm_recvbuf(q + 5_C_INT64_T); ym1 = ycomm_recvbuf(q + 6_C_INT64_T)
       else
-        u1m2 = (0.0d0, 0.0d0); u2m2 = (0.0d0, 0.0d0); ym2 = (0.0d0, 0.0d0)
-        u1m1 = (0.0d0, 0.0d0); u2m1 = (0.0d0, 0.0d0); ym1 = (0.0d0, 0.0d0)
+        u1m2 = YS_CZERO; u2m2 = YS_CZERO; ym2 = (0.0d0, 0.0d0)
+        u1m1 = YS_CZERO; u2m1 = YS_CZERO; ym1 = (0.0d0, 0.0d0)
       end if
       do i = 0, active_n - 1
         p = int(iline, C_INT64_T) + int(${ROW}$, C_INT64_T)*int(stride, C_INT64_T)
-        a = merge(${AA}$(p), (0.0d0, 0.0d0), i >= 2 .or. has_left)
-        b = merge(${BB}$(p), (0.0d0, 0.0d0), i >= 1 .or. has_left)
+        a = merge(${AA}$(p), YS_CZERO, i >= 2 .or. has_left)
+        b = merge(${BB}$(p), YS_CZERO, i >= 1 .or. has_left)
         c = ys_gpsv_d(p)
-        e = merge(${EE}$(p), (0.0d0, 0.0d0), i <= active_n - 2 .or. has_right)
-        f = merge(${FF}$(p), (0.0d0, 0.0d0), i <= active_n - 3 .or. has_right)
+        e = merge(${EE}$(p), YS_CZERO, i <= active_n - 2 .or. has_right)
+        f = merge(${FF}$(p), YS_CZERO, i <= active_n - 3 .or. has_right)
         r = ys_gpsv_x(p)
         b = b - a*u1m2; c = c - a*u2m2; r = r - a*ym2
         c = c - b*u1m1; e = e - b*u2m1; r = r - b*ym1
@@ -2693,178 +2490,11 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
   ! factorizing one whose tail continues into the rank above -- both are this
   ! routine, called with the flag set one way or the other.
 
-  subroutine ys_factor_penta_interleaved(ds, dl, d, du, dw, stride, first, n, open_right)
-    implicit none
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: ds(:), dl(:), d(:), du(:), dw(:)
-    integer(C_INT), intent(in) :: stride, first, n
-    logical, intent(in) :: open_right
-    integer(C_INT) :: i
-    integer(C_INT64_T) :: p, p1, p2
-    complex(C_DOUBLE_COMPLEX) :: factor
 
-    if (n <= 0) return
-    if (n == 1) then
-      d(first) = 1.0d0/d(first)
-      return
-    end if
 
-    do i = 0, n - 3
-      p = int(first, C_INT64_T) + int(i, C_INT64_T)*int(stride, C_INT64_T)
-      d(p) = 1.0d0/d(p)
 
-      p1 = p + int(stride, C_INT64_T)
-      factor = dl(p1)*d(p)
-      dl(p1) = factor
-      d(p1) = d(p1) - factor*du(p)
-      du(p1) = du(p1) - factor*dw(p)
 
-      p2 = p + 2_C_INT64_T*int(stride, C_INT64_T)
-      factor = ds(p2)*d(p)
-      ds(p2) = factor
-      dl(p2) = dl(p2) - factor*du(p)
-      d(p2) = d(p2) - factor*dw(p)
-    end do
 
-    p = int(first, C_INT64_T) + int(n - 2, C_INT64_T)*int(stride, C_INT64_T)
-    d(p) = 1.0d0/d(p)
-    p1 = p + int(stride, C_INT64_T)
-    factor = dl(p1)*d(p)
-    dl(p1) = factor
-    d(p1) = d(p1) - factor*du(p)
-    if (open_right) du(p1) = du(p1) - factor*dw(p)
 
-    d(p1) = 1.0d0/d(p1)
-  end subroutine ys_factor_penta_interleaved
-
-  ! Fold the predecessor batch's tail into the first two rows of this one.
-  !
-  ! Despite the name, this is not a variant of the routine above and the two
-  ! share no body.  The substitutions do pick one twin or the other -- a line is
-  ! either opened at the wall or continued from the rank below -- but the factor
-  ! path runs both: the pipelined solves call this whenever ipy > 0 and then
-  ! call the plain factorization unconditionally.  So it is a prologue to that
-  ! routine, not an alternative to it.  It carries the two eliminations that
-  ! need the previous rank's last two rows and nothing else; the interior
-  ! elimination it looks to be missing is the one the plain routine goes on to
-  ! do over the whole local line.  There is no shared recurrence here to write
-  ! once.
-  subroutine ys_factor_penta_interleaved_continue(ds, dl, d, du, stride, first, n, &
-                                                  prev0_d, prev0_du, prev0_dw, prev1_d, prev1_du, prev1_dw)
-    implicit none
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: ds(:), dl(:), d(:), du(:)
-    integer(C_INT), intent(in) :: stride, first, n
-    complex(C_DOUBLE_COMPLEX), intent(in) :: prev0_d, prev0_du, prev0_dw, prev1_d, prev1_du, prev1_dw
-    integer(C_INT64_T) :: p0, p1
-    complex(C_DOUBLE_COMPLEX) :: factor
-
-    if (n <= 0) return
-
-    p0 = int(first, C_INT64_T)
-    factor = ds(p0)*prev0_d
-    ds(p0) = factor
-    dl(p0) = dl(p0) - factor*prev0_du
-    d(p0) = d(p0) - factor*prev0_dw
-
-    factor = dl(p0)*prev1_d
-    dl(p0) = factor
-    d(p0) = d(p0) - factor*prev1_du
-    du(p0) = du(p0) - factor*prev1_dw
-
-    if (n >= 2_C_INT) then
-      p1 = p0 + int(stride, C_INT64_T)
-      factor = ds(p1)*prev1_d
-      ds(p1) = factor
-      dl(p1) = dl(p1) - factor*prev1_du
-      d(p1) = d(p1) - factor*prev1_dw
-    end if
-  end subroutine ys_factor_penta_interleaved_continue
-
-  subroutine ys_forward_substitute_penta_interleaved(rhs, ds, dl, stride, first, n)
-    implicit none
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs(:)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: ds(:), dl(:)
-    integer(C_INT), intent(in) :: stride, first, n
-    integer(C_INT) :: i
-    integer(C_INT64_T) :: p
-
-    if (n <= 0) return
-
-    if (n >= 2) then
-      p = int(first, C_INT64_T) + int(stride, C_INT64_T)
-      rhs(p) = rhs(p) - dl(p)*rhs(first)
-    end if
-$:penta_forward_interior()
-  end subroutine ys_forward_substitute_penta_interleaved
-
-  subroutine ys_forward_substitute_penta_interleaved_continue(rhs, ds, dl, stride, first, n, prev0_rhs, prev1_rhs)
-    implicit none
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs(:)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: ds(:), dl(:)
-    integer(C_INT), intent(in) :: stride, first, n
-    complex(C_DOUBLE_COMPLEX), intent(in) :: prev0_rhs, prev1_rhs
-    integer(C_INT) :: i
-    integer(C_INT64_T) :: p0, p1, p
-
-    if (n <= 0) return
-
-    p0 = int(first, C_INT64_T)
-    rhs(p0) = rhs(p0) - ds(p0)*prev0_rhs - dl(p0)*prev1_rhs
-    if (n >= 2_C_INT) then
-      p1 = p0 + int(stride, C_INT64_T)
-      rhs(p1) = rhs(p1) - ds(p1)*prev1_rhs - dl(p1)*rhs(p0)
-    end if
-$:penta_forward_interior()
-  end subroutine ys_forward_substitute_penta_interleaved_continue
-
-  subroutine ys_backward_substitute_penta_interleaved(rhs, d, du, dw, stride, first, n)
-    implicit none
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs(:)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: d(:), du(:), dw(:)
-    integer(C_INT), intent(in) :: stride, first, n
-    integer(C_INT) :: i
-    integer(C_INT64_T) :: p
-
-    if (n <= 0) return
-
-    p = int(first, C_INT64_T) + int(n - 1, C_INT64_T)*int(stride, C_INT64_T)
-    rhs(p) = rhs(p)*d(p)
-    if (n >= 2) then
-      p = int(first, C_INT64_T) + int(n - 2, C_INT64_T)*int(stride, C_INT64_T)
-      rhs(p) = (rhs(p) - du(p)*rhs(p + int(stride, C_INT64_T)))*d(p)
-    end if
-$:penta_backward_interior()
-  end subroutine ys_backward_substitute_penta_interleaved
-
-  subroutine ys_backward_substitute_penta_interleaved_continue(rhs, d, du, dw, stride, first, n, next0_rhs, next1_rhs)
-    implicit none
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs(:)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: d(:), du(:), dw(:)
-    integer(C_INT), intent(in) :: stride, first, n
-    complex(C_DOUBLE_COMPLEX), intent(in) :: next0_rhs, next1_rhs
-    integer(C_INT) :: i
-    integer(C_INT64_T) :: p, p_last, p_prev
-
-    if (n <= 0) return
-
-    p_last = int(first, C_INT64_T) + int(n - 1, C_INT64_T)*int(stride, C_INT64_T)
-    rhs(p_last) = (rhs(p_last) - du(p_last)*next0_rhs - dw(p_last)*next1_rhs)*d(p_last)
-    if (n >= 2_C_INT) then
-      p_prev = p_last - int(stride, C_INT64_T)
-      rhs(p_prev) = (rhs(p_prev) - du(p_prev)*rhs(p_last) - dw(p_prev)*next0_rhs)*d(p_prev)
-    end if
-$:penta_backward_interior()
-  end subroutine ys_backward_substitute_penta_interleaved_continue
-
-  subroutine ys_solve_factored_penta_interleaved(rhs, ds, dl, d, du, dw, stride, first, n)
-    implicit none
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: rhs(:)
-    complex(C_DOUBLE_COMPLEX), intent(in) :: ds(:), dl(:), d(:), du(:), dw(:)
-    integer(C_INT), intent(in) :: stride, first, n
-
-    if (n <= 0) return
-
-    call ys_forward_substitute_penta_interleaved(rhs, ds, dl, stride, first, n)
-    call ys_backward_substitute_penta_interleaved(rhs, d, du, dw, stride, first, n)
-  end subroutine ys_solve_factored_penta_interleaved
 
 end module y_line_solvers

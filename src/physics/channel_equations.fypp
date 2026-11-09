@@ -70,7 +70,8 @@ contains
     integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner, izb, iyb, izi, iyi
     integer(C_INT), parameter :: RHS_TILE = 8
     complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
-    complex(C_DOUBLE_COMPLEX), pointer :: system_matrix(:, :, :, :), system_rhs(:, :, :)
+    YS_COEF, pointer :: system_matrix(:, :, :, :)
+    complex(C_DOUBLE_COMPLEX), pointer :: system_rhs(:, :, :)
     integer(C_INT) :: row_start, row_end
     real(C_DOUBLE) :: lambda_coeff
 
@@ -109,7 +110,8 @@ $:tile_zy_close()
     integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner, izb, iyb, izi, iyi
     integer(C_INT), parameter :: RHS_TILE = 8
     complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
-    complex(C_DOUBLE_COMPLEX), pointer :: system_matrix(:, :, :, :), system_rhs(:, :, :)
+    YS_COEF, pointer :: system_matrix(:, :, :, :)
+    complex(C_DOUBLE_COMPLEX), pointer :: system_rhs(:, :, :)
     integer(C_INT) :: row_start, row_end
     real(C_DOUBLE) :: lambda_coeff, diffusion_coeff
 

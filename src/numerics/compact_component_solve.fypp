@@ -67,7 +67,7 @@ module compact_component_solve
     complex(C_DOUBLE_COMPLEX), pointer :: upper_rhs(:, :) => null(), upper_ghost_rhs(:, :) => null()
 
     ! Outputs: the banded interior system, ...
-    complex(C_DOUBLE_COMPLEX), pointer :: system_matrix(:, :, :, :) => null()
+    YS_COEF, pointer :: system_matrix(:, :, :, :) => null()
     complex(C_DOUBLE_COMPLEX), pointer :: system_rhs(:, :, :) => null()
     ! ... and the four closure rows with their right-hand sides.  The wall rows
     ! enforce the physical condition, the ghost rows close the node just
