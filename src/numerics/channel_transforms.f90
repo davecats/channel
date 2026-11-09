@@ -31,33 +31,42 @@ CONTAINS
 
   SUBROUTINE assemble_vvdz(m, to)
     IMPLICIT NONE
-    integer(C_INT) :: i, j, k, y_first, y_last, ib, kb, ii, ki
+    integer(C_INT) :: i, j, k, iz, kk, y_first, y_last, ib, kb, ii, ki
     integer(C_INT), intent(in) :: m, to
     y_first = ny0
     y_last = nyN
 
-    ! Every VVdz element is written below (the dealiasing band as zero), so no
-    ! separate zeroing pass.  8x8 (k, i) tiles, k fastest: VVdz is z-fastest and V
-    ! is y-fastest, so a wavefront writes full z-lines and reads full y-lines.
+    ! Every VVdz element is written (the dealiasing band as zero), so no
+    ! separate zeroing pass.  The 2nz+1 retained modes are a transpose (VVdz is
+    ! z-fastest, V y-fastest): 8x8 (kk, i) tiles over the modes only, kk
+    ! running iz = 0..nz then -nz..-1 so each tile row stays one contiguous
+    ! piece of VVdz except at the wrap.  The band between them (half the
+    ! column for nzd ~ 4nz) is a plain z-innermost zero fill: with both in one
+    ! tiled kernel the zeros went through the transpose tiles too.
     !$omp target teams distribute parallel do collapse(5) default(none) &
-    !$omp shared(V, VVdz) shared(nx0, nxN, nz, nzd, y_first, y_last, m, to) private(i, j, k, ib, kb, ii, ki)
+    !$omp shared(V, VVdz) shared(nx0, nxN, nz, nzd, y_first, y_last, m, to) private(i, j, k, iz, kk, ib, kb, ii, ki)
     DO j = nx0, nxN
     DO ib = 0, (y_last - y_first + 4)/8
-    DO kb = 0, (nzd - 1)/8
+    DO kb = 0, (2*nz)/8
     DO ii = 0, 7
     DO ki = 0, 7
         i = y_first - 2 + ib*8 + ii
-        k = kb*8 + ki + 1
-        IF (i > y_last + 2 .OR. k > nzd) CYCLE
-          IF (k <= nz + 1) THEN
-            VVdz(k, j - nx0 + 1, i, to) = V(i, k - 1, j, m)
-          ELSEIF (k >= nz + 2 .AND. k <= nzd - nz) THEN
-            VVdz(k, j - nx0 + 1, i, to) = 0.0d0
-          ELSE
-            VVdz(k, j - nx0 + 1, i, to) = V(i, k - nzd - 1, j, m)
-          END IF
+        kk = kb*8 + ki
+        IF (i > y_last + 2 .OR. kk > 2*nz) CYCLE
+        iz = merge(kk, kk - 2*nz - 1, kk <= nz)
+        k = merge(iz + 1, nzd + iz + 1, iz >= 0)
+        VVdz(k, j - nx0 + 1, i, to) = V(i, iz, j, m)
     END DO
     END DO
+    END DO
+    END DO
+    END DO
+    !$omp target teams distribute parallel do collapse(3) default(none) &
+    !$omp shared(VVdz) shared(nx0, nxN, nz, nzd, y_first, y_last, to) private(i, j, k)
+    DO i = y_first - 2, y_last + 2
+    DO j = nx0, nxN
+    DO k = nz + 2, nzd - nz
+        VVdz(k, j - nx0 + 1, i, to) = 0.0d0
     END DO
     END DO
     END DO
