@@ -26,6 +26,50 @@
 #! It overwrites du, dw and x; the arrays are per-call scratch, as they
 #! already were for the vendor routine.
 #:def custom_penta_kernel(ds, dl, d, du, dw, x)
+#if defined(_CRAYFTN)
+      ! The reduced rows i-1 and i-2 (forward) and the solution values i+1 and
+      ! i+2 (backward) are re-read from the arrays this thread has just written
+      ! rather than carried in registers.  Carrying them as a chain of copies
+      ! (u2m2 = u2m1; u2m1 = u2) is what CCE 21's scalar optimiser miscompiles
+      ! on the GPU at -O1 and above (even with -hscalar0): wrong solves.  The
+      ! re-reads cost ~18% kernel time under amdflang, so only CCE uses this
+      ! (reproducer kept outside the repo: gpu-scalar-opt-penta).
+      !$omp target teams distribute parallel do default(none) &
+      !$omp shared(${ds}$, ${dl}$, ${d}$, ${du}$, ${dw}$, ${x}$, n, batch_count) &
+      !$omp private(iline, pr_i, pr_p, pr_a, pr_b, pr_c, pr_e, pr_f, pr_r, pr_inv, pr_y, pr_s1, pr_s2)
+      do iline = 1, batch_count
+        pr_s1 = int(batch_count, C_INT64_T); pr_s2 = 2_C_INT64_T*pr_s1
+        do pr_i = 0, n - 1
+          pr_p = int(iline, C_INT64_T) + int(pr_i, C_INT64_T)*pr_s1
+          ! Row pr_i: pr_a*x(i-2) + pr_b*x(i-1) + pr_c*x(i) + pr_e*x(i+1) + pr_f*x(i+2) = pr_r.
+          pr_a = merge(${ds}$(pr_p), (0.0d0, 0.0d0), pr_i >= 2)
+          pr_b = merge(${dl}$(pr_p), (0.0d0, 0.0d0), pr_i >= 1)
+          pr_c = ${d}$(pr_p)
+          pr_e = merge(${du}$(pr_p), (0.0d0, 0.0d0), pr_i <= n - 2)
+          pr_f = merge(${dw}$(pr_p), (0.0d0, 0.0d0), pr_i <= n - 3)
+          pr_r = ${x}$(pr_p)
+          ! Eliminate x(i-2), then x(i-1), with the reduced rows i-2 and i-1.
+          if (pr_i >= 2) then
+            pr_b = pr_b - pr_a*${du}$(pr_p - pr_s2); pr_c = pr_c - pr_a*${dw}$(pr_p - pr_s2)
+            pr_r = pr_r - pr_a*${x}$(pr_p - pr_s2)
+          end if
+          if (pr_i >= 1) then
+            pr_c = pr_c - pr_b*${du}$(pr_p - pr_s1); pr_e = pr_e - pr_b*${dw}$(pr_p - pr_s1)
+            pr_r = pr_r - pr_b*${x}$(pr_p - pr_s1)
+          end if
+          pr_inv = 1.0d0/pr_c
+          ${du}$(pr_p) = pr_e*pr_inv; ${dw}$(pr_p) = pr_f*pr_inv; ${x}$(pr_p) = pr_r*pr_inv
+        end do
+        do pr_i = n - 1, 0, -1
+          pr_p = int(iline, C_INT64_T) + int(pr_i, C_INT64_T)*pr_s1
+          pr_y = ${x}$(pr_p)
+          if (pr_i <= n - 2) pr_y = pr_y - ${du}$(pr_p)*${x}$(pr_p + pr_s1)
+          if (pr_i <= n - 3) pr_y = pr_y - ${dw}$(pr_p)*${x}$(pr_p + pr_s2)
+          ${x}$(pr_p) = pr_y
+        end do
+      end do
+      !$omp end target teams distribute parallel do
+#else
       !$omp target teams distribute parallel do default(none) &
       !$omp shared(${ds}$, ${dl}$, ${d}$, ${du}$, ${dw}$, ${x}$, n, batch_count) &
       !$omp private(iline, pr_i, pr_p, pr_a, pr_b, pr_c, pr_e, pr_f, pr_r, pr_inv, &
@@ -60,6 +104,7 @@
         end do
       end do
       !$omp end target teams distribute parallel do
+#endif
 #:enddef
 
 #:def interleaved_penta_solver(name, ds, dl, d, du, dw, x)
@@ -73,6 +118,7 @@
     integer(C_INT64_T) :: pr_p
     complex(C_DOUBLE_COMPLEX) :: pr_a, pr_b, pr_c, pr_e, pr_f, pr_r, pr_inv, pr_u1, pr_u2, pr_y
     complex(C_DOUBLE_COMPLEX) :: pr_u1m2, pr_u2m2, pr_ym2, pr_u1m1, pr_u2m1, pr_ym1, pr_xn1, pr_xn2
+    integer(C_INT64_T) :: pr_s1, pr_s2
 #if defined(HAVE_CUDA)
     integer(C_INT64_T) :: p, p1
     complex(C_DOUBLE_COMPLEX) :: d0inv, d1inv, lfac, rhs0, rhs1
@@ -2222,6 +2268,12 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
 #:set BB = 'ys_gpsv_du' if mir else 'ys_gpsv_dl'
 #:set EE = 'ys_gpsv_dl' if mir else 'ys_gpsv_du'
 #:set FF = 'ys_gpsv_ds' if mir else 'ys_gpsv_dw'
+#:set PREV = '+' if mir else '-'
+#:set NEXT = '-' if mir else '+'
+#:set ROWN2 = '1_C_INT' if mir else '(active_n - 2_C_INT)'
+#:set ROWN1 = '0_C_INT' if mir else '(active_n - 1_C_INT)'
+#:set ROW0 = '(active_n - 1_C_INT)' if mir else '0_C_INT'
+#:set ROW1 = '(active_n - 2_C_INT)' if mir else '1_C_INT'
   ! Forward stage, fused: factor and eliminate in one sweep, seeded by the two
   ! reduced rows from `up` (offset in the receive buffer); this rank's last two
   ! go to the same offset in the send buffer.
@@ -2232,14 +2284,59 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     integer(C_INT) :: local_line, iline, stride, i
     integer(C_INT64_T) :: p, q
     complex(C_DOUBLE_COMPLEX) :: a, b, c, e, f, r, inv, u1, u2, y, u1m2, u2m2, ym2, u1m1, u2m1, ym1
+    integer(C_INT64_T) :: p2
     stride = ys_workspace_nlines
     !$omp target teams distribute parallel do default(none) &
     !$omp shared(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, ycomm_recvbuf, ycomm_sendbuf) &
     !$omp shared(stride, first_line, line_count, active_n, has_left, has_right, offset) &
-    !$omp private(local_line, iline, i, p, q, a, b, c, e, f, r, inv, u1, u2, y, u1m2, u2m2, ym2, u1m1, u2m1, ym1)
+    !$omp private(local_line, iline, i, p, p2, q, a, b, c, e, f, r, inv, u1, u2, y, u1m2, u2m2, ym2, u1m1, u2m1, ym1)
     do local_line = 1_C_INT, line_count
       iline = first_line + local_line - 1_C_INT
       q = int(offset + YS_PIPELINE_FACTOR_ELEMS*(local_line - 1_C_INT), C_INT64_T)
+#if defined(_CRAYFTN)
+      ! CCE: the reduced rows i-1 and i-2 come from memory, or from the seed
+      ! for the first two rows; no loop-carried copies (see custom_penta_kernel).
+      do i = 0, active_n - 1
+        p = int(iline, C_INT64_T) + int(${ROW}$, C_INT64_T)*int(stride, C_INT64_T)
+        a = merge(${AA}$(p), (0.0d0, 0.0d0), i >= 2 .or. has_left)
+        b = merge(${BB}$(p), (0.0d0, 0.0d0), i >= 1 .or. has_left)
+        c = ys_gpsv_d(p)
+        e = merge(${EE}$(p), (0.0d0, 0.0d0), i <= active_n - 2 .or. has_right)
+        f = merge(${FF}$(p), (0.0d0, 0.0d0), i <= active_n - 3 .or. has_right)
+        r = ys_gpsv_x(p)
+        if (i >= 2) then
+          p2 = p ${PREV}$ 2_C_INT64_T*int(stride, C_INT64_T)
+          b = b - a*${EE}$(p2); c = c - a*${FF}$(p2); r = r - a*ys_gpsv_x(p2)
+        else if (has_left) then
+          if (i == 0) then
+            b = b - a*ycomm_recvbuf(q + 1_C_INT64_T); c = c - a*ycomm_recvbuf(q + 2_C_INT64_T)
+            r = r - a*ycomm_recvbuf(q + 3_C_INT64_T)
+          else
+            b = b - a*ycomm_recvbuf(q + 4_C_INT64_T); c = c - a*ycomm_recvbuf(q + 5_C_INT64_T)
+            r = r - a*ycomm_recvbuf(q + 6_C_INT64_T)
+          end if
+        end if
+        if (i >= 1) then
+          p2 = p ${PREV}$ int(stride, C_INT64_T)
+          c = c - b*${EE}$(p2); e = e - b*${FF}$(p2); r = r - b*ys_gpsv_x(p2)
+        else if (has_left) then
+          c = c - b*ycomm_recvbuf(q + 4_C_INT64_T); e = e - b*ycomm_recvbuf(q + 5_C_INT64_T)
+          r = r - b*ycomm_recvbuf(q + 6_C_INT64_T)
+        end if
+        inv = 1.0d0/c
+        ${EE}$(p) = e*inv; ${FF}$(p) = f*inv; ys_gpsv_x(p) = r*inv
+      end do
+      if (has_right) then
+        ! the last two rows in sweep order, nearest-but-one first
+        p2 = int(iline, C_INT64_T) + int(${ROWN2}$, C_INT64_T)*int(stride, C_INT64_T)
+        p = int(iline, C_INT64_T) + int(${ROWN1}$, C_INT64_T)*int(stride, C_INT64_T)
+        ycomm_sendbuf(q + 1_C_INT64_T) = ${EE}$(p2); ycomm_sendbuf(q + 2_C_INT64_T) = ${FF}$(p2)
+        ycomm_sendbuf(q + 3_C_INT64_T) = ys_gpsv_x(p2)
+        ycomm_sendbuf(q + 4_C_INT64_T) = ${EE}$(p); ycomm_sendbuf(q + 5_C_INT64_T) = ${FF}$(p)
+        ycomm_sendbuf(q + 6_C_INT64_T) = ys_gpsv_x(p)
+      end if
+    end do
+#else
       if (has_left) then
         u1m2 = ycomm_recvbuf(q + 1_C_INT64_T); u2m2 = ycomm_recvbuf(q + 2_C_INT64_T); ym2 = ycomm_recvbuf(q + 3_C_INT64_T)
         u1m1 = ycomm_recvbuf(q + 4_C_INT64_T); u2m1 = ycomm_recvbuf(q + 5_C_INT64_T); ym1 = ycomm_recvbuf(q + 6_C_INT64_T)
@@ -2268,6 +2365,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
         ycomm_sendbuf(q + 4_C_INT64_T) = u1m1; ycomm_sendbuf(q + 5_C_INT64_T) = u2m1; ycomm_sendbuf(q + 6_C_INT64_T) = ym1
       end if
     end do
+#endif
     !$omp end target teams distribute parallel do
   end subroutine ys_pipelined_forward_fused${sfx}$
 
@@ -2316,6 +2414,42 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       else
         xn1 = (0.0d0, 0.0d0); xn2 = (0.0d0, 0.0d0)
       end if
+#if defined(_CRAYFTN)
+      ! CCE: the solution at i+1 and i+2 comes from memory, or from the seed
+      ! for the two rows nearest `down`; no loop-carried copies.
+      do i = active_n - 1, 0, -1
+        p = int(iline, C_INT64_T) + int(${ROW}$, C_INT64_T)*int(stride, C_INT64_T)
+        y = ys_gpsv_x(p)
+        if (i <= active_n - 2) then
+          y = y - ${EE}$(p)*ys_gpsv_x(p ${NEXT}$ int(stride, C_INT64_T))
+        else if (has_right) then
+          y = y - ${EE}$(p)*xn1
+        end if
+        if (i <= active_n - 3) then
+          y = y - ${FF}$(p)*ys_gpsv_x(p ${NEXT}$ 2_C_INT64_T*int(stride, C_INT64_T))
+        else if (has_right) then
+          y = y - ${FF}$(p)*merge(xn2, xn1, i == active_n - 1)
+        end if
+        ys_gpsv_x(p) = y
+        if (do_pack .and. i >= active_n - 2) then
+          q = int(halo_base + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
+#:if mir
+          ! physical rows 1, 2 (i = active_n-1, active_n-2) -> slots 1, 2
+          ycomm_sendbuf(q + int(active_n - i, C_INT64_T)) = y
+#:else
+          ! rows active_n-1 and active_n (1-based) -> slots 1 and 2
+          ycomm_sendbuf(q + int(i - active_n + 3, C_INT64_T)) = y
+#:endif
+        end if
+      end do
+      if (has_left) then
+        ! this rank's two values nearest `up`, nearest first
+        q = int(send_offset + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
+        ycomm_sendbuf(q + 1_C_INT64_T) = ys_gpsv_x(int(iline, C_INT64_T) + int(${ROW0}$, C_INT64_T)*int(stride, C_INT64_T))
+        ycomm_sendbuf(q + 2_C_INT64_T) = ys_gpsv_x(int(iline, C_INT64_T) + int(${ROW1}$, C_INT64_T)*int(stride, C_INT64_T))
+      end if
+    end do
+#else
       do i = active_n - 1, 0, -1
         p = int(iline, C_INT64_T) + int(${ROW}$, C_INT64_T)*int(stride, C_INT64_T)
         y = ys_gpsv_x(p) - ${EE}$(p)*xn1 - ${FF}$(p)*xn2
@@ -2337,6 +2471,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
         ycomm_sendbuf(q + 1_C_INT64_T) = xn1; ycomm_sendbuf(q + 2_C_INT64_T) = xn2
       end if
     end do
+#endif
     !$omp end target teams distribute parallel do
   end subroutine ys_pipelined_backward_fused${sfx}$
 

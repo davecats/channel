@@ -203,7 +203,7 @@ contains
     type(autotune_best), intent(inout) :: best
     real(C_DOUBLE) :: xz_forward_cost, xz_back_cost, y_cost, score
     real(C_DOUBLE) :: y_error
-    integer(C_INT) :: ib, batches, npy, nlines, placeholder_path(MAXP), placeholder_npass, batch_candidates(3)
+    integer(C_INT) :: ib, batches, npy, nlines, placeholder_path(MAXP), placeholder_npass, batch_candidates(4)
     integer(C_INT), allocatable :: placeholder_passes(:)
     logical :: y_ok, fft_ok
     integer :: ierr, rank
@@ -229,10 +229,15 @@ contains
     if (placeholder_npass > 0_C_INT) placeholder_path(1:placeholder_npass) = placeholder_passes
 
     nlines = (nxpp/npxz)*(2_C_INT*nz + 1_C_INT)
-    batch_candidates = [max(1_C_INT, npy/2_C_INT), npy, 2_C_INT*npy]
+    ! The twisted pipeline (default for even npy) is npy/2 deep, so fewer
+    ! batches can pay off: npy/4 is a candidate too.  Duplicates are skipped.
+    batch_candidates = [max(1_C_INT, npy/4_C_INT), max(1_C_INT, npy/2_C_INT), npy, 2_C_INT*npy]
     do ib = 1_C_INT, int(size(batch_candidates), C_INT)
       batches = batch_candidates(ib)
       if (batches > nlines) cycle
+      if (ib > 1_C_INT) then
+        if (any(batch_candidates(1:ib - 1) == batches)) cycle
+      end if
       y_cost = time_y(nxpp, nzd, nz, ny, nphi, overlapping, npy, placeholder_path, placeholder_npass, &
                       YS_SCHUR_EXCHANGE_AUTO, Y_SOLVER_PIPELINED_LU, batches, y_ok, y_error)
       if (.not. y_ok) then
