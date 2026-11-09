@@ -686,10 +686,9 @@ $:z2z_transform('IFT', 'INVERSE')
     type(c_ptr), intent(in) :: recv
     complex(C_DOUBLE_COMPLEX), target :: x(:, :, ny0 - 2:)
     real(C_DOUBLE), target :: rx(:, :, ny0 - 2:)
-    integer :: istat, x_y0, rx_y0, nreal, i, j, k
+    integer :: istat, x_y0, rx_y0
     x_y0 = lbound(x, 3)
     rx_y0 = lbound(rx, 3)
-    nreal = 2*(size(x, 1) - 1)
 #ifdef HAVE_XZ_CALLBACKS
     !$omp target data use_device_addr(x, rx)
     istat = channel_xz_cb_set_buffers(c_null_ptr, recv)
@@ -699,16 +698,9 @@ $:z2z_transform('IFT', 'INVERSE')
 #else
     error stop "this build has no hipFFT xz callbacks"
 #endif
-    if (nreal < size(rx, 1)) then
-      !$omp target teams distribute parallel do collapse(3) default(none) shared(rx, nreal) private(i, j, k)
-      do k = lbound(rx, 3), ubound(rx, 3)
-        do j = 1, size(rx, 2)
-          do i = nreal + 1, size(rx, 1)
-            rx(i, j, k) = 0.0d0
-          end do
-        end do
-      end do
-    end if
+    ! The two padding columns rx(2*nxd+1:2*nxd+2, :, :) are left as they are:
+    ! in the nonlinear-term path nothing reads past 2*nxd (build_products,
+    ! the HFT plans and compute_cfl all stop there), unlike RFT's other callers.
   END SUBROUTINE RFT_unpack
 
   ! HFT of the product rx(:,:,:,a)*rx(:,:,:,b)*factor, formed in the load

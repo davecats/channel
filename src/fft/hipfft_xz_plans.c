@@ -47,7 +47,7 @@ CHANNEL_INCBIN(channel_xz_cb_hft_load_spv, CHANNEL_XZ_CB_HFT_LOAD_SPV)
 
 /* Must match channel_xz_cb_info in hipfft_xz_callbacks.hip. */
 typedef struct {
-  unsigned int nzd, nxB, nzB, nxd1, nxpp, sendcount, nxr1, pad;
+  unsigned int nzd, nxB, nzB, nxd1, nxpp, sendcount, nxr1, layout;
   unsigned long long a_off, b_off;
   double factor;
   void *zbuf;
@@ -98,7 +98,11 @@ int channel_xz_cb_create(int nzd, int nxB, int nzB, int nxd, int nyb, void **pIF
   host_info.zbuf = NULL;
   host_info.xbuf = NULL;
   host_info.nxr1 = (unsigned)(2*(nxd + 1));
-  host_info.pad = 0;
+  host_info.layout = 0;
+  {
+    const char *lay = getenv("CHANNEL_XZ_CB_LAYOUT");
+    if (lay) host_info.layout = (unsigned)atoi(lay);
+  }
   if (dev_info == NULL && hipMalloc((void **)&dev_info, sizeof(host_info)) != hipSuccess) return 100;
   if (hipMemcpy(dev_info, &host_info, sizeof(host_info), hipMemcpyHostToDevice) != hipSuccess) return 101;
   cbdata_array[0] = dev_info;
@@ -129,14 +133,16 @@ int channel_xz_cb_create(int nzd, int nxB, int nzB, int nxd, int nyb, void **pIF
   else
     fails++;
   inembed[0] = 2*(nxd + 1); onembed[0] = nxd + 1;
-  /* HFT: products load callback plus pack store callback; when rocFFT will
-   * not take both (or CHANNEL_XZ_CB_HFT=store), the store callback alone and
-   * the products come from the build_products kernel. */
+  /* HFT: the pack store callback, and with CHANNEL_XZ_CB_HFT=products also
+   * the products load callback.  The latter is correct but measured slower
+   * (small x4y1 0.0895 vs 0.0846 s/step, big 0.774 vs 0.719): the R2C kernel
+   * then loads two factors per element through the callback.  Without it the
+   * products come from the build_products kernel. */
   *pHFT = NULL;
   hft_products = 0;
   {
     const char *mode = getenv("CHANNEL_XZ_CB_HFT");
-    int want_load = !(mode && strcmp(mode, "store") == 0);
+    int want_load = (mode && strcmp(mode, "products") == 0);
     if (want_load && !check(hipfftCreate(&h), "create HFT") &&
         !set_cb(h, "channel_cb_hft_load_products", HIPFFT_CB_LD_REAL_DOUBLE) &&
         !set_cb(h, "channel_cb_hft_store_pack", HIPFFT_CB_ST_COMPLEX_DOUBLE)) {

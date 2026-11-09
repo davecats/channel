@@ -17,6 +17,9 @@
 // here):
 //   zTOx block p: p = dest*sendcount + iz + nzB*(ix + nxB*iy)
 //   xTOz block p: p = dest*sendcount + ix + nxB*(iz + nzB*iy)
+// CHANNEL_XZ_CB_LAYOUT (bit 1: zTOx, bit 2: xTOz) flips a block to the other
+// fastest index, moving the strided access from the load to the store side;
+// pack and unpack are both callbacks, so they always agree.
 // When the transpose is local (npxz = 1) the zTOx "buffer" is VVdz itself and
 // the xTOz one is a compact copy of VVdx, so the same formulas apply.
 //
@@ -29,7 +32,7 @@
 #include <hip/hip_runtime.h>
 
 struct channel_xz_cb_info {
-  unsigned int nzd, nxB, nzB, nxd1, nxpp, sendcount, nxr1, pad;
+  unsigned int nzd, nxB, nzB, nxd1, nxpp, sendcount, nxr1, layout;
   unsigned long long a_off, b_off;  // HFT products: element offsets of the two factors from rVVdx(1,1,y0,1)
   double factor;                    // HFT products: normalisation
   double2* zbuf;                    // zTOx send (IFT) / xTOz receive (FFT) buffer
@@ -60,7 +63,10 @@ extern "C" __device__ void channel_cb_ift_store_pack(double2* buf, size_t offset
   unsigned int iy = r / c->nxB;
   unsigned int dest = iz / c->nzB;
   unsigned int izl = iz - dest*c->nzB;
-  c->zbuf[dest*c->sendcount + izl + c->nzB*(ix + c->nxB*iy)] = e;
+  if (c->layout & 1)  // zTOx blocks x-fastest: strided store here, contiguous load in the RFT
+    c->zbuf[dest*c->sendcount + ix + c->nxB*(izl + c->nzB*iy)] = e;
+  else
+    c->zbuf[dest*c->sendcount + izl + c->nzB*(ix + c->nxB*iy)] = e;
 }
 
 // RFT load: x-pencil element (ix, iz, iy) of VVdx read from the zTOx receive
@@ -75,6 +81,7 @@ extern "C" __device__ double2 channel_cb_rft_load_unpack(double2* buf, size_t of
   if (ixf >= c->nxpp) return make_double2(0.0, 0.0);
   unsigned int src = ixf / c->nxB;
   unsigned int ix = ixf - src*c->nxB;
+  if (c->layout & 1) return c->xbuf[src*c->sendcount + ix + c->nxB*(iz + c->nzB*iy)];
   return c->xbuf[src*c->sendcount + iz + c->nzB*(ix + c->nxB*iy)];
 }
 
@@ -91,7 +98,10 @@ extern "C" __device__ void channel_cb_hft_store_pack(double2* buf, size_t offset
   if (ixf >= c->nxpp) return;
   unsigned int dest = ixf / c->nxB;
   unsigned int ix = ixf - dest*c->nxB;
-  c->xbuf[dest*c->sendcount + ix + c->nxB*(iz + c->nzB*iy)] = e;
+  if (c->layout & 2)  // xTOz blocks z-fastest: strided store here, contiguous load in the FFT
+    c->xbuf[dest*c->sendcount + iz + c->nzB*(ix + c->nxB*iy)] = e;
+  else
+    c->xbuf[dest*c->sendcount + ix + c->nxB*(iz + c->nzB*iy)] = e;
 }
 
 // FFT load: z-pencil element (iz, ix, iy) of VVdz read from the xTOz receive
@@ -105,6 +115,7 @@ extern "C" __device__ double2 channel_cb_fft_load_unpack(double2* buf, size_t of
   unsigned int iy = r / c->nxB;
   unsigned int src = iz / c->nzB;
   unsigned int izl = iz - src*c->nzB;
+  if (c->layout & 2) return c->zbuf[src*c->sendcount + izl + c->nzB*(ix + c->nxB*iy)];
   return c->zbuf[src*c->sendcount + ix + c->nxB*(izl + c->nzB*iy)];
 }
 #endif
