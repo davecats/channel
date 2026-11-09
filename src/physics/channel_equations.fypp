@@ -603,7 +603,7 @@ $:tile_zy_close()
     ! latency-bound.
     nteams = int((int(y_last - y_first + 1, C_INT64_T)*int(2*nz + 1, C_INT64_T)*int(nxN - nx0 + 1, C_INT64_T) + 255)/256, C_INT)
     !$omp target teams distribute parallel do collapse(3) default(none) num_teams(nteams) thread_limit(256) &
-    !$omp shared(rhs_stash, oldrhs, der, ialfa, ibeta, k2, nz, nx0, nxN, y_first, y_last) &
+    !$omp shared(rhs_stash, oldrhs, der, ialfa, ibeta, k2, nz, nx0, nxN, y_first, y_last) firstprivate(nteams) &
     !$omp private(iz, ix, iy, rhsu, rhsw, acc_d2v, acc_eta, acc_mean)
     DO ix = nx0, nxN
       DO iz = -nz, nz
