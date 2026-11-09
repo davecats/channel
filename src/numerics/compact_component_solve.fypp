@@ -121,9 +121,9 @@ contains
     type(compact_assembly_context), intent(in) :: ctx
     complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
     integer(C_INT) :: derivative_order_value, row_start, row_end
-    integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner, nlines_z, nlines, iline
+    integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner, nlines_z, nlines, iline, izb, iyb, izi, iyi
+    integer(C_INT), parameter :: RHS_TILE = 8
     integer(C_INT64_T) :: p
-    complex(C_DOUBLE_COMPLEX) :: src_m2, src_m1, src_0, src_p1, src_p2
 
     owner_src => ctx%src
     row_start = ctx%row_start
@@ -133,40 +133,39 @@ contains
     ixN_owner = ubound(owner_src, 3)
     nlines_z = 2_C_INT*nz + 1_C_INT
     nlines = (ixN_owner - ix0_owner + 1_C_INT)*nlines_z
+    ! The bands are the D^0 weights of row iy, the same for every line: written
+    ! line-fastest, as the solver reads them.  The right-hand side is the
+    ! D^order stencil of the y-fastest field, written line-fastest, so it is
+    ! the one that needs (iz, iy) tiles.  (One thread per line walking iy,
+    ! as before, read the field with a 4 KB stride and carried the stencil
+    ! window as a chain of copies, the pattern CCE miscompiles.)
     !$omp target teams distribute parallel do collapse(2) default(none) &
-    !$omp shared(owner_src, der, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, &
-    !$omp& row_start, row_end, derivative_order_value, nz, ix0_owner, ixN_owner, nlines_z, nlines) &
-    !$omp private(ix, iz, iy, iline, p, src_m2, src_m1, src_0, src_p1, src_p2)
-    do ix = ix0_owner, ixN_owner
-      do iz = -nz, nz
-        iline = (ix - ix0_owner)*nlines_z + iz + nz + 1_C_INT
-        src_m2 = owner_src(row_start - 2_C_INT, iz, ix)
-        src_m1 = owner_src(row_start - 1_C_INT, iz, ix)
-        src_0 = owner_src(row_start, iz, ix)
-        src_p1 = owner_src(row_start + 1_C_INT, iz, ix)
-        src_p2 = owner_src(row_start + 2_C_INT, iz, ix)
-        do iy = row_start, row_end
-          p = int(iy - row_start, C_INT64_T)*int(nlines, C_INT64_T) + int(iline, C_INT64_T)
-          ys_gpsv_ds(p) = cmplx(der(iy, 0, -2), 0.0d0, kind=C_DOUBLE)
-          ys_gpsv_dl(p) = cmplx(der(iy, 0, -1), 0.0d0, kind=C_DOUBLE)
-          ys_gpsv_d(p) = cmplx(der(iy, 0, 0), 0.0d0, kind=C_DOUBLE)
-          ys_gpsv_du(p) = cmplx(der(iy, 0, 1), 0.0d0, kind=C_DOUBLE)
-          ys_gpsv_dw(p) = cmplx(der(iy, 0, 2), 0.0d0, kind=C_DOUBLE)
-          ys_gpsv_x(p) = der(iy, derivative_order_value, -2)*src_m2 + &
-                         der(iy, derivative_order_value, -1)*src_m1 + &
-                         der(iy, derivative_order_value, 0)*src_0 + &
-                         der(iy, derivative_order_value, 1)*src_p1 + &
-                         der(iy, derivative_order_value, 2)*src_p2
-          if (iy < row_end) then
-            src_m2 = src_m1
-            src_m1 = src_0
-            src_0 = src_p1
-            src_p1 = src_p2
-            src_p2 = owner_src(iy + 3_C_INT, iz, ix)
-          end if
-        end do
+    !$omp shared(der, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, row_start, row_end, nlines) &
+    !$omp private(iy, iline, p)
+    do iy = row_start, row_end
+      do iline = 1, nlines
+        p = int(iy - row_start, C_INT64_T)*int(nlines, C_INT64_T) + int(iline, C_INT64_T)
+        ys_gpsv_ds(p) = der(iy, 0, -2)
+        ys_gpsv_dl(p) = der(iy, 0, -1)
+        ys_gpsv_d(p) = der(iy, 0, 0)
+        ys_gpsv_du(p) = der(iy, 0, 1)
+        ys_gpsv_dw(p) = der(iy, 0, 2)
       end do
     end do
+    !$omp end target teams distribute parallel do
+    !$omp target teams distribute parallel do collapse(5) default(none) &
+    !$omp shared(owner_src, der, ys_gpsv_x, row_start, row_end, derivative_order_value, nz, ix0_owner, ixN_owner, &
+    !$omp& nlines_z, nlines) &
+    !$omp private(ix, iz, iy, izb, iyb, izi, iyi, iline, p)
+$:tile_zy_open(ix0='ix0_owner', ix1='ixN_owner', y0='row_start', y1='row_end')
+              iline = (ix - ix0_owner)*nlines_z + iz + nz + 1_C_INT
+              p = int(iy - row_start, C_INT64_T)*int(nlines, C_INT64_T) + int(iline, C_INT64_T)
+              ys_gpsv_x(p) = der(iy, derivative_order_value, -2)*owner_src(iy - 2, iz, ix) + &
+                             der(iy, derivative_order_value, -1)*owner_src(iy - 1, iz, ix) + &
+                             der(iy, derivative_order_value, 0)*owner_src(iy, iz, ix) + &
+                             der(iy, derivative_order_value, 1)*owner_src(iy + 1, iz, ix) + &
+                             der(iy, derivative_order_value, 2)*owner_src(iy + 2, iz, ix)
+$:tile_zy_close()
     !$omp end target teams distribute parallel do
   end subroutine assemble_compact_derivative_interior
 
