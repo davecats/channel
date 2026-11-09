@@ -25,6 +25,18 @@
 ! compact_component_solve's business, and this file says nothing about it.
 !
 ! It contains no MPI, no FFT and no linear algebra of its own.
+#! The right-hand side of an assembled system: the y-fastest field copied to
+#! the z-fastest system layout in (iz, iy) tiles.
+#:def assemble_rhs_tiles()
+    !$omp target teams distribute parallel do collapse(5) default(none) &
+    !$omp shared(owner_src, system_rhs, nz, ix0_owner, ixN_owner, row_start, row_end) &
+    !$omp private(ix, iz, iy, izb, iyb, izi, iyi)
+$:tile_zy_open(ix0='ix0_owner', ix1='ixN_owner', y0='row_start', y1='row_end')
+              system_rhs(iz, ix, iy) = owner_src(iy, iz, ix)
+$:tile_zy_close()
+    !$omp end target teams distribute parallel do
+#:enddef
+
 module channel_equations
 
   use, intrinsic :: iso_c_binding
@@ -65,7 +77,6 @@ contains
   subroutine assemble_compact_biharmonic_system(ctx)
     implicit none
     type(compact_assembly_context), intent(in) :: ctx
-    complex(C_DOUBLE_COMPLEX) :: rhs_value
     integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner, izb, iyb, izi, iyi
     integer(C_INT), parameter :: RHS_TILE = 8
     complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
@@ -83,28 +94,31 @@ contains
     ix0_owner = lbound(owner_src, 3)
     ixN_owner = ubound(owner_src, 3)
 
-    ! Reads the y-fastest field, writes the z-fastest system: (iz, iy) tiles.
-    !$omp target teams distribute parallel do collapse(5) default(none) &
-    !$omp shared(owner_src, der, k2, ni, lambda_coeff, system_matrix, system_rhs, nz, ix0_owner, ixN_owner, row_start, row_end) &
-    !$omp private(ix, iz, iy, izb, iyb, izi, iyi, rhs_value)
-$:tile_zy_open(ix0='ix0_owner', ix1='ixN_owner', y0='row_start', y1='row_end')
-              rhs_value = owner_src(iy, iz, ix)
-              ! v equation, implicit half:  lambda*(D^2 - k^2) - ni*(D^2 - k^2)^2
-              ! One scalar statement per coefficient: the array-section form built
-              ! a five-element temporary per point.
+    ! The bands depend on iy and k^2 only and are written z-fastest, as the
+    ! solver reads them: no transpose, so a plain z-innermost loop.  Only the
+    ! right-hand side transposes the y-fastest field, in (iz, iy) tiles.  One
+    ! tiled kernel for both cost 34% more: the tile bookkeeping outweighed
+    ! coalescing for the five band stores, which needed none.
+    !$omp target teams distribute parallel do collapse(3) default(none) &
+    !$omp shared(der, k2, ni, lambda_coeff, system_matrix, nz, ix0_owner, ixN_owner, row_start, row_end) &
+    !$omp private(ix, iz, iy)
+    do iy = row_start, row_end
+      do ix = ix0_owner, ixN_owner
+        do iz = -nz, nz
+          ! v equation, implicit half:  lambda*(D^2 - k^2) - ni*(D^2 - k^2)^2
 #:for k in range(-2, 3)
-              system_matrix(iz, ix, iy, ${k}$) = cmplx(lambda_coeff*${helmholtz_op('iy', str(k))}$ - &
-                                                      ni*${biharmonic_op('iy', str(k))}$, 0.0d0, kind=C_DOUBLE)
+          system_matrix(iz, ix, iy, ${k}$) = lambda_coeff*${helmholtz_op('iy', str(k))}$ - ni*${biharmonic_op('iy', str(k))}$
 #:endfor
-              system_rhs(iz, ix, iy) = rhs_value
-$:tile_zy_close()
+        end do
+      end do
+    end do
     !$omp end target teams distribute parallel do
+$:assemble_rhs_tiles()
   end subroutine assemble_compact_biharmonic_system
 
   subroutine assemble_compact_helmholtz_system(ctx)
     implicit none
     type(compact_assembly_context), intent(in) :: ctx
-    complex(C_DOUBLE_COMPLEX) :: rhs_value
     integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner, izb, iyb, izi, iyi
     integer(C_INT), parameter :: RHS_TILE = 8
     complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
@@ -123,20 +137,22 @@ $:tile_zy_close()
     ix0_owner = lbound(owner_src, 3)
     ixN_owner = ubound(owner_src, 3)
 
-    ! Reads the y-fastest field, writes the z-fastest system: (iz, iy) tiles.
-    !$omp target teams distribute parallel do collapse(5) default(none) &
-    !$omp shared(owner_src, der, k2, ni, lambda_coeff, diffusion_coeff, system_matrix, system_rhs, nz, ix0_owner, ixN_owner, row_start, row_end) &
-    !$omp private(ix, iz, iy, izb, iyb, izi, iyi, rhs_value)
-$:tile_zy_open(ix0='ix0_owner', ix1='ixN_owner', y0='row_start', y1='row_end')
-              rhs_value = owner_src(iy, iz, ix)
-              ! eta / scalar equation, implicit half:  lambda - diffusion*ni*(D^2 - k^2)
+    ! Bands untiled, right-hand side tiled: see the biharmonic system above.
+    !$omp target teams distribute parallel do collapse(3) default(none) &
+    !$omp shared(der, k2, ni, lambda_coeff, diffusion_coeff, system_matrix, nz, ix0_owner, ixN_owner, row_start, row_end) &
+    !$omp private(ix, iz, iy)
+    do iy = row_start, row_end
+      do ix = ix0_owner, ixN_owner
+        do iz = -nz, nz
+          ! eta / scalar equation, implicit half:  lambda - diffusion*ni*(D^2 - k^2)
 #:for k in range(-2, 3)
-              system_matrix(iz, ix, iy, ${k}$) = cmplx(lambda_coeff*der(iy, 0, ${k}$) - &
-                                                      diffusion_coeff*ni*${helmholtz_op('iy', str(k))}$, 0.0d0, kind=C_DOUBLE)
+          system_matrix(iz, ix, iy, ${k}$) = lambda_coeff*der(iy, 0, ${k}$) - diffusion_coeff*ni*${helmholtz_op('iy', str(k))}$
 #:endfor
-              system_rhs(iz, ix, iy) = rhs_value
-$:tile_zy_close()
+        end do
+      end do
+    end do
     !$omp end target teams distribute parallel do
+$:assemble_rhs_tiles()
   end subroutine assemble_compact_helmholtz_system
 
   SUBROUTINE solve_mean_correction_line(x, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, lambda_coeff, diffusion_coeff)
