@@ -31,29 +31,35 @@ CONTAINS
 
   SUBROUTINE assemble_vvdz(m, to)
     IMPLICIT NONE
-    integer(C_INT) :: i, j, k, iz, kk, y_first, y_last, ib, kb, ii, ki
+    integer(C_INT) :: i, j, k, iz, y_first, y_last, ib, kb, ii, ki, sz, sy
     integer(C_INT), intent(in) :: m, to
+    integer(C_INTPTR_T) :: addr
     y_first = ny0
     y_last = nyN
 
     ! Every VVdz element is written (the dealiasing band as zero), so no
     ! separate zeroing pass.  The 2nz+1 retained modes are a transpose (VVdz is
-    ! z-fastest, V y-fastest): 8x8 (kk, i) tiles over the modes only, kk
-    ! running iz = 0..nz then -nz..-1 so each tile row stays one contiguous
-    ! piece of VVdz except at the wrap.  The band between them (half the
-    ! column for nzd ~ 4nz) is a plain z-innermost zero fill: with both in one
-    ! tiled kernel the zeros went through the transpose tiles too.
+    ! z-fastest, V y-fastest): 8x8 (iz, i) tiles over the modes only.  The
+    ! tile origins are moved down by (sz, sy) elements so that every tile row
+    ! is exactly one 128-byte line of VVdz and every tile column one line of V
+    ! (see buildrhs_stash; the phases come from the host addresses, and a wrong
+    ! phase only costs the gain).  The band between the two halves of the
+    ! modes (half the column for nzd ~ 4nz) is a plain z-innermost zero fill:
+    ! with both in one tiled kernel the zeros went through the transpose tiles too.
+    addr = transfer(c_loc(VVdz(1, 1, lbound(VVdz, 3), to)), addr)
+    sz = int(modulo(addr/16 + int(nzd - nz, C_INTPTR_T), 8_C_INTPTR_T), C_INT)
+    addr = transfer(c_loc(V(y_first - 2, -nz, nx0, m)), addr)
+    sy = int(modulo(addr/16, 8_C_INTPTR_T), C_INT)
     !$omp target teams distribute parallel do collapse(5) default(none) &
-    !$omp shared(V, VVdz) shared(nx0, nxN, nz, nzd, y_first, y_last, m, to) private(i, j, k, iz, kk, ib, kb, ii, ki)
+    !$omp shared(V, VVdz) shared(nx0, nxN, nz, nzd, y_first, y_last, m, to, sz, sy) private(i, j, k, iz, ib, kb, ii, ki)
     DO j = nx0, nxN
-    DO ib = 0, (y_last - y_first + 4)/8
-    DO kb = 0, (2*nz)/8
+    DO ib = 0, (y_last - y_first + 4 + sy)/8
+    DO kb = 0, (2*nz + sz)/8
     DO ii = 0, 7
     DO ki = 0, 7
-        i = y_first - 2 + ib*8 + ii
-        kk = kb*8 + ki
-        IF (i > y_last + 2 .OR. kk > 2*nz) CYCLE
-        iz = merge(kk, kk - 2*nz - 1, kk <= nz)
+        iz = -nz - sz + kb*8 + ki
+        i = y_first - 2 - sy + ib*8 + ii
+        IF (iz < -nz .OR. iz > nz .OR. i < y_first - 2 .OR. i > y_last + 2) CYCLE
         k = merge(iz + 1, nzd + iz + 1, iz >= 0)
         VVdz(k, j - nx0 + 1, i, to) = V(i, iz, j, m)
     END DO
