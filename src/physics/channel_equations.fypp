@@ -37,6 +37,139 @@ $:tile_zy_close()
     !$omp end target teams distribute parallel do
 #:enddef
 
+#! ===================================================================
+#! Real-arithmetic building blocks of the buildrhs kernels.
+#!
+#! The kernels below never use complex operators on the fields.  amdflang
+#! compiles real*complex to a full complex multiply (with the 0*x terms kept)
+#! and complex/real to a call to __divdc3 per point; written with explicit
+#! real and imaginary parts the same stencils need a third of the
+#! floating-point instructions.  ialfa and ibeta are purely imaginary, so
+#! only a = dimag(ialfa(ix)) and b = dimag(ibeta(iz)) appear.
+#! ===================================================================
+#:set RJ = [(-2, 'm2'), (-1, 'm1'), (0, 'c0'), (1, 'p1'), (2, 'p2')]
+#! Scalars d<order><row> = der(iy, order, row) for the listed orders.
+#:def rhs_load_der(orders)
+#:for o in orders
+#:for j, t in RJ
+          d${o}$${t}$ = der(iy, ${o}$, ${j}$)
+#:endfor
+#:endfor
+#:enddef
+#! One part ('dreal' or 'dimag') of the y stencil with coefficients cf<row>
+#! applied to component comp of a y-fastest field.
+#:def rhs_rsum(part, cf, field, comp)
+(${' + '.join('{}{}*{}({}(iy + ({}), iz, ix, {}))'.format(cf, t, part, field, j, comp) for j, t in RJ)}$)
+#:enddef
+#:set RHS_DER_NAMES = ', '.join('d{}{}'.format(o, t) for o in range(4) for j, t in RJ) + ', ' + ', '.join('e{}'.format(t) for j, t in RJ)
+#! The explicit terms of all six velocity products (VEL_RHS above, expanded):
+#!   d2v:  -a^2 D1(uu) + k^2 D1(vv) - b^2 D1(ww) - 2ab D1(uw) + i [a (D2 + k^2 D0)(uv) + b (D2 + k^2 D0)(vw)]
+#!   eta:  ab [D0(uu) - D0(ww)] + (b^2 - a^2) D0(uw) + i [a D1(vw) - b D1(uv)]
+#!   mean (ix = iz = 0):  (-Re D1(uv), -Re D1(vw))
+#! Result in n2r, n2i (d2v) and n1r, n1i (eta or mean).  Needs kk, a, b and
+#! the der scalars of orders 0, 1, 2.
+#:def rhs_nonlinear_real(field)
+#:for j, t in RJ
+          e${t}$ = d2${t}$ + kk*d0${t}$
+#:endfor
+#:for c in [1, 2, 3, 6, 4, 5]
+          x1${c}$r = ${rhs_rsum('dreal', 'd1', field, c)}$
+          x1${c}$i = ${rhs_rsum('dimag', 'd1', field, c)}$
+#:endfor
+#:for c in [1, 3, 6]
+          x0${c}$r = ${rhs_rsum('dreal', 'd0', field, c)}$
+          x0${c}$i = ${rhs_rsum('dimag', 'd0', field, c)}$
+#:endfor
+#:for c in [4, 5]
+          xe${c}$r = ${rhs_rsum('dreal', 'e', field, c)}$
+          xe${c}$i = ${rhs_rsum('dimag', 'e', field, c)}$
+#:endfor
+          aa = a*a; bb = b*b; ab = a*b
+          n2r = kk*x12r - aa*x11r - bb*x13r - 2.0d0*ab*x16r - (a*xe4i + b*xe5i)
+          n2i = kk*x12i - aa*x11i - bb*x13i - 2.0d0*ab*x16i + (a*xe4r + b*xe5r)
+          if (ix == 0 .AND. iz == 0) then
+            n1r = -x14r
+            n1i = -x15r
+          else
+            n1r = ab*(x01r - x03r) + (bb - aa)*x06r - (a*x15i - b*x14i)
+            n1i = ab*(x01i - x03i) + (bb - aa)*x06i + (a*x15r - b*x14r)
+          end if
+#:enddef
+#:set RHS_NL_NAMES = 'aa, bb, ab, n1r, n1i, n2r, n2i, ' + ', '.join('x1{}{}'.format(c, p) for c in range(1, 7) for p in 'ri') + ', ' + ', '.join('x0{}{}'.format(c, p) for c in [1, 3, 6] for p in 'ri') + ', ' + ', '.join('xe{}{}'.format(c, p) for c in [4, 5] for p in 'ri')
+#! The a-priori (linear) part of both velocity equations, minus ODE(3) times
+#! the previous explicit term:
+#!   d2v:  c1 (D2 - k^2) v + ni (D4 - 2 k^2 D2 + k^4) v
+#!   eta:  [c1 + ni (D2 - k^2)] (i b u - i a w),  mean mode: (c1 + ni D2)(Re u, Re w)
+#! with c1 = ODE(1)/deltat.  Per stencil row the fields are combined first
+#! (u<row> = v, w<row> = b u - a w, or the mean pair), then the stencils are
+#! applied to the combinations.  Result in m1r, m1i (eta) and m2r, m2i (d2v).
+#! Needs kk, a, b, mean.  The order of the statements is measured, not
+#! arbitrary: with the der loads placed before the field rows the kernel is
+#! 20 % slower (13.3 vs 11.1 ms), and the general w followed by the mean-mode
+#! override beat an if/else.
+#:def rhs_linear_real()
+#:for j, t in RJ
+          u${t}$r = dreal(V(iy + (${j}$), iz, ix, 2)); u${t}$i = dimag(V(iy + (${j}$), iz, ix, 2))
+          w${t}$r = b*dreal(V(iy + (${j}$), iz, ix, 1)) - a*dreal(V(iy + (${j}$), iz, ix, 3))
+          w${t}$i = b*dimag(V(iy + (${j}$), iz, ix, 1)) - a*dimag(V(iy + (${j}$), iz, ix, 3))
+          if (mean) then
+            w${t}$r = dreal(V(iy + (${j}$), iz, ix, 3)); w${t}$i = -dreal(V(iy + (${j}$), iz, ix, 1))
+          end if
+#:endfor
+$:rhs_load_der([0, 2, 3])
+#:for o, nm in [(0, 's0'), (2, 's2'), (3, 's4')]
+#:for p in 'ri'
+          ${nm}$${p}$ = ${' + '.join('d{}{}*u{}{}'.format(o, t, t, p) for j, t in RJ)}$
+#:endfor
+#:endfor
+#:for o, nm in [(0, 't0'), (2, 't2')]
+#:for p in 'ri'
+          ${nm}$${p}$ = ${' + '.join('d{}{}*w{}{}'.format(o, t, t, p) for j, t in RJ)}$
+#:endfor
+#:endfor
+          m2r = c1*(s2r - kk*s0r) + ni*(s4r - 2.0d0*kk*s2r + kk*kk*s0r) - o3*dreal(oldrhs(iy, iz, ix, 2))
+          m2i = c1*(s2i - kk*s0i) + ni*(s4i - 2.0d0*kk*s2i + kk*kk*s0i) - o3*dimag(oldrhs(iy, iz, ix, 2))
+          m1r = -(c1*t0i + ni*(t2i - kk*t0i)) - o3*dreal(oldrhs(iy, iz, ix, 1))
+          m1i = c1*t0r + ni*(t2r - kk*t0r) - o3*dimag(oldrhs(iy, iz, ix, 1))
+#:enddef
+#:set RHS_LIN_NAMES = 's0r, s0i, s2r, s2i, s4r, s4i, t0r, t0i, t2r, t2i, m1r, m1i, m2r, m2i, ' + ', '.join('{}{}{}'.format(x, t, p) for x in 'uw' for j, t in RJ for p in 'ri')
+
+#! The buildrhs_prepare kernel for the velocity equations.  zero: also reset
+#! oldrhs for kernels that accumulate into it (and add the mean-pressure
+#! drive); without it oldrhs is only read.  ix outermost: the loop runs in
+#! memory order.  All loads come before the first store (memrhs is a pointer
+#! and V a target).
+#:def prepare_velocity_kernel(zero)
+      !$omp target teams distribute parallel do collapse(3) default(none)  &
+      !$omp private(iz, ix, iy, mean, kk, a, b, ${RHS_DER_NAMES}$, ${RHS_LIN_NAMES}$) &
+      !$omp shared(nz, nx0, nxN, y_first, y_last, ialfa, ibeta, k2, der, memrhs, oldrhs, V) &
+      !$omp shared(ni, c1, o2, o3, meanpx, meanpz)
+      DO ix = nx0, nxN
+        DO iz = -nz, nz
+          DO iy = y_first, y_last
+          kk = k2(iz, ix); a = dimag(ialfa(ix)); b = dimag(ibeta(iz))
+          mean = (ix == 0 .AND. iz == 0)
+$:rhs_linear_real()
+#:if zero
+          if (mean) then
+            m1r = m1r + o2*meanpx; m1i = m1i + o2*meanpz
+          end if
+#:endif
+          memrhs(iy, iz, ix, 1) = dcmplx(m1r, m1i)
+          memrhs(iy, iz, ix, 2) = dcmplx(m2r, m2i)
+#:if zero
+          if (mean) then
+            oldrhs(iy, iz, ix, 1) = dcmplx(meanpx, meanpz)
+          else
+            oldrhs(iy, iz, ix, 1) = 0.0
+          end if
+          oldrhs(iy, iz, ix, 2) = 0.0
+#:endif
+          END DO
+        END DO
+      END DO
+#:enddef
+
 module channel_equations
 
   use, intrinsic :: iso_c_binding
@@ -186,16 +319,18 @@ $:assemble_rhs_tiles()
     type(wall_normal_system) :: systems(2)
 
     ! v and eta are independent: one stacked solve (see solve_wall_normal_systems).
+    ! The right-hand sides are read from memrhs, where buildrhs left them; V
+    ! receives the solution.
     call roctxPush("linsolve solve_v_eta")
     systems(1)%ctx = compact_component_boundaries(v0bc, v0m1bc, vnbc, vnp1bc, &
                                                   bc0(:, :, 2), bc0(:, :, 4), bcn(:, :, 2), bcn(:, :, 4))
     systems(1)%field => V(:, :, :, 2)
-    systems(1)%source => V(:, :, :, 2)
+    systems(1)%source => memrhs(:, :, :, 2)
     systems(1)%assemble => assemble_compact_biharmonic_system
     systems(2)%ctx = compact_component_boundaries(eta0bc, eta0m1bc, etanbc, etanp1bc, &
                                                   bc0(:, :, 5), zero_bc, bcn(:, :, 5), zero_bc)
     systems(2)%field => V(:, :, :, 1)
-    systems(2)%source => V(:, :, :, 1)
+    systems(2)%source => memrhs(:, :, :, 1)
     systems(2)%assemble => assemble_compact_helmholtz_system
     systems(:)%ctx%lambda = lambda
     systems(:)%ctx%diffusion = 1.0d0
@@ -295,7 +430,7 @@ $:assemble_rhs_tiles()
     sys%ctx%lambda = lambda
     sys%ctx%diffusion = pra(iPhi)
     sys%field => V(:, :, :, 3 + iPhi)
-    sys%source => V(:, :, :, 3 + iPhi)
+    sys%source => memrhs(:, :, :, 2 + iPhi)
     sys%assemble => assemble_compact_helmholtz_system
     sys%boundary => assemble_selected_compact_component_boundaries
   end subroutine scalar_system
@@ -393,102 +528,56 @@ $:assemble_rhs_tiles()
   ! (u,v,w) = (1,2,3)
   ! (uu,vv,ww,uv,vw,uw) = (1,2,3,4,5,6)
 
+  ! The contributions known a priori, for both velocity equations in one
+  ! pass: memrhs = ODE(1)/deltat*unknown + viscous term - ODE(3)*oldrhs.
+  !
+  ! memrhs is where the right-hand side stays: linsolve reads it from there
+  ! (V is not overwritten, so there is no copy back into V), and the buildrhs
+  ! kernels add the explicit terms to it.
+  !
+  ! With the fused buildrhs (rhs_fuse) oldrhs is left untouched here:
+  ! buildrhs_fused_velocity overwrites it with the new explicit terms without
+  ! reading it.  The per-product kernels accumulate into oldrhs instead, so
+  ! for them it is zeroed here (and the mean-pressure drive added) as before.
   SUBROUTINE buildrhs_prepare(ODE)
     IMPLICIT NONE
     real(C_DOUBLE), intent(in) :: ODE(1:3)
     integer(C_INT) :: iy, iz, ix, iPhi, y_first, y_last
-    complex(C_DOUBLE_COMPLEX) :: tmp, unkn, s0, s2, s4, w0, w1, w2, w3, w4
-    real(C_DOUBLE) :: kk
+    complex(C_DOUBLE_COMPLEX) :: tmp, unkn, s0, s2
+    logical :: mean
+    real(C_DOUBLE) :: c1, o2, o3, kk, a, b
+    real(C_DOUBLE) :: ${RHS_DER_NAMES}$
+    real(C_DOUBLE) :: ${RHS_LIN_NAMES}$
     y_first = ny0
     y_last = nyN
+    if (.not. rhs_fuse_decided) call buildrhs_decide_fusion()
+    c1 = ODE(1)/deltat; o2 = ODE(2); o3 = ODE(3)
 
-    ! Contributions known a priori.
-    !
-    ! The d2v part reads only V(:, 2) and the eta part (with the mean-pressure
-    ! drive) only V(:, 1) and V(:, 3), so they are two kernels: fused, the
-    ! kernel needed 116 VGPRs and ran latency-bound at 4 waves per SIMD; split,
-    ! each holds half the live state and no array is read twice.
-    ! Three stencil sums (D^0, D^2, D^4 of v) give both terms: each V and
-    ! der value is loaded once instead of once per operator.
-    !$omp target teams distribute parallel do collapse(3) default(none)  &
-    !$omp private(iz, ix, iy, tmp, unkn, s0, s2, s4, kk) &
-    !$omp shared(nz, nx0, nxN, ny, y_first, y_last) shared(k2, der) shared(memrhs, oldrhs) &
-    !$omp shared(ni, deltat, ode) shared(v)
-    DO iz = -nz, nz
-      DO ix = nx0, nxN
-        DO iy = y_first, y_last
-          kk = k2(iz, ix)
-          s0 = ${apply_d('V', '2', 0)}$
-          s2 = ${apply_d('V', '2', 2)}$
-          s4 = ${apply_d('V', '2', 3)}$
-          unkn = s2 - kk*s0
-          tmp = ni*(s4 - 2.0d0*kk*s2 + kk*kk*s0)
-          memrhs(iy, iz, ix, 2) = ODE(1)*unkn/deltat + tmp - ODE(3)*oldrhs(iy, iz, ix, 2)
-          oldrhs(iy, iz, ix, 2) = 0.0
-        END DO
-      END DO
-    END DO
-    !$omp target teams distribute parallel do collapse(3) default(none)  &
-    !$omp private(iz, ix, iy, tmp, unkn, s0, s2, w0, w1, w2, w3, w4) &
-    !$omp shared(nz, nx0, nxN, ny, y_first, y_last) shared(ialfa, ibeta) shared(k2, der) shared(memrhs, oldrhs) &
-    !$omp shared(meanpx, meanpz, ni, deltat, ode) shared(v)
-    DO iz = -nz, nz
-      DO ix = nx0, nxN
-        DO iy = y_first, y_last
-          IF (ix == 0 .AND. iz == 0) THEN
-            unkn = ${apply_d_real_pair('V', '1', '3', 0)}$
-            tmp = ni*${apply_d_real_pair('V', '1', '3', 2)}$
-          ELSE
-            ! eta = i beta u - i alpha w: combine first, then two stencil sums.
-#:for j in range(-2, 3)
-            w${j+2}$ = ibeta(iz)*V(iy + (${j}$), iz, ix, 1) - ialfa(ix)*V(iy + (${j}$), iz, ix, 3)
-#:endfor
-            s0 = ${' + '.join('der(iy, 0, {})*w{}'.format(j, j+2) for j in range(-2,3))}$
-            s2 = ${' + '.join('der(iy, 2, {})*w{}'.format(j, j+2) for j in range(-2,3))}$
-            unkn = s0
-            tmp = ni*(s2 - k2(iz, ix)*s0)
-          END IF
-          memrhs(iy, iz, ix, 1) = ODE(1)*unkn/deltat + tmp - ODE(3)*oldrhs(iy, iz, ix, 1)
-          oldrhs(iy, iz, ix, 1) = 0.0
-
-          if (ix == 0 .AND. iz == 0) then
-            $:rk_accum('memrhs(iy, iz, ix, 1)', 'oldrhs(iy, iz, ix, 1)', 'dcmplx(meanpx, meanpz)')
-          end if
-        END DO
-      END DO
-    END DO
+    ! Two copies of the kernel, with the oldrhs reset compiled in or out: as a
+    ! run-time flag inside one kernel the reset cost 6 ms per call even when off.
+    if (rhs_fuse) then
+$:prepare_velocity_kernel(False)
+    else
+$:prepare_velocity_kernel(True)
+    end if
 
     !initialize phi
     DO iPhi = 1, nPhi
       !$omp target teams distribute parallel do collapse(3) default(none)  &
       !$omp private(tmp, iz, ix, iy, unkn, s0, s2) &
-      !$omp shared(nz, nx0, nxN, ny, y_first, y_last, pra, V, memrhs, ode, deltat, oldrhs, iphi, der, k2, ni)
-      DO iz = -nz, nz
-        DO ix = nx0, nxN
+      !$omp shared(nz, nx0, nxN, ny, y_first, y_last, pra, V, memrhs, ode, c1, oldrhs, iphi, der, k2, ni)
+      DO ix = nx0, nxN
+        DO iz = -nz, nz
           DO iy = y_first, y_last
             s0 = ${apply_d('V', '3 + iPhi', 0)}$
             s2 = ${apply_d('V', '3 + iPhi', 2)}$
             tmp = ni*(s2 - k2(iz, ix)*s0)
             unkn = s0
-            memrhs(iy, iz, ix, 2 + iPhi) = ODE(1)*unkn/deltat + tmp*pra(iPhi) - ODE(3)*oldrhs(iy, iz, ix, 2 + iPhi)
+            memrhs(iy, iz, ix, 2 + iPhi) = c1*unkn + tmp*pra(iPhi) - ODE(3)*oldrhs(iy, iz, ix, 2 + iPhi)
             oldrhs(iy, iz, ix, 2 + iPhi) = 0.0
           END DO
         END DO
       END DO
-    END DO
-
-    !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(memrhs, V) shared(nz, nx0, nxN, ny, y_first, y_last, nPhi) private(iy, ix, iz, iPhi)
-    DO iz = -nz, nz
-    DO ix = nx0, nxN
-    DO iy = y_first, y_last
-      V(iy, iz, ix, 1) = memrhs(iy, iz, ix, 1)
-      V(iy, iz, ix, 2) = memrhs(iy, iz, ix, 2)
-      DO iPhi = 1, nPhi
-        V(iy, iz, ix, 3 + iPhi) = memrhs(iy, iz, ix, 2 + iPhi)
-      END DO
-    END DO
-    END DO
     END DO
 
   END SUBROUTINE buildrhs_prepare
@@ -503,8 +592,8 @@ $:assemble_rhs_tiles()
 #! tile_zy_open / tile_zy_close live in stencil_macros.fypph.
 #! Velocity products: expl feeds the d2v equation; rhsu/rhsw, when given,
 #! feed the eta equation (and the mean flow for ix = iz = 0).  The kernels add
-#! only to oldrhs; buildrhs_finish adds ODE(2) times the sum to V once, which
-#! halves the traffic of each of these kernels (V and oldrhs got the same terms).
+#! only to oldrhs; buildrhs_finish adds ODE(2) times the sum to memrhs once, which
+#! halves the traffic of each of these kernels (both got the same terms).
 #:def rhs_velocity_kernel(expl, rhsu=None, rhsw=None)
       !$omp target teams distribute parallel do collapse(5) default(none) &
       !$omp private(rhsu, rhsw, expl, iz, ix, iy, izb, iyb, izi, iyi) &
@@ -565,7 +654,7 @@ $:rhs_scalar_kernel(SCA_RHS[c - 1].format(D0=apply_d_vvdz(0, 'from'), D1=apply_d
       ! Stash the product; once a group is complete, one fused kernel applies
       ! all of its terms and updates oldrhs once instead of once per product.
       call buildrhs_stash(component, from)
-      if (component == 6) call buildrhs_fused_velocity()
+      if (component == 6) call buildrhs_fused_velocity(ODE)
       if (component > 6) then
         if (MODULO(component - 4, 3) == 2) call buildrhs_fused_scalar((component - 4)/3)
       end if
@@ -614,58 +703,84 @@ $:rhs_scalar_case(3)
 
   ! Copy the spectral modes buildrhs needs from VVdz (z-fastest) into
   ! rhs_stash (y-fastest), slot 1..6 for the velocity products and 1..3 for a
-  ! scalar's.  (iz, iy) tiles as in the kernels it replaces.
+  ! scalar's.  (iz, iy) tiles as in the kernels it replaces, with the tile
+  ! origins moved down by (sz, sy) elements so that every tile row is exactly
+  ! one 128-byte line of VVdz and every tile column one line of rhs_stash:
+  ! each wavefront then reads 8 whole lines and writes 8 whole lines.  With
+  ! the origin at (-nz, y_first - 2) the rows straddled two lines each (3.2 ->
+  ! 2.6 ms per call at 1364 x 1365 x 116; only one of the eight z phases is
+  ! aligned).  The phases come from the host addresses, which are the device
+  ! addresses where the offload runtime maps without copying; elsewhere a
+  ! wrong phase only costs the gain.
   subroutine buildrhs_stash(component, from)
     integer(C_INT), intent(in) :: component, from
-    integer(C_INT) :: iy, iz, ix, slot, y_first, y_last, izb, iyb, izi, iyi
+    integer(C_INT) :: iy, iz, ix, slot, y_first, y_last, izb, iyb, izi, iyi, sz, sy
     integer(C_INT), parameter :: RHS_TILE = 8
+    integer(C_INTPTR_T) :: addr
     y_first = ny0
     y_last = nyN
     slot = merge(component, MODULO(component - 4, 3) + 1, component <= 6)
+    ! VVdz(k, ...) holds iz = k - 1 - nzd for the negative modes: the tile that
+    ! starts at iz = -nz - sz starts at element nzd - nz - sz of its z line.
+    addr = transfer(c_loc(VVdz(1, 1, lbound(VVdz, 3), from)), addr)
+    sz = int(modulo(addr/16 + int(nzd - nz, C_INTPTR_T), int(RHS_TILE, C_INTPTR_T)), C_INT)
+    addr = transfer(c_loc(rhs_stash(y_first - 2, -nz, nx0, slot)), addr)
+    sy = int(modulo(addr/16, int(RHS_TILE, C_INTPTR_T)), C_INT)
     !$omp target teams distribute parallel do collapse(5) default(none) &
-    !$omp shared(rhs_stash, VVdz, nz, nzd, nx0, nxN, y_first, y_last, slot, from) &
+    !$omp shared(rhs_stash, VVdz, nz, nzd, nx0, nxN, y_first, y_last, slot, from, sz, sy) &
     !$omp private(iz, ix, iy, izb, iyb, izi, iyi)
-$:tile_zy_open(y0='y_first - 2', y1='y_last + 2')
-                ! izd(iz) + 1 computed rather than looked up: one load less per element
-                rhs_stash(iy, iz, ix, slot) = VVdz(merge(iz + 1, nzd + iz + 1, iz >= 0), ix + 1 - nx0, iy, from)
-$:tile_zy_close()
+    DO ix = nx0, nxN
+      DO izb = 0, (2*nz + sz)/RHS_TILE
+        DO iyb = 0, (y_last - y_first + 4 + sy)/RHS_TILE
+          DO iyi = 0, RHS_TILE - 1
+            DO izi = 0, RHS_TILE - 1
+              iz = -nz - sz + izb*RHS_TILE + izi
+              iy = y_first - 2 - sy + iyb*RHS_TILE + iyi
+              IF (iz < -nz .OR. iz > nz .OR. iy < y_first - 2 .OR. iy > y_last + 2) CYCLE
+              ! izd(iz) + 1 computed rather than looked up: one load less per element
+              rhs_stash(iy, iz, ix, slot) = VVdz(merge(iz + 1, nzd + iz + 1, iz >= 0), ix + 1 - nx0, iy, from)
+            END DO
+          END DO
+        END DO
+      END DO
+    END DO
   end subroutine buildrhs_stash
 
-  ! All six velocity products' terms in one pass; every array is y-fastest,
-  ! so iy innermost reads and writes contiguous lines.
-  subroutine buildrhs_fused_velocity()
-    integer(C_INT) :: iy, iz, ix, y_first, y_last, nteams
-    complex(C_DOUBLE_COMPLEX) :: rhsu, rhsw, acc_d2v, acc_eta, acc_mean
+  ! All six velocity products' terms in one pass, and the end of the substep
+  ! for the velocity equations: memrhs += ODE(2)*N and oldrhs = N, with N the
+  ! explicit terms (plus the mean-pressure drive in the mean mode).  oldrhs is
+  ! written without being read -- buildrhs_prepare has already used the
+  ! previous substep's value -- so buildrhs_finish has nothing left to do for
+  ! the velocity.  Every array is y-fastest: iy innermost reads and writes
+  ! contiguous lines.
+  subroutine buildrhs_fused_velocity(ODE)
+    real(C_DOUBLE), intent(in) :: ODE(1:3)
+    integer(C_INT) :: iy, iz, ix, y_first, y_last
+    real(C_DOUBLE) :: kk, a, b, o2, m1r, m1i, m2r, m2i
+    real(C_DOUBLE) :: ${RHS_DER_NAMES}$
+    real(C_DOUBLE) :: ${RHS_NL_NAMES}$
     y_first = ny0
     y_last = nyN
-    ! One thread per point (num_teams below) rather than the default grid of
-    ! four teams per CU: at 40 VGPRs the default left it at 26% occupancy and
-    ! latency-bound.
-    nteams = int((int(y_last - y_first + 1, C_INT64_T)*int(2*nz + 1, C_INT64_T)*int(nxN - nx0 + 1, C_INT64_T) + 255)/256, C_INT)
-    !$omp target teams distribute parallel do collapse(3) default(none) num_teams(nteams) thread_limit(256) &
-    !$omp shared(rhs_stash, oldrhs, der, ialfa, ibeta, k2, nz, nx0, nxN, y_first, y_last) firstprivate(nteams) &
-    !$omp private(iz, ix, iy, rhsu, rhsw, acc_d2v, acc_eta, acc_mean)
+    o2 = ODE(2)
+    !$omp target teams distribute parallel do collapse(3) default(none) &
+    !$omp shared(rhs_stash, oldrhs, memrhs, der, ialfa, ibeta, k2, nz, nx0, nxN, y_first, y_last, o2, meanpx, meanpz) &
+    !$omp private(iz, ix, iy, kk, a, b, m1r, m1i, m2r, m2i, ${RHS_DER_NAMES}$, ${RHS_NL_NAMES}$)
     DO ix = nx0, nxN
       DO iz = -nz, nz
         DO iy = y_first, y_last
-          acc_d2v = (0.0d0, 0.0d0); acc_eta = (0.0d0, 0.0d0); acc_mean = (0.0d0, 0.0d0)
-#:for c in range(1, 7)
-#:set e = VEL_RHS[c - 1]
-#:set ds = dict(D0=apply_d('rhs_stash', c, 0), D1=apply_d('rhs_stash', c, 1), D2=apply_d('rhs_stash', c, 2))
-          acc_d2v = acc_d2v + ${e['expl'].format(**ds)}$
-#:if e['rhsu'] is not None
-          rhsu = ${e['rhsu'].format(**ds)}$
-          rhsw = ${e['rhsw'].format(**ds)}$
-          acc_eta = acc_eta + (ibeta(iz)*(rhsu) - ialfa(ix)*(rhsw))
-          acc_mean = acc_mean + dcmplx(dreal(rhsu), dreal(rhsw))
-#:endif
-#:endfor
-          oldrhs(iy, iz, ix, 2) = oldrhs(iy, iz, ix, 2) + acc_d2v
+          kk = k2(iz, ix); a = dimag(ialfa(ix)); b = dimag(ibeta(iz))
+$:rhs_load_der([0, 1, 2])
+$:rhs_nonlinear_real('rhs_stash')
           if (ix == 0 .AND. iz == 0) then
-            oldrhs(iy, iz, ix, 1) = oldrhs(iy, iz, ix, 1) + acc_mean
-          else
-            oldrhs(iy, iz, ix, 1) = oldrhs(iy, iz, ix, 1) + acc_eta
+            n1r = n1r + meanpx; n1i = n1i + meanpz
           end if
+          ! memrhs is a pointer: load it before the stores.
+          m1r = dreal(memrhs(iy, iz, ix, 1)) + o2*n1r; m1i = dimag(memrhs(iy, iz, ix, 1)) + o2*n1i
+          m2r = dreal(memrhs(iy, iz, ix, 2)) + o2*n2r; m2i = dimag(memrhs(iy, iz, ix, 2)) + o2*n2i
+          memrhs(iy, iz, ix, 1) = dcmplx(m1r, m1i)
+          memrhs(iy, iz, ix, 2) = dcmplx(m2r, m2i)
+          oldrhs(iy, iz, ix, 1) = dcmplx(n1r, n1i)
+          oldrhs(iy, iz, ix, 2) = dcmplx(n2r, n2i)
         END DO
       END DO
     END DO
@@ -694,30 +809,38 @@ $:tile_zy_close()
     END DO
   end subroutine buildrhs_fused_scalar
 
-  ! After all buildrhs calls of a substep: V += ODE(2)*(what buildrhs added to
-  ! oldrhs).  buildrhs_prepare left oldrhs zero in these components except the
-  ! mean pressure drive in the (0,0) mode of component 1, which V already holds.
+  ! After all buildrhs calls of a substep: memrhs += ODE(2)*(what buildrhs
+  ! added to oldrhs), for the equations whose kernels accumulate into oldrhs
+  ! only -- the scalars, and the velocity unless buildrhs_fused_velocity has
+  ! done it already.  buildrhs_prepare left oldrhs zero in these components
+  ! except the mean pressure drive in the (0,0) mode of component 1, which
+  ! memrhs already holds.
   SUBROUTINE buildrhs_finish(ODE)
     IMPLICIT NONE
     real(C_DOUBLE), intent(in) :: ODE(1:3)
     integer(C_INT) :: iy, iz, ix, iPhi, y_first, y_last
     complex(C_DOUBLE_COMPLEX) :: mean_drive
+    logical :: velocity
     y_first = ny0
     y_last = nyN
+    velocity = .not. rhs_fuse
+    if (.not. velocity .and. nPhi == 0) return
     mean_drive = dcmplx(meanpx, meanpz)
     !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(V, oldrhs, ODE, mean_drive, nz, nx0, nxN, y_first, y_last, nPhi) private(iy, iz, ix, iPhi)
+    !$omp shared(memrhs, oldrhs, ODE, mean_drive, nz, nx0, nxN, y_first, y_last, nPhi, velocity) private(iy, iz, ix, iPhi)
     DO ix = nx0, nxN
       DO iz = -nz, nz
         DO iy = y_first, y_last
-          if (ix == 0 .AND. iz == 0) then
-            V(iy, iz, ix, 1) = V(iy, iz, ix, 1) + ODE(2)*(oldrhs(iy, iz, ix, 1) - mean_drive)
-          else
-            V(iy, iz, ix, 1) = V(iy, iz, ix, 1) + ODE(2)*oldrhs(iy, iz, ix, 1)
+          if (velocity) then
+            if (ix == 0 .AND. iz == 0) then
+              memrhs(iy, iz, ix, 1) = memrhs(iy, iz, ix, 1) + ODE(2)*(oldrhs(iy, iz, ix, 1) - mean_drive)
+            else
+              memrhs(iy, iz, ix, 1) = memrhs(iy, iz, ix, 1) + ODE(2)*oldrhs(iy, iz, ix, 1)
+            end if
+            memrhs(iy, iz, ix, 2) = memrhs(iy, iz, ix, 2) + ODE(2)*oldrhs(iy, iz, ix, 2)
           end if
-          V(iy, iz, ix, 2) = V(iy, iz, ix, 2) + ODE(2)*oldrhs(iy, iz, ix, 2)
           DO iPhi = 1, nPhi
-            V(iy, iz, ix, 3 + iPhi) = V(iy, iz, ix, 3 + iPhi) + ODE(2)*oldrhs(iy, iz, ix, 2 + iPhi)
+            memrhs(iy, iz, ix, 2 + iPhi) = memrhs(iy, iz, ix, 2 + iPhi) + ODE(2)*oldrhs(iy, iz, ix, 2 + iPhi)
           END DO
         END DO
       END DO
