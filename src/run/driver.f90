@@ -323,7 +323,9 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
         call roctxPush("transform_back_and_build_rhs")
         CALL transform_back_and_build_rhs(RK_rai(:, i))
         call roctxPop("transform_back_and_build_rhs")
+#ifndef CHANNEL_SINGLE
         if (emu_oldrhs) call emu_round_array(oldrhs)
+#endif
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
         call release_fft_workspace("rk_fft")
 #endif

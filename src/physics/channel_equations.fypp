@@ -59,7 +59,8 @@ $:tile_zy_close()
 #! One part ('dreal' or 'dimag') of the y stencil with coefficients cf<row>
 #! applied to component comp of a y-fastest field.
 #:def rhs_rsum(part, cf, field, comp)
-(${' + '.join('{}{}*{}({}(iy + ({}), iz, ix, {}))'.format(cf, t, part, field, j, comp) for j, t in RJ)}$)
+#:set gpart = {'dreal': 'real', 'dimag': 'aimag'}.get(part, part)
+(${' + '.join('{}{}*{}({}(iy + ({}), iz, ix, {}))'.format(cf, t, gpart, field, j, comp) for j, t in RJ)}$)
 #:enddef
 #:set RHS_DER_NAMES = ', '.join('d{}{}'.format(o, t) for o in range(4) for j, t in RJ) + ', ' + ', '.join('e{}'.format(t) for j, t in RJ)
 #! The explicit terms of all six velocity products (VEL_RHS above, expanded):
@@ -127,10 +128,10 @@ $:rhs_load_der([0, 2, 3])
           ${nm}$${p}$ = ${' + '.join('d{}{}*w{}{}'.format(o, t, t, p) for j, t in RJ)}$
 #:endfor
 #:endfor
-          m2r = c1*(s2r - kk*s0r) + ni*(s4r - 2.0d0*kk*s2r + kk*kk*s0r) - o3*dreal(oldrhs(iy, iz, ix, 2))
-          m2i = c1*(s2i - kk*s0i) + ni*(s4i - 2.0d0*kk*s2i + kk*kk*s0i) - o3*dimag(oldrhs(iy, iz, ix, 2))
-          m1r = -(c1*t0i + ni*(t2i - kk*t0i)) - o3*dreal(oldrhs(iy, iz, ix, 1))
-          m1i = c1*t0r + ni*(t2r - kk*t0r) - o3*dimag(oldrhs(iy, iz, ix, 1))
+          m2r = c1*(s2r - kk*s0r) + ni*(s4r - 2.0d0*kk*s2r + kk*kk*s0r) - o3*real(oldrhs(iy, iz, ix, 2))
+          m2i = c1*(s2i - kk*s0i) + ni*(s4i - 2.0d0*kk*s2i + kk*kk*s0i) - o3*aimag(oldrhs(iy, iz, ix, 2))
+          m1r = -(c1*t0i + ni*(t2i - kk*t0i)) - o3*real(oldrhs(iy, iz, ix, 1))
+          m1i = c1*t0r + ni*(t2r - kk*t0r) - o3*aimag(oldrhs(iy, iz, ix, 1))
 #:enddef
 #:set RHS_LIN_NAMES = 's0r, s0i, s2r, s2i, s4r, s4i, t0r, t0i, t2r, t2i, m1r, m1i, m2r, m2i, ' + ', '.join('{}{}{}'.format(x, t, p) for x in 'uw' for j, t in RJ for p in 'ri')
 
@@ -183,7 +184,7 @@ module channel_equations
   use emu_round
   implicit none
   ! VVdz products stashed y-fastest for the fused buildrhs (buildrhs_stash).
-  complex(C_DOUBLE_COMPLEX), allocatable, target, save :: rhs_stash(:, :, :, :)
+  RHS_COMPLEX, allocatable, target, save :: rhs_stash(:, :, :, :)
   logical, save :: rhs_fuse_decided = .false., rhs_fuse = .false.
 contains
 
@@ -715,9 +716,9 @@ $:rhs_scalar_case(3)
     ! VVdz(k, ...) holds iz = k - 1 - nzd for the negative modes: the tile that
     ! starts at iz = -nz - sz starts at element nzd - nz - sz of its z line.
     addr = transfer(c_loc(VVdz(1, 1, lbound(VVdz, 3), from)), addr)
-    sz = int(modulo(addr/16 + int(nzd - nz, C_INTPTR_T), int(RHS_TILE, C_INTPTR_T)), C_INT)
+    sz = int(modulo(addr/(storage_size(VVdz)/8) + int(nzd - nz, C_INTPTR_T), int(RHS_TILE, C_INTPTR_T)), C_INT)
     addr = transfer(c_loc(rhs_stash(y_first - 2, -nz, nx0, slot)), addr)
-    sy = int(modulo(addr/16, int(RHS_TILE, C_INTPTR_T)), C_INT)
+    sy = int(modulo(addr/(storage_size(rhs_stash)/8), int(RHS_TILE, C_INTPTR_T)), C_INT)
     !$omp target teams distribute parallel do collapse(5) default(none) &
     !$omp shared(rhs_stash, VVdz, nz, nzd, nx0, nxN, y_first, y_last, slot, from, sz, sy) &
     !$omp private(iz, ix, iy, izb, iyb, izi, iyi)
@@ -736,7 +737,9 @@ $:rhs_scalar_case(3)
         END DO
       END DO
     END DO
+#ifndef CHANNEL_SINGLE
     if (emu_stash) call emu_round_array(rhs_stash(:, :, :, slot:slot))
+#endif
   end subroutine buildrhs_stash
 
   ! All six velocity products' terms in one pass, and the end of the substep

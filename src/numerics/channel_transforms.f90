@@ -48,9 +48,9 @@ CONTAINS
     ! modes (half the column for nzd ~ 4nz) is a plain z-innermost zero fill:
     ! with both in one tiled kernel the zeros went through the transpose tiles too.
     addr = transfer(c_loc(VVdz(1, 1, lbound(VVdz, 3), to)), addr)
-    sz = int(modulo(addr/16 + int(nzd - nz, C_INTPTR_T), 8_C_INTPTR_T), C_INT)
+    sz = int(modulo(addr/(storage_size(VVdz)/8) + int(nzd - nz, C_INTPTR_T), 8_C_INTPTR_T), C_INT)
     addr = transfer(c_loc(V(y_first - 2, -nz, nx0, m)), addr)
-    sy = int(modulo(addr/16, 8_C_INTPTR_T), C_INT)
+    sy = int(modulo(addr/(storage_size(V)/8), 8_C_INTPTR_T), C_INT)
     !$omp target teams distribute parallel do collapse(5) default(none) &
     !$omp shared(V, VVdz) shared(nx0, nxN, nz, nzd, y_first, y_last, m, to, sz, sy) private(i, j, k, iz, ib, kb, ii, ki)
     DO j = nx0, nxN

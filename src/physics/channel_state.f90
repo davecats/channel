@@ -27,7 +27,7 @@ module channel_state
   !                    oldrhs: built by buildrhs, read by linsolve (V is not overwritten)
   !-------------------------------------------------------------------------
   complex(C_DOUBLE_COMPLEX), allocatable, target :: V(:, :, :, :)
-  complex(C_DOUBLE_COMPLEX), allocatable :: oldrhs(:, :, :, :)
+  RHS_COMPLEX, allocatable :: oldrhs(:, :, :, :)   ! double, or single with CHANNEL_SINGLE
   complex(C_DOUBLE_COMPLEX), pointer :: memrhs(:, :, :, :)
 
   !-------------------------------------------------------------------------
