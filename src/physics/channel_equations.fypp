@@ -314,7 +314,7 @@ $:assemble_rhs_tiles()
     IMPLICIT NONE
     real(C_DOUBLE), intent(in) :: lambda
     integer(C_INT) :: ix, iz, j, y_first, y_last
-    complex(C_DOUBLE_COMPLEX) :: temp
+    real(C_DOUBLE) :: a, b, rk, er, ei, dr, di
     complex(C_DOUBLE_COMPLEX) :: zero_mode_u(-1:ny + 1), zero_mode_w(-1:ny + 1), zero_mode_ucor(-1:ny + 1)
     type(wall_normal_system) :: systems(2)
 
@@ -373,17 +373,23 @@ $:assemble_rhs_tiles()
     call roctxPush("linsolve recover_u_w")
     ! collapse(3) with y innermost: V is y-fastest, so a wavefront walks contiguous
     ! lines (with collapse(2) each thread walked its own column, 4 KB from the next).
+    ! u = (i alfa dv/dy - i beta eta)/k^2, w = (i beta dv/dy + i alfa eta)/k^2,
+    ! in real and imaginary parts: as complex expressions amdflang compiled the
+    ! two divisions by k2 to __divdc3 calls and the products to full complex
+    ! multiplies.
     !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp shared(ny, y_first, y_last, nz, nx0, nxN) &
     !$omp shared(V, k2, ialfa, ibeta) &
-    !$omp private(ix, iz, j, temp)
+    !$omp private(ix, iz, j, a, b, rk, er, ei, dr, di)
     DO ix = nx0, nxN
       DO iz = -nz, nz
         do j = y_first - 2, y_last + 2
           if (ix == 0 .and. iz == 0) cycle
-          temp = (ialfa(ix)*V(j, iz, ix, 3) - ibeta(iz)*V(j, iz, ix, 1))/k2(iz, ix)
-          V(j, iz, ix, 3) = (ibeta(iz)*V(j, iz, ix, 3) + ialfa(ix)*V(j, iz, ix, 1))/k2(iz, ix)
-          V(j, iz, ix, 1) = temp
+          a = dimag(ialfa(ix)); b = dimag(ibeta(iz)); rk = 1.0d0/k2(iz, ix)
+          er = dreal(V(j, iz, ix, 1)); ei = dimag(V(j, iz, ix, 1))
+          dr = dreal(V(j, iz, ix, 3)); di = dimag(V(j, iz, ix, 3))
+          V(j, iz, ix, 1) = dcmplx((b*ei - a*di)*rk, (a*dr - b*er)*rk)
+          V(j, iz, ix, 3) = dcmplx(-(b*di + a*ei)*rk, (b*dr + a*er)*rk)
         end do
       END DO
     END DO
