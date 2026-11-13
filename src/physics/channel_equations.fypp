@@ -188,15 +188,15 @@ contains
 
   !--------------------------------------------------------------!
   !---------------- integral in the y-direction -----------------!
-#ifdef HAVE_CUDA
-  !$omp declare target(yintegr)
-#endif
   PURE FUNCTION yintegr(f, y) result(II)
     IMPLICIT NONE
     complex(C_DOUBLE_COMPLEX), intent(in) :: f(-1:ny + 1)
     real(C_DOUBLE), intent(in) :: y(-1:ny + 1)
     real(C_DOUBLE) :: II, yp1, ym1, a1, a2, a3
     integer(C_INT) :: iy
+    ! Device procedure: the directive sits in its own specification part, the one form
+    ! that CCE, amdflang and nvfortran all accept (a module-level list makes CCE warn).
+    !$omp declare target
     II = 0.0d0
     DO iy = 1, ny, 2
       yp1 = y(iy + 1) - y(iy); ym1 = y(iy - 1) - y(iy)

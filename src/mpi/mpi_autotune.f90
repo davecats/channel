@@ -46,9 +46,6 @@ module mpi_autotune
   real(C_DOUBLE), parameter :: Y_SOLVE_CHECK_TOL = 1.0e-6_C_DOUBLE
   integer(C_INT), save, public :: mpi_autotune_selected_comm_backend = CHANNEL_COMM_BACKEND_AUTO
   integer(C_INT), save :: mpi_autotune_comm_mode = CHANNEL_COMM_BACKEND_AUTO
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
-  !$omp declare target(autotune_exact_value)
-#endif
   public :: configure_mpi_decomposition, mpi_autotune_has_pass_sequence
 
 contains
@@ -727,6 +724,9 @@ contains
   pure complex(C_DOUBLE_COMPLEX) function autotune_exact_value(iy, iline)
     integer(C_INT), intent(in) :: iy, iline
     real(C_DOUBLE) :: yv, lr, li
+    ! Device procedure: the directive sits in its own specification part, the one form
+    ! that CCE, amdflang and nvfortran all accept (a module-level list makes CCE warn).
+    !$omp declare target
 
     yv = real(iy, C_DOUBLE)
     lr = real(mod(iline, 17_C_INT), C_DOUBLE)
