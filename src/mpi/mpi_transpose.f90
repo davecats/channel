@@ -38,6 +38,7 @@
 #endif
     use roctx
     use channel_grid
+    use fft_kinds, only: fk
     use y_pipeline_nccl, only: channel_comm_alltoall_complex, channel_comm_alltoall_wait, channel_comm_cache, &
                                channel_comm_cache_reserve, channel_comm_cache_finalize
 
@@ -448,8 +449,8 @@
     SUBROUTINE repack_zTOx_local(Vz, Vx)
       use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
       implicit none
-      complex(C_DOUBLE_COMPLEX), intent(in) :: Vz(1:, 1:, :)
-      complex(C_DOUBLE_COMPLEX), intent(out) :: Vx(1:, 1:, :)
+      complex(fk), intent(in) :: Vz(1:, 1:, :)
+      complex(fk), intent(out) :: Vx(1:, 1:, :)
       integer(C_INT) :: iy, ix, iz, ixb, izb, ixi, izi
       integer(C_INT) :: ny_batch
       ! 4 (z) x 16 (x) tiles per wavefront, z fastest: each instruction reads
@@ -477,8 +478,8 @@
     SUBROUTINE repack_xTOz_local(Vx, Vz)
       use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
       implicit none
-      complex(C_DOUBLE_COMPLEX), intent(in) :: Vx(1:, 1:, :)
-      complex(C_DOUBLE_COMPLEX), intent(out) :: Vz(1:, 1:, :)
+      complex(fk), intent(in) :: Vx(1:, 1:, :)
+      complex(fk), intent(out) :: Vz(1:, 1:, :)
       integer(C_INT) :: iy, ix, iz, ixb, izb, ixi, izi
       integer(C_INT) :: ny_batch
       ! 8 x 8 (z, x) tiles per wavefront, x fastest: full x-lines of Vx are read
@@ -506,7 +507,7 @@
     SUBROUTINE pack_zTOx(Vz, send)
       use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
       implicit none
-      complex(C_DOUBLE_COMPLEX), intent(in)  :: Vz(1:, 1:, :)
+      complex(fk), intent(in)  :: Vz(1:, 1:, :)
       complex(C_DOUBLE_COMPLEX), intent(out) :: send(:)
       integer(C_SIZE_T) :: iy, ix, iz, dest, p
       integer(C_INT) :: ny_batch
@@ -531,7 +532,7 @@
       use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
       implicit none
       complex(C_DOUBLE_COMPLEX), intent(in)  :: recv(:)
-      complex(C_DOUBLE_COMPLEX), intent(out) :: Vx(1:, 1:, :)
+      complex(fk), intent(out) :: Vx(1:, 1:, :)
       integer(C_SIZE_T) :: p
       integer(C_INT) :: iy, ix, iz, src, ixb, izb, ixi, izi
       integer(C_INT) :: ny_batch
@@ -566,7 +567,7 @@
     SUBROUTINE pack_xTOz(Vx, send)
       use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
       implicit none
-      complex(C_DOUBLE_COMPLEX), intent(in)  :: Vx(1:, 1:, :)
+      complex(fk), intent(in)  :: Vx(1:, 1:, :)
       complex(C_DOUBLE_COMPLEX), intent(out) :: send(:)
       integer(C_SIZE_T) :: iy, ix, iz, dest, p
       integer(C_INT) :: ny_batch
@@ -590,7 +591,7 @@
       use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
       implicit none
       complex(C_DOUBLE_COMPLEX), intent(in)  :: recv(:)
-      complex(C_DOUBLE_COMPLEX), intent(out) :: Vz(1:, 1:, :)
+      complex(fk), intent(out) :: Vz(1:, 1:, :)
       integer(C_SIZE_T) :: p
       integer(C_INT) :: iy, ix, iz, src, ixb, izb, ixi, izi
       integer(C_INT) :: ny_batch
@@ -662,8 +663,8 @@
     ! for the callers that transform one field and have nothing to overlap.
     SUBROUTINE transpose_zTOx(Vz, Vx, label)
       IMPLICIT NONE
-      complex(C_DOUBLE_COMPLEX), intent(in) :: Vz(1:, 1:, :)
-      complex(C_DOUBLE_COMPLEX), intent(out) :: Vx(1:, 1:, :)
+      complex(fk), intent(in) :: Vz(1:, 1:, :)
+      complex(fk), intent(out) :: Vx(1:, 1:, :)
       character(len=*), intent(in) :: label
       type(MPI_Request) :: request
       type(MPI_Status) :: status
@@ -682,8 +683,8 @@
 
     SUBROUTINE transpose_xTOz(Vx, Vz, label)
       IMPLICIT NONE
-      complex(C_DOUBLE_COMPLEX), intent(in) :: Vx(1:, 1:, :)
-      complex(C_DOUBLE_COMPLEX), intent(out) :: Vz(1:, 1:, :)
+      complex(fk), intent(in) :: Vx(1:, 1:, :)
+      complex(fk), intent(out) :: Vz(1:, 1:, :)
       character(len=*), intent(in) :: label
       type(MPI_Request) :: request
       type(MPI_Status) :: status

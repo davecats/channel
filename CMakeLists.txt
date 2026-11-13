@@ -144,6 +144,7 @@ add_library(channel_core
     ${CHANNEL_SOURCE_DIR}/numerics/channel_grid.f90
     ${CHANNEL_SOURCE_DIR}/numerics/stencil_coefficients.f90
     ${CHANNEL_SOURCE_DIR}/numerics/banded_lu.f90
+    ${CHANNEL_SOURCE_DIR}/fft/fft_kinds.f90
     # physics/ -- the state the equations act on
     ${CHANNEL_SOURCE_DIR}/physics/channel_state.f90
     ${CHANNEL_SOURCE_DIR}/physics/channel_bcs.f90
@@ -181,6 +182,27 @@ if(CHANNEL_HALF_CHANNEL)
     target_compile_definitions(channel_core PUBLIC halfchannel)
     message(STATUS "Physics option: half channel")
 endif()
+
+# --------------------------------------------------------------------
+# Single precision (src/fft/fft_kinds.f90)
+# --------------------------------------------------------------------
+# The xz round trip in single precision: the z and x transforms and the
+# physical-space fields and their products (VVdz, VVdx, rVVdx, products).
+# The state, the right-hand side and every wall-normal operation stay
+# double.  HIP backend only.
+option(CHANNEL_SINGLE "Single-precision xz transforms" OFF)
+if(CHANNEL_SINGLE)
+    target_compile_definitions(channel_core PUBLIC CHANNEL_SINGLE)
+    message(STATUS "Precision option: single-precision xz transforms")
+endif()
+# The three options CHANNEL_SINGLE replaced: a build tree that still sets one
+# would otherwise build in double without a word.
+foreach(_old CHANNEL_FFT_Z_SINGLE CHANNEL_FFT_X_SINGLE CHANNEL_RHS_SINGLE)
+    if(${_old})
+        message(FATAL_ERROR "${_old} is gone: reconfigure with -U${_old} -DCHANNEL_SINGLE=ON.")
+    endif()
+    unset(${_old} CACHE)
+endforeach()
 
 # The scalar wall condition used to be the compile-time option
 # CHANNEL_PHI_NEUMANN, all scalars or none.  It is a deck setting now, per

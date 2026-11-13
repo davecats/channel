@@ -24,6 +24,7 @@ module channel_transforms
   use mpi_transpose
   use roctx, only: roctxPush, roctxPop
   use ffts
+  use fft_kinds, only: fk
 
   IMPLICIT NONE
 
@@ -238,8 +239,45 @@ CONTAINS
     call IFT(VVdz(:, :, :, 1))
     call transpose_zTOx(VVdz(:, :, :, 1), VVdx(:, :, :, 1), label)
     call zero_vvdx_hft(1)
+#ifdef CHANNEL_SINGLE
+    ! Single-precision x transform: through products(:, :, :, 1), which is
+    ! idle outside transform_back_and_build_rhs.
+    call RFT(VVdx(:, :, :, 1), products(:, :, :, 1))
+    call copy_x_to_double(products(:, :, :, 1), rx)
+#else
     call RFT(VVdx(:, :, :, 1), rx)
+#endif
   END SUBROUTINE spectral_field_to_real_x
+
+#ifdef CHANNEL_SINGLE
+  SUBROUTINE copy_x_to_double(src, dst)
+    real(fk), intent(in) :: src(:, :, :)
+    real(C_DOUBLE), intent(out) :: dst(:, :, :)
+    integer(C_INT) :: i, j, k
+    !$omp target teams distribute parallel do collapse(3) default(none) shared(src, dst) private(i, j, k)
+    do k = 1, size(dst, 3)
+      do j = 1, size(dst, 2)
+        do i = 1, size(dst, 1)
+          dst(i, j, k) = src(i, j, k)
+        end do
+      end do
+    end do
+  END SUBROUTINE copy_x_to_double
+
+  SUBROUTINE copy_x_from_double(src, dst)
+    real(C_DOUBLE), intent(in) :: src(:, :, :)
+    real(fk), intent(out) :: dst(:, :, :)
+    integer(C_INT) :: i, j, k
+    !$omp target teams distribute parallel do collapse(3) default(none) shared(src, dst) private(i, j, k)
+    do k = 1, size(src, 3)
+      do j = 1, size(src, 2)
+        do i = 1, size(src, 1)
+          dst(i, j, k) = src(i, j, k)
+        end do
+      end do
+    end do
+  END SUBROUTINE copy_x_from_double
+#endif
 
   SUBROUTINE real_x_to_spectral_field(rx, field, label)
     IMPLICIT NONE
@@ -250,7 +288,12 @@ CONTAINS
     y_first = ny0
     y_last = nyN
 
+#ifdef CHANNEL_SINGLE
+    call copy_x_from_double(rx, products(:, :, :, 1))
+    call HFT(products(:, :, :, 1), VVdx(:, :, :, 1))
+#else
     call HFT(rx, VVdx(:, :, :, 1))
+#endif
     call transpose_xTOz(VVdx(:, :, :, 1), VVdz(:, :, :, 1), label)
     call FFT(VVdz(:, :, :, 1))
     !$omp target teams distribute parallel do collapse(3) default(none) &
