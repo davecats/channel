@@ -193,18 +193,15 @@ ${body.rstrip()}$
       call roctxPop("ys_pipeline ${label}$")
 #:enddef
 
-#! Posting a message costs the same bracket plus the use_device_addr
-#! region the buffer needs, and always charges T_COMM_POST.  Posts that
-#! already sit inside a named range pass no label of their own.
-#:def timed_comm_post(buffer, body, label=None)
+#! Posting a message always charges T_COMM_POST.  Posts that already sit
+#! inside a named range pass no label of their own.
+#:def timed_comm_post(body, label=None)
 #:if label is not None
       call roctxPush("ys_pipeline ${label}$")
 #:endif
-      !$omp target data use_device_addr(${buffer}$)
       call tic()
 ${body.rstrip()}$
       call toc(T_COMM_POST)
-      !$omp end target data
 #:if label is not None
       call roctxPop("ys_pipeline ${label}$")
 #:endif
@@ -225,7 +222,9 @@ module y_line_solvers
                             YS_SCHUR_EXCHANGE_AUTO
   use mpi_transpose, only: MPI_COMM_Y
   use y_pipeline_nccl, only: channel_comm_use_nccl, channel_comm_p2p_ensure, &
-                             channel_comm_send, channel_comm_recv, channel_comm_sendrecv, &
+                             channel_comm_p2p_isend, channel_comm_p2p_irecv, channel_comm_p2p_sendrecv, &
+                             channel_comm_p2p_flush, channel_comm_p2p_test, channel_comm_p2p_wait, &
+                             channel_comm_p2p_complete, channel_comm_p2p_connect, &
                              channel_comm_cache, channel_comm_cache_reserve, channel_comm_cache_finalize
   use roctx, only: roctxPush, roctxPop
   use byte_workspace, only: workspace_request, workspace_release, workspace_slice, workspace_align_offset
@@ -300,7 +299,38 @@ module y_line_solvers
   integer(C_SIZE_T), save :: ys_batch_complex_cap = YS_BATCH_DEFAULT_COMPLEX_CAP
   logical, save :: ys_batch_complex_cap_initialized = .false.
   integer(C_INT), save :: ys_pipeline_timing_solve_id = 0_C_INT
-  type(channel_comm_cache), save :: ys_pipeline_nccl_contexts
+
+  ! Messages of the pipelined solve, through yc_isend / yc_irecv / yc_test /
+  ! yc_wait / yc_sendrecv, which call MPI or NCCL/RCCL (CHANNEL_COMM); the
+  ! schedule in ys_solve_pipelined_lu_distributed is the same for both.
+  !
+  ! NCCL has no tags: it pairs the messages between two ranks in issue order,
+  ! and runs each communicator's operations in stream order.  So each kind of
+  ! message travels in its own lane, a communicator with its own stream:
+  ! factor state (and the meeting swap) flows along the elimination direction,
+  ! the backward state against it, and the solution halos in a lane of their
+  ! own because they are sent during the backward sweep but received only at
+  ! the end.  Within a lane both partners issue in batch order.  MPI ignores
+  ! the lanes and keeps its tags.
+  integer(C_INT), parameter :: YC_FACTOR = 1_C_INT, YC_BACKWARD = 2_C_INT, YC_HALO = 3_C_INT
+  integer(C_INT), parameter :: YC_LANES = 3_C_INT
+  type(channel_comm_cache), save :: ys_pipeline_nccl_contexts(YC_LANES)
+  logical, save :: yc_nccl = .false.
+  type(c_ptr), save :: yc_ctx(YC_LANES)
+  ! Lane contexts not yet connected to their neighbours (yc_connect).
+  logical, save :: yc_unconnected = .false.
+
+  ! A pending message.  MPI: the request.  NCCL: sends need nothing (they
+  ! complete in yc_complete); a receive remembers where it goes, since it is
+  ! only posted when yc_irecv is eager or at its first test or wait -- posted
+  ! earlier, it would sit in its lane's stream ahead of sends the partner is
+  ! waiting for.  `ticket` is its completion event once posted.
+  type :: yc_request
+    type(MPI_Request) :: mpi = MPI_REQUEST_NULL
+    integer(C_INT) :: lane = 0_C_INT
+    integer(C_INT) :: ticket = -1_C_INT
+    integer(C_INT) :: offset = 0_C_INT, count = 0_C_INT, peer = -1_C_INT
+  end type yc_request
 
   ! The bands are YS_COEF (real except on CUDA, see build_options.h); the
   ! right-hand sides and solutions are complex.
@@ -1543,19 +1573,15 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     ! backward message.  That halves the pipeline depth.
     integer(C_INT) :: up, down
     logical :: has_up, has_down, meeting, mirror, twisted
+    type(yc_request), allocatable :: factor_send_req(:), backward_recv_req(:), backward_send_req(:)
+    type(yc_request), allocatable :: halo_send_req(:), halo_recv_req(:)
+    type(yc_request) :: factor_recv_req
     integer :: ierr
-    type(MPI_Request), allocatable :: factor_send_req(:), forward_send_req(:), backward_recv_req(:), backward_send_req(:)
-    type(MPI_Request), allocatable :: halo_send_req(:), halo_recv_req(:)
-    type(MPI_Request) :: factor_recv_req, forward_recv_req
-    type(MPI_Status) :: status
     logical :: timing_enabled
     real(C_DOUBLE) :: timing(10), time_start, time_t0
 
     if (active_n < 2_C_INT) error stop "pipelined LU distributed solve requires at least two local rows"
-    if (channel_comm_use_nccl()) then
-      call ys_solve_pipelined_lu_nccl_distributed(active_n, nlines, nbatches, batch_max_lines)
-      return
-    end if
+    call yc_begin()
 
     timing_enabled = .false.
     call env_flag("CHANNEL_Y_PIPELINE_TIMING", timing_enabled)
@@ -1572,14 +1598,9 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     call ys_pipeline_directions(twisted, up, down, has_up, has_down, meeting, mirror)
 
     call ys_ensure_pipeline_buffers(nbatches, batch_max_lines)
-    allocate (factor_send_req(nbatches), forward_send_req(nbatches), backward_recv_req(nbatches), backward_send_req(nbatches))
+    call yc_connect()
+    allocate (factor_send_req(nbatches), backward_recv_req(nbatches), backward_send_req(nbatches))
     allocate (halo_send_req(nbatches), halo_recv_req(nbatches))
-    halo_send_req = MPI_REQUEST_NULL
-    halo_recv_req = MPI_REQUEST_NULL
-    factor_send_req = MPI_REQUEST_NULL
-    forward_send_req = MPI_REQUEST_NULL
-    backward_recv_req = MPI_REQUEST_NULL
-    backward_send_req = MPI_REQUEST_NULL
 
     ! The solution halo: the one on the `down` side is the backward message
     ! itself (that neighbour's two nearest values), stored by the backward
@@ -1590,10 +1611,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
         call ys_pipeline_batch_slice(batch, nbatches, nlines, batch_max_lines, first_line, line_count, &
                                      factor_count, solve_count, factor_offset, forward_offset, backward_offset)
         halo_offset = ys_pipeline_halo_offset(batch, nbatches, batch_max_lines, .true.)
-        !$omp target data use_device_addr(ycomm_recvbuf)
-        call MPI_Irecv(ycomm_recvbuf(halo_offset + 1), solve_count, &
-                       MPI_DOUBLE_COMPLEX, up, TAG_HALO + batch, MPI_COMM_Y, halo_recv_req(batch), ierr)
-        !$omp end target data
+        call yc_irecv(YC_HALO, halo_offset, solve_count, up, TAG_HALO + batch, halo_recv_req(batch))
       end do
     end if
 
@@ -1602,13 +1620,16 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       do batch = 1_C_INT, nbatches
         call ys_pipeline_batch_slice(batch, nbatches, nlines, batch_max_lines, first_line, line_count, &
                                      factor_count, solve_count, factor_offset, forward_offset, backward_offset)
-#:call timed_comm_post('ycomm_recvbuf')
-        call MPI_Irecv(ycomm_recvbuf(backward_offset + 1), solve_count, &
-                       MPI_DOUBLE_COMPLEX, down, TAG_BACKWARD + batch, MPI_COMM_Y, backward_recv_req(batch), ierr)
+#:call timed_comm_post
+        call yc_irecv(YC_BACKWARD, backward_offset, solve_count, down, TAG_BACKWARD + batch, backward_recv_req(batch))
 #:endcall
       end do
       call roctxPop("ys_pipeline post_backward_recvs")
     end if
+
+    ! The factor state of batch 1; each batch then posts the next one's as
+    ! soon as it has sent its own, so on NCCL the two go out in one group.
+    if (has_up) call post_factor_recv(1_C_INT)
 
     next_backward = 1_C_INT
     call roctxPush("ys_pipeline forward_sweep")
@@ -1622,12 +1643,8 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       ! (u1, u2, y each: YS_PIPELINE_FACTOR_ELEMS values per line) in the send
       ! buffer.  It replaced five synchronous kernels and two messages per batch.
       if (has_up) then
-#:call timed_comm_post('ycomm_recvbuf')
-        call MPI_Irecv(ycomm_recvbuf(factor_offset + 1), factor_count, &
-                       MPI_DOUBLE_COMPLEX, up, TAG_FACTOR + batch, MPI_COMM_Y, factor_recv_req, ierr)
-#:endcall
-#:call timed_step('MPI_Wait factor_recv', 'T_FACTOR_WAIT')
-        call MPI_Wait(factor_recv_req, status, ierr)
+#:call timed_step('wait factor_recv', 'T_FACTOR_WAIT')
+        call yc_wait(factor_recv_req)
 #:endcall
       end if
 #:call timed_step('forward_fused', 'T_FACTOR_KERNEL')
@@ -1642,22 +1659,21 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
         ! forward kernel has finished reading) and solve the interface: the
         ! result is this rank's backward seed, so no backward message.
 #:call timed_step('meet_exchange', 'T_FACTOR_WAIT')
-        !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
-        call MPI_Sendrecv(ycomm_sendbuf(factor_offset + 1), factor_count, MPI_DOUBLE_COMPLEX, down, TAG_FACTOR + batch, &
-                          ycomm_recvbuf(factor_offset + 1), factor_count, MPI_DOUBLE_COMPLEX, down, TAG_FACTOR + batch, &
-                          MPI_COMM_Y, status, ierr)
-        !$omp end target data
+        call yc_sendrecv(YC_FACTOR, factor_offset, factor_count, down, TAG_FACTOR + batch)
 #:endcall
         call ys_pipeline_meet(line_count, factor_offset, backward_offset, mirror)
       else if (has_down) then
-#:call timed_comm_post('ycomm_sendbuf', label='MPI_Isend factor_state')
-        call MPI_Isend(ycomm_sendbuf(factor_offset + 1), factor_count, &
-                       MPI_DOUBLE_COMPLEX, down, TAG_FACTOR + batch, MPI_COMM_Y, factor_send_req(batch), ierr)
+#:call timed_comm_post(label='isend factor_state')
+        call yc_isend(YC_FACTOR, factor_offset, factor_count, down, TAG_FACTOR + batch, factor_send_req(batch))
 #:endcall
       end if
+      if (has_up .and. batch < nbatches) call post_factor_recv(batch + 1_C_INT)
       call roctxPush("ys_pipeline drain_backward_nonblocking")
       call drain_backward_batches(batch, .false.)
       call roctxPop("ys_pipeline drain_backward_nonblocking")
+      ! NCCL: whatever this batch queued (sends with no receive of their own
+      ! lane behind them, e.g. on the first and last rank) leaves now.
+      call yc_flush()
       call roctxPop("ys_pipeline forward_batch")
     end do
     call roctxPop("ys_pipeline forward_sweep")
@@ -1665,16 +1681,15 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     call drain_backward_batches(nbatches, .true.)
     call roctxPop("ys_pipeline drain_backward_blocking")
 
-#:call timed_step('MPI_Waitall sends', 'T_COMM_POST')
-    call MPI_Waitall(nbatches, factor_send_req, MPI_STATUSES_IGNORE, ierr)
-    call MPI_Waitall(nbatches, forward_send_req, MPI_STATUSES_IGNORE, ierr)
-    call MPI_Waitall(nbatches, backward_send_req, MPI_STATUSES_IGNORE, ierr)
+#:call timed_step('wait sends', 'T_COMM_POST')
+    call yc_waitall(factor_send_req)
+    call yc_waitall(backward_send_req)
 #:endcall
 
 #:call timed_step('exchange_solution_halos', 'T_HALO')
-    call MPI_Waitall(nbatches, halo_send_req, MPI_STATUSES_IGNORE, ierr)
+    call yc_waitall(halo_send_req)
     if (has_up) then
-      call MPI_Waitall(nbatches, halo_recv_req, MPI_STATUSES_IGNORE, ierr)
+      call yc_waitall(halo_recv_req)
       do batch = 1_C_INT, nbatches
         call ys_pipeline_batch_slice(batch, nbatches, nlines, batch_max_lines, first_line, line_count, &
                                      factor_count, solve_count, factor_offset, forward_offset, backward_offset)
@@ -1682,6 +1697,8 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
                                   ys_pipeline_halo_offset(batch, nbatches, batch_max_lines, .true.), mirror)
       end do
     end if
+    ! NCCL: the sends finish here (MPI: they were waited for above).
+    call yc_complete()
 #:endcall
 
     ! Reporting sits outside the halo range: it barriers across MPI_COMM_Y
@@ -1691,9 +1708,21 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       call ys_print_pipeline_timing(ys_pipeline_timing_solve_id, active_n, nlines, nbatches, timing)
     end if
 
-    deallocate (factor_send_req, forward_send_req, backward_recv_req, backward_send_req, halo_send_req, halo_recv_req)
+    deallocate (factor_send_req, backward_recv_req, backward_send_req, halo_send_req, halo_recv_req)
 
   contains
+    ! Posts the factor-state receive of batch b from `up` (eagerly: on NCCL it
+    ! joins the group of this rank's last factor send).
+    subroutine post_factor_recv(b)
+      integer(C_INT), intent(in) :: b
+      integer(C_INT) :: fl, lc, fc, sc, fo, wo, bo
+
+      call ys_pipeline_batch_slice(b, nbatches, nlines, batch_max_lines, fl, lc, fc, sc, fo, wo, bo)
+#:call timed_comm_post
+      call yc_irecv(YC_FACTOR, fo, fc, up, TAG_FACTOR + b, factor_recv_req, eager=.true.)
+#:endcall
+    end subroutine post_factor_recv
+
     ! Timed regions never nest here, so one start stamp is enough.
     subroutine tic()
       if (timing_enabled) time_t0 = MPI_Wtime()
@@ -1741,15 +1770,15 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
 
         if (has_down .and. .not. meeting) then
           if (blocking) then
-#:call timed_step('MPI_Wait backward_recv', 'T_BACKWARD_WAIT')
-            call MPI_Wait(backward_recv_req(next_backward), status, ierr)
+#:call timed_step('wait backward_recv', 'T_BACKWARD_WAIT')
+            call yc_wait(backward_recv_req(next_backward))
 #:endcall
             ready = .true.
           else
             ! Untimed: the whole point of the test is that it may cost nothing.
-            call roctxPush("ys_pipeline MPI_Test backward_recv")
-            call MPI_Test(backward_recv_req(next_backward), ready, status, ierr)
-            call roctxPop("ys_pipeline MPI_Test backward_recv")
+            call roctxPush("ys_pipeline test backward_recv")
+            ready = yc_test(backward_recv_req(next_backward))
+            call roctxPop("ys_pipeline test backward_recv")
           end if
           if (.not. ready) exit
         end if
@@ -1767,188 +1796,187 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
         end if
 #:endcall
         if (has_up) then
-#:call timed_comm_post('ycomm_sendbuf', label='MPI_Isend backward_state')
-          call MPI_Isend(ycomm_sendbuf(forward_offset + 1), solve_count, &
-                         MPI_DOUBLE_COMPLEX, up, TAG_BACKWARD + next_backward, &
-                         MPI_COMM_Y, backward_send_req(next_backward), ierr)
+#:call timed_comm_post(label='isend backward_state')
+          call yc_isend(YC_BACKWARD, forward_offset, solve_count, up, TAG_BACKWARD + next_backward, &
+                        backward_send_req(next_backward))
 #:endcall
         end if
         if (has_down .and. .not. meeting) then
-          !$omp target data use_device_addr(ycomm_sendbuf)
-          call MPI_Isend(ycomm_sendbuf(halo_offset + 1), solve_count, &
-                         MPI_DOUBLE_COMPLEX, down, TAG_HALO + next_backward, &
-                         MPI_COMM_Y, halo_send_req(next_backward), ierr)
-          !$omp end target data
+          call yc_isend(YC_HALO, halo_offset, solve_count, down, TAG_HALO + next_backward, &
+                        halo_send_req(next_backward))
         end if
         next_backward = next_backward + 1_C_INT
       end do
     end subroutine drain_backward_batches
   end subroutine ys_solve_pipelined_lu_distributed
 
-  subroutine ys_solve_pipelined_lu_nccl_distributed(active_n, nlines, nbatches, batch_max_lines)
-    implicit none
-    integer(C_INT), intent(in) :: active_n, nlines, nbatches, batch_max_lines
-    integer(C_INT) :: batch, first_line, line_count, factor_count, solve_count
-    integer(C_INT) :: factor_offset, forward_offset, backward_offset
-    type(c_ptr) :: nccl_ctx
-
-    call ys_ensure_pipeline_buffers(nbatches, batch_max_lines)
-    call ys_pipeline_nccl_context(nccl_ctx)
-
-    ! Same fused stages as the MPI path: one kernel and one message per batch
-    ! and direction.  The NCCL calls block, so the backward sweep cannot be
-    ! interleaved with the forward one as the MPI path does with MPI_Test.
-    call roctxPush("ys_pipeline_nccl forward_sweep")
-    do batch = 1_C_INT, nbatches
-      call ys_pipeline_batch_slice(batch, nbatches, nlines, batch_max_lines, first_line, line_count, &
-                                   factor_count, solve_count, factor_offset, forward_offset, backward_offset)
-      if (ipy > 0_C_INT) then
-        call roctxPush("ys_pipeline_nccl recv_factor")
-        !$omp target data use_device_addr(ycomm_recvbuf)
-        call channel_comm_recv(nccl_ctx, c_loc(ycomm_recvbuf(factor_offset + 1)), factor_count, ipy - 1_C_INT)
-        !$omp end target data
-        call roctxPop("ys_pipeline_nccl recv_factor")
-      end if
-      call roctxPush("ys_pipeline_nccl forward_fused")
-      call ys_pipelined_forward_fused(first_line, line_count, active_n, ipy > 0_C_INT, ipy < npy_grid - 1_C_INT, &
-                                      factor_offset)
-      call roctxPop("ys_pipeline_nccl forward_fused")
-      if (ipy < npy_grid - 1_C_INT) then
-        call roctxPush("ys_pipeline_nccl send_factor")
-        !$omp target data use_device_addr(ycomm_sendbuf)
-        call channel_comm_send(nccl_ctx, c_loc(ycomm_sendbuf(factor_offset + 1)), factor_count, ipy + 1_C_INT)
-        !$omp end target data
-        call roctxPop("ys_pipeline_nccl send_factor")
-      end if
-    end do
-    call roctxPop("ys_pipeline_nccl forward_sweep")
-
-    call roctxPush("ys_pipeline_nccl backward_sweep")
-    do batch = 1_C_INT, nbatches
-      call ys_pipeline_batch_slice(batch, nbatches, nlines, batch_max_lines, first_line, line_count, &
-                                   factor_count, solve_count, factor_offset, forward_offset, backward_offset)
-      if (ipy < npy_grid - 1_C_INT) then
-        call roctxPush("ys_pipeline_nccl recv_backward")
-        !$omp target data use_device_addr(ycomm_recvbuf)
-        call channel_comm_recv(nccl_ctx, c_loc(ycomm_recvbuf(backward_offset + 1)), solve_count, ipy + 1_C_INT)
-        !$omp end target data
-        call roctxPop("ys_pipeline_nccl recv_backward")
-      end if
-      call roctxPush("ys_pipeline_nccl backward_fused")
-      call ys_pipelined_backward_fused(first_line, line_count, active_n, ipy > 0_C_INT, ipy < npy_grid - 1_C_INT, &
-                                       backward_offset, forward_offset)
-      call roctxPop("ys_pipeline_nccl backward_fused")
-      if (ipy > 0_C_INT) then
-        call roctxPush("ys_pipeline_nccl send_backward")
-        !$omp target data use_device_addr(ycomm_sendbuf)
-        call channel_comm_send(nccl_ctx, c_loc(ycomm_sendbuf(forward_offset + 1)), solve_count, ipy - 1_C_INT)
-        !$omp end target data
-        call roctxPop("ys_pipeline_nccl send_backward")
-      end if
-    end do
-    call roctxPop("ys_pipeline_nccl backward_sweep")
-
-    call roctxPush("ys_pipeline_nccl exchange_solution_halos")
-    call ys_exchange_pipelined_solution_halos_nccl(active_n, nlines, nccl_ctx)
-    call roctxPop("ys_pipeline_nccl exchange_solution_halos")
-  end subroutine ys_solve_pipelined_lu_nccl_distributed
-
-  subroutine ys_pipeline_nccl_context(nccl_ctx)
-    implicit none
-    type(c_ptr), intent(out) :: nccl_ctx
-
-    call channel_comm_cache_reserve(ys_pipeline_nccl_contexts, npy_grid)
-    call channel_comm_p2p_ensure(MPI_COMM_Y, ys_pipeline_nccl_contexts%by_size(npy_grid))
-    nccl_ctx = ys_pipeline_nccl_contexts%by_size(npy_grid)
-  end subroutine ys_pipeline_nccl_context
-
   subroutine ys_finalize_nccl_contexts()
-    implicit none
+    integer(C_INT) :: lane
 
-    call channel_comm_cache_finalize(ys_pipeline_nccl_contexts)
+    do lane = 1_C_INT, YC_LANES
+      call channel_comm_cache_finalize(ys_pipeline_nccl_contexts(lane))
+    end do
   end subroutine ys_finalize_nccl_contexts
 
-  subroutine ys_exchange_pipelined_solution_halos(active_n, nlines)
-    implicit none
-    integer(C_INT), intent(in) :: active_n, nlines
-    integer(C_INT), parameter :: TAG_HALO_LOW = 8710_C_INT
-    integer(C_INT), parameter :: TAG_HALO_HIGH = 8711_C_INT
-    integer(C_INT) :: ierr, count, lower_offset, upper_offset, nreq
-    type(MPI_Request) :: req(4)
-    type(MPI_Status) :: statuses(4)
+  ! ---------------------------------------------------------------------
+  ! The message layer of the pipelined solve (see yc_request).  Buffers are
+  ! always ycomm_sendbuf / ycomm_recvbuf, addressed by element offset.
+  ! ---------------------------------------------------------------------
 
-    count = 2_C_INT*nlines
-    lower_offset = 0_C_INT
-    upper_offset = count
-    req = MPI_REQUEST_NULL
-    nreq = 0
+  ! Picks the backend for the solve that starts; NCCL: the lane contexts.
+  subroutine yc_begin()
+    integer(C_INT) :: lane
 
-    if (ipy > 0_C_INT) then
-      nreq = nreq + 1
+    yc_nccl = channel_comm_use_nccl()
+    if (.not. yc_nccl) return
+    do lane = 1_C_INT, YC_LANES
+      call channel_comm_cache_reserve(ys_pipeline_nccl_contexts(lane), npy_grid)
+      if (.not. c_associated(ys_pipeline_nccl_contexts(lane)%by_size(npy_grid))) yc_unconnected = .true.
+      call channel_comm_p2p_ensure(MPI_COMM_Y, ys_pipeline_nccl_contexts(lane)%by_size(npy_grid))
+      yc_ctx(lane) = ys_pipeline_nccl_contexts(lane)%by_size(npy_grid)
+    end do
+  end subroutine yc_begin
+
+  ! NCCL: right after new lane contexts were made, connects each to both y
+  ! neighbours (see channel_nccl_p2p_connect), using the first values of the
+  ! pipeline buffers, which hold nothing yet.
+  subroutine yc_connect()
+    integer(C_INT) :: lane, lo, hi
+
+    if (.not. (yc_nccl .and. yc_unconnected)) return
+    lo = merge(ipy - 1_C_INT, -1_C_INT, ipy > 0_C_INT)
+    hi = merge(ipy + 1_C_INT, -1_C_INT, ipy < npy_grid - 1_C_INT)
+    !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
+    do lane = 1_C_INT, YC_LANES
+      call channel_comm_p2p_connect(yc_ctx(lane), c_loc(ycomm_sendbuf(1)), c_loc(ycomm_recvbuf(1)), lo, hi)
+    end do
+    !$omp end target data
+    yc_unconnected = .false.
+  end subroutine yc_connect
+
+  subroutine yc_isend(lane, offset, count, peer, tag, req)
+    integer(C_INT), intent(in) :: lane, offset, count, peer, tag
+    type(yc_request), intent(inout) :: req
+    integer :: ierr
+
+    !$omp target data use_device_addr(ycomm_sendbuf)
+    if (yc_nccl) then
+      call channel_comm_p2p_isend(yc_ctx(lane), c_loc(ycomm_sendbuf(offset + 1)), count, peer)
+      req = yc_request()
+    else
+      call MPI_Isend(ycomm_sendbuf(offset + 1), count, MPI_DOUBLE_COMPLEX, peer, tag, MPI_COMM_Y, req%mpi, ierr)
+    end if
+    !$omp end target data
+  end subroutine yc_isend
+
+  ! NCCL posts the receive now only when `eager`; otherwise at its first test
+  ! or wait.
+  subroutine yc_irecv(lane, offset, count, peer, tag, req, eager)
+    integer(C_INT), intent(in) :: lane, offset, count, peer, tag
+    type(yc_request), intent(inout) :: req
+    logical, intent(in), optional :: eager
+    integer :: ierr
+
+    if (yc_nccl) then
+      req = yc_request(lane=lane, offset=offset, count=count, peer=peer)
+      if (present(eager)) then
+        if (eager) call yc_post(req)
+      end if
+    else
       !$omp target data use_device_addr(ycomm_recvbuf)
-      call MPI_Irecv(ycomm_recvbuf(lower_offset + 1), count, MPI_DOUBLE_COMPLEX, &
-                     ipy - 1_C_INT, TAG_HALO_HIGH, MPI_COMM_Y, req(nreq), ierr)
-      !$omp end target data
-      call ys_pack_solution_rows(nlines, first_row=1_C_INT, send_offset=lower_offset)
-      nreq = nreq + 1
-      !$omp target data use_device_addr(ycomm_sendbuf)
-      call MPI_Isend(ycomm_sendbuf(lower_offset + 1), count, MPI_DOUBLE_COMPLEX, &
-                     ipy - 1_C_INT, TAG_HALO_LOW, MPI_COMM_Y, req(nreq), ierr)
+      call MPI_Irecv(ycomm_recvbuf(offset + 1), count, MPI_DOUBLE_COMPLEX, peer, tag, MPI_COMM_Y, req%mpi, ierr)
       !$omp end target data
     end if
+  end subroutine yc_irecv
 
-    if (ipy < npy_grid - 1_C_INT) then
-      nreq = nreq + 1
-      !$omp target data use_device_addr(ycomm_recvbuf)
-      call MPI_Irecv(ycomm_recvbuf(upper_offset + 1), count, MPI_DOUBLE_COMPLEX, &
-                     ipy + 1_C_INT, TAG_HALO_LOW, MPI_COMM_Y, req(nreq), ierr)
-      !$omp end target data
-      call ys_pack_solution_rows(nlines, first_row=active_n - 1_C_INT, send_offset=upper_offset)
-      nreq = nreq + 1
-      !$omp target data use_device_addr(ycomm_sendbuf)
-      call MPI_Isend(ycomm_sendbuf(upper_offset + 1), count, MPI_DOUBLE_COMPLEX, &
-                     ipy + 1_C_INT, TAG_HALO_HIGH, MPI_COMM_Y, req(nreq), ierr)
-      !$omp end target data
+  subroutine yc_post(req)
+    type(yc_request), intent(inout) :: req
+
+    if (req%ticket >= 0_C_INT) return
+    !$omp target data use_device_addr(ycomm_recvbuf)
+    req%ticket = channel_comm_p2p_irecv(yc_ctx(req%lane), c_loc(ycomm_recvbuf(req%offset + 1)), req%count, req%peer)
+    !$omp end target data
+  end subroutine yc_post
+
+  logical function yc_test(req) result(ready)
+    type(yc_request), intent(inout) :: req
+    integer :: ierr
+
+    if (yc_nccl) then
+      ready = .true.
+      if (req%lane == 0_C_INT) return
+      call yc_post(req)
+      ready = channel_comm_p2p_test(yc_ctx(req%lane), req%ticket)
+      if (ready) req = yc_request()
+    else
+      call MPI_Test(req%mpi, ready, MPI_STATUS_IGNORE, ierr)
     end if
+  end function yc_test
 
-    if (nreq > 0) call MPI_Waitall(nreq, req(1:nreq), statuses(1:nreq), ierr)
-    if (ipy > 0_C_INT) call ys_unpack_lower_solution_halo(nlines, lower_offset)
-    if (ipy < npy_grid - 1_C_INT) call ys_unpack_upper_solution_halo(nlines, upper_offset)
-  end subroutine ys_exchange_pipelined_solution_halos
+  subroutine yc_wait(req)
+    type(yc_request), intent(inout) :: req
+    integer :: ierr
 
-  subroutine ys_exchange_pipelined_solution_halos_nccl(active_n, nlines, nccl_ctx)
-    implicit none
-    integer(C_INT), intent(in) :: active_n, nlines
-    type(c_ptr), intent(in), value :: nccl_ctx
-    integer(C_INT) :: count, lower_offset, upper_offset
-
-    count = 2_C_INT*nlines
-    lower_offset = 0_C_INT
-    upper_offset = count
-
-    if (ipy > 0_C_INT) call ys_pack_solution_rows(nlines, first_row=1_C_INT, send_offset=lower_offset)
-    if (ipy < npy_grid - 1_C_INT) call ys_pack_solution_rows(nlines, first_row=active_n - 1_C_INT, send_offset=upper_offset)
-
-    if (ipy > 0_C_INT) then
-      call roctxPush("ys_pipeline_nccl halo_lower")
-      !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
-      call channel_comm_sendrecv(nccl_ctx, c_loc(ycomm_sendbuf(lower_offset + 1)), count, ipy - 1_C_INT, &
-                                 c_loc(ycomm_recvbuf(lower_offset + 1)), count, ipy - 1_C_INT)
-      !$omp end target data
-      call roctxPop("ys_pipeline_nccl halo_lower")
-      call ys_unpack_lower_solution_halo(nlines, lower_offset)
+    if (yc_nccl) then
+      if (req%lane == 0_C_INT) return
+      ! Before blocking, let every queued send go: the partner may need one
+      ! of them to get as far as the message waited for here.
+      call yc_flush()
+      call yc_post(req)
+      call channel_comm_p2p_wait(yc_ctx(req%lane), req%ticket)
+      req = yc_request()
+    else
+      call MPI_Wait(req%mpi, MPI_STATUS_IGNORE, ierr)
     end if
+  end subroutine yc_wait
 
-    if (ipy < npy_grid - 1_C_INT) then
-      call roctxPush("ys_pipeline_nccl halo_upper")
-      !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
-      call channel_comm_sendrecv(nccl_ctx, c_loc(ycomm_sendbuf(upper_offset + 1)), count, ipy + 1_C_INT, &
-                                 c_loc(ycomm_recvbuf(upper_offset + 1)), count, ipy + 1_C_INT)
-      !$omp end target data
-      call roctxPop("ys_pipeline_nccl halo_upper")
-      call ys_unpack_upper_solution_halo(nlines, upper_offset)
+  subroutine yc_waitall(reqs)
+    type(yc_request), intent(inout) :: reqs(:)
+    integer :: i
+
+    do i = 1, size(reqs)
+      call yc_wait(reqs(i))
+    end do
+  end subroutine yc_waitall
+
+  ! Swaps `count` values with `peer`: from ycomm_sendbuf into ycomm_recvbuf
+  ! at the same offset, and returns when both are done.
+  subroutine yc_sendrecv(lane, offset, count, peer, tag)
+    integer(C_INT), intent(in) :: lane, offset, count, peer, tag
+    integer :: ierr
+
+    if (yc_nccl) call yc_flush()
+    !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
+    if (yc_nccl) then
+      call channel_comm_p2p_sendrecv(yc_ctx(lane), c_loc(ycomm_sendbuf(offset + 1)), count, peer, &
+                                     c_loc(ycomm_recvbuf(offset + 1)), count, peer)
+    else
+      call MPI_Sendrecv(ycomm_sendbuf(offset + 1), count, MPI_DOUBLE_COMPLEX, peer, tag, &
+                        ycomm_recvbuf(offset + 1), count, MPI_DOUBLE_COMPLEX, peer, tag, &
+                        MPI_COMM_Y, MPI_STATUS_IGNORE, ierr)
     end if
-  end subroutine ys_exchange_pipelined_solution_halos_nccl
+    !$omp end target data
+  end subroutine yc_sendrecv
+
+  ! NCCL: sends the queued messages of every lane.  MPI: nothing to do.
+  subroutine yc_flush()
+    integer(C_INT) :: lane
+
+    if (.not. yc_nccl) return
+    do lane = 1_C_INT, YC_LANES
+      call channel_comm_p2p_flush(yc_ctx(lane))
+    end do
+  end subroutine yc_flush
+
+  ! NCCL: waits until every lane is idle, so the buffers may be reused.
+  subroutine yc_complete()
+    integer(C_INT) :: lane
+
+    if (.not. yc_nccl) return
+    do lane = 1_C_INT, YC_LANES
+      call channel_comm_p2p_complete(yc_ctx(lane))
+    end do
+  end subroutine yc_complete
 
   ! Copy the pair of solution rows starting at first_row into the halo send
   ! buffer.  The lower halo sends rows 1 and 2, the upper rows active_n-1 and

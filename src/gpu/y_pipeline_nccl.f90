@@ -27,7 +27,9 @@ module y_pipeline_nccl
   public :: channel_comm_set_backend_override, channel_comm_clear_backend_override
   public :: channel_comm_alltoall_complex, channel_comm_allgather_complex, channel_comm_alltoall_wait
   public :: channel_comm_xz_use_nccl
-  public :: channel_comm_p2p_ensure, channel_comm_send, channel_comm_recv, channel_comm_sendrecv
+  public :: channel_comm_p2p_ensure, channel_comm_p2p_isend, channel_comm_p2p_irecv, channel_comm_p2p_sendrecv
+  public :: channel_comm_p2p_flush, channel_comm_p2p_test, channel_comm_p2p_wait, channel_comm_p2p_complete
+  public :: channel_comm_p2p_connect
   public :: channel_comm_context_reset
 
 #ifdef HAVE_NCCL
@@ -106,15 +108,73 @@ module y_pipeline_nccl
       integer(c_size_t), value :: count_elems
     end function channel_nccl_context_allgather
 
-    function channel_nccl_context_sendrecv(ctx, sendbuf, send_elems, send_peer, recvbuf, recv_elems, recv_peer) &
-      bind(c, name="channel_nccl_context_sendrecv")
+    function channel_nccl_p2p_isend(ctx, buf, elems, peer) bind(c, name="channel_nccl_p2p_isend")
       use, intrinsic :: iso_c_binding
       implicit none
-      integer(c_int) :: channel_nccl_context_sendrecv
+      integer(c_int) :: channel_nccl_p2p_isend
+      type(c_ptr), value :: ctx, buf
+      integer(c_size_t), value :: elems
+      integer(c_int), value :: peer
+    end function channel_nccl_p2p_isend
+
+    function channel_nccl_p2p_irecv(ctx, buf, elems, peer, ticket) bind(c, name="channel_nccl_p2p_irecv")
+      use, intrinsic :: iso_c_binding
+      implicit none
+      integer(c_int) :: channel_nccl_p2p_irecv
+      type(c_ptr), value :: ctx, buf
+      integer(c_size_t), value :: elems
+      integer(c_int), value :: peer
+      integer(c_int) :: ticket
+    end function channel_nccl_p2p_irecv
+
+    function channel_nccl_p2p_sendrecv(ctx, sendbuf, send_elems, send_peer, recvbuf, recv_elems, recv_peer) &
+      bind(c, name="channel_nccl_p2p_sendrecv")
+      use, intrinsic :: iso_c_binding
+      implicit none
+      integer(c_int) :: channel_nccl_p2p_sendrecv
       type(c_ptr), value :: ctx, sendbuf, recvbuf
       integer(c_size_t), value :: send_elems, recv_elems
       integer(c_int), value :: send_peer, recv_peer
-    end function channel_nccl_context_sendrecv
+    end function channel_nccl_p2p_sendrecv
+
+    function channel_nccl_p2p_flush(ctx) bind(c, name="channel_nccl_p2p_flush")
+      use, intrinsic :: iso_c_binding
+      implicit none
+      integer(c_int) :: channel_nccl_p2p_flush
+      type(c_ptr), value :: ctx
+    end function channel_nccl_p2p_flush
+
+    function channel_nccl_p2p_test(ctx, ticket, done) bind(c, name="channel_nccl_p2p_test")
+      use, intrinsic :: iso_c_binding
+      implicit none
+      integer(c_int) :: channel_nccl_p2p_test
+      type(c_ptr), value :: ctx
+      integer(c_int), value :: ticket
+      integer(c_int) :: done
+    end function channel_nccl_p2p_test
+
+    function channel_nccl_p2p_wait(ctx, ticket) bind(c, name="channel_nccl_p2p_wait")
+      use, intrinsic :: iso_c_binding
+      implicit none
+      integer(c_int) :: channel_nccl_p2p_wait
+      type(c_ptr), value :: ctx
+      integer(c_int), value :: ticket
+    end function channel_nccl_p2p_wait
+
+    function channel_nccl_p2p_connect(ctx, sendbuf, recvbuf, lo, hi) bind(c, name="channel_nccl_p2p_connect")
+      use, intrinsic :: iso_c_binding
+      implicit none
+      integer(c_int) :: channel_nccl_p2p_connect
+      type(c_ptr), value :: ctx, sendbuf, recvbuf
+      integer(c_int), value :: lo, hi
+    end function channel_nccl_p2p_connect
+
+    function channel_nccl_p2p_complete(ctx) bind(c, name="channel_nccl_p2p_complete")
+      use, intrinsic :: iso_c_binding
+      implicit none
+      integer(c_int) :: channel_nccl_p2p_complete
+      type(c_ptr), value :: ctx
+    end function channel_nccl_p2p_complete
 
     function channel_nccl_context_destroy(ctx) bind(c, name="channel_nccl_context_destroy")
       use, intrinsic :: iso_c_binding
@@ -440,45 +500,95 @@ contains
 #endif
   end subroutine channel_nccl_alltoall
 
-  subroutine channel_comm_send(comm_ctx, sendptr, count, peer)
-    type(c_ptr), intent(in), value :: comm_ctx, sendptr
+  ! Nonblocking point-to-point on a context (see channel_nccl_p2p.c): isend
+  ! queues, irecv posts and returns a ticket, test/wait look at that ticket,
+  ! flush sends the queued messages, complete drains the stream.  Counts are
+  ! double complex; the pointers are device addresses.
+  subroutine channel_comm_p2p_isend(ctx, ptr, count, peer)
+    type(c_ptr), intent(in), value :: ctx, ptr
     integer(c_int), intent(in), value :: count, peer
 #ifdef HAVE_NCCL
-    integer(c_int) :: status
-
-    status = channel_nccl_context_sendrecv(comm_ctx, sendptr, int(count, c_size_t), peer, &
-                                           c_null_ptr, 0_c_size_t, -1_c_int)
-    if (status /= 0_c_int) error stop "channel_comm_send failed"
+    if (channel_nccl_p2p_isend(ctx, ptr, int(count, c_size_t), peer) /= 0_c_int) &
+      error stop "channel_nccl_p2p_isend failed"
 #else
     error stop "NCCL/RCCL point-to-point backend requested, but this build has no support"
 #endif
-  end subroutine channel_comm_send
+  end subroutine channel_comm_p2p_isend
 
-  subroutine channel_comm_recv(comm_ctx, recvptr, count, peer)
-    type(c_ptr), intent(in), value :: comm_ctx, recvptr
+  integer(c_int) function channel_comm_p2p_irecv(ctx, ptr, count, peer) result(ticket)
+    type(c_ptr), intent(in), value :: ctx, ptr
     integer(c_int), intent(in), value :: count, peer
+    ticket = -1_c_int
 #ifdef HAVE_NCCL
-    integer(c_int) :: status
-
-    status = channel_nccl_context_sendrecv(comm_ctx, c_null_ptr, 0_c_size_t, -1_c_int, &
-                                           recvptr, int(count, c_size_t), peer)
-    if (status /= 0_c_int) error stop "channel_comm_recv failed"
+    if (channel_nccl_p2p_irecv(ctx, ptr, int(count, c_size_t), peer, ticket) /= 0_c_int) &
+      error stop "channel_nccl_p2p_irecv failed"
 #else
     error stop "NCCL/RCCL point-to-point backend requested, but this build has no support"
 #endif
-  end subroutine channel_comm_recv
+  end function channel_comm_p2p_irecv
 
-  subroutine channel_comm_sendrecv(comm_ctx, sendptr, send_count, send_peer, recvptr, recv_count, recv_peer)
-    type(c_ptr), intent(in), value :: comm_ctx, sendptr, recvptr
+  subroutine channel_comm_p2p_sendrecv(ctx, sendptr, send_count, send_peer, recvptr, recv_count, recv_peer)
+    type(c_ptr), intent(in), value :: ctx, sendptr, recvptr
     integer(c_int), intent(in), value :: send_count, send_peer, recv_count, recv_peer
 #ifdef HAVE_NCCL
-    integer(c_int) :: status
-
-    status = channel_nccl_context_sendrecv(comm_ctx, sendptr, int(send_count, c_size_t), send_peer, &
-                                           recvptr, int(recv_count, c_size_t), recv_peer)
-    if (status /= 0_c_int) error stop "channel_comm_sendrecv failed"
+    if (channel_nccl_p2p_sendrecv(ctx, sendptr, int(send_count, c_size_t), send_peer, &
+                                  recvptr, int(recv_count, c_size_t), recv_peer) /= 0_c_int) &
+      error stop "channel_nccl_p2p_sendrecv failed"
 #else
     error stop "NCCL/RCCL point-to-point backend requested, but this build has no support"
 #endif
-  end subroutine channel_comm_sendrecv
+  end subroutine channel_comm_p2p_sendrecv
+
+  subroutine channel_comm_p2p_flush(ctx)
+    type(c_ptr), intent(in), value :: ctx
+#ifdef HAVE_NCCL
+    if (channel_nccl_p2p_flush(ctx) /= 0_c_int) error stop "channel_nccl_p2p_flush failed"
+#else
+    error stop "NCCL/RCCL point-to-point backend requested, but this build has no support"
+#endif
+  end subroutine channel_comm_p2p_flush
+
+  logical function channel_comm_p2p_test(ctx, ticket) result(done)
+    type(c_ptr), intent(in), value :: ctx
+    integer(c_int), intent(in), value :: ticket
+#ifdef HAVE_NCCL
+    integer(c_int) :: flag
+    if (channel_nccl_p2p_test(ctx, ticket, flag) /= 0_c_int) error stop "channel_nccl_p2p_test failed"
+    done = flag /= 0_c_int
+#else
+    done = .true.
+    error stop "NCCL/RCCL point-to-point backend requested, but this build has no support"
+#endif
+  end function channel_comm_p2p_test
+
+  subroutine channel_comm_p2p_wait(ctx, ticket)
+    type(c_ptr), intent(in), value :: ctx
+    integer(c_int), intent(in), value :: ticket
+#ifdef HAVE_NCCL
+    if (channel_nccl_p2p_wait(ctx, ticket) /= 0_c_int) error stop "channel_nccl_p2p_wait failed"
+#else
+    error stop "NCCL/RCCL point-to-point backend requested, but this build has no support"
+#endif
+  end subroutine channel_comm_p2p_wait
+
+  ! Connects ctx to the neighbours lo and hi (-1: none); collective over them.
+  ! recvptr must have room for two values.
+  subroutine channel_comm_p2p_connect(ctx, sendptr, recvptr, lo, hi)
+    type(c_ptr), intent(in), value :: ctx, sendptr, recvptr
+    integer(c_int), intent(in), value :: lo, hi
+#ifdef HAVE_NCCL
+    if (channel_nccl_p2p_connect(ctx, sendptr, recvptr, lo, hi) /= 0_c_int) error stop "channel_nccl_p2p_connect failed"
+#else
+    error stop "NCCL/RCCL point-to-point backend requested, but this build has no support"
+#endif
+  end subroutine channel_comm_p2p_connect
+
+  subroutine channel_comm_p2p_complete(ctx)
+    type(c_ptr), intent(in), value :: ctx
+#ifdef HAVE_NCCL
+    if (channel_nccl_p2p_complete(ctx) /= 0_c_int) error stop "channel_nccl_p2p_complete failed"
+#else
+    error stop "NCCL/RCCL point-to-point backend requested, but this build has no support"
+#endif
+  end subroutine channel_comm_p2p_complete
 end module y_pipeline_nccl
