@@ -140,6 +140,7 @@ add_library(channel_core
     # util/ -- no domain vocabulary, depends on nothing in the code
     ${CHANNEL_SOURCE_DIR}/util/env_options.f90
     ${CHANNEL_SOURCE_DIR}/util/roctx.f90
+    ${CHANNEL_SOURCE_DIR}/util/emu_round.f90
     # numerics/ -- grid, stencils and dense linear algebra
     ${CHANNEL_SOURCE_DIR}/numerics/channel_grid.f90
     ${CHANNEL_SOURCE_DIR}/numerics/stencil_coefficients.f90

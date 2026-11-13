@@ -180,6 +180,7 @@ module channel_equations
   use mpi_transpose
   use roctx, only: roctxPush, roctxPop
   use ffts
+  use emu_round
   implicit none
   ! VVdz products stashed y-fastest for the fused buildrhs (buildrhs_stash).
   complex(C_DOUBLE_COMPLEX), allocatable, target, save :: rhs_stash(:, :, :, :)
@@ -246,6 +247,7 @@ contains
       end do
     end do
     !$omp end target teams distribute parallel do
+    if (emu_matv) call emu_round_array(system_matrix)
 $:assemble_rhs_tiles()
   end subroutine assemble_compact_biharmonic_system
 
@@ -285,6 +287,7 @@ $:assemble_rhs_tiles()
       end do
     end do
     !$omp end target teams distribute parallel do
+    if (emu_math) call emu_round_array(system_matrix)
 $:assemble_rhs_tiles()
   end subroutine assemble_compact_helmholtz_system
 
@@ -733,6 +736,7 @@ $:rhs_scalar_case(3)
         END DO
       END DO
     END DO
+    if (emu_stash) call emu_round_array(rhs_stash(:, :, :, slot:slot))
   end subroutine buildrhs_stash
 
   ! All six velocity products' terms in one pass, and the end of the substep

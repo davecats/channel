@@ -273,6 +273,7 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
     USE case_setup
     USE channel_transforms, only: transform_to_physical, transform_back_and_build_rhs, compute_cfl
     USE convvelo, only: advance_convvelo_runtime
+    USE emu_round
     USE mpi_f08, only: MPI_Wtime
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
     USE ffts, only: acquire_fft_workspace, release_fft_workspace
@@ -286,6 +287,7 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
     elapsed_run_time = 0.0d0
 #endif
 
+    call emu_init(has_terminal)
     DO WHILE ((time < t_max - deltat/2.0) .AND. (istep < nstep))
 #ifdef chron
       timei = MPI_Wtime()
@@ -321,6 +323,7 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
         call roctxPush("transform_back_and_build_rhs")
         CALL transform_back_and_build_rhs(RK_rai(:, i))
         call roctxPop("transform_back_and_build_rhs")
+        if (emu_oldrhs) call emu_round_array(oldrhs)
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
         call release_fft_workspace("rk_fft")
 #endif
@@ -333,6 +336,8 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
         !depends on memrhs(:, :, :, 2+iPhi), updates V(:, :, :, 3+iPhi)
         CALL linsolve_scalars(RK_rai(1, i)/deltat)
         call roctxPop("linsolve_scalar")
+        if (emu_vel) call emu_round_array(V(:, :, :, 1:3))
+        if (emu_phi .and. nPhi > 0) call emu_round_array(V(:, :, :, 4:3 + nPhi))
         call roctxPop("rk_substep")
       end do
 
