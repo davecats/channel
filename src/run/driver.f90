@@ -312,7 +312,7 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
           call roctxPop("compute_cfl")
         END IF
 
-        !only depends on data from the previous substep, updates V(:, :, :, 1:2) and oldrhs(:, :, :, 1:2)
+        !only depends on data from the previous substep; builds memrhs(:, :, :, 1:2) from V and oldrhs
         !can be done in parallel to FFTs
         call roctxPush("buildrhs_prepare")
         CALL buildrhs_prepare(RK_rai(:, i))
@@ -325,15 +325,13 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
         call release_fft_workspace("rk_fft")
 #endif
 
-        !depends on V(:, :, :, 1:2), updates V(:, :, :, 1:3)
+        !depends on memrhs(:, :, :, 1:2), updates V(:, :, :, 1:3)
         call roctxPush("linsolve_velocity")
         CALL linsolve(RK_rai(1, i)/deltat)
         call roctxPop("linsolve_velocity")
         call roctxPush("linsolve_scalar")
-        do iPhi = 1, nPhi
-          !depends on (V(:, :, :, 3+iPhi), updates V(:, :, :, 3+iPhi)
-          CALL linsolve_scalar(RK_rai(1, i)/deltat, iPhi)
-        end do
+        !depends on memrhs(:, :, :, 2+iPhi), updates V(:, :, :, 3+iPhi)
+        CALL linsolve_scalars(RK_rai(1, i)/deltat)
         call roctxPop("linsolve_scalar")
         call roctxPop("rk_substep")
       end do

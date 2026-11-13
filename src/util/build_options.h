@@ -29,3 +29,16 @@
 
 ! Verbose echo of parallel parameters
 #define mpiverbose
+
+! Coefficient type of the wall-normal band matrices (the y-solver workspace).
+! Every one of them is real -- stencil weights, k^2, lambda, the wall closure
+! rows -- and only the right-hand sides and solutions are complex, so real
+! bands halve the solver's coefficient traffic.  cuSPARSE's gpsv takes complex
+! bands, so CUDA builds keep complex ones.
+#if defined(HAVE_CUDA)
+#define YS_COEF complex(C_DOUBLE_COMPLEX)
+#define YS_CZERO (0.0d0, 0.0d0)
+#else
+#define YS_COEF real(C_DOUBLE)
+#define YS_CZERO 0.0d0
+#endif

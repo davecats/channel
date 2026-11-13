@@ -72,11 +72,6 @@ module y_schur_solver
   integer(C_INT), allocatable, save :: s_level_nccl_key_npy(:), s_level_nccl_key_span(:)
   integer(C_INT), allocatable, save :: s_level_nccl_key_arity(:), s_level_nccl_key_parent(:)
 
-#if defined(HAVE_CUDA)
-  !$omp declare target(ys_schur_factor_banded_complex_fixed)
-  !$omp declare target(ys_schur_solve_factored_banded_complex_multi_fixed)
-#endif
-
 contains
 
   subroutine ys_schur_configure(cfg, pass_node_counts, comm_stats_enabled, exchange_mode)
@@ -909,6 +904,9 @@ contains
     complex(C_DOUBLE_COMPLEX), intent(inout) :: a(YS_SCHUR_MAX_ROWS, 2*YS_SCHUR_BW + 1)
     integer(C_INT) :: i, j, t, last
     complex(C_DOUBLE_COMPLEX) :: piv, factor
+    ! Device procedure: the directive sits in its own specification part, the one form
+    ! that CCE, amdflang and nvfortran all accept (a module-level list makes CCE warn).
+    !$omp declare target
 
     do i = 1, n
       piv = a(i, YS_SCHUR_BW + 1)
@@ -931,6 +929,9 @@ contains
     complex(C_DOUBLE_COMPLEX), intent(in) :: a(YS_SCHUR_MAX_ROWS, 2*YS_SCHUR_BW + 1)
     integer(C_INT) :: i, j, irhs
     complex(C_DOUBLE_COMPLEX) :: factor, piv
+    ! Device procedure: the directive sits in its own specification part, the one form
+    ! that CCE, amdflang and nvfortran all accept (a module-level list makes CCE warn).
+    !$omp declare target
 
     do i = 1, n
       do j = max(1_C_INT, i - YS_SCHUR_BW), i - 1

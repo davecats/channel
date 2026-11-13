@@ -558,7 +558,8 @@ CONTAINS
     integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner
 
     complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
-    complex(C_DOUBLE_COMPLEX), pointer :: system_matrix(:, :, :, :), system_rhs(:, :, :)
+    YS_COEF, pointer :: system_matrix(:, :, :, :)
+    complex(C_DOUBLE_COMPLEX), pointer :: system_rhs(:, :, :)
     integer(C_INT) :: row_start, row_end
 
     owner_src => ctx%src
@@ -595,7 +596,8 @@ CONTAINS
     integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner
 
     complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
-    complex(C_DOUBLE_COMPLEX), pointer :: system_matrix(:, :, :, :), system_rhs(:, :, :)
+    YS_COEF, pointer :: system_matrix(:, :, :, :)
+    complex(C_DOUBLE_COMPLEX), pointer :: system_rhs(:, :, :)
     integer(C_INT) :: row_start, row_end
 
     owner_src => ctx%src
