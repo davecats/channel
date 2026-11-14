@@ -1756,6 +1756,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     logical :: has_up, has_down, meeting, mirror, twisted
     type(yc_request), allocatable :: factor_send_req(:), backward_recv_req(:), backward_send_req(:)
     type(yc_request), allocatable :: halo_send_req(:), halo_recv_req(:)
+    type(yc_request), allocatable :: meet_send_req(:), meet_recv_req(:)
     type(yc_request) :: factor_recv_req
     integer :: ierr
     logical :: timing_enabled
@@ -1782,6 +1783,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     call yc_connect()
     allocate (factor_send_req(nbatches), backward_recv_req(nbatches), backward_send_req(nbatches))
     allocate (halo_send_req(nbatches), halo_recv_req(nbatches))
+    allocate (meet_send_req(nbatches), meet_recv_req(nbatches))
 
     ! The solution halo: the one on the `down` side is the backward message
     ! itself (that neighbour's two nearest values), stored by the backward
@@ -1837,20 +1839,22 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
 #:endcall
       if (meeting) then
         ! Swap reduced rows with the partner (into the receive slot the
-        ! forward kernel has finished reading) and solve the interface: the
-        ! result is this rank's backward seed, so no backward message.
-#:call timed_step('meet_exchange', 'T_FACTOR_WAIT')
-        call yc_sendrecv(YC_FACTOR, factor_offset, factor_count, down, TAG_FACTOR + batch)
-#:endcall
-        call ys_pipeline_meet(line_count, factor_offset, backward_offset, mirror)
+        ! forward kernel has finished reading).  The interface solve of this
+        ! batch waits until the next batch's forward kernel has run, so the
+        ! swap (across a node boundary from npy = 8 on) overlaps it.
+        call yc_isendrecv(YC_FACTOR, factor_offset, factor_count, down, TAG_FACTOR + batch, &
+                          meet_send_req(batch), meet_recv_req(batch))
       else if (has_down) then
 #:call timed_comm_post(label='isend factor_state')
         call yc_isend(YC_FACTOR, factor_offset, factor_count, down, TAG_FACTOR + batch, factor_send_req(batch))
 #:endcall
       end if
       if (has_up .and. batch < nbatches) call post_factor_recv(batch + 1_C_INT)
+      ! Meeting ranks: the previous batch's interface solve, its swap having
+      ! travelled while this batch's forward kernel ran.
+      if (meeting .and. batch > 1_C_INT) call finish_meet(batch - 1_C_INT)
       call roctxPush("ys_pipeline drain_backward_nonblocking")
-      call drain_backward_batches(batch, .false.)
+      call drain_backward_batches(merge(batch - 1_C_INT, batch, meeting), .false.)
       call roctxPop("ys_pipeline drain_backward_nonblocking")
       ! NCCL: whatever this batch queued (sends with no receive of their own
       ! lane behind them, e.g. on the first and last rank) leaves now.
@@ -1858,6 +1862,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       call roctxPop("ys_pipeline forward_batch")
     end do
     call roctxPop("ys_pipeline forward_sweep")
+    if (meeting) call finish_meet(nbatches)
     call roctxPush("ys_pipeline drain_backward_blocking")
     call drain_backward_batches(nbatches, .true.)
     call roctxPop("ys_pipeline drain_backward_blocking")
@@ -1890,6 +1895,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     end if
 
     deallocate (factor_send_req, backward_recv_req, backward_send_req, halo_send_req, halo_recv_req)
+    deallocate (meet_send_req, meet_recv_req)
 
   contains
     ! Posts the factor-state receive of batch b from `up` (eagerly: on NCCL it
@@ -1903,6 +1909,19 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       call yc_irecv(YC_FACTOR, fo, fc, up, TAG_FACTOR + b, factor_recv_req, eager=.true.)
 #:endcall
     end subroutine post_factor_recv
+    ! Meeting ranks: waits for batch b's swap of reduced rows with the partner
+    ! and solves the interface; the result is this rank's backward seed, so
+    ! there is no backward message.
+    subroutine finish_meet(b)
+      integer(C_INT), intent(in) :: b
+      integer(C_INT) :: fl, lc, fc, sc, fo, wo, bo
+      call ys_pipeline_batch_slice(b, nbatches, nlines, batch_max_lines, fl, lc, fc, sc, fo, wo, bo)
+#:call timed_step('meet_exchange', 'T_FACTOR_WAIT')
+      call yc_wait(meet_recv_req(b))
+      call yc_wait(meet_send_req(b))
+#:endcall
+      call ys_pipeline_meet(lc, fo, bo, mirror)
+    end subroutine finish_meet
 
     ! Timed regions never nest here, so one start stamp is enough.
     subroutine tic()
@@ -2138,6 +2157,26 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     end if
     !$omp end target data
   end subroutine yc_sendrecv
+
+  ! Starts a swap of `count` values with `peer` (from ycomm_sendbuf into
+  ! ycomm_recvbuf at the same offset); completed by yc_wait on both requests.
+  ! NCCL: the swap happens here, as yc_sendrecv, and both requests come back
+  ! complete -- a lane is one ordered stream, and a receive posted ahead of
+  ! the queued send could hold that send back.
+  subroutine yc_isendrecv(lane, offset, count, peer, tag, sreq, rreq)
+    integer(C_INT), intent(in) :: lane, offset, count, peer, tag
+    type(yc_request), intent(inout) :: sreq, rreq
+    integer :: ierr
+    if (yc_nccl) then
+      call yc_sendrecv(lane, offset, count, peer, tag)
+      sreq = yc_request(); rreq = yc_request()
+      return
+    end if
+    !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
+    call MPI_Irecv(ycomm_recvbuf(offset + 1), count, MPI_DOUBLE_COMPLEX, peer, tag, MPI_COMM_Y, rreq%mpi, ierr)
+    call MPI_Isend(ycomm_sendbuf(offset + 1), count, MPI_DOUBLE_COMPLEX, peer, tag, MPI_COMM_Y, sreq%mpi, ierr)
+    !$omp end target data
+  end subroutine yc_isendrecv
 
   ! NCCL: sends the queued messages of every lane.  MPI: nothing to do.
   subroutine yc_flush()
