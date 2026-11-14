@@ -2275,6 +2275,9 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
 #:set ROWN1 = '0_C_INT' if mir else '(active_n - 1_C_INT)'
 #:set ROW0 = '(active_n - 1_C_INT)' if mir else '0_C_INT'
 #:set ROW1 = '(active_n - 2_C_INT)' if mir else '1_C_INT'
+#! the row after i in the forward sweep, and the row before i in the backward one
+#:set ROWNX = '(active_n - 2_C_INT - i)' if mir else '(i + 1_C_INT)'
+#:set ROWPV = '(active_n - i)' if mir else '(i - 1_C_INT)'
   ! Forward stage, fused: factor and eliminate in one sweep, seeded by the two
   ! reduced rows from `up` (offset in the receive buffer); this rank's last two
   ! go to the same offset in the send buffer.
@@ -2289,6 +2292,8 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     integer(C_INT64_T) :: p2
     ! matrix-free rows (ys_mf_register): physical row ph = ${ROW}$
     integer(C_INT) :: iz, ix, iy, ph, col, slot, kind, nzw, nzl, ix0, row0, nxb_l
+    integer(C_INT64_T) :: pn
+    complex(C_DOUBLE_COMPLEX) :: rn
     integer(C_INT) :: kinds(YS_MF_MAXSYS)
     real(C_DOUBLE) :: lams(YS_MF_MAXSYS), difs(YS_MF_MAXSYS), lam, dif
     logical :: lower_wall, upper_wall, stored
@@ -2300,7 +2305,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     !$omp shared(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, ycomm_recvbuf, ycomm_sendbuf) &
     !$omp shared(stride, first_line, line_count, active_n, has_left, has_right, offset) &
     !$omp shared(der, k2, ni, kinds, lams, difs, nzw, nzl, ix0, row0, nxb_l, lower_wall, upper_wall) &
-    !$omp private(iz, ix, iy, ph, col, slot, kind, lam, dif, stored) &
+    !$omp private(iz, ix, iy, ph, col, slot, kind, lam, dif, stored, pn, rn) &
     !$omp private(local_line, iline, i, p, p2, q, a, b, c, e, f, r, inv, u1, u2, y, u1m2, u2m2, ym2, u1m1, u2m1, ym1)
     do local_line = 1_C_INT, line_count
       iline = first_line + local_line - 1_C_INT
@@ -2361,8 +2366,16 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
         u1m2 = YS_CZERO; u2m2 = YS_CZERO; ym2 = (0.0d0, 0.0d0)
         u1m1 = YS_CZERO; u2m1 = YS_CZERO; ym1 = (0.0d0, 0.0d0)
       end if
+      ! The rhs of the next row is loaded one row ahead: the stores of this row
+      ! (to the same arrays) would otherwise keep the compiler from issuing it early.
+      pn = int(iline, C_INT64_T) + int(${ROW0}$, C_INT64_T)*int(stride, C_INT64_T)
+      rn = ys_gpsv_x(pn)
       do i = 0, active_n - 1
-        p = int(iline, C_INT64_T) + int(${ROW}$, C_INT64_T)*int(stride, C_INT64_T)
+        p = pn; r = rn
+        if (i < active_n - 1) then
+          pn = int(iline, C_INT64_T) + int(${ROWNX}$, C_INT64_T)*int(stride, C_INT64_T)
+          rn = ys_gpsv_x(pn)
+        end if
         ph = ${ROW}$
         stored = kind == YS_MF_OFF .or. (lower_wall .and. ph < 2) .or. (upper_wall .and. ph > active_n - 3)
         if (stored) then
@@ -2376,13 +2389,21 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
           ! without one are wall rows, always stored)
           iy = row0 + ph
 #:set JJ = ['2', '1', '0', '-1', '-2'] if mir else ['-2', '-1', '0', '1', '2']
-          a = ${mf_band('kind', 'lam', 'dif', 'iy', JJ[0])}$
-          b = ${mf_band('kind', 'lam', 'dif', 'iy', JJ[1])}$
-          c = ${mf_band('kind', 'lam', 'dif', 'iy', JJ[2])}$
-          e = ${mf_band('kind', 'lam', 'dif', 'iy', JJ[3])}$
-          f = ${mf_band('kind', 'lam', 'dif', 'iy', JJ[4])}$
+          ! same expressions as mf_band, one operator evaluated
+          if (kind == YS_MF_BIHARMONIC) then
+            a = lam*${helmholtz_op('iy', JJ[0])}$ - ni*${biharmonic_op('iy', JJ[0])}$
+            b = lam*${helmholtz_op('iy', JJ[1])}$ - ni*${biharmonic_op('iy', JJ[1])}$
+            c = lam*${helmholtz_op('iy', JJ[2])}$ - ni*${biharmonic_op('iy', JJ[2])}$
+            e = lam*${helmholtz_op('iy', JJ[3])}$ - ni*${biharmonic_op('iy', JJ[3])}$
+            f = lam*${helmholtz_op('iy', JJ[4])}$ - ni*${biharmonic_op('iy', JJ[4])}$
+          else
+            a = lam*der(iy, 0, ${JJ[0]}$) - dif*ni*${helmholtz_op('iy', JJ[0])}$
+            b = lam*der(iy, 0, ${JJ[1]}$) - dif*ni*${helmholtz_op('iy', JJ[1])}$
+            c = lam*der(iy, 0, ${JJ[2]}$) - dif*ni*${helmholtz_op('iy', JJ[2])}$
+            e = lam*der(iy, 0, ${JJ[3]}$) - dif*ni*${helmholtz_op('iy', JJ[3])}$
+            f = lam*der(iy, 0, ${JJ[4]}$) - dif*ni*${helmholtz_op('iy', JJ[4])}$
+          end if
         end if
-        r = ys_gpsv_x(p)
         b = b - a*u1m2; c = c - a*u2m2; r = r - a*ym2
         c = c - b*u1m1; e = e - b*u2m1; r = r - b*ym1
         inv = 1.0d0/c
@@ -2413,8 +2434,9 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     integer(C_INT), optional, intent(in) :: halo_offset
     logical, optional, intent(in) :: pack_halo
     integer(C_INT) :: local_line, iline, stride, i, halo_base
-    integer(C_INT64_T) :: p, q
-    complex(C_DOUBLE_COMPLEX) :: y, xn1, xn2
+    integer(C_INT64_T) :: p, q, pn
+    complex(C_DOUBLE_COMPLEX) :: y, xn1, xn2, xc, xp
+    YS_COEF :: ec, fc, ep, fp
     logical :: do_halo, do_pack
     stride = ys_workspace_nlines
     do_halo = present(halo_offset)
@@ -2426,7 +2448,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     !$omp shared(${EE}$, ${FF}$, ys_gpsv_x, ycomm_recvbuf, ycomm_sendbuf, ys_right_interface_values, ys_left_interface_values) &
     !$omp shared(stride, first_line, line_count, active_n, has_left, has_right, recv_offset, send_offset) &
     !$omp shared(do_halo, do_pack, halo_base) &
-    !$omp private(local_line, iline, i, p, q, y, xn1, xn2)
+    !$omp private(local_line, iline, i, p, q, y, xn1, xn2, pn, xc, xp, ec, fc, ep, fp)
     do local_line = 1_C_INT, line_count
       iline = first_line + local_line - 1_C_INT
       if (has_right) then
@@ -2481,9 +2503,16 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       end if
     end do
 #else
+      ! the next row's x, u1, u2 are loaded one row ahead (see the forward sweep)
+      pn = int(iline, C_INT64_T) + int(${ROWN1}$, C_INT64_T)*int(stride, C_INT64_T)
+      xp = ys_gpsv_x(pn); ep = ${EE}$(pn); fp = ${FF}$(pn)
       do i = active_n - 1, 0, -1
-        p = int(iline, C_INT64_T) + int(${ROW}$, C_INT64_T)*int(stride, C_INT64_T)
-        y = ys_gpsv_x(p) - ${EE}$(p)*xn1 - ${FF}$(p)*xn2
+        p = pn; xc = xp; ec = ep; fc = fp
+        if (i > 0) then
+          pn = int(iline, C_INT64_T) + int(${ROWPV}$, C_INT64_T)*int(stride, C_INT64_T)
+          xp = ys_gpsv_x(pn); ep = ${EE}$(pn); fp = ${FF}$(pn)
+        end if
+        y = xc - ec*xn1 - fc*xn2
         ys_gpsv_x(p) = y
         if (do_pack .and. i >= active_n - 2) then
           q = int(halo_base + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
