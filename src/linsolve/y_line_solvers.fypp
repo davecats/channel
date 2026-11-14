@@ -264,8 +264,12 @@ module y_line_solvers
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_EVEN_Z = 2_C_INT
 
   ! How many complex values each pipelined-LU line contributes to a message:
-  ! six for the factor state of a batch, two for a solve state (forward or
-  ! backward).  Each number is read from two sides: ys_ensure_pipeline_buffers
+  ! four for the factor state of a batch, two for a solve state (forward or
+  ! backward).  The factor state of a row is (u1, u2, y); u1 and u2 are band
+  ! coefficients with real values (YS_COEF is a complex type on CUDA, but its
+  ! values are real there too), so one complex value carries both and the
+  ! state of the two rows is (u1 + i u2, y) twice.
+  ! Each number is read from two sides: ys_ensure_pipeline_buffers
   ! and ys_pipeline_batch_slice use it for the message counts and the per-batch
   ! strides, and the pack and continuation kernels below use it as the per-line
   ! stride they step q by.  A side that drifted would read a line's state from
@@ -275,7 +279,7 @@ module y_line_solvers
   ! The solution *halo* exchange also carries two values per line, but that is
   ! a pair of adjacent rows rather than a batch's solve state; it is unrelated
   ! to these and keeps its own count.
-  integer(C_INT), parameter :: YS_PIPELINE_FACTOR_ELEMS = 6_C_INT
+  integer(C_INT), parameter :: YS_PIPELINE_FACTOR_ELEMS = 4_C_INT
   integer(C_INT), parameter :: YS_PIPELINE_SOLVE_ELEMS = 2_C_INT
 
   public :: ys_prepare_assembled_workspace, ys_release_workspace, ys_get_workspace_bytes, ys_stack_width
@@ -2331,19 +2335,19 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
           b = b - a*${EE}$(p2); c = c - a*${FF}$(p2); r = r - a*ys_gpsv_x(p2)
         else if (has_left) then
           if (i == 0) then
-            b = b - a*ycomm_recvbuf(q + 1_C_INT64_T); c = c - a*ycomm_recvbuf(q + 2_C_INT64_T)
-            r = r - a*ycomm_recvbuf(q + 3_C_INT64_T)
+            b = b - a*real(ycomm_recvbuf(q + 1_C_INT64_T), C_DOUBLE); c = c - a*aimag(ycomm_recvbuf(q + 1_C_INT64_T))
+            r = r - a*ycomm_recvbuf(q + 2_C_INT64_T)
           else
-            b = b - a*ycomm_recvbuf(q + 4_C_INT64_T); c = c - a*ycomm_recvbuf(q + 5_C_INT64_T)
-            r = r - a*ycomm_recvbuf(q + 6_C_INT64_T)
+            b = b - a*real(ycomm_recvbuf(q + 3_C_INT64_T), C_DOUBLE); c = c - a*aimag(ycomm_recvbuf(q + 3_C_INT64_T))
+            r = r - a*ycomm_recvbuf(q + 4_C_INT64_T)
           end if
         end if
         if (i >= 1) then
           p2 = p ${PREV}$ int(stride, C_INT64_T)
           c = c - b*${EE}$(p2); e = e - b*${FF}$(p2); r = r - b*ys_gpsv_x(p2)
         else if (has_left) then
-          c = c - b*ycomm_recvbuf(q + 4_C_INT64_T); e = e - b*ycomm_recvbuf(q + 5_C_INT64_T)
-          r = r - b*ycomm_recvbuf(q + 6_C_INT64_T)
+          c = c - b*real(ycomm_recvbuf(q + 3_C_INT64_T), C_DOUBLE); e = e - b*aimag(ycomm_recvbuf(q + 3_C_INT64_T))
+          r = r - b*ycomm_recvbuf(q + 4_C_INT64_T)
         end if
         inv = 1.0d0/c
         ${EE}$(p) = e*inv; ${FF}$(p) = f*inv; ys_gpsv_x(p) = r*inv
@@ -2352,16 +2356,18 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
         ! the last two rows in sweep order, nearest-but-one first
         p2 = int(iline, C_INT64_T) + int(${ROWN2}$, C_INT64_T)*int(stride, C_INT64_T)
         p = int(iline, C_INT64_T) + int(${ROWN1}$, C_INT64_T)*int(stride, C_INT64_T)
-        ycomm_sendbuf(q + 1_C_INT64_T) = ${EE}$(p2); ycomm_sendbuf(q + 2_C_INT64_T) = ${FF}$(p2)
-        ycomm_sendbuf(q + 3_C_INT64_T) = ys_gpsv_x(p2)
-        ycomm_sendbuf(q + 4_C_INT64_T) = ${EE}$(p); ycomm_sendbuf(q + 5_C_INT64_T) = ${FF}$(p)
-        ycomm_sendbuf(q + 6_C_INT64_T) = ys_gpsv_x(p)
+        ycomm_sendbuf(q + 1_C_INT64_T) = cmplx(real(${EE}$(p2), C_DOUBLE), real(${FF}$(p2), C_DOUBLE), C_DOUBLE_COMPLEX)
+        ycomm_sendbuf(q + 2_C_INT64_T) = ys_gpsv_x(p2)
+        ycomm_sendbuf(q + 3_C_INT64_T) = cmplx(real(${EE}$(p), C_DOUBLE), real(${FF}$(p), C_DOUBLE), C_DOUBLE_COMPLEX)
+        ycomm_sendbuf(q + 4_C_INT64_T) = ys_gpsv_x(p)
       end if
     end do
 #else
       if (has_left) then
-        u1m2 = ycomm_recvbuf(q + 1_C_INT64_T); u2m2 = ycomm_recvbuf(q + 2_C_INT64_T); ym2 = ycomm_recvbuf(q + 3_C_INT64_T)
-        u1m1 = ycomm_recvbuf(q + 4_C_INT64_T); u2m1 = ycomm_recvbuf(q + 5_C_INT64_T); ym1 = ycomm_recvbuf(q + 6_C_INT64_T)
+        u1m2 = real(ycomm_recvbuf(q + 1_C_INT64_T), C_DOUBLE); u2m2 = aimag(ycomm_recvbuf(q + 1_C_INT64_T))
+        ym2 = ycomm_recvbuf(q + 2_C_INT64_T)
+        u1m1 = real(ycomm_recvbuf(q + 3_C_INT64_T), C_DOUBLE); u2m1 = aimag(ycomm_recvbuf(q + 3_C_INT64_T))
+        ym1 = ycomm_recvbuf(q + 4_C_INT64_T)
       else
         u1m2 = YS_CZERO; u2m2 = YS_CZERO; ym2 = (0.0d0, 0.0d0)
         u1m1 = YS_CZERO; u2m1 = YS_CZERO; ym1 = (0.0d0, 0.0d0)
@@ -2413,8 +2419,10 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
         u1m1 = u1; u2m1 = u2; ym1 = y
       end do
       if (has_right) then
-        ycomm_sendbuf(q + 1_C_INT64_T) = u1m2; ycomm_sendbuf(q + 2_C_INT64_T) = u2m2; ycomm_sendbuf(q + 3_C_INT64_T) = ym2
-        ycomm_sendbuf(q + 4_C_INT64_T) = u1m1; ycomm_sendbuf(q + 5_C_INT64_T) = u2m1; ycomm_sendbuf(q + 6_C_INT64_T) = ym1
+        ycomm_sendbuf(q + 1_C_INT64_T) = cmplx(real(u1m2, C_DOUBLE), real(u2m2, C_DOUBLE), C_DOUBLE_COMPLEX)
+        ycomm_sendbuf(q + 2_C_INT64_T) = ym2
+        ycomm_sendbuf(q + 3_C_INT64_T) = cmplx(real(u1m1, C_DOUBLE), real(u2m1, C_DOUBLE), C_DOUBLE_COMPLEX)
+        ycomm_sendbuf(q + 4_C_INT64_T) = ym1
       end if
     end do
 #endif
@@ -2574,8 +2582,9 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     logical, intent(in) :: mirror
     integer(C_INT) :: local_line
     integer(C_INT64_T) :: qt, qb, qs
-    complex(C_DOUBLE_COMPLEX) :: u1a, u2a, ya, u1b, u2b, yb, l1c, l2c, zc, l1d, l2d, zd
-    complex(C_DOUBLE_COMPLEX) :: b0, b1, b2, g0, g1, g2, va, vb, vc, vd
+    ! band coefficients (u, l) and their combinations (b1, b2, g1, g2) are real
+    real(C_DOUBLE) :: u1a, u2a, u1b, u2b, l1c, l2c, l1d, l2d, b1, b2, g1, g2
+    complex(C_DOUBLE_COMPLEX) :: ya, yb, zc, zd, b0, g0, va, vb, vc, vd
 
     !$omp target teams distribute parallel do default(none) &
     !$omp shared(ycomm_sendbuf, ycomm_recvbuf, line_count, factor_offset, seed_offset, mirror) &
@@ -2584,17 +2593,18 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     do local_line = 1_C_INT, line_count
       qt = int(factor_offset + YS_PIPELINE_FACTOR_ELEMS*(local_line - 1_C_INT), C_INT64_T)
       qs = int(seed_offset + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
+      ! (u1 + i u2, y) per row, see YS_PIPELINE_FACTOR_ELEMS
       if (mirror) then
-        u1a = ycomm_recvbuf(qt + 1); u2a = ycomm_recvbuf(qt + 2); ya = ycomm_recvbuf(qt + 3)
-        u1b = ycomm_recvbuf(qt + 4); u2b = ycomm_recvbuf(qt + 5); yb = ycomm_recvbuf(qt + 6)
+        u1a = real(ycomm_recvbuf(qt + 1), C_DOUBLE); u2a = aimag(ycomm_recvbuf(qt + 1)); ya = ycomm_recvbuf(qt + 2)
+        u1b = real(ycomm_recvbuf(qt + 3), C_DOUBLE); u2b = aimag(ycomm_recvbuf(qt + 3)); yb = ycomm_recvbuf(qt + 4)
         ! own reduced rows, in sweep order: row 1 (D) then row 0 (C)
-        l1d = ycomm_sendbuf(qt + 1); l2d = ycomm_sendbuf(qt + 2); zd = ycomm_sendbuf(qt + 3)
-        l1c = ycomm_sendbuf(qt + 4); l2c = ycomm_sendbuf(qt + 5); zc = ycomm_sendbuf(qt + 6)
+        l1d = real(ycomm_sendbuf(qt + 1), C_DOUBLE); l2d = aimag(ycomm_sendbuf(qt + 1)); zd = ycomm_sendbuf(qt + 2)
+        l1c = real(ycomm_sendbuf(qt + 3), C_DOUBLE); l2c = aimag(ycomm_sendbuf(qt + 3)); zc = ycomm_sendbuf(qt + 4)
       else
-        u1a = ycomm_sendbuf(qt + 1); u2a = ycomm_sendbuf(qt + 2); ya = ycomm_sendbuf(qt + 3)
-        u1b = ycomm_sendbuf(qt + 4); u2b = ycomm_sendbuf(qt + 5); yb = ycomm_sendbuf(qt + 6)
-        l1d = ycomm_recvbuf(qt + 1); l2d = ycomm_recvbuf(qt + 2); zd = ycomm_recvbuf(qt + 3)
-        l1c = ycomm_recvbuf(qt + 4); l2c = ycomm_recvbuf(qt + 5); zc = ycomm_recvbuf(qt + 6)
+        u1a = real(ycomm_sendbuf(qt + 1), C_DOUBLE); u2a = aimag(ycomm_sendbuf(qt + 1)); ya = ycomm_sendbuf(qt + 2)
+        u1b = real(ycomm_sendbuf(qt + 3), C_DOUBLE); u2b = aimag(ycomm_sendbuf(qt + 3)); yb = ycomm_sendbuf(qt + 4)
+        l1d = real(ycomm_recvbuf(qt + 1), C_DOUBLE); l2d = aimag(ycomm_recvbuf(qt + 1)); zd = ycomm_recvbuf(qt + 2)
+        l1c = real(ycomm_recvbuf(qt + 3), C_DOUBLE); l2c = aimag(ycomm_recvbuf(qt + 3)); zc = ycomm_recvbuf(qt + 4)
       end if
       ! B = (b0 - b1 C)/b2 from the two outer equations; C from the inner ones.
       b2 = 1.0d0 - u2b*l2d; b0 = yb - u2b*zd; b1 = u1b - u2b*l1d
