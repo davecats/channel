@@ -224,9 +224,11 @@ module channel_equations
   ! nothing, the fused buildrhs kernels only write newrhs, and the solves'
   ! assembly computes  rhs = (linear part of V - ODE(3)*oldrhs) + ODE(2)*newrhs
   ! itself (assemble_rhs_fused), with the coefficients of the substep kept here.
-  ! memrhs is then only the address the systems' sources point into, from which
-  ! the assembly tells the component; it is neither written nor read.
+  ! memrhs is not allocated then.  linsolve lists the components of the systems
+  ! it solves (fused_rhs_order) and each assembly callback takes the next one;
+  ! the systems' sources point at a V column the fused assembly never reads.
   real(C_DOUBLE), save :: rk_c1 = 0.0d0, rk_o2 = 0.0d0, rk_o3 = 0.0d0
+  integer(C_INT), save :: fused_rhs_list(64), fused_rhs_n = 0, fused_rhs_pos = 0
 contains
 
   !--------------------------------------------------------------!
@@ -250,20 +252,27 @@ contains
     END DO
   END FUNCTION yintegr
 
-  ! Which component of memrhs a system's source points at (fused right-hand
-  ! side), 0 if it is not one of them.
-  integer(C_INT) function fused_rhs_component(src)
-    complex(C_DOUBLE_COMPLEX), pointer, intent(in) :: src(:, :, :)
-    integer(C_INTPTR_T) :: a0, a, stride
-    fused_rhs_component = 0
-    if (.not. rhs_fuse .or. .not. associated(newrhs) .or. .not. associated(memrhs)) return
-    a0 = transfer(c_loc(memrhs(lbound(memrhs, 1), lbound(memrhs, 2), lbound(memrhs, 3), 1)), a0)
-    a = transfer(c_loc(src(lbound(src, 1), lbound(src, 2), lbound(src, 3))), a)
-    stride = int(size(memrhs, 1), C_INTPTR_T)*size(memrhs, 2)*size(memrhs, 3)*int(storage_size(memrhs)/8, C_INTPTR_T)
-    if (a < a0 .or. modulo(a - a0, stride) /= 0) return
-    if ((a - a0)/stride >= size(memrhs, 4)) return
-    fused_rhs_component = int((a - a0)/stride, C_INT) + 1
-  end function fused_rhs_component
+  ! Fused right-hand side: the components (1 eta, 2 v, 2+iPhi phi) of the
+  ! systems linsolve is about to solve, in the order they are assembled.
+  subroutine fused_rhs_order(components)
+    integer(C_INT), intent(in) :: components(:)
+    fused_rhs_n = 0; fused_rhs_pos = 0
+    if (.not. rhs_fuse) return
+    fused_rhs_n = size(components, kind=C_INT)
+    fused_rhs_list(1:fused_rhs_n) = components
+  end subroutine fused_rhs_order
+
+  ! The component of the system an assembly callback is assembling, 0 when it
+  ! is not one of a listed solve (then the source is copied as before).
+  integer(C_INT) function fused_rhs_next()
+    fused_rhs_next = 0
+    if (fused_rhs_pos >= fused_rhs_n) return
+    fused_rhs_pos = fused_rhs_pos + 1
+    fused_rhs_next = fused_rhs_list(fused_rhs_pos)
+    if (fused_rhs_pos == fused_rhs_n) then
+      fused_rhs_n = 0; fused_rhs_pos = 0
+    end if
+  end function fused_rhs_next
 
   subroutine assemble_compact_biharmonic_system(ctx)
     implicit none
@@ -318,7 +327,7 @@ contains
     end do
     !$omp end target teams distribute parallel do
     if (emu_matv) call emu_round_array(system_matrix)
-    kcomp = fused_rhs_component(ctx%src)
+    kcomp = fused_rhs_next()
     c1 = rk_c1; o2 = rk_o2; o3 = rk_o3; iPhi = 0
     if (kcomp == 2) then
 $:assemble_rhs_fused('v')
@@ -377,7 +386,7 @@ $:assemble_rhs_tiles()
     end do
     !$omp end target teams distribute parallel do
     if (emu_math) call emu_round_array(system_matrix)
-    kcomp = fused_rhs_component(ctx%src)
+    kcomp = fused_rhs_next()
     c1 = rk_c1; o2 = rk_o2; o3 = rk_o3; iPhi = max(0_C_INT, kcomp - 2_C_INT)
     if (kcomp == 1) then
 $:assemble_rhs_fused('eta')
@@ -425,17 +434,28 @@ $:assemble_rhs_tiles()
     systems(1)%ctx = compact_component_boundaries(v0bc, v0m1bc, vnbc, vnp1bc, &
                                                   bc0(:, :, 2), bc0(:, :, 4), bcn(:, :, 2), bcn(:, :, 4))
     systems(1)%field => V(:, :, :, 2)
-    systems(1)%source => memrhs(:, :, :, 2)
+    ! fused right-hand side: the assembly computes it; the source is a V column
+    ! it does not read (and not the system's own field)
+    if (rhs_fuse) then
+      systems(1)%source => V(:, :, :, 1)
+    else
+      systems(1)%source => memrhs(:, :, :, 2)
+    end if
     systems(1)%assemble => assemble_compact_biharmonic_system
     systems(2)%ctx = compact_component_boundaries(eta0bc, eta0m1bc, etanbc, etanp1bc, &
                                                   bc0(:, :, 5), zero_bc, bcn(:, :, 5), zero_bc)
     systems(2)%field => V(:, :, :, 1)
-    systems(2)%source => memrhs(:, :, :, 1)
+    if (rhs_fuse) then
+      systems(2)%source => V(:, :, :, 2)
+    else
+      systems(2)%source => memrhs(:, :, :, 1)
+    end if
     systems(2)%assemble => assemble_compact_helmholtz_system
     systems(:)%ctx%lambda = lambda
     systems(:)%ctx%diffusion = 1.0d0
     systems(1)%boundary => assemble_selected_compact_component_boundaries
     systems(2)%boundary => assemble_selected_compact_component_boundaries
+    call fused_rhs_order([2_C_INT, 1_C_INT])
     call solve_wall_normal_systems(systems)
     call roctxPop("linsolve solve_v_eta")
     call roctxPush("linsolve d_v_dy")
@@ -503,6 +523,7 @@ $:assemble_rhs_tiles()
     type(wall_normal_system) :: systems(1)
 
     call scalar_system(systems(1), lambda, iPhi)
+    call fused_rhs_order([2_C_INT + iPhi])
     call solve_wall_normal_systems(systems)
     call correct_scalar_mean(lambda, iPhi)
   END SUBROUTINE linsolve_scalar
@@ -519,6 +540,7 @@ $:assemble_rhs_tiles()
     do iPhi = 1, nPhi
       call scalar_system(systems(iPhi), lambda, iPhi)
     end do
+    call fused_rhs_order([(2_C_INT + iPhi, iPhi = 1, nPhi)])
     call solve_wall_normal_systems(systems)
     do iPhi = 1, nPhi
       call correct_scalar_mean(lambda, iPhi)
@@ -536,7 +558,11 @@ $:assemble_rhs_tiles()
     sys%ctx%lambda = lambda
     sys%ctx%diffusion = pra(iPhi)
     sys%field => V(:, :, :, 3 + iPhi)
-    sys%source => memrhs(:, :, :, 2 + iPhi)
+    if (rhs_fuse) then
+      sys%source => V(:, :, :, 1)
+    else
+      sys%source => memrhs(:, :, :, 2 + iPhi)
+    end if
     sys%assemble => assemble_compact_helmholtz_system
     sys%boundary => assemble_selected_compact_component_boundaries
   end subroutine scalar_system
@@ -789,9 +815,12 @@ $:rhs_scalar_case(3)
     t => oldrhs; oldrhs => newrhs; newrhs => t
   end subroutine rhs_swap
 
+  ! Called from init_memory (before the FFT workspace exists, hence the overlap
+  ! setting rather than fft_nflds, which is 1 exactly when not overlapping).
   subroutine buildrhs_decide_fusion()
     use env_options, only: env_flag
-    rhs_fuse = fft_transpose_is_local .or. fft_nflds == 1
+    if (rhs_fuse_decided) return
+    rhs_fuse = fft_transpose_is_local .or. .not. overlapping
     call env_flag("CHANNEL_BUILDRHS_FUSED", rhs_fuse)
     if (rhs_fuse) then
       allocate (rhs_stash(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 6))

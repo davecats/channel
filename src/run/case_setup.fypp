@@ -183,12 +183,18 @@ CONTAINS
     zero_bc = 0.0
     !$omp target enter data map(to: bc0, bcn, zero_bc)
     IF (solveNS) then
-      ALLOCATE (memrhs(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:2 + nPhi), &
-                rhs_store_a(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:2 + nPhi))
-      memrhs = 0.0
+      ALLOCATE (rhs_store_a(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:2 + nPhi))
       rhs_store_a = 0.0
-      !$omp target enter data map(to: memrhs, rhs_store_a)
+      !$omp target enter data map(to: rhs_store_a)
       oldrhs => rhs_store_a
+      ! The fused buildrhs keeps a second buffer of explicit terms instead of
+      ! memrhs (buildrhs_decide_fusion allocates it).
+      call buildrhs_decide_fusion()
+      if (.not. rhs_fuse) then
+        ALLOCATE (memrhs(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:2 + nPhi))
+        memrhs = 0.0
+        !$omp target enter data map(to: memrhs)
+      end if
     END IF
     ALLOCATE (der(1:ny - 1, 0:3, -2:2)); der = 0.0
     ! One wall row set per scalar; setup_boundary_conditions fills them.
