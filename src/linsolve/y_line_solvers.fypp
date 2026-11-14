@@ -1,4 +1,5 @@
 #include "build_options.h"
+#:include "channel_operators.fypph"
 
 #! ===================================================================
 #! The interleaved pentadiagonal batch solve, expanded once per array
@@ -210,7 +211,9 @@ ${body.rstrip()}$
 module y_line_solvers
 
   use, intrinsic :: iso_c_binding
-  use channel_grid, only: ny0, nyN, nx0, nxN, nxB, npy_grid, ipy, iproc
+  use channel_grid, only: ny0, nyN, nx0, nxN, nxB, npy_grid, ipy, iproc, k2
+  use stencil_coefficients, only: der
+  use channel_state, only: ni
   ! ycomm_* and ensure_ycomm_buffers exist in every build; only MPI_COMM_Y is
   ! MPI-specific.  This use must stay outside the #ifdef below: with it inside,
   ! nvfortran rejects ycomm_sendbuf/ycomm_recvbuf in the shared() clauses of the
@@ -281,6 +284,7 @@ module y_line_solvers
   public :: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, ys_owner_nz, ys_owner_nx, ys_owner_ix0, ys_owner_ixN
   public :: ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x
   public :: ys_solve_packed_pentadiagonal, ys_solve_endpoint_schur, ys_solve_pipelined_lu
+  public :: ys_matrix_free_ok
   public :: ys_solve_pipelined_lu_lines, ys_unpack_pipelined_columns
   public :: ys_finalize_nccl_contexts
 
@@ -296,6 +300,15 @@ module y_line_solvers
   integer(C_INT), save :: ys_owner_nz = 0
   integer(C_INT), save :: ys_owner_nx = 0
   integer(C_INT), save :: ys_owner_ix0 = 1
+  ! Matrix-free interior rows (one rank).  When the assembly callback sets
+  ! ys_mf_kind (see ys_matrix_free_ok), it writes only the two rows next to each
+  ! wall -- the ones eliminate_assembled_boundaries rewrites -- and the solve
+  ! computes every other row's bands from the operator itself, so the five band
+  ! arrays are neither written nor read for the interior.
+  integer(C_INT), parameter, public :: YS_MF_OFF = 0, YS_MF_HELMHOLTZ = 1, YS_MF_BIHARMONIC = 2
+  integer(C_INT), save, public :: ys_mf_kind = YS_MF_OFF
+  real(C_DOUBLE), save, public :: ys_mf_lambda = 0.0d0, ys_mf_diffusion = 0.0d0
+  integer(C_INT), save :: ys_mf_enabled = -1
   integer(C_INT), save :: ys_owner_ixN = 0
   integer(C_SIZE_T), parameter :: YS_BATCH_DEFAULT_COMPLEX_CAP = 120000000_C_SIZE_T
   integer(C_SIZE_T), save :: ys_batch_complex_cap = YS_BATCH_DEFAULT_COMPLEX_CAP
@@ -1469,6 +1482,95 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     call ys_unpack_pipelined_columns(dst, 0_C_INT)
   end subroutine ys_solve_pipelined_lu
 
+  ! Whether the assembly callback about to run may leave the interior rows to
+  ! the solve: one rank (the packed solve), one system in the workspace (a
+  ! stacked solve mixes operators), and not switched off with
+  ! CHANNEL_Y_MATRIX_FREE=0.
+  logical function ys_matrix_free_ok()
+    logical :: want
+    if (ys_mf_enabled < 0) then
+      want = .true.
+      call env_flag("CHANNEL_Y_MATRIX_FREE", want)
+      ys_mf_enabled = merge(1, 0, want)
+    end if
+    ys_matrix_free_ok = ys_mf_enabled == 1 .and. npy_grid == 1_C_INT .and. ys_selected_solver == Y_SOLVER_PIPELINED_LU &
+                        .and. ys_workspace_nlines == (2*ys_workspace_nz + 1)*nxB .and. ys_workspace_active_n >= 6
+  end function ys_matrix_free_ok
+
+  ! The packed solve (custom_penta_kernel, register form) with the bands of
+  ! rows 2 .. n-3 computed from the operator -- the same expressions the
+  ! assembly kernels write -- and only rows 0, 1, n-2, n-1 (rewritten by the
+  ! wall elimination) read from the band arrays.
+  subroutine ys_solve_penta_matrix_free(n, batch_count, label)
+    implicit none
+    integer(C_INT), intent(in) :: n, batch_count
+    character(*), intent(in) :: label
+    integer(C_INT) :: iline, pr_i, iz, ix, iy, nzw, nzl, ix0, row0, kind
+    integer(C_INT64_T) :: pr_p
+    real(C_DOUBLE) :: lambda_coeff, diffusion_coeff
+    YS_COEF :: pr_a, pr_b, pr_c, pr_e, pr_f, pr_inv, pr_u1, pr_u2, pr_u1m2, pr_u2m2, pr_u1m1, pr_u2m1
+    complex(C_DOUBLE_COMPLEX) :: pr_r, pr_y, pr_ym2, pr_ym1, pr_xn1, pr_xn2
+
+    call roctxPush(label)
+    kind = ys_mf_kind; lambda_coeff = ys_mf_lambda; diffusion_coeff = ys_mf_diffusion
+    nzw = ys_workspace_nz; nzl = 2*nzw + 1; ix0 = ys_owner_ix0; row0 = ny0
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, n, batch_count) &
+    !$omp shared(der, k2, ni, kind, lambda_coeff, diffusion_coeff, nzw, nzl, ix0, row0) &
+    !$omp private(iline, pr_i, pr_p, iz, ix, iy, pr_a, pr_b, pr_c, pr_e, pr_f, pr_r, pr_inv, &
+    !$omp& pr_u1m2, pr_u2m2, pr_ym2, pr_u1m1, pr_u2m1, pr_ym1, pr_u1, pr_u2, pr_y, pr_xn1, pr_xn2)
+    do iline = 1, batch_count
+      iz = mod(iline - 1, nzl) - nzw
+      ix = ix0 + (iline - 1)/nzl
+      pr_u1m2 = YS_CZERO; pr_u2m2 = YS_CZERO; pr_ym2 = (0.0d0, 0.0d0)
+      pr_u1m1 = YS_CZERO; pr_u2m1 = YS_CZERO; pr_ym1 = (0.0d0, 0.0d0)
+      do pr_i = 0, n - 1
+        pr_p = int(iline, C_INT64_T) + int(pr_i, C_INT64_T)*int(batch_count, C_INT64_T)
+        if (pr_i < 2 .or. pr_i > n - 3) then
+          pr_a = merge(ys_gpsv_ds(pr_p), YS_CZERO, pr_i >= 2)
+          pr_b = merge(ys_gpsv_dl(pr_p), YS_CZERO, pr_i >= 1)
+          pr_c = ys_gpsv_d(pr_p)
+          pr_e = merge(ys_gpsv_du(pr_p), YS_CZERO, pr_i <= n - 2)
+          pr_f = merge(ys_gpsv_dw(pr_p), YS_CZERO, pr_i <= n - 3)
+        else
+          iy = row0 + pr_i
+          if (kind == YS_MF_BIHARMONIC) then
+            ! v equation:  lambda*(D^2 - k^2) - ni*(D^2 - k^2)^2  (assemble_compact_biharmonic_system)
+            pr_a = lambda_coeff*${helmholtz_op('iy', '-2')}$ - ni*${biharmonic_op('iy', '-2')}$
+            pr_b = lambda_coeff*${helmholtz_op('iy', '-1')}$ - ni*${biharmonic_op('iy', '-1')}$
+            pr_c = lambda_coeff*${helmholtz_op('iy', '0')}$ - ni*${biharmonic_op('iy', '0')}$
+            pr_e = lambda_coeff*${helmholtz_op('iy', '1')}$ - ni*${biharmonic_op('iy', '1')}$
+            pr_f = lambda_coeff*${helmholtz_op('iy', '2')}$ - ni*${biharmonic_op('iy', '2')}$
+          else
+            ! eta / scalars:  lambda - diffusion*ni*(D^2 - k^2)  (assemble_compact_helmholtz_system)
+            pr_a = lambda_coeff*der(iy, 0, -2) - diffusion_coeff*ni*${helmholtz_op('iy', '-2')}$
+            pr_b = lambda_coeff*der(iy, 0, -1) - diffusion_coeff*ni*${helmholtz_op('iy', '-1')}$
+            pr_c = lambda_coeff*der(iy, 0, 0) - diffusion_coeff*ni*${helmholtz_op('iy', '0')}$
+            pr_e = lambda_coeff*der(iy, 0, 1) - diffusion_coeff*ni*${helmholtz_op('iy', '1')}$
+            pr_f = lambda_coeff*der(iy, 0, 2) - diffusion_coeff*ni*${helmholtz_op('iy', '2')}$
+          end if
+        end if
+        pr_r = ys_gpsv_x(pr_p)
+        pr_b = pr_b - pr_a*pr_u1m2; pr_c = pr_c - pr_a*pr_u2m2; pr_r = pr_r - pr_a*pr_ym2
+        pr_c = pr_c - pr_b*pr_u1m1; pr_e = pr_e - pr_b*pr_u2m1; pr_r = pr_r - pr_b*pr_ym1
+        pr_inv = 1.0d0/pr_c
+        pr_u1 = pr_e*pr_inv; pr_u2 = pr_f*pr_inv; pr_y = pr_r*pr_inv
+        ys_gpsv_du(pr_p) = pr_u1; ys_gpsv_dw(pr_p) = pr_u2; ys_gpsv_x(pr_p) = pr_y
+        pr_u1m2 = pr_u1m1; pr_u2m2 = pr_u2m1; pr_ym2 = pr_ym1
+        pr_u1m1 = pr_u1; pr_u2m1 = pr_u2; pr_ym1 = pr_y
+      end do
+      pr_xn1 = (0.0d0, 0.0d0); pr_xn2 = (0.0d0, 0.0d0)
+      do pr_i = n - 1, 0, -1
+        pr_p = int(iline, C_INT64_T) + int(pr_i, C_INT64_T)*int(batch_count, C_INT64_T)
+        pr_y = ys_gpsv_x(pr_p) - ys_gpsv_du(pr_p)*pr_xn1 - ys_gpsv_dw(pr_p)*pr_xn2
+        ys_gpsv_x(pr_p) = pr_y
+        pr_xn2 = pr_xn1; pr_xn1 = pr_y
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+    call roctxPop(label)
+  end subroutine ys_solve_penta_matrix_free
+
   ! Copies the solved lines of columns column_offset+1 .. column_offset+size(dst,3)
   ! of the workspace into dst.  With several systems stacked along x in one
   ! workspace (solve_wall_normal_systems) each one is unpacked by its offset.
@@ -1507,7 +1609,12 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     batch_max_lines = (nlines + nbatches - 1_C_INT)/nbatches
 
     if (npy_grid == 1_C_INT) then
-      call ys_solve_packed_pentadiagonal(active_n, nlines, "ys_pipelined_lu_local")
+      if (ys_mf_kind /= YS_MF_OFF) then
+        call ys_solve_penta_matrix_free(active_n, nlines, "ys_pipelined_lu_local_mf")
+      else
+        call ys_solve_packed_pentadiagonal(active_n, nlines, "ys_pipelined_lu_local")
+      end if
+      ys_mf_kind = YS_MF_OFF
     else
       call ys_solve_pipelined_lu_distributed(active_n, nlines, nbatches, batch_max_lines)
     end if

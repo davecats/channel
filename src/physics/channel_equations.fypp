@@ -178,6 +178,7 @@ module channel_equations
   use channel_state
   use stencil_coefficients
   use compact_component_solve
+  use y_line_solvers, only: ys_matrix_free_ok, ys_mf_kind, ys_mf_lambda, ys_mf_diffusion, YS_MF_BIHARMONIC, YS_MF_HELMHOLTZ
   use mpi_transpose
   use roctx, only: roctxPush, roctxPop
   use ffts
@@ -217,7 +218,8 @@ contains
     complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
     YS_COEF, pointer :: system_matrix(:, :, :, :)
     complex(C_DOUBLE_COMPLEX), pointer :: system_rhs(:, :, :)
-    integer(C_INT) :: row_start, row_end
+    integer(C_INT) :: row_start, row_end, ir, nrows
+    logical :: mf
     real(C_DOUBLE) :: lambda_coeff
 
     owner_src => ctx%src
@@ -227,6 +229,13 @@ contains
     row_end = ctx%row_end
     lambda_coeff = ctx%lambda
     ix0_owner = lbound(owner_src, 3)
+    ! Matrix-free solve: only the two rows next to each wall are assembled.
+    mf = ys_matrix_free_ok()
+    nrows = merge(4_C_INT, row_end - row_start + 1_C_INT, mf)
+    if (mf) then
+      ys_mf_kind = YS_MF_BIHARMONIC; ys_mf_lambda = lambda_coeff
+      ys_mf_diffusion = 0.0d0
+    end if
     ixN_owner = ubound(owner_src, 3)
 
     ! The bands depend on iy and k^2 only and are written z-fastest, as the
@@ -235,11 +244,12 @@ contains
     ! tiled kernel for both cost 34% more: the tile bookkeeping outweighed
     ! coalescing for the five band stores, which needed none.
     !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(der, k2, ni, lambda_coeff, system_matrix, nz, ix0_owner, ixN_owner, row_start, row_end) &
-    !$omp private(ix, iz, iy)
-    do iy = row_start, row_end
+    !$omp shared(nrows, mf, der, k2, ni, lambda_coeff, system_matrix, nz, ix0_owner, ixN_owner, row_start, row_end) &
+    !$omp private(ix, iz, iy, ir)
+    do ir = 0, nrows - 1
       do ix = ix0_owner, ixN_owner
         do iz = -nz, nz
+          iy = merge(row_start + ir, row_end - (nrows - 1 - ir), (.not. mf) .or. ir < 2)
           ! v equation, implicit half:  lambda*(D^2 - k^2) - ni*(D^2 - k^2)^2
 #:for k in range(-2, 3)
           system_matrix(iz, ix, iy, ${k}$) = lambda_coeff*${helmholtz_op('iy', str(k))}$ - ni*${biharmonic_op('iy', str(k))}$
@@ -260,7 +270,8 @@ $:assemble_rhs_tiles()
     complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
     YS_COEF, pointer :: system_matrix(:, :, :, :)
     complex(C_DOUBLE_COMPLEX), pointer :: system_rhs(:, :, :)
-    integer(C_INT) :: row_start, row_end
+    integer(C_INT) :: row_start, row_end, ir, nrows
+    logical :: mf
     real(C_DOUBLE) :: lambda_coeff, diffusion_coeff
 
     owner_src => ctx%src
@@ -271,15 +282,23 @@ $:assemble_rhs_tiles()
     lambda_coeff = ctx%lambda
     diffusion_coeff = ctx%diffusion
     ix0_owner = lbound(owner_src, 3)
+    ! Matrix-free solve: only the two rows next to each wall are assembled.
+    mf = ys_matrix_free_ok()
+    nrows = merge(4_C_INT, row_end - row_start + 1_C_INT, mf)
+    if (mf) then
+      ys_mf_kind = YS_MF_HELMHOLTZ; ys_mf_lambda = lambda_coeff
+      ys_mf_diffusion = diffusion_coeff
+    end if
     ixN_owner = ubound(owner_src, 3)
 
     ! Bands untiled, right-hand side tiled: see the biharmonic system above.
     !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(der, k2, ni, lambda_coeff, diffusion_coeff, system_matrix, nz, ix0_owner, ixN_owner, row_start, row_end) &
-    !$omp private(ix, iz, iy)
-    do iy = row_start, row_end
+    !$omp shared(nrows, mf, der, k2, ni, lambda_coeff, diffusion_coeff, system_matrix, nz, ix0_owner, ixN_owner, row_start, row_end) &
+    !$omp private(ix, iz, iy, ir)
+    do ir = 0, nrows - 1
       do ix = ix0_owner, ixN_owner
         do iz = -nz, nz
+          iy = merge(row_start + ir, row_end - (nrows - 1 - ir), (.not. mf) .or. ir < 2)
           ! eta / scalar equation, implicit half:  lambda - diffusion*ni*(D^2 - k^2)
 #:for k in range(-2, 3)
           system_matrix(iz, ix, iy, ${k}$) = lambda_coeff*der(iy, 0, ${k}$) - diffusion_coeff*ni*${helmholtz_op('iy', str(k))}$
