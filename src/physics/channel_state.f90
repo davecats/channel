@@ -27,7 +27,12 @@ module channel_state
   !                    oldrhs: built by buildrhs, read by linsolve (V is not overwritten)
   !-------------------------------------------------------------------------
   complex(C_DOUBLE_COMPLEX), allocatable, target :: V(:, :, :, :)
-  RHS_COMPLEX, allocatable :: oldrhs(:, :, :, :)   ! double, or single with CHANNEL_SINGLE
+  ! oldrhs: the explicit terms of the previous substep; newrhs: those of this
+  ! substep, filled by the fused buildrhs (otherwise unused).  Pointers into
+  ! rhs_store_a / rhs_store_b, swapped after each substep (rhs_swap).
+  ! Double, or single with CHANNEL_SINGLE.
+  RHS_COMPLEX, pointer :: oldrhs(:, :, :, :) => null(), newrhs(:, :, :, :) => null()
+  RHS_COMPLEX, allocatable, target :: rhs_store_a(:, :, :, :), rhs_store_b(:, :, :, :)
   complex(C_DOUBLE_COMPLEX), pointer :: memrhs(:, :, :, :)
 
   !-------------------------------------------------------------------------

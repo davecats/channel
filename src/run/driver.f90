@@ -338,6 +338,7 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
         !depends on memrhs(:, :, :, 2+iPhi), updates V(:, :, :, 3+iPhi)
         CALL linsolve_scalars(RK_rai(1, i)/deltat)
         call roctxPop("linsolve_scalar")
+        CALL rhs_swap()
         if (emu_vel) call emu_round_array(V(:, :, :, 1:3))
         if (emu_phi .and. nPhi > 0) call emu_round_array(V(:, :, :, 4:3 + nPhi))
         call roctxPop("rk_substep")

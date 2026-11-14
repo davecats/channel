@@ -184,10 +184,11 @@ CONTAINS
     !$omp target enter data map(to: bc0, bcn, zero_bc)
     IF (solveNS) then
       ALLOCATE (memrhs(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:2 + nPhi), &
-                oldrhs(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:2 + nPhi))
+                rhs_store_a(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:2 + nPhi))
       memrhs = 0.0
-      oldrhs = 0.0
-      !$omp target enter data map(to: memrhs, oldrhs)
+      rhs_store_a = 0.0
+      !$omp target enter data map(to: memrhs, rhs_store_a)
+      oldrhs => rhs_store_a
     END IF
     ALLOCATE (der(1:ny - 1, 0:3, -2:2)); der = 0.0
     ! One wall row set per scalar; setup_boundary_conditions fills them.
@@ -300,11 +301,19 @@ CONTAINS
     !$omp target exit data map(delete: bc0, bcn, zero_bc)
     DEALLOCATE (bc0, bcn, zero_bc)
     IF (solveNS) THEN
-      if (associated(memrhs) .or. allocated(oldrhs)) then
-        !$omp target exit data map(delete: memrhs, oldrhs)
+      if (associated(memrhs)) then
+        !$omp target exit data map(delete: memrhs)
+        deallocate (memrhs)
       end if
-      if (associated(memrhs)) deallocate (memrhs)
-      if (allocated(oldrhs)) deallocate (oldrhs)
+      if (allocated(rhs_store_a)) then
+        !$omp target exit data map(delete: rhs_store_a)
+        deallocate (rhs_store_a)
+      end if
+      if (allocated(rhs_store_b)) then
+        !$omp target exit data map(delete: rhs_store_b)
+        deallocate (rhs_store_b)
+      end if
+      nullify (oldrhs, newrhs)
       CLOSE (UNIT=195)
       IF (has_terminal) CLOSE (UNIT=121)
     END IF
