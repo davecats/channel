@@ -465,17 +465,20 @@ contains
   subroutine ys_bind_core_views(row_start, row_end, line_start, nlines)
     implicit none
     integer(C_INT), intent(in) :: row_start, row_end, line_start, nlines
-    integer(C_INT) :: active_n, line_end, nall
+    integer(C_INT) :: active_n, line_end
+    ! 64-bit: a stacked solve's five band planes exceed 2**31 elements on a
+    ! full-node mesh (5 systems of the Re1000 mesh on 4 GPUs: 3.3e9)
+    integer(C_INT64_T) :: nall
 
     active_n = row_end - row_start + 1
     line_end = line_start + nlines - 1
-    nall = nlines*active_n
+    nall = int(nlines, C_INT64_T)*int(active_n, C_INT64_T)
 
     ys_gpsv_ds(1:nall) => ys_gpsv_matrix_store(1:nall)
-    ys_gpsv_dl(1:nall) => ys_gpsv_matrix_store(nall + 1:2*nall)
-    ys_gpsv_d(1:nall) => ys_gpsv_matrix_store(2*nall + 1:3*nall)
-    ys_gpsv_du(1:nall) => ys_gpsv_matrix_store(3*nall + 1:4*nall)
-    ys_gpsv_dw(1:nall) => ys_gpsv_matrix_store(4*nall + 1:5*nall)
+    ys_gpsv_dl(1:nall) => ys_gpsv_matrix_store(nall + 1:2_C_INT64_T*nall)
+    ys_gpsv_d(1:nall) => ys_gpsv_matrix_store(2_C_INT64_T*nall + 1:3_C_INT64_T*nall)
+    ys_gpsv_du(1:nall) => ys_gpsv_matrix_store(3_C_INT64_T*nall + 1:4_C_INT64_T*nall)
+    ys_gpsv_dw(1:nall) => ys_gpsv_matrix_store(4_C_INT64_T*nall + 1:5_C_INT64_T*nall)
     ys_gpsv_x(1:nall) => ys_gpsv_rhs_store(1:nall)
 
     ys_gpsv_line_matrix(line_start:line_end, row_start:row_end, -2:2) => ys_gpsv_matrix_store
@@ -664,8 +667,8 @@ contains
 
       if (bind) then
         call workspace_slice(offset, ptr)
-        call c_f_pointer(ptr, cbuf, [int(count)])
-        view(1:int(count)) => cbuf
+        call c_f_pointer(ptr, cbuf, [count])
+        view(1:count) => cbuf
       end if
       offset = workspace_align_offset(offset + count*complex_bytes)
     end subroutine slot_complex
@@ -676,8 +679,8 @@ contains
 
       if (bind) then
         call workspace_slice(offset, ptr)
-        call c_f_pointer(ptr, kbuf, [int(count)])
-        view(1:int(count)) => kbuf
+        call c_f_pointer(ptr, kbuf, [count])
+        view(1:count) => kbuf
       end if
       offset = workspace_align_offset(offset + count*coef_bytes)
     end subroutine slot_coef
@@ -688,8 +691,8 @@ contains
 
       if (bind) then
         call workspace_slice(offset, ptr)
-        call c_f_pointer(ptr, rbuf, [int(count)])
-        view(1:int(count)) => rbuf
+        call c_f_pointer(ptr, rbuf, [count])
+        view(1:count) => rbuf
       end if
       offset = workspace_align_offset(offset + count*real_bytes)
     end subroutine slot_real
@@ -702,7 +705,7 @@ contains
       count = int(nrows, C_SIZE_T)*int(ncols, C_SIZE_T)
       if (bind) then
         call workspace_slice(offset, ptr)
-        call c_f_pointer(ptr, cbuf, [int(count)])
+        call c_f_pointer(ptr, cbuf, [count])
         view(1:nrows, 1:ncols) => cbuf
       end if
       offset = workspace_align_offset(offset + count*complex_bytes)
