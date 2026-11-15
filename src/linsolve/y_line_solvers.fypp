@@ -602,10 +602,13 @@ contains
   ! that workspace_request has already handed back.  Both passes run the same
   ! list of slots, which is what keeps the reported size and the actual
   ! bindings from drifting apart.
-  subroutine ys_workspace_layout(active_n, nlines, nz, bind, nbytes)
+  ! `schur`: also the buffers only the Schur solver uses (the endpoint batch,
+  ! the reduced rows and right-hand sides) -- several GB per GPU that the
+  ! pipelined LU never touches.
+  subroutine ys_workspace_layout(active_n, nlines, nz, bind, nbytes, schur)
     implicit none
     integer(C_INT), intent(in) :: active_n, nlines, nz
-    logical, intent(in) :: bind
+    logical, intent(in) :: bind, schur
     integer(C_SIZE_T), intent(out) :: nbytes
     type(C_PTR) :: ptr
     complex(C_DOUBLE_COMPLEX), pointer :: cbuf(:)
@@ -644,18 +647,20 @@ contains
     call slot_real(n_real, ys_boundary_lower_eq_store)
     call slot_real(n_real, ys_boundary_upper_eq_store)
 
-    call slot_coef(batch_capacity, ys_batch_ds)
-    call slot_coef(batch_capacity, ys_batch_dl)
-    call slot_coef(batch_capacity, ys_batch_d)
-    call slot_coef(batch_capacity, ys_batch_du)
-    call slot_coef(batch_capacity, ys_batch_dw)
-    call slot_complex(batch_capacity, ys_batch_x)
+    if (schur) then
+      call slot_coef(batch_capacity, ys_batch_ds)
+      call slot_coef(batch_capacity, ys_batch_dl)
+      call slot_coef(batch_capacity, ys_batch_d)
+      call slot_coef(batch_capacity, ys_batch_du)
+      call slot_coef(batch_capacity, ys_batch_dw)
+      call slot_complex(batch_capacity, ys_batch_x)
+    end if
 
     if (npy_grid > 1) then
-      call slot_complex_2d(20_C_INT, nlines, ys_reduced_rows_send)
+      if (schur) call slot_complex_2d(20_C_INT, nlines, ys_reduced_rows_send)
       call slot_complex_2d(2_C_INT, nlines, ys_left_interface_values)
       call slot_complex_2d(2_C_INT, nlines, ys_right_interface_values)
-      call slot_complex_2d(4_C_INT*npy_grid, nlines, ys_reduced_rhs)
+      if (schur) call slot_complex_2d(4_C_INT*npy_grid, nlines, ys_reduced_rhs)
     end if
 
     nbytes = offset
@@ -712,17 +717,19 @@ contains
     end subroutine slot_complex_2d
   end subroutine ys_workspace_layout
 
-  subroutine ys_bind_workspace_storage(active_n, nlines, nz)
+  subroutine ys_bind_workspace_storage(active_n, nlines, nz, schur)
     implicit none
     integer(C_INT), intent(in) :: active_n, nlines, nz
+    logical, intent(in) :: schur
     type(C_PTR) :: base
     integer(C_SIZE_T) :: total_bytes
 
-    ys_batch_capacity = int(ys_endpoint_batch_capacity(active_n, nlines, nz), C_INT64_T)
+    ys_batch_capacity = 0_C_INT64_T
+    if (schur) ys_batch_capacity = int(ys_endpoint_batch_capacity(active_n, nlines, nz), C_INT64_T)
 
-    call ys_workspace_layout(active_n, nlines, nz, .false., total_bytes)
+    call ys_workspace_layout(active_n, nlines, nz, .false., total_bytes, schur)
     call workspace_request(total_bytes, "y_line_solver", base)
-    call ys_workspace_layout(active_n, nlines, nz, .true., total_bytes)
+    call ys_workspace_layout(active_n, nlines, nz, .true., total_bytes, schur)
   end subroutine ys_bind_workspace_storage
 
   ! How many of nsys independent wall-normal systems one solve takes together
@@ -762,7 +769,7 @@ contains
     if (mod(line_start - 1, nlines_z) /= 0) error stop "ys_get_workspace_bytes requires ix-aligned line_start"
     if (mod(nlines, nlines_z) /= 0) error stop "ys_get_workspace_bytes requires full ix columns"
 
-    call ys_workspace_layout(active_n, nlines, nz, .false., nbytes)
+    call ys_workspace_layout(active_n, nlines, nz, .false., nbytes, ys_selected_solver == Y_SOLVER_SCHUR)
   end subroutine ys_get_workspace_bytes
 
   subroutine ys_get_gpusparse_buffer_bytes(nbytes)
@@ -795,7 +802,7 @@ contains
     if (associated(ys_gpsv_rhs_store)) error stop "ys_allocate_workspace called with core workspace already allocated"
     if (associated(ys_batch_ds)) error stop "ys_allocate_workspace called with batch workspace already allocated"
     if (associated(ys_reduced_rows_send)) error stop "ys_allocate_workspace called with reduced workspace already allocated"
-    call ys_bind_workspace_storage(active_n, nlines, nz)
+    call ys_bind_workspace_storage(active_n, nlines, nz, prepare_schur_value)
 
     call ys_bind_core_views(row_start, row_end, line_start, nlines)
 
@@ -805,7 +812,9 @@ contains
     !$omp& ys_boundary_lower_rhs0_store, ys_boundary_upper_rhsn_store, &
     !$omp& ys_boundary_lower_eq_store, ys_boundary_upper_eq_store)
 
-    !$omp target enter data map(alloc: ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
+    if (prepare_schur_value) then
+      !$omp target enter data map(alloc: ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
+    end if
 
     if (npy_grid > 1 .and. prepare_schur_value) then
       if (allocated(ys_reduced_pass_counts)) deallocate (ys_reduced_pass_counts)
