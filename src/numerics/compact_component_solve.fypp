@@ -115,11 +115,12 @@ contains
   END SUBROUTINE apply_d2y
 
   subroutine assemble_compact_derivative_interior(ctx)
-    use y_line_solvers, only: ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x
+    use y_line_solvers, only: ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, ys_dvdy_register
     IMPLICIT NONE
     type(compact_assembly_context), intent(in) :: ctx
     complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
-    integer(C_INT) :: derivative_order_value, row_start, row_end
+    integer(C_INT) :: derivative_order_value, row_start, row_end, nlow, nrows, ir
+    logical :: table
     integer(C_INT) :: ix, iz, iy, ix0_owner, ixN_owner, nlines_z, nlines, iline, izb, iyb, izi, iyi
     integer(C_INT), parameter :: RHS_TILE = 8
     integer(C_INT64_T) :: p
@@ -132,17 +133,24 @@ contains
     ixN_owner = ubound(owner_src, 3)
     nlines_z = 2_C_INT*nz + 1_C_INT
     nlines = (ixN_owner - ix0_owner + 1_C_INT)*nlines_z
+    table = ys_dvdy_register()
+    nlow = merge(2_C_INT, 0_C_INT, ctx%has_lower_boundary)
+    nrows = merge(nlow + merge(2_C_INT, 0_C_INT, ctx%has_upper_boundary), row_end - row_start + 1_C_INT, table)
     ! The bands are the D^0 weights of row iy, the same for every line: written
-    ! line-fastest, as the solver reads them.  The right-hand side is the
+    ! line-fastest, as the solver reads them -- unless the solve takes its
+    ! factor quantities from the table (ys_dvdy_register), which needs only the
+    ! two rows next to each wall this rank owns (the wall elimination rewrites
+    ! them) and has the table built from them once.  The right-hand side is the
     ! D^order stencil of the y-fastest field, written line-fastest, so it is
     ! the one that needs (iz, iy) tiles.  (One thread per line walking iy,
     ! as before, read the field with a 4 KB stride and carried the stencil
     ! window as a chain of copies, the pattern CCE miscompiles.)
     !$omp target teams distribute parallel do collapse(2) default(none) &
     !$omp shared(der, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, row_start, row_end, nlines) &
-    !$omp private(iy, iline, p)
-    do iy = row_start, row_end
+    !$omp shared(table, nlow, nrows) private(ir, iy, iline, p)
+    do ir = 0, nrows - 1
       do iline = 1, nlines
+        iy = merge(row_start + ir, row_end - (nrows - 1 - ir), (.not. table) .or. ir < nlow)
         p = int(iy - row_start, C_INT64_T)*int(nlines, C_INT64_T) + int(iline, C_INT64_T)
         ys_gpsv_ds(p) = der(iy, 0, -2)
         ys_gpsv_dl(p) = der(iy, 0, -1)
