@@ -264,8 +264,8 @@ CONTAINS
     integer(C_INT) :: width
 
     if (solveNS) then
-      ! The widest solve: v and eta stacked, or all nPhi scalars stacked.
-      width = ys_stack_width(max(2_C_INT, int(nPhi, C_INT)))
+      ! The widest solve: v, eta and the nPhi scalars stacked (linsolve).
+      width = ys_stack_width(2_C_INT + int(nPhi, C_INT))
       call ys_get_workspace_bytes(ny, nz, ny0, nyN, 1_C_INT, width*nxB*(2*nz + 1), nbytes)
     else
       nbytes = 0_C_SIZE_T

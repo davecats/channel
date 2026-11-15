@@ -329,14 +329,10 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
         call release_fft_workspace("rk_fft")
 #endif
 
-        !depends on V, oldrhs and newrhs, updates V(:, :, :, 1:3)
-        call roctxPush("linsolve_velocity")
+        !depends on V, oldrhs and newrhs, updates V(:, :, :, 1:3+nPhi)
+        call roctxPush("linsolve")
         CALL linsolve(RK_rai(1, i)/deltat)
-        call roctxPop("linsolve_velocity")
-        call roctxPush("linsolve_scalar")
-        !depends on V, oldrhs and newrhs, updates V(:, :, :, 4:3+nPhi)
-        CALL linsolve_scalars(RK_rai(1, i)/deltat)
-        call roctxPop("linsolve_scalar")
+        call roctxPop("linsolve")
         CALL rhs_swap()
         if (emu_vel) call emu_round_array(V(:, :, :, 1:3))
         if (emu_phi .and. nPhi > 0) call emu_round_array(V(:, :, :, 4:3 + nPhi))

@@ -386,12 +386,15 @@ $:assemble_rhs_tiles()
     integer(C_INT) :: ix, iz, j, y_first, y_last
     real(C_DOUBLE) :: a, b, rk, er, ei, dr, di
     complex(C_DOUBLE_COMPLEX) :: zero_mode_u(-1:ny + 1), zero_mode_w(-1:ny + 1), zero_mode_ucor(-1:ny + 1)
-    type(wall_normal_system) :: systems(2)
+    type(wall_normal_system), allocatable :: systems(:)
+    integer(C_INT) :: iPhi
 
-    ! v and eta are independent: one stacked solve (see solve_wall_normal_systems).
-    ! The right-hand sides are assembled from V, oldrhs and newrhs
-    ! (assemble_rhs_fused); V receives the solution.
-    call roctxPush("linsolve solve_v_eta")
+    ! v, eta and the scalars are independent: one stacked solve (see
+    ! solve_wall_normal_systems), so a pipelined y-solve fills and drains once
+    ! for all of them.  The right-hand sides are assembled from V, oldrhs and
+    ! newrhs (assemble_rhs_fused); V receives the solution.
+    allocate (systems(2 + nPhi))
+    call roctxPush("linsolve solve_v_eta_phi")
     systems(1)%ctx = compact_component_boundaries(v0bc, v0m1bc, vnbc, vnp1bc, &
                                                   bc0(:, :, 2), bc0(:, :, 4), bcn(:, :, 2), bcn(:, :, 4))
     systems(1)%field => V(:, :, :, 2)
@@ -408,9 +411,12 @@ $:assemble_rhs_tiles()
     systems(:)%ctx%diffusion = 1.0d0
     systems(1)%boundary => assemble_selected_compact_component_boundaries
     systems(2)%boundary => assemble_selected_compact_component_boundaries
-    call fused_rhs_order([2_C_INT, 1_C_INT])
+    do iPhi = 1, nPhi
+      call scalar_system(systems(2 + iPhi), lambda, iPhi)
+    end do
+    call fused_rhs_order([2_C_INT, 1_C_INT, (2_C_INT + iPhi, iPhi = 1, nPhi)])
     call solve_wall_normal_systems(systems)
-    call roctxPop("linsolve solve_v_eta")
+    call roctxPop("linsolve solve_v_eta_phi")
     call roctxPush("linsolve d_v_dy")
     call apply_dy(V(:, :, :, 2), V(:, :, :, 3))
     call roctxPop("linsolve d_v_dy")
@@ -467,6 +473,9 @@ $:assemble_rhs_tiles()
       END DO
     END DO
     call roctxPop("linsolve recover_u_w")
+    do iPhi = 1, nPhi
+      call correct_scalar_mean(lambda, iPhi)
+    end do
   END SUBROUTINE linsolve
 
   SUBROUTINE linsolve_scalar(lambda, iPhi)
@@ -480,25 +489,6 @@ $:assemble_rhs_tiles()
     call solve_wall_normal_systems(systems)
     call correct_scalar_mean(lambda, iPhi)
   END SUBROUTINE linsolve_scalar
-
-  ! All scalars at once: they are independent, so one stacked solve.
-  SUBROUTINE linsolve_scalars(lambda)
-    IMPLICIT NONE
-    real(C_DOUBLE), intent(in) :: lambda
-    type(wall_normal_system), allocatable :: systems(:)
-    integer(C_INT) :: iPhi
-
-    if (nPhi < 1) return
-    allocate (systems(nPhi))
-    do iPhi = 1, nPhi
-      call scalar_system(systems(iPhi), lambda, iPhi)
-    end do
-    call fused_rhs_order([(2_C_INT + iPhi, iPhi = 1, nPhi)])
-    call solve_wall_normal_systems(systems)
-    do iPhi = 1, nPhi
-      call correct_scalar_mean(lambda, iPhi)
-    end do
-  END SUBROUTINE linsolve_scalars
 
   subroutine scalar_system(sys, lambda, iPhi)
     IMPLICIT NONE
