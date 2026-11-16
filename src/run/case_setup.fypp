@@ -256,13 +256,16 @@ CONTAINS
   END SUBROUTINE get_solver_memory_estimate
 
   SUBROUTINE get_solver_workspace_estimate(solveNS, nbytes)
-    use y_line_solvers, only: ys_get_workspace_bytes
+    use y_line_solvers, only: ys_get_workspace_bytes, ys_stack_width
     IMPLICIT NONE
     logical, intent(in) :: solveNS
     integer(C_SIZE_T), intent(out) :: nbytes
+    integer(C_INT) :: width
 
     if (solveNS) then
-      call ys_get_workspace_bytes(ny, nz, ny0, nyN, 1_C_INT, nxB*(2*nz + 1), nbytes)
+      ! The widest solve: v and eta stacked, or all nPhi scalars stacked.
+      width = ys_stack_width(max(2_C_INT, int(nPhi, C_INT)))
+      call ys_get_workspace_bytes(ny, nz, ny0, nyN, 1_C_INT, width*nxB*(2*nz + 1), nbytes)
     else
       nbytes = 0_C_SIZE_T
     end if

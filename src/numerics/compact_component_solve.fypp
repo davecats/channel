@@ -95,7 +95,6 @@ module compact_component_solve
     procedure(compact_assembly_step), pointer, nopass :: boundary => null()
     type(compact_assembly_context) :: ctx
   end type wall_normal_system
-  integer(C_INT), save :: wall_normal_stack_max = -1_C_INT
 contains
 
   SUBROUTINE apply_dy(src, dst)
@@ -495,26 +494,20 @@ $:tile_zy_close()
   ! latency once instead of K times.  Each system is assembled into its own
   ! block of columns through views whose x bounds are rebased to nx0:nxN, so
   ! the assembly callbacks are unchanged.  Falls back to one solve per system
-  ! for the Schur solver, and stacks at most CHANNEL_Y_STACK_MAX systems
-  ! (default 8 on npy > 1, 1 otherwise -- on one rank the solve is bandwidth
-  ! bound and stacking only costs workspace).
+  ! for the Schur solver; ys_stack_width says how many systems go together
+  ! (CHANNEL_Y_STACK_MAX, with a per-platform default).
   subroutine solve_wall_normal_systems(systems)
-    use env_options, only: env_int
-    use y_line_solvers, only: Y_SOLVER_PIPELINED_LU, ys_selected_solver
+    use y_line_solvers, only: ys_stack_width
     implicit none
     type(wall_normal_system), intent(inout) :: systems(:)
-    integer(C_INT) :: first, last, nsys, requested
+    integer(C_INT) :: first, last, nsys, width
 
     nsys = size(systems, kind=C_INT)
-    if (wall_normal_stack_max < 0_C_INT) then
-      wall_normal_stack_max = merge(8_C_INT, 1_C_INT, npy_grid > 1)
-      if (env_int("CHANNEL_Y_STACK_MAX", requested)) wall_normal_stack_max = max(1_C_INT, requested)
-    end if
+    width = ys_stack_width(nsys)
     first = 1_C_INT
     do while (first <= nsys)
-      last = min(nsys, first + wall_normal_stack_max - 1_C_INT)
-      if (last == first .or. ys_selected_solver /= Y_SOLVER_PIPELINED_LU) then
-        last = first
+      last = min(nsys, first + width - 1_C_INT)
+      if (last == first) then
         call solve_wall_normal_component(systems(first)%field, systems(first)%assemble, systems(first)%boundary, &
                                          systems(first)%ctx%lambda, systems(first)%ctx%diffusion, systems(first)%source, &
                                          boundaries=systems(first)%ctx)

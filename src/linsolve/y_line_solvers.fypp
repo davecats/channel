@@ -248,6 +248,8 @@ module y_line_solvers
   integer(C_INT), parameter, public :: Y_SOLVER_PIPELINED_LU = 2_C_INT
   integer(C_INT), save, public :: ys_selected_solver = Y_SOLVER_SCHUR
   integer(C_INT), save, public :: ys_selected_batches = 0_C_INT
+  ! Upper limit on the systems one stacked solve takes; see ys_stack_width.
+  integer(C_INT), save :: ys_stack_max = -1_C_INT
 
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_CONST = 1_C_INT
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_EVEN_Z = 2_C_INT
@@ -267,7 +269,7 @@ module y_line_solvers
   integer(C_INT), parameter :: YS_PIPELINE_FACTOR_ELEMS = 6_C_INT
   integer(C_INT), parameter :: YS_PIPELINE_SOLVE_ELEMS = 2_C_INT
 
-  public :: ys_prepare_assembled_workspace, ys_release_workspace, ys_get_workspace_bytes
+  public :: ys_prepare_assembled_workspace, ys_release_workspace, ys_get_workspace_bytes, ys_stack_width
   public :: ys_get_gpusparse_buffer_bytes
   public :: ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs
   public :: ys_eqm1, ys_eq0, ys_eqn, ys_eqnp1
@@ -692,6 +694,30 @@ contains
     call workspace_request(total_bytes, "y_line_solver", base)
     call ys_workspace_layout(active_n, nlines, nz, .true., total_bytes)
   end subroutine ys_bind_workspace_storage
+
+  ! How many of nsys independent wall-normal systems one solve takes together
+  ! (solve_wall_normal_systems).  Stacking K systems along x pays the fixed
+  ! message and stage latency of the distributed pipelined solve once instead of
+  ! K times, but the solver workspace grows K-fold, so the memory estimate asks
+  ! here too.  Only the pipelined solver stacks.  The limit is CHANNEL_Y_STACK_MAX,
+  ! by default 1 on one y rank (the solve is bandwidth bound there) and on CUDA,
+  ! 8 otherwise.  On A100s (HoreKa, npy=2, NCCL) stacking measured no faster:
+  ! 474 ms/step at 15 GB per GPU unstacked, 480 ms/step at 37 GB with 4.
+  integer(C_INT) function ys_stack_width(nsys) result(width)
+    integer(C_INT), intent(in) :: nsys
+    integer(C_INT) :: requested
+
+    if (ys_stack_max < 0_C_INT) then
+#if defined(HAVE_CUDA)
+      ys_stack_max = 1_C_INT
+#else
+      ys_stack_max = merge(8_C_INT, 1_C_INT, npy_grid > 1)
+#endif
+      if (env_int("CHANNEL_Y_STACK_MAX", requested)) ys_stack_max = max(1_C_INT, requested)
+    end if
+    width = 1_C_INT
+    if (ys_selected_solver == Y_SOLVER_PIPELINED_LU) width = max(1_C_INT, min(nsys, ys_stack_max))
+  end function ys_stack_width
 
   subroutine ys_get_workspace_bytes(ny, nz, row_start, row_end, line_start, nlines, nbytes)
     implicit none
