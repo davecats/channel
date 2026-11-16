@@ -42,11 +42,11 @@
         do pr_i = 0, n - 1
           pr_p = int(iline, C_INT64_T) + int(pr_i, C_INT64_T)*pr_s1
           ! Row pr_i: pr_a*x(i-2) + pr_b*x(i-1) + pr_c*x(i) + pr_e*x(i+1) + pr_f*x(i+2) = pr_r.
-          pr_a = merge(${ds}$(pr_p), YS_CZERO, pr_i >= 2)
-          pr_b = merge(${dl}$(pr_p), YS_CZERO, pr_i >= 1)
+          pr_a = YS_CZERO; if (pr_i >= 2) pr_a = ${ds}$(pr_p)
+          pr_b = YS_CZERO; if (pr_i >= 1) pr_b = ${dl}$(pr_p)
           pr_c = ${d}$(pr_p)
-          pr_e = merge(${du}$(pr_p), YS_CZERO, pr_i <= n - 2)
-          pr_f = merge(${dw}$(pr_p), YS_CZERO, pr_i <= n - 3)
+          pr_e = YS_CZERO; if (pr_i <= n - 2) pr_e = ${du}$(pr_p)
+          pr_f = YS_CZERO; if (pr_i <= n - 3) pr_f = ${dw}$(pr_p)
           pr_r = ${x}$(pr_p)
           ! Eliminate x(i-2), then x(i-1), with the reduced rows i-2 and i-1.
           if (pr_i >= 2) then
@@ -80,11 +80,11 @@
         do pr_i = 0, n - 1
           pr_p = int(iline, C_INT64_T) + int(pr_i, C_INT64_T)*int(batch_count, C_INT64_T)
           ! Row pr_i: pr_a*x(i-2) + pr_b*x(i-1) + pr_c*x(i) + pr_e*x(i+1) + pr_f*x(i+2) = pr_r.
-          pr_a = merge(${ds}$(pr_p), YS_CZERO, pr_i >= 2)
-          pr_b = merge(${dl}$(pr_p), YS_CZERO, pr_i >= 1)
+          pr_a = YS_CZERO; if (pr_i >= 2) pr_a = ${ds}$(pr_p)
+          pr_b = YS_CZERO; if (pr_i >= 1) pr_b = ${dl}$(pr_p)
           pr_c = ${d}$(pr_p)
-          pr_e = merge(${du}$(pr_p), YS_CZERO, pr_i <= n - 2)
-          pr_f = merge(${dw}$(pr_p), YS_CZERO, pr_i <= n - 3)
+          pr_e = YS_CZERO; if (pr_i <= n - 2) pr_e = ${du}$(pr_p)
+          pr_f = YS_CZERO; if (pr_i <= n - 3) pr_f = ${dw}$(pr_p)
           pr_r = ${x}$(pr_p)
           ! Eliminate x(i-2), then x(i-1), with the reduced rows i-2 and i-1.
           pr_b = pr_b - pr_a*pr_u1m2; pr_c = pr_c - pr_a*pr_u2m2; pr_r = pr_r - pr_a*pr_ym2
@@ -1178,11 +1178,27 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
           c_p1 = ys_gpsv_du(actual_p)
           c_p2 = ys_gpsv_dw(actual_p)
           p = int(local_i, C_INT64_T)*int(chunk_batch_count, C_INT64_T) + int(sys, C_INT64_T)
-          ys_batch_ds(p) = merge(c_m2, (0.0d0, 0.0d0), local_i >= 2)
-          ys_batch_dl(p) = merge(c_m1, (0.0d0, 0.0d0), local_i >= 1)
+          if (local_i >= 2) then
+            ys_batch_ds(p) = c_m2
+          else
+            ys_batch_ds(p) = (0.0d0, 0.0d0)
+          end if
+          if (local_i >= 1) then
+            ys_batch_dl(p) = c_m1
+          else
+            ys_batch_dl(p) = (0.0d0, 0.0d0)
+          end if
           ys_batch_d(p) = c_0
-          ys_batch_du(p) = merge(c_p1, (0.0d0, 0.0d0), local_i <= nI - 2)
-          ys_batch_dw(p) = merge(c_p2, (0.0d0, 0.0d0), local_i <= nI - 3)
+          if (local_i <= nI - 2) then
+            ys_batch_du(p) = c_p1
+          else
+            ys_batch_du(p) = (0.0d0, 0.0d0)
+          end if
+          if (local_i <= nI - 3) then
+            ys_batch_dw(p) = c_p2
+          else
+            ys_batch_dw(p) = (0.0d0, 0.0d0)
+          end if
           rhs_value = (0.0d0, 0.0d0)
           if (is_actual) then
             rhs_value = ys_gpsv_x(actual_p)
@@ -2128,11 +2144,11 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       ! for the first two rows; no loop-carried copies (see custom_penta_kernel).
       do i = 0, active_n - 1
         p = int(iline, C_INT64_T) + int(${ROW}$, C_INT64_T)*int(stride, C_INT64_T)
-        a = merge(${AA}$(p), YS_CZERO, i >= 2 .or. has_left)
-        b = merge(${BB}$(p), YS_CZERO, i >= 1 .or. has_left)
+        a = YS_CZERO; if (i >= 2 .or. has_left) a = ${AA}$(p)
+        b = YS_CZERO; if (i >= 1 .or. has_left) b = ${BB}$(p)
         c = ys_gpsv_d(p)
-        e = merge(${EE}$(p), YS_CZERO, i <= active_n - 2 .or. has_right)
-        f = merge(${FF}$(p), YS_CZERO, i <= active_n - 3 .or. has_right)
+        e = YS_CZERO; if (i <= active_n - 2 .or. has_right) e = ${EE}$(p)
+        f = YS_CZERO; if (i <= active_n - 3 .or. has_right) f = ${FF}$(p)
         r = ys_gpsv_x(p)
         if (i >= 2) then
           p2 = p ${PREV}$ 2_C_INT64_T*int(stride, C_INT64_T)
@@ -2176,11 +2192,11 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       end if
       do i = 0, active_n - 1
         p = int(iline, C_INT64_T) + int(${ROW}$, C_INT64_T)*int(stride, C_INT64_T)
-        a = merge(${AA}$(p), YS_CZERO, i >= 2 .or. has_left)
-        b = merge(${BB}$(p), YS_CZERO, i >= 1 .or. has_left)
+        a = YS_CZERO; if (i >= 2 .or. has_left) a = ${AA}$(p)
+        b = YS_CZERO; if (i >= 1 .or. has_left) b = ${BB}$(p)
         c = ys_gpsv_d(p)
-        e = merge(${EE}$(p), YS_CZERO, i <= active_n - 2 .or. has_right)
-        f = merge(${FF}$(p), YS_CZERO, i <= active_n - 3 .or. has_right)
+        e = YS_CZERO; if (i <= active_n - 2 .or. has_right) e = ${EE}$(p)
+        f = YS_CZERO; if (i <= active_n - 3 .or. has_right) f = ${FF}$(p)
         r = ys_gpsv_x(p)
         b = b - a*u1m2; c = c - a*u2m2; r = r - a*ym2
         c = c - b*u1m1; e = e - b*u2m1; r = r - b*ym1
