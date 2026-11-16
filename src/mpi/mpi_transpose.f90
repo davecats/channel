@@ -48,7 +48,7 @@
     complex(C_DOUBLE_COMPLEX), pointer:: sendbuf(:, :), recvbuf(:, :)
     complex(C_DOUBLE_COMPLEX), pointer:: ycomm_sendbuf(:), ycomm_recvbuf(:)
 #else
-    complex(C_DOUBLE_COMPLEX), allocatable :: sendbuf(:, :), recvbuf(:, :)
+    complex(C_DOUBLE_COMPLEX), allocatable, target :: sendbuf(:, :), recvbuf(:, :)
     complex(C_DOUBLE_COMPLEX), allocatable, target :: ycomm_sendbuf(:), ycomm_recvbuf(:)
 #endif
 #if defined(HAVE_HIP)
