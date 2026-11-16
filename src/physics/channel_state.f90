@@ -23,7 +23,8 @@ module channel_state
   !
   ! V(iy,iz,ix,i)      i = 1:u, 2:v, 3:w, 4..3+nPhi: scalars
   ! oldrhs(iy,iz,ix,i) i = 1:eta, 2:d2v, 3..2+nPhi: scalars
-  ! memrhs             storage the new right-hand side is built into
+  ! memrhs(iy,iz,ix,i) the right-hand side of the substep, same components as
+  !                    oldrhs: built by buildrhs, read by linsolve (V is not overwritten)
   !-------------------------------------------------------------------------
   complex(C_DOUBLE_COMPLEX), allocatable, target :: V(:, :, :, :)
   complex(C_DOUBLE_COMPLEX), allocatable :: oldrhs(:, :, :, :)

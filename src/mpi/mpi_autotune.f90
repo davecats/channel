@@ -46,9 +46,6 @@ module mpi_autotune
   real(C_DOUBLE), parameter :: Y_SOLVE_CHECK_TOL = 1.0e-6_C_DOUBLE
   integer(C_INT), save, public :: mpi_autotune_selected_comm_backend = CHANNEL_COMM_BACKEND_AUTO
   integer(C_INT), save :: mpi_autotune_comm_mode = CHANNEL_COMM_BACKEND_AUTO
-#if defined(HAVE_CUDA) || defined(HAVE_HIP)
-  !$omp declare target(autotune_exact_value)
-#endif
   public :: configure_mpi_decomposition, mpi_autotune_has_pass_sequence
 
 contains
@@ -162,6 +159,11 @@ contains
     else
       call ys_schur_default_pass_counts(npy_out, passes)
     end if
+    ! On one y rank both solvers reduce to a direct banded solve.  The pipelined
+    ! path does it in place on the assembled system and copies the solution out;
+    ! the Schur path packs and reconstructs around the same solve (~17 ms/step
+    ! more on 251x250x257).  An explicit CHANNEL_Y_SOLVER still wins.
+    if (npy_out == 1_C_INT .and. .not. has_y_solver) ys_selected_solver = Y_SOLVER_PIPELINED_LU
     if (.not. applied) call apply_comm_env_override()
     if (rank == 0 .and. applied) &
       call print_config("MPI autotune selected", npxz_out, npy_out, passes, int(size(passes), C_INT), exchange, &
@@ -198,7 +200,7 @@ contains
     type(autotune_best), intent(inout) :: best
     real(C_DOUBLE) :: xz_forward_cost, xz_back_cost, y_cost, score
     real(C_DOUBLE) :: y_error
-    integer(C_INT) :: ib, batches, npy, nlines, placeholder_path(MAXP), placeholder_npass, batch_candidates(3)
+    integer(C_INT) :: ib, batches, npy, nlines, placeholder_path(MAXP), placeholder_npass, batch_candidates(4)
     integer(C_INT), allocatable :: placeholder_passes(:)
     logical :: y_ok, fft_ok
     integer :: ierr, rank
@@ -224,10 +226,15 @@ contains
     if (placeholder_npass > 0_C_INT) placeholder_path(1:placeholder_npass) = placeholder_passes
 
     nlines = (nxpp/npxz)*(2_C_INT*nz + 1_C_INT)
-    batch_candidates = [max(1_C_INT, npy/2_C_INT), npy, 2_C_INT*npy]
+    ! The twisted pipeline (default for even npy) is npy/2 deep, so fewer
+    ! batches can pay off: npy/4 is a candidate too.  Duplicates are skipped.
+    batch_candidates = [max(1_C_INT, npy/4_C_INT), max(1_C_INT, npy/2_C_INT), npy, 2_C_INT*npy]
     do ib = 1_C_INT, int(size(batch_candidates), C_INT)
       batches = batch_candidates(ib)
       if (batches > nlines) cycle
+      if (ib > 1_C_INT) then
+        if (any(batch_candidates(1:ib - 1) == batches)) cycle
+      end if
       y_cost = time_y(nxpp, nzd, nz, ny, nphi, overlapping, npy, placeholder_path, placeholder_npass, &
                       YS_SCHUR_EXCHANGE_AUTO, Y_SOLVER_PIPELINED_LU, batches, y_ok, y_error)
       if (.not. y_ok) then
@@ -717,6 +724,9 @@ contains
   pure complex(C_DOUBLE_COMPLEX) function autotune_exact_value(iy, iline)
     integer(C_INT), intent(in) :: iy, iline
     real(C_DOUBLE) :: yv, lr, li
+    ! Device procedure: the directive sits in its own specification part, the one form
+    ! that CCE, amdflang and nvfortran all accept (a module-level list makes CCE warn).
+    !$omp declare target
 
     yv = real(iy, C_DOUBLE)
     lr = real(mod(iline, 17_C_INT), C_DOUBLE)

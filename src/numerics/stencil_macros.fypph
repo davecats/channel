@@ -86,13 +86,19 @@ ${rhs}$ = ODE(1)*(${unkn}$)/deltat + (${impl}$) + ODE(2)*(${expl}$) - ODE(3)*(${
 #:enddef
 
 #! Add a further explicit contribution to a substep already opened.
+#! rhs=None accumulates into old only: buildrhs does that and lets
+#! buildrhs_finish add ODE(2) times the total to the field once.
 #:def rk_accum(rhs, old, expl)
+#:if rhs is None
+${old}$ = ${old}$ + (${expl}$)
+#:else
 ${rhs}$ = ${rhs}$ + ODE(2)*(${expl}$); ${old}$ = ${old}$ + (${expl}$)
+#:endif
 #:enddef
 
 #! Accumulate into the d2v (component 2) equation.
 #:def accum_d2v(field, expl)
-$:rk_accum('{}(iy, iz, ix, 2)'.format(field), 'oldrhs(iy, iz, ix, 2)', expl)
+$:rk_accum(None if field is None else '{}(iy, iz, ix, 2)'.format(field), 'oldrhs(iy, iz, ix, 2)', expl)
 #:enddef
 
 #! Accumulate into the eta (component 1) equation.  The (0,0) mean mode carries
@@ -100,13 +106,40 @@ $:rk_accum('{}(iy, iz, ix, 2)'.format(field), 'oldrhs(iy, iz, ix, 2)', expl)
 #! from the general mode.
 #:def accum_eta(field, expl_general, expl_mean)
 if (ix == 0 .AND. iz == 0) then
-  $:rk_accum('{}(iy, iz, ix, 1)'.format(field), 'oldrhs(iy, iz, ix, 1)', expl_mean)
+  $:rk_accum(None if field is None else '{}(iy, iz, ix, 1)'.format(field), 'oldrhs(iy, iz, ix, 1)', expl_mean)
 else
-  $:rk_accum('{}(iy, iz, ix, 1)'.format(field), 'oldrhs(iy, iz, ix, 1)', expl_general)
+  $:rk_accum(None if field is None else '{}(iy, iz, ix, 1)'.format(field), 'oldrhs(iy, iz, ix, 1)', expl_general)
 end if
 #:enddef
 
 #! Accumulate into eta from a (u, w) right-hand-side pair.
 #:def accum_eta_uw(field, rhsu, rhsw)
 $:accum_eta(field, 'ibeta(iz)*({}) - ialfa(ix)*({})'.format(rhsu, rhsw), 'dcmplx(dreal({}), dreal({}))'.format(rhsu, rhsw))
+#:enddef
+
+#! ===================================================================
+#! A loop nest over (ix, iz, iy) whose wavefronts each cover an 8x8 tile of
+#! (iz, iy), iz fastest.  For kernels that read or write a y-fastest array
+#! (V, oldrhs, a field) and a z- or line-fastest one (VVdz, the solver's
+#! system) in the same iteration: with iy alone fastest, every access to the
+#! second array hits a different, widely strided line.  The enclosing
+#! target region is collapse(5) and lists iz, ix, iy, izb, iyb, izi, iyi as
+#! private; RHS_TILE is the tile edge.
+#! ===================================================================
+#:def tile_zy_open(ix0='nx0', ix1='nxN', y0='y_first', y1='y_last')
+      DO ix = ${ix0}$, ${ix1}$
+        DO izb = 0, (2*nz)/RHS_TILE
+          DO iyb = 0, (${y1}$ - (${y0}$))/RHS_TILE
+            DO iyi = 0, RHS_TILE - 1
+              DO izi = 0, RHS_TILE - 1
+                iz = -nz + izb*RHS_TILE + izi
+                iy = ${y0}$ + iyb*RHS_TILE + iyi
+                IF (iz > nz .OR. iy > ${y1}$) CYCLE
+#:enddef
+#:def tile_zy_close()
+              END DO
+            END DO
+          END DO
+        END DO
+      END DO
 #:enddef
