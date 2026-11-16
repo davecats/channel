@@ -849,8 +849,13 @@ call ys_allocate_workspace(row_start, row_end, line_start, nlines, nz, schur_pas
     ! does not: it is rebuilt only when the decomposition actually changes, which
     ! is why it is torn down for finalization alone.
     if (associated(ys_reduced_rows_send)) then
-      !$omp target exit data map(release: ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values, &
-      !$omp& ys_reduced_rhs)
+      ! The views are bound whenever npy > 1 but entered only when the Schur levels
+      ! were prepared, which is what sets the node size to 0.  An unmatched release
+      ! drops the refcount of the whole byte workspace to zero and frees its device copy.
+      if (ys_workspace_reduced_node_size >= 0) then
+        !$omp target exit data map(release: ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values, &
+        !$omp& ys_reduced_rhs)
+      end if
       nullify (ys_reduced_rows_send, ys_left_interface_values, ys_right_interface_values, ys_reduced_rhs)
     end if
     if (release_external) then
