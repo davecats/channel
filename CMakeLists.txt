@@ -187,12 +187,13 @@ endif()
 # --------------------------------------------------------------------
 # Single precision (src/fft/fft_kinds.f90, RHS_COMPLEX in build_options.h)
 # --------------------------------------------------------------------
-# The xz round trip in single precision -- the z and x transforms and the
-# physical-space fields and their products (VVdz, VVdx, rVVdx, products) --
-# and the storage of oldrhs/newrhs (the explicit terms kept between substeps)
-# and rhs_stash (the transformed products buildrhs differentiates in y),
-# which are still computed in double.  The state, the right-hand side and
-# every wall-normal operation stay double.  HIP backend only.
+# The xz round trip in single precision -- the z and x transforms, the
+# physical-space fields and their products (VVdz, VVdx, rVVdx, products) and
+# the xz transpose buffers -- and the storage of oldrhs/newrhs (the explicit
+# terms kept between substeps) and rhs_stash (the transformed products
+# buildrhs differentiates in y), which are still computed in double.  The
+# state, the right-hand side and every wall-normal operation stay double.
+# HIP backend only.
 option(CHANNEL_SINGLE "Single-precision xz transforms and explicit-term storage" OFF)
 if(CHANNEL_SINGLE)
     target_compile_definitions(channel_core PUBLIC CHANNEL_SINGLE)

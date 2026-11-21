@@ -142,7 +142,7 @@ CONTAINS
           call roctxPop("transform_to_physical repack_zTOx_local")
         else
           call roctxPush("transform_to_physical pack_zTOx")
-          CALL pack_zTOx(VVdz(:, :, :, to), sendbuf(:, to))
+          CALL pack_zTOx(VVdz(:, :, :, to), sendbuf_t(:, to))
           call roctxPop("transform_to_physical pack_zTOx")
           CALL alltoall(sendbuf(:, to), recvbuf(:, to), requests(m), "zTOx transform_to_physical", to)
         end if
@@ -155,7 +155,7 @@ CONTAINS
           CALL alltoall_wait(requests(mm1), from)
           call roctxPop("MPI_Wait zTOx transform_to_physical")
           call roctxPush("transform_to_physical unpack_zTOx")
-          CALL unpack_zTOx(recvbuf(:, from), VVdx(:, :, :, from))
+          CALL unpack_zTOx(recvbuf_t(:, from), VVdx(:, :, :, from))
           call roctxPop("transform_to_physical unpack_zTOx")
         end if
         call roctxPush("transform_to_physical zero_vvdx_hft")
@@ -196,7 +196,7 @@ CONTAINS
           call roctxPop("transform_back repack_xTOz_local")
         else
           call roctxPush("transform_back pack_xTOz")
-          call pack_xTOz(VVdx(:, :, :, to), sendbuf(:, to))
+          call pack_xTOz(VVdx(:, :, :, to), sendbuf_t(:, to))
           call roctxPop("transform_back pack_xTOz")
           call alltoall(sendbuf(:, to), recvbuf(:, to), requests(m), "xTOz transform_back_and_build_rhs", to)
         end if
@@ -209,7 +209,7 @@ CONTAINS
           call alltoall_wait(requests(mm1), from)
           call roctxPop("MPI_Wait xTOz transform_back_and_build_rhs")
           call roctxPush("transform_back unpack_xTOz")
-          call unpack_xTOz(recvbuf(:, from), VVdz(:, :, :, from))
+          call unpack_xTOz(recvbuf_t(:, from), VVdz(:, :, :, from))
           call roctxPop("transform_back unpack_xTOz")
         end if
         call roctxPush("transform_back FFT")

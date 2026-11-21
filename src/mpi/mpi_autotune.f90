@@ -5,7 +5,7 @@ module mpi_autotune
   use, intrinsic :: ieee_arithmetic
   use channel_grid, only: nxB, nzB, ny0, nyN
   use mpi_transpose, only: init_MPI, free_MPI, fft_transpose_is_local, repack_zTOx_local, pack_zTOx, alltoall, &
-                           unpack_zTOx, repack_xTOz_local, pack_xTOz, unpack_xTOz, sendbuf, recvbuf
+                           unpack_zTOx, repack_xTOz_local, pack_xTOz, unpack_xTOz, sendbuf, recvbuf, sendbuf_t, recvbuf_t
 #ifdef HAVE_CUDA
   use ffts, only: init_cufft, free_fft, acquire_fft_workspace, release_fft_workspace, VVdz, VVdx, rVVdx, fft_plans_ok
 #elif defined(HAVE_HIP)
@@ -504,10 +504,10 @@ contains
       if (fft_transpose_is_local) then
         call repack_zTOx_local(VVdz(:, :, :, 1), VVdx(:, :, :, 1))
       else
-        call pack_zTOx(VVdz(:, :, :, 1), sendbuf(:, 1))
+        call pack_zTOx(VVdz(:, :, :, 1), sendbuf_t(:, 1))
         call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "zTOx autotune_xz_sweep")
         call MPI_Wait(request, status, ierr)
-        call unpack_zTOx(recvbuf(:, 1), VVdx(:, :, :, 1))
+        call unpack_zTOx(recvbuf_t(:, 1), VVdx(:, :, :, 1))
       end if
       call MPI_Barrier(MPI_COMM_WORLD, ierr)
       if (iter > 0) forward_elapsed = forward_elapsed + MPI_Wtime() - t0
@@ -516,10 +516,10 @@ contains
       if (fft_transpose_is_local) then
         call repack_xTOz_local(VVdx(:, :, :, 1), VVdz(:, :, :, 1))
       else
-        call pack_xTOz(VVdx(:, :, :, 1), sendbuf(:, 1))
+        call pack_xTOz(VVdx(:, :, :, 1), sendbuf_t(:, 1))
         call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "xTOz autotune_xz_sweep")
         call MPI_Wait(request, status, ierr)
-        call unpack_xTOz(recvbuf(:, 1), VVdz(:, :, :, 1))
+        call unpack_xTOz(recvbuf_t(:, 1), VVdz(:, :, :, 1))
       end if
 
       call MPI_Barrier(MPI_COMM_WORLD, ierr)
