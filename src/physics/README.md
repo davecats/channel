@@ -15,6 +15,7 @@ changes there is exactly one.
 | the viscous operators | `channel_operators.fypph` |
 | the nonlinear terms, the right-hand side, the mean-flow correction | `channel_equations.fypp` |
 | the wall condition on a scalar — isothermal or isoflux | nothing here — `[scalars] bc`, see the README's *Input File* section |
+| make a scalar active (Boussinesq buoyancy, gravity along x) | nothing here — `[scalars] ri`; the terms are `rhs_buoyancy_real` in `channel_equations.fypp` |
 | half channel | neither — a CMake option, see below |
 
 `channel_state.f90` is the run state itself (fields, physical parameters,
@@ -31,7 +32,7 @@ v   :  lambda*(D^2 - k^2) v  -  ni*(D^2 - k^2)^2 v  =  explicit terms
 eta :  lambda*eta           -  ni*(D^2 - k^2) eta   =  explicit terms
 ```
 
-plus one Helmholtz problem per passive scalar. Each operator is written **once**
+plus one Helmholtz problem per scalar. Each operator is written **once**
 in `channel_operators.fypph` and used by both halves of its equation — the
 implicit half assembled into the banded matrix as a slice `j = -2:2`, the
 explicit half applied at a single offset. That is the point of the file: these

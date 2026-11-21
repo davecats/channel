@@ -69,6 +69,11 @@ module channel_state
   !$omp declare target(u0, uN)
   real(C_DOUBLE), allocatable :: t0s(:), tNs(:)
   real(C_DOUBLE), allocatable :: pra(:)
+  ! [scalars] ri: Boussinesq force ri_buoy*phi_1 on u (buoyant = ri_buoy /= 0).
+  real(C_DOUBLE) :: ri_buoy = 0.0d0
+  logical :: buoyant = .false.
+  ! [scalars] sink = velocity: -phi_sink(i)*u in scalar i's equation (else 0).
+  real(C_DOUBLE), allocatable :: phi_sink(:)
   real(C_DOUBLE) :: perturbation_amplitude = 5.54d-5
   ! Seed for the perturbation of a generated start field, from [velocity] seed.
   ! INITIAL_SEED_UNSET means the deck did not give one, and the start field is

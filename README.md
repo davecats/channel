@@ -25,7 +25,7 @@ at a friction Reynolds number of Re_tau = 500<br/>
 - Distributed wall-normal solves using a hierarchical y-Schur solver.
 - Optional autotuning of MPI decomposition, y-Schur pass hierarchy, and y-solve batch sizes.
 - Constant streamwise/spanwise flow-rate correction or prescribed mean pressure gradients.
-- Optional passive scalar fields.
+- Optional passive scalar fields, or one active scalar (Boussinesq buoyancy along x).
 - Optional pressure and `dpdy` post-processing.
 - Optional raw convection-velocity/statistics output through the `[convvelo]` input section.
 
@@ -278,6 +278,12 @@ scalar.
   value by a uniform volumetric source. The correction field solves the same
   Helmholtz problem with *homogeneous* rows, which under `neumann` means
   zero-gradient, so it adds no wall flux and the imposed `t0`/`tN` stay exact.
+- `sink`: what balances the wall heat flux. `uniform` (default) is the `meantb`
+  correction above. `velocity` adds `-gamma*u` (fully developed flow heated
+  along x), `gamma = (1/(Re*Pr))*(tN - t0)/meanflowx`, which balances the wall
+  fluxes exactly; needs `bc = neumann` and `meanflowx /= 0`.
+- `ri`: makes the scalar active (needs `nPhi = 1`): the explicit Boussinesq
+  force `ri*phi` along `+x`, i.e. `ri = Gr/Re^2` with gravity along `-x`.
 
 ## Optional Convvelo Output
 

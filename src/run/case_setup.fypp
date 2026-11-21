@@ -79,6 +79,7 @@ CONTAINS
     logical :: found
     real(C_DOUBLE) :: unused_wall_value
     character(len=32), allocatable :: bc_names(:)
+    character(len=32) :: sink_name
 
     call require_integer(cfg, "mesh", "nx", nx)
     call require_integer(cfg, "mesh", "ny", ny)
@@ -117,7 +118,8 @@ CONTAINS
     call require_real(cfg, "scalars", "meantx", meantx)
     call require_real(cfg, "scalars", "meantb", meantb)
     !$omp target update to(u0, uN)
-    allocate (pra(nPhi), t0s(nPhi), tNs(nPhi), phi_bc_kind(nPhi), bc_names(nPhi))
+    allocate (pra(nPhi), t0s(nPhi), tNs(nPhi), phi_bc_kind(nPhi), bc_names(nPhi), phi_sink(nPhi))
+    phi_sink = 0.0d0
     if (nPhi > 0) then
       call require_real_vector(cfg, "scalars", "pr", pra(1:nPhi))
       DO iPhi = 1, nPhi
@@ -147,6 +149,32 @@ CONTAINS
       call require_real(cfg, "scalars", "t0", unused_wall_value)
       call require_real(cfg, "scalars", "tn", unused_wall_value)
     end if
+    ! [scalars] ri: Boussinesq force ri*phi along x (one active scalar).
+    ri_buoy = 0.0d0
+    call get_real(cfg, "scalars", "ri", ri_buoy, found)
+    buoyant = (ri_buoy /= 0.0d0)
+    if (buoyant .and. nPhi /= 1) then
+      if (has_terminal) print *, "ERROR: [scalars] ri needs nPhi = 1; got", nPhi
+      error stop "active scalar needs nPhi = 1"
+    end if
+    ! [scalars] sink = velocity: -gamma*u instead of the uniform meantb
+    ! correction, gamma balancing the Neumann wall fluxes at the fixed flow rate.
+    sink_name = "uniform"
+    call get_string(cfg, "scalars", "sink", sink_name, found)
+    select case (trim(lowercase(sink_name)))
+    case ("uniform")
+    case ("velocity")
+      if (abs(meanflowx) <= 1.0d-7 .or. any(phi_bc_kind /= PHI_BC_NEUMANN)) then
+        if (has_terminal) print *, "ERROR: [scalars] sink = velocity needs meanflowx /= 0 and bc = neumann"
+        error stop "invalid sink = velocity"
+      end if
+      phi_sink = ni*pra*(tNs - t0s)/meanflowx
+    case default
+      if (has_terminal) print *, "ERROR: [scalars] sink must be uniform or velocity; got ", trim(sink_name)
+      error stop "invalid scalar sink"
+    end select
+    if (has_terminal .and. buoyant) print *, "Boussinesq buoyancy along x, ri =", ri_buoy
+    if (has_terminal .and. any(phi_sink /= 0.0d0)) print *, "Velocity-weighted scalar sink, gamma =", phi_sink
     !$omp target enter data map(to: pra, t0s, tNs)
 
     overlapping = .false.
