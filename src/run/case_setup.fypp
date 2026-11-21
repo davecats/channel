@@ -187,14 +187,8 @@ CONTAINS
       rhs_store_a = 0.0
       !$omp target enter data map(to: rhs_store_a)
       oldrhs => rhs_store_a
-      ! The fused buildrhs keeps a second buffer of explicit terms instead of
-      ! memrhs (buildrhs_decide_fusion allocates it).
-      call buildrhs_decide_fusion()
-      if (.not. rhs_fuse) then
-        ALLOCATE (memrhs(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:2 + nPhi))
-        memrhs = 0.0
-        !$omp target enter data map(to: memrhs)
-      end if
+      ! newrhs and the stash of the products
+      call buildrhs_allocate()
     END IF
     ALLOCATE (der(1:ny - 1, 0:3, -2:2)); der = 0.0
     ! One wall row set per scalar; setup_boundary_conditions fills them.
@@ -307,10 +301,6 @@ CONTAINS
     !$omp target exit data map(delete: bc0, bcn, zero_bc)
     DEALLOCATE (bc0, bcn, zero_bc)
     IF (solveNS) THEN
-      if (associated(memrhs)) then
-        !$omp target exit data map(delete: memrhs)
-        deallocate (memrhs)
-      end if
       if (allocated(rhs_store_a)) then
         !$omp target exit data map(delete: rhs_store_a)
         deallocate (rhs_store_a)

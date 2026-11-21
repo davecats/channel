@@ -23,17 +23,14 @@ module channel_state
   !
   ! V(iy,iz,ix,i)      i = 1:u, 2:v, 3:w, 4..3+nPhi: scalars
   ! oldrhs(iy,iz,ix,i) i = 1:eta, 2:d2v, 3..2+nPhi: scalars
-  ! memrhs(iy,iz,ix,i) the right-hand side of the substep, same components as
-  !                    oldrhs: built by buildrhs, read by linsolve (V is not overwritten)
   !-------------------------------------------------------------------------
   complex(C_DOUBLE_COMPLEX), allocatable, target :: V(:, :, :, :)
   ! oldrhs: the explicit terms of the previous substep; newrhs: those of this
-  ! substep, filled by the fused buildrhs (otherwise unused).  Pointers into
-  ! rhs_store_a / rhs_store_b, swapped after each substep (rhs_swap).
+  ! substep, filled by buildrhs.  Pointers into rhs_store_a / rhs_store_b,
+  ! swapped after each substep (rhs_swap).
   ! Double, or single with CHANNEL_SINGLE.
   RHS_COMPLEX, pointer :: oldrhs(:, :, :, :) => null(), newrhs(:, :, :, :) => null()
   RHS_COMPLEX, allocatable, target :: rhs_store_a(:, :, :, :), rhs_store_b(:, :, :, :)
-  complex(C_DOUBLE_COMPLEX), pointer :: memrhs(:, :, :, :)
 
   !-------------------------------------------------------------------------
   ! Boundary planes.  bc0/bcn(iz,ix,i) with i = 1:u, 2:v, 3:w, 4:vy, 5:eta,

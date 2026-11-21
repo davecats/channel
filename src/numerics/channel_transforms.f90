@@ -20,7 +20,7 @@ module channel_transforms
   use, intrinsic :: iso_c_binding
   use channel_grid
   use channel_state
-  use channel_equations, only: build_products, buildrhs, buildrhs_finish
+  use channel_equations, only: build_products, buildrhs
   use mpi_transpose
   use roctx, only: roctxPush, roctxPop
   use ffts
@@ -220,9 +220,6 @@ CONTAINS
         call roctxPop("transform_back buildrhs")
       end if
     END DO
-    call roctxPush("transform_back buildrhs_finish")
-    call buildrhs_finish(ODE)
-    call roctxPop("transform_back buildrhs_finish")
   END SUBROUTINE transform_back_and_build_rhs
 
   ! The same round trip for a single field, without the pipelining above: one
