@@ -542,7 +542,9 @@ $:tile_zy_close()
     has_lower_boundary = (ny0 == 1)
     has_upper_boundary = (nyN == ny - 1)
     call roctxPush("solve_stacked_systems")
+    call roctxPush("stack prepare_workspace")
     call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, nsys*nxB*(2*nz + 1), prepare_schur=.false.)
+    call roctxPop("stack prepare_workspace")
     do s = 1, nsys
       c0 = nx0 + (s - 1)*nxB
       c1 = c0 + nxB - 1
@@ -562,21 +564,33 @@ $:tile_zy_close()
       ctx%lower_wall_value(-nz:, nx0:) => ys_lower_boundary_owner(:, c0:c1)
       ctx%upper_wall_value(-nz:, nx0:) => ys_upper_boundary_owner(:, c0:c1)
       ctx%upper_ghost_value(-nz:, nx0:) => ys_upper_ghost_owner(:, c0:c1)
+      call roctxPush("stack assemble")          ! one range per system, in the order of the stack (v, eta, scalars)
       call systems(s)%assemble(ctx)
+      call roctxPop("stack assemble")
+      call roctxPush("stack boundary_rows")     ! wall-specific: the ghost / wall rows of the rank's own walls
       call systems(s)%boundary(ctx)
+      call roctxPop("stack boundary_rows")
     end do
+    call roctxPush("stack eliminate_boundaries")    ! wall-specific: eliminate_assembled_boundaries (empty on ranks without a wall)
     call eliminate_assembled_boundaries(ny0, nyN, has_lower_boundary, has_upper_boundary)
+    call roctxPop("stack eliminate_boundaries")
+    call roctxPush("stack solve_lines")
     if (ys_selected_batches >= 1_C_INT) then
       call ys_solve_pipelined_lu_lines(ys_selected_batches)
     else
       call ys_solve_pipelined_lu_lines()
     end if
+    call roctxPop("stack solve_lines")
     do s = 1, nsys
       c0 = nx0 + (s - 1)*nxB
       owner_dst(ny0 - 2:, -nz:, nx0:) => systems(s)%field
+      call roctxPush("stack unpack")
       call ys_unpack_pipelined_columns(owner_dst, (s - 1)*nxB)
+      call roctxPop("stack unpack")
+      call roctxPush("stack reconstruct_boundaries")   ! wall-specific
       call reconstruct_assembled_boundaries(owner_dst, ny0, has_lower_boundary, has_upper_boundary, &
                                             ix_start=c0, ix_end=c0 + nxB - 1)
+      call roctxPop("stack reconstruct_boundaries")
     end do
     call ys_release_workspace()
     call roctxPop("solve_stacked_systems")

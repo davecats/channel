@@ -235,7 +235,7 @@ module y_line_solvers
                              channel_comm_p2p_flush, channel_comm_p2p_test, channel_comm_p2p_wait, &
                              channel_comm_p2p_complete, channel_comm_p2p_connect, &
                              channel_comm_cache, channel_comm_cache_reserve, channel_comm_cache_finalize
-  use roctx, only: roctxPush, roctxPop
+  use roctx, only: roctxPush, roctxPop, rt_mirror
   use byte_workspace, only: workspace_request, workspace_release, workspace_slice, workspace_align_offset
   use env_options, only: env_flag, env_int, env_int64
   use mpi_f08
@@ -1989,6 +1989,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     twisted = mod(npy_grid, 2_C_INT) == 0_C_INT
     call env_flag("CHANNEL_Y_TWISTED", twisted)
     call ys_pipeline_directions(twisted, up, down, has_up, has_down, meeting, mirror)
+    rt_mirror = merge(1, 0, mirror)
 
     call ys_ensure_pipeline_buffers(nbatches, batch_max_lines)
     call yc_connect()

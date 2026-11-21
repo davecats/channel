@@ -395,6 +395,7 @@ $:assemble_rhs_tiles()
     ! newrhs (assemble_rhs_fused); V receives the solution.
     allocate (systems(2 + nPhi))
     call roctxPush("linsolve solve_v_eta_phi")
+    call roctxPush("linsolve setup_systems")
     systems(1)%ctx = compact_component_boundaries(v0bc, v0m1bc, vnbc, vnp1bc, &
                                                   bc0(:, :, 2), bc0(:, :, 4), bcn(:, :, 2), bcn(:, :, 4))
     systems(1)%field => V(:, :, :, 2)
@@ -415,6 +416,7 @@ $:assemble_rhs_tiles()
       call scalar_system(systems(2 + iPhi), lambda, iPhi)
     end do
     call fused_rhs_order([2_C_INT, 1_C_INT, (2_C_INT + iPhi, iPhi = 1, nPhi)])
+    call roctxPop("linsolve setup_systems")
     call solve_wall_normal_systems(systems)
     call roctxPop("linsolve solve_v_eta_phi")
     call roctxPush("linsolve d_v_dy")
