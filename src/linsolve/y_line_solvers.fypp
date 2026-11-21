@@ -237,7 +237,7 @@ module y_line_solvers
                              channel_comm_cache, channel_comm_cache_reserve, channel_comm_cache_finalize
   use roctx, only: roctxPush, roctxPop, rt_mirror
   use byte_workspace, only: workspace_request, workspace_release, workspace_slice, workspace_align_offset
-  use env_options, only: env_flag, env_int, env_int64
+  use env_options, only: env_flag, env_int, env_int64, env_text
   use mpi_f08
 #ifdef HAVE_CUDA
   use cusparse
@@ -295,6 +295,7 @@ module y_line_solvers
   public :: ys_mf_register, ys_dvdy_register
   public :: ys_solve_pipelined_lu_lines, ys_unpack_pipelined_columns
   public :: ys_finalize_nccl_contexts
+  public :: ys_fa2_wanted, ys_fa2_begin, ys_fa2_progress
 
   integer(C_INT), save :: ys_workspace_ny = -1
   integer(C_INT), save :: ys_workspace_nz = -1
@@ -376,6 +377,10 @@ module y_line_solvers
     integer(C_INT) :: ticket = -1_C_INT
     integer(C_INT) :: offset = 0_C_INT, count = 0_C_INT, peer = -1_C_INT
   end type yc_request
+
+#:set FA_PART = 'decl'
+#:include "y_factor_ahead.fypph"
+
 
   ! The bands are YS_COEF (real except on CUDA, see build_options.h); the
   ! right-hand sides and solutions are complex.
@@ -1971,9 +1976,13 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     integer :: ierr
     logical :: timing_enabled
     real(C_DOUBLE) :: timing(10), time_start, time_t0
+    logical :: fa
 
     if (active_n < 2_C_INT) error stop "pipelined LU distributed solve requires at least two local rows"
-    ys_pipe_fe = merge(YS_PIPELINE_TABLE_ELEMS, YS_PIPELINE_FACTOR_ELEMS, table)
+    ! Factor-ahead (ys_fa2_begin ran for this stacked solve): the chain moves y only, the factors travel in the
+    ! factor pipeline (y_factor_ahead.fypph).
+    fa = ys_fa_early .and. .not. table
+    ys_pipe_fe = merge(YS_PIPELINE_TABLE_ELEMS, YS_PIPELINE_FACTOR_ELEMS, table .or. fa)
     call yc_begin()
 
     timing_enabled = .false.
@@ -1993,6 +2002,13 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
 
     call ys_ensure_pipeline_buffers(nbatches, batch_max_lines)
     call yc_connect()
+    ! Factor-ahead: the factor pipeline, begun while the right-hand sides were assembled, runs to completion here.
+    if (fa) then
+      ! the plan must be the one computed here
+      if (any(ys_fa_early_plan /= [active_n, nlines, nbatches, batch_max_lines])) error stop "factor-ahead: plan mismatch"
+      ys_fa_early = .false.
+      call ys_factor_finish()
+    end if
     allocate (factor_send_req(nbatches), backward_recv_req(nbatches), backward_send_req(nbatches))
     allocate (factor_recv_req(nbatches))
     allocate (meet_send_req(nbatches), meet_recv_req(nbatches))
@@ -2055,6 +2071,12 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
         else
           call ys_dvdy_forward(first_line, line_count, active_n, has_up, factor_offset, factor_offset, has_down)
         end if
+      else if (fa) then
+        if (mirror) then
+          call ys_fa_forward_mirror(first_line, line_count, active_n, has_up, has_down, factor_offset, factor_offset)
+        else
+          call ys_fa_forward(first_line, line_count, active_n, has_up, has_down, factor_offset, factor_offset)
+        end if
       else if (mirror) then
         call ys_pipelined_forward_fused_mirror(first_line, line_count, active_n, has_up, has_down, factor_offset)
       else
@@ -2105,6 +2127,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     call yc_complete()
 #:endcall
 
+
     ! Reporting sits outside the timed regions: it barriers across MPI_COMM_Y
     ! once per rank, which a profiler would otherwise charge to them.
     if (timing_enabled) then
@@ -2140,6 +2163,9 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
 #:endcall
       if (table) then
         call ys_dvdy_meet(lc, fo, ys_pipeline_meet_offset(b, nbatches, batch_max_lines), bo, mirror)
+      else if (fa) then
+        call ys_fa_meet(lc, fo, ys_pipeline_meet_offset(b, nbatches, batch_max_lines), bo, ys_fa_off(1_C_INT, b), &
+                        ys_fa_off(3_C_INT, b), mirror)
       else
         call ys_pipeline_meet(lc, fo, ys_pipeline_meet_offset(b, nbatches, batch_max_lines), bo, mirror)
       end if
@@ -2218,6 +2244,14 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
             call ys_dvdy_backward(first_line, line_count, active_n, has_down, backward_offset, forward_offset, &
                                   has_up, factor_offset, has_up, has_down)
           end if
+        else if (fa) then
+          if (mirror) then
+            call ys_fa_backward_mirror(first_line, line_count, active_n, has_up, has_down, backward_offset, forward_offset, &
+                                       factor_offset, ys_fa_off(2_C_INT, next_backward))
+          else
+            call ys_fa_backward(first_line, line_count, active_n, has_up, has_down, backward_offset, forward_offset, &
+                                factor_offset, ys_fa_off(2_C_INT, next_backward))
+          end if
         else if (mirror) then
           call ys_pipelined_backward_fused_mirror(first_line, line_count, active_n, has_up, has_down, &
                                                   backward_offset, forward_offset, factor_offset)
@@ -2244,6 +2278,48 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       call channel_comm_cache_finalize(ys_pipeline_nccl_contexts(lane))
     end do
   end subroutine ys_finalize_nccl_contexts
+
+#if !defined(_CRAYFTN)
+#:set FA_PART = 'kernels'
+#:include "y_factor_ahead.fypph"
+#:set FA_PART = 'pipeline'
+#:include "y_factor_ahead.fypph"
+#else
+  ! CCE: factor-ahead is off (ys_fa2_wanted); the routines the solve names exist for the compiler only.
+  logical function ys_fa2_wanted()
+    ys_fa2_wanted = .false.
+  end function ys_fa2_wanted
+  subroutine ys_fa2_begin()
+  end subroutine ys_fa2_begin
+  subroutine ys_fa2_progress()
+  end subroutine ys_fa2_progress
+  integer(C_INT) function ys_fa_off(region, batch)
+    integer(C_INT), intent(in) :: region, batch
+    ys_fa_off = 0_C_INT
+  end function ys_fa_off
+  subroutine ys_factor_finish()
+  end subroutine ys_factor_finish
+  subroutine ys_fa_forward(first_line, line_count, active_n, has_left, has_right, recv_offset, send_offset)
+    integer(C_INT), intent(in) :: first_line, line_count, active_n, recv_offset, send_offset
+    logical, intent(in) :: has_left, has_right
+  end subroutine ys_fa_forward
+  subroutine ys_fa_forward_mirror(first_line, line_count, active_n, has_left, has_right, recv_offset, send_offset)
+    integer(C_INT), intent(in) :: first_line, line_count, active_n, recv_offset, send_offset
+    logical, intent(in) :: has_left, has_right
+  end subroutine ys_fa_forward_mirror
+  subroutine ys_fa_backward(first_line, line_count, active_n, has_left, has_right, recv_offset, send_offset, y_off, u_off)
+    integer(C_INT), intent(in) :: first_line, line_count, active_n, recv_offset, send_offset, y_off, u_off
+    logical, intent(in) :: has_left, has_right
+  end subroutine ys_fa_backward
+  subroutine ys_fa_backward_mirror(first_line, line_count, active_n, has_left, has_right, recv_offset, send_offset, y_off, u_off)
+    integer(C_INT), intent(in) :: first_line, line_count, active_n, recv_offset, send_offset, y_off, u_off
+    logical, intent(in) :: has_left, has_right
+  end subroutine ys_fa_backward_mirror
+  subroutine ys_fa_meet(line_count, y_own, y_recv, seed_offset, own_u, partner_u, mirror)
+    integer(C_INT), intent(in) :: line_count, y_own, y_recv, seed_offset, own_u, partner_u
+    logical, intent(in) :: mirror
+  end subroutine ys_fa_meet
+#endif
 
   ! ---------------------------------------------------------------------
   ! The message layer of the pipelined solve (see yc_request).  Buffers are

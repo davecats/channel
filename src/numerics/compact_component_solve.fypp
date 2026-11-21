@@ -59,6 +59,9 @@ module compact_component_solve
     complex(C_DOUBLE_COMPLEX), pointer :: src(:, :, :) => null()
     integer(C_INT) :: row_start = 0_C_INT, row_end = 0_C_INT
     integer(C_INT) :: derivative_order = 1_C_INT
+    ! Stage 3n: 0 = a callback assembles matrix and right-hand side (as always); 1 = the matrix part only (ys_mf_register,
+    ! the matrix rows); 2 = the right-hand side part only.  Callbacks that know no phases ignore it.
+    integer(C_INT) :: phase = 0_C_INT
     real(C_DOUBLE) :: lambda = 0.0d0, diffusion = 0.0d0
     logical :: has_lower_boundary = .false., has_upper_boundary = .false.
     real(C_DOUBLE) :: lower_bc(-2:2) = 0.0d0, lower_ghost_bc(-2:2) = 0.0d0
@@ -95,6 +98,10 @@ module compact_component_solve
     procedure(compact_assembly_step), pointer, nopass :: boundary => null()
     type(compact_assembly_context) :: ctx
   end type wall_normal_system
+  ! Stage 3n: the factors of the matrix half of the wall elimination, kept for its right-hand-side half:
+  ! 1, 2 lower first row (ghost, wall), 3 lower second row, 4 upper second-last row, 5, 6 upper last row (ghost, wall);
+  ! complex, as the `fac` of the combined routine.
+  complex(C_DOUBLE_COMPLEX), allocatable, save :: elim_fac(:, :, :)
 contains
 
   SUBROUTINE apply_dy(src, dst)
@@ -353,6 +360,171 @@ $:tile_zy_close()
     end if
   end subroutine eliminate_assembled_boundaries
 
+  ! eliminate_assembled_boundaries in two halves, so that the matrix half can run before the right-hand side is
+  ! assembled (factor-ahead, CHANNEL_Y_FACTOR_AHEAD): the matrix half folds the closure rows and eliminates the matrix rows of
+  ! the first and last two rows next to a wall (the statements of the combined routine that touch only matrix
+  ! quantities, in the same order, on complex row copies as there) and keeps the factors; the right-hand-side half
+  ! applies the same factors to the right-hand sides and folds the wall values.  The results are the same bits as the
+  ! combined routine's: every statement is the one of the macros of wall_closure.fypph, split by what it touches.
+  subroutine eliminate_assembled_boundaries_matrix(row_start, row_end, has_lower_boundary, has_upper_boundary)
+    use y_line_solvers, only: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, &
+          ys_eqm1_owner, ys_eq0_owner, ys_eqn_owner, ys_eqnp1_owner, ys_boundary_lower_eq_owner, ys_boundary_upper_eq_owner
+    implicit none
+    integer(C_INT), intent(in) :: row_start, row_end
+    logical, intent(in) :: has_lower_boundary, has_upper_boundary
+    complex(C_DOUBLE_COMPLEX) :: row_coeffs(-2:2)
+    real(C_DOUBLE) :: eq0(-1:2), eqn(-2:1)
+    integer(C_INT) :: ix, iz, ix0_owner, ixN_owner, ib
+    complex(C_DOUBLE_COMPLEX) :: fac
+
+    if (.not. has_lower_boundary .and. .not. has_upper_boundary) return
+    ix0_owner = lbound(ys_gpsv_owner_rhs, 2)
+    ixN_owner = ubound(ys_gpsv_owner_rhs, 2)
+    if (allocated(elim_fac)) then
+      if (lbound(elim_fac, 3) /= ix0_owner .or. ubound(elim_fac, 3) /= ixN_owner .or. lbound(elim_fac, 2) /= -nz) then
+        !$omp target exit data map(delete: elim_fac)
+        deallocate (elim_fac)
+      end if
+    end if
+    if (.not. allocated(elim_fac)) then
+      allocate (elim_fac(6, -nz:nz, ix0_owner:ixN_owner))
+      !$omp target enter data map(alloc: elim_fac)
+    end if
+
+    if (has_lower_boundary) then
+      call roctxPush("assembled_boundary_eliminate_matrix_lower")
+      !$omp target teams distribute parallel do default(none) &
+      !$omp shared(ys_gpsv_owner_matrix, ys_eqm1_owner, ys_eq0_owner, ys_boundary_lower_eq_owner, elim_fac, row_start, ix0_owner, ixN_owner, nz) &
+      !$omp private(ix, iz, row_coeffs, eq0, fac, ib) collapse(2)
+      do ix = ix0_owner, ixN_owner
+        do iz = -nz, nz
+          ! fold (the matrix part of fold_ghost_into_lower_wall)
+          do ib = -1, 2
+            ys_boundary_lower_eq_owner(ib, iz, ix) = ys_eq0_owner(ib, iz, ix) - ys_eqm1_owner(ib, iz, ix)*ys_eq0_owner(-2, iz, ix)/ys_eqm1_owner(-2, iz, ix)
+          end do
+          eq0 = ys_boundary_lower_eq_owner(:, iz, ix)
+
+          row_coeffs = ys_gpsv_owner_matrix(iz, ix, row_start, -2:2)
+          ! eliminate_lower_first_row, matrix statements
+          fac = row_coeffs(-2)/ys_eqm1_owner(-2, iz, ix)
+          elim_fac(1, iz, ix) = fac
+          row_coeffs = row_coeffs - ys_eqm1_owner(:, iz, ix)*fac
+          row_coeffs(-2) = 0.0d0
+          fac = row_coeffs(-1)/eq0(-1)
+          elim_fac(2, iz, ix) = fac
+          row_coeffs(-1:2) = row_coeffs(-1:2) - eq0*fac
+          row_coeffs(-1) = 0.0d0
+          ys_gpsv_owner_matrix(iz, ix, row_start, -2:2) = row_coeffs
+
+          row_coeffs = ys_gpsv_owner_matrix(iz, ix, row_start + 1, -2:2)
+          ! eliminate_lower_second_row, matrix statements
+          fac = row_coeffs(-2)/eq0(-1)
+          elim_fac(3, iz, ix) = fac
+          row_coeffs(-2:1) = row_coeffs(-2:1) - eq0(-1:2)*fac
+          row_coeffs(-2) = 0.0d0
+          ys_gpsv_owner_matrix(iz, ix, row_start + 1, -2:2) = row_coeffs
+        end do
+      end do
+      !$omp end target teams distribute parallel do
+      call roctxPop("assembled_boundary_eliminate_matrix_lower")
+    end if
+
+    if (has_upper_boundary) then
+      call roctxPush("assembled_boundary_eliminate_matrix_upper")
+      !$omp target teams distribute parallel do default(none) &
+      !$omp shared(ys_gpsv_owner_matrix, ys_eqn_owner, ys_eqnp1_owner, ys_boundary_upper_eq_owner, elim_fac, row_end, ix0_owner, ixN_owner, nz) &
+      !$omp private(ix, iz, row_coeffs, eqn, fac, ib) collapse(2)
+      do ix = ix0_owner, ixN_owner
+        do iz = -nz, nz
+          do ib = -2, 1
+            ys_boundary_upper_eq_owner(ib, iz, ix) = ys_eqn_owner(ib, iz, ix) - ys_eqnp1_owner(ib, iz, ix)*ys_eqn_owner(2, iz, ix)/ys_eqnp1_owner(2, iz, ix)
+          end do
+          eqn = ys_boundary_upper_eq_owner(:, iz, ix)
+
+          row_coeffs = ys_gpsv_owner_matrix(iz, ix, row_end - 1, -2:2)
+          ! eliminate_upper_second_last_row, matrix statements
+          fac = row_coeffs(2)/eqn(1)
+          elim_fac(4, iz, ix) = fac
+          row_coeffs(-1:2) = row_coeffs(-1:2) - eqn(-2:1)*fac
+          row_coeffs(2) = 0.0d0
+          ys_gpsv_owner_matrix(iz, ix, row_end - 1, -2:2) = row_coeffs
+
+          row_coeffs = ys_gpsv_owner_matrix(iz, ix, row_end, -2:2)
+          ! eliminate_upper_last_row, matrix statements
+          fac = row_coeffs(2)/ys_eqnp1_owner(2, iz, ix)
+          elim_fac(5, iz, ix) = fac
+          row_coeffs = row_coeffs - ys_eqnp1_owner(:, iz, ix)*fac
+          row_coeffs(2) = 0.0d0
+          fac = row_coeffs(1)/eqn(1)
+          elim_fac(6, iz, ix) = fac
+          row_coeffs(-2:1) = row_coeffs(-2:1) - eqn*fac
+          row_coeffs(1) = 0.0d0
+          ys_gpsv_owner_matrix(iz, ix, row_end, -2:2) = row_coeffs
+        end do
+      end do
+      !$omp end target teams distribute parallel do
+      call roctxPop("assembled_boundary_eliminate_matrix_upper")
+    end if
+  end subroutine eliminate_assembled_boundaries_matrix
+
+  subroutine eliminate_assembled_boundaries_rhs(row_start, row_end, has_lower_boundary, has_upper_boundary)
+    use y_line_solvers, only: ys_gpsv_owner_rhs, &
+          ys_lower_ghost_owner, ys_lower_boundary_owner, ys_upper_boundary_owner, ys_upper_ghost_owner, ys_eqm1_owner, ys_eq0_owner, ys_eqn_owner, ys_eqnp1_owner, &
+                  ys_boundary_lower_rhs0_owner, ys_boundary_upper_rhsn_owner
+    implicit none
+    integer(C_INT), intent(in) :: row_start, row_end
+    logical, intent(in) :: has_lower_boundary, has_upper_boundary
+    complex(C_DOUBLE_COMPLEX) :: rhs_value
+    integer(C_INT) :: ix, iz, ix0_owner, ixN_owner
+
+    if (.not. has_lower_boundary .and. .not. has_upper_boundary) return
+    ix0_owner = lbound(ys_gpsv_owner_rhs, 2)
+    ixN_owner = ubound(ys_gpsv_owner_rhs, 2)
+
+    if (has_lower_boundary) then
+      call roctxPush("assembled_boundary_eliminate_rhs_lower")
+      !$omp target teams distribute parallel do default(none) &
+      !$omp shared(ys_gpsv_owner_rhs, ys_lower_ghost_owner, ys_lower_boundary_owner, ys_eqm1_owner, ys_eq0_owner, ys_boundary_lower_rhs0_owner, elim_fac, row_start, ix0_owner, ixN_owner, nz) &
+      !$omp private(ix, iz, rhs_value) collapse(2)
+      do ix = ix0_owner, ixN_owner
+        do iz = -nz, nz
+          ! fold, right-hand-side part
+          ys_boundary_lower_rhs0_owner(iz, ix) = ys_lower_boundary_owner(iz, ix) - ys_lower_ghost_owner(iz, ix)*ys_eq0_owner(-2, iz, ix)/ys_eqm1_owner(-2, iz, ix)
+          rhs_value = ys_gpsv_owner_rhs(iz, ix, row_start)
+          rhs_value = rhs_value - ys_lower_ghost_owner(iz, ix)*elim_fac(1, iz, ix)
+          rhs_value = rhs_value - ys_boundary_lower_rhs0_owner(iz, ix)*elim_fac(2, iz, ix)
+          ys_gpsv_owner_rhs(iz, ix, row_start) = rhs_value
+          rhs_value = ys_gpsv_owner_rhs(iz, ix, row_start + 1)
+          rhs_value = rhs_value - ys_boundary_lower_rhs0_owner(iz, ix)*elim_fac(3, iz, ix)
+          ys_gpsv_owner_rhs(iz, ix, row_start + 1) = rhs_value
+        end do
+      end do
+      !$omp end target teams distribute parallel do
+      call roctxPop("assembled_boundary_eliminate_rhs_lower")
+    end if
+
+    if (has_upper_boundary) then
+      call roctxPush("assembled_boundary_eliminate_rhs_upper")
+      !$omp target teams distribute parallel do default(none) &
+      !$omp shared(ys_gpsv_owner_rhs, ys_upper_boundary_owner, ys_upper_ghost_owner, ys_eqn_owner, ys_eqnp1_owner, ys_boundary_upper_rhsn_owner, elim_fac, row_end, ix0_owner, ixN_owner, nz) &
+      !$omp private(ix, iz, rhs_value) collapse(2)
+      do ix = ix0_owner, ixN_owner
+        do iz = -nz, nz
+          ys_boundary_upper_rhsn_owner(iz, ix) = ys_upper_boundary_owner(iz, ix) - ys_upper_ghost_owner(iz, ix)*ys_eqn_owner(2, iz, ix)/ys_eqnp1_owner(2, iz, ix)
+          rhs_value = ys_gpsv_owner_rhs(iz, ix, row_end - 1)
+          rhs_value = rhs_value - ys_boundary_upper_rhsn_owner(iz, ix)*elim_fac(4, iz, ix)
+          ys_gpsv_owner_rhs(iz, ix, row_end - 1) = rhs_value
+          rhs_value = ys_gpsv_owner_rhs(iz, ix, row_end)
+          rhs_value = rhs_value - ys_upper_ghost_owner(iz, ix)*elim_fac(5, iz, ix)
+          rhs_value = rhs_value - ys_boundary_upper_rhsn_owner(iz, ix)*elim_fac(6, iz, ix)
+          ys_gpsv_owner_rhs(iz, ix, row_end) = rhs_value
+        end do
+      end do
+      !$omp end target teams distribute parallel do
+      call roctxPop("assembled_boundary_eliminate_rhs_upper")
+    end if
+  end subroutine eliminate_assembled_boundaries_rhs
+
   subroutine reconstruct_assembled_boundaries(line_values, row_start, has_lower_boundary, has_upper_boundary, ix_start, ix_end)
     use y_line_solvers, only: ys_lower_ghost_owner, ys_upper_ghost_owner, ys_eqm1_owner, ys_eqnp1_owner, &
                   ys_boundary_lower_rhs0_owner, ys_boundary_upper_rhsn_owner, ys_boundary_lower_eq_owner, ys_boundary_upper_eq_owner
@@ -530,12 +702,14 @@ $:tile_zy_close()
     use y_line_solvers, only: ys_prepare_assembled_workspace, ys_release_workspace, &
                               ys_solve_pipelined_lu_lines, ys_unpack_pipelined_columns, ys_selected_batches, &
                               ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, ys_eqm1_owner, ys_eq0_owner, ys_eqn_owner, ys_eqnp1_owner, &
-                              ys_lower_ghost_owner, ys_lower_boundary_owner, ys_upper_boundary_owner, ys_upper_ghost_owner
+                              ys_lower_ghost_owner, ys_lower_boundary_owner, ys_upper_boundary_owner, ys_upper_ghost_owner, &
+                              ys_fa2_wanted, ys_fa2_begin, ys_fa2_progress
     implicit none
     type(wall_normal_system), intent(inout) :: systems(:)
     type(compact_assembly_context) :: ctx
+    type(compact_assembly_context), allocatable :: ctxs(:)
     complex(C_DOUBLE_COMPLEX), pointer :: owner_dst(:, :, :)
-    logical :: has_lower_boundary, has_upper_boundary
+    logical :: has_lower_boundary, has_upper_boundary, fa2
     integer(C_INT) :: nsys, s, c0, c1
 
     nsys = size(systems, kind=C_INT)
@@ -545,35 +719,93 @@ $:tile_zy_close()
     call roctxPush("stack prepare_workspace")
     call ys_prepare_assembled_workspace(ny, nz, ny0, nyN, 1_C_INT, nsys*nxB*(2*nz + 1), prepare_schur=.false.)
     call roctxPop("stack prepare_workspace")
-    do s = 1, nsys
-      c0 = nx0 + (s - 1)*nxB
-      c1 = c0 + nxB - 1
-      ctx = systems(s)%ctx
-      ctx%src(ny0 - 2:, -nz:, nx0:) => systems(s)%source
-      ctx%row_start = ny0
-      ctx%row_end = nyN
-      ctx%has_lower_boundary = has_lower_boundary
-      ctx%has_upper_boundary = has_upper_boundary
-      ctx%system_matrix(-nz:, nx0:, ny0:, -2:) => ys_gpsv_owner_matrix(:, c0:c1, :, :)
-      ctx%system_rhs(-nz:, nx0:, ny0:) => ys_gpsv_owner_rhs(:, c0:c1, :)
-      ctx%lower_ghost_row(-2:, -nz:, nx0:) => ys_eqm1_owner(:, :, c0:c1)
-      ctx%lower_wall_row(-2:, -nz:, nx0:) => ys_eq0_owner(:, :, c0:c1)
-      ctx%upper_wall_row(-2:, -nz:, nx0:) => ys_eqn_owner(:, :, c0:c1)
-      ctx%upper_ghost_row(-2:, -nz:, nx0:) => ys_eqnp1_owner(:, :, c0:c1)
-      ctx%lower_ghost_value(-nz:, nx0:) => ys_lower_ghost_owner(:, c0:c1)
-      ctx%lower_wall_value(-nz:, nx0:) => ys_lower_boundary_owner(:, c0:c1)
-      ctx%upper_wall_value(-nz:, nx0:) => ys_upper_boundary_owner(:, c0:c1)
-      ctx%upper_ghost_value(-nz:, nx0:) => ys_upper_ghost_owner(:, c0:c1)
-      call roctxPush("stack assemble")          ! one range per system, in the order of the stack (v, eta, scalars)
-      call systems(s)%assemble(ctx)
-      call roctxPop("stack assemble")
-      call roctxPush("stack boundary_rows")     ! wall-specific: the ghost / wall rows of the rank's own walls
-      call systems(s)%boundary(ctx)
-      call roctxPop("stack boundary_rows")
-    end do
-    call roctxPush("stack eliminate_boundaries")    ! wall-specific: eliminate_assembled_boundaries (empty on ranks without a wall)
-    call eliminate_assembled_boundaries(ny0, nyN, has_lower_boundary, has_upper_boundary)
-    call roctxPop("stack eliminate_boundaries")
+    fa2 = ys_fa2_wanted()
+    if (fa2) then
+      ! Factor-ahead (CHANNEL_Y_FACTOR_AHEAD nonzero): the matrix of all systems first (ys_mf_register, the wall rows,
+      ! the matrix half of the wall elimination), then the factor pipeline begins and runs, one or a few batches per
+      ! ys_fa2_progress call, while the right-hand sides are assembled and the wall elimination's right-hand-side half
+      ! runs; ys_solve_pipelined_lu_lines completes it before the chain, which then moves y only.  Same arithmetic as the
+      ! combined path (callbacks with ctx%phase 1 and 2, eliminate_assembled_boundaries_matrix / _rhs).
+      allocate (ctxs(nsys))
+      do s = 1, nsys
+        c0 = nx0 + (s - 1)*nxB
+        c1 = c0 + nxB - 1
+        ctxs(s) = systems(s)%ctx
+        ctxs(s)%src(ny0 - 2:, -nz:, nx0:) => systems(s)%source
+        ctxs(s)%row_start = ny0
+        ctxs(s)%row_end = nyN
+        ctxs(s)%has_lower_boundary = has_lower_boundary
+        ctxs(s)%has_upper_boundary = has_upper_boundary
+        ctxs(s)%system_matrix(-nz:, nx0:, ny0:, -2:) => ys_gpsv_owner_matrix(:, c0:c1, :, :)
+        ctxs(s)%system_rhs(-nz:, nx0:, ny0:) => ys_gpsv_owner_rhs(:, c0:c1, :)
+        ctxs(s)%lower_ghost_row(-2:, -nz:, nx0:) => ys_eqm1_owner(:, :, c0:c1)
+        ctxs(s)%lower_wall_row(-2:, -nz:, nx0:) => ys_eq0_owner(:, :, c0:c1)
+        ctxs(s)%upper_wall_row(-2:, -nz:, nx0:) => ys_eqn_owner(:, :, c0:c1)
+        ctxs(s)%upper_ghost_row(-2:, -nz:, nx0:) => ys_eqnp1_owner(:, :, c0:c1)
+        ctxs(s)%lower_ghost_value(-nz:, nx0:) => ys_lower_ghost_owner(:, c0:c1)
+        ctxs(s)%lower_wall_value(-nz:, nx0:) => ys_lower_boundary_owner(:, c0:c1)
+        ctxs(s)%upper_wall_value(-nz:, nx0:) => ys_upper_boundary_owner(:, c0:c1)
+        ctxs(s)%upper_ghost_value(-nz:, nx0:) => ys_upper_ghost_owner(:, c0:c1)
+        ctxs(s)%phase = 1_C_INT
+        call roctxPush("stack assemble_matrix")
+        call systems(s)%assemble(ctxs(s))
+        call roctxPop("stack assemble_matrix")
+        call roctxPush("stack boundary_rows")
+        call systems(s)%boundary(ctxs(s))        ! the closure rows (static) and values; written again with the rhs below
+        call roctxPop("stack boundary_rows")
+      end do
+      call roctxPush("stack eliminate_matrix")
+      call eliminate_assembled_boundaries_matrix(ny0, nyN, has_lower_boundary, has_upper_boundary)
+      call roctxPop("stack eliminate_matrix")
+      call roctxPush("stack factor_begin")
+      call ys_fa2_begin()
+      call roctxPop("stack factor_begin")
+      do s = 1, nsys
+        ctxs(s)%phase = 2_C_INT
+        call roctxPush("stack assemble_rhs")
+        call systems(s)%assemble(ctxs(s))
+        call roctxPop("stack assemble_rhs")
+        call roctxPush("stack boundary_rows")
+        call systems(s)%boundary(ctxs(s))
+        call roctxPop("stack boundary_rows")
+        call ys_fa2_progress()
+      end do
+      call roctxPush("stack eliminate_rhs")
+      call eliminate_assembled_boundaries_rhs(ny0, nyN, has_lower_boundary, has_upper_boundary)
+      call roctxPop("stack eliminate_rhs")
+      call ys_fa2_progress()
+      deallocate (ctxs)
+    else
+      do s = 1, nsys
+        c0 = nx0 + (s - 1)*nxB
+        c1 = c0 + nxB - 1
+        ctx = systems(s)%ctx
+        ctx%src(ny0 - 2:, -nz:, nx0:) => systems(s)%source
+        ctx%row_start = ny0
+        ctx%row_end = nyN
+        ctx%has_lower_boundary = has_lower_boundary
+        ctx%has_upper_boundary = has_upper_boundary
+        ctx%system_matrix(-nz:, nx0:, ny0:, -2:) => ys_gpsv_owner_matrix(:, c0:c1, :, :)
+        ctx%system_rhs(-nz:, nx0:, ny0:) => ys_gpsv_owner_rhs(:, c0:c1, :)
+        ctx%lower_ghost_row(-2:, -nz:, nx0:) => ys_eqm1_owner(:, :, c0:c1)
+        ctx%lower_wall_row(-2:, -nz:, nx0:) => ys_eq0_owner(:, :, c0:c1)
+        ctx%upper_wall_row(-2:, -nz:, nx0:) => ys_eqn_owner(:, :, c0:c1)
+        ctx%upper_ghost_row(-2:, -nz:, nx0:) => ys_eqnp1_owner(:, :, c0:c1)
+        ctx%lower_ghost_value(-nz:, nx0:) => ys_lower_ghost_owner(:, c0:c1)
+        ctx%lower_wall_value(-nz:, nx0:) => ys_lower_boundary_owner(:, c0:c1)
+        ctx%upper_wall_value(-nz:, nx0:) => ys_upper_boundary_owner(:, c0:c1)
+        ctx%upper_ghost_value(-nz:, nx0:) => ys_upper_ghost_owner(:, c0:c1)
+        call roctxPush("stack assemble")          ! one range per system, in the order of the stack (v, eta, scalars)
+        call systems(s)%assemble(ctx)
+        call roctxPop("stack assemble")
+        call roctxPush("stack boundary_rows")     ! wall-specific: the ghost / wall rows of the rank's own walls
+        call systems(s)%boundary(ctx)
+        call roctxPop("stack boundary_rows")
+      end do
+      call roctxPush("stack eliminate_boundaries")    ! wall-specific: eliminate_assembled_boundaries (empty on ranks without a wall)
+      call eliminate_assembled_boundaries(ny0, nyN, has_lower_boundary, has_upper_boundary)
+      call roctxPop("stack eliminate_boundaries")
+    end if
     call roctxPush("stack solve_lines")
     if (ys_selected_batches >= 1_C_INT) then
       call ys_solve_pipelined_lu_lines(ys_selected_batches)

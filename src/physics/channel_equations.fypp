@@ -262,10 +262,12 @@ contains
     ix0_owner = lbound(owner_src, 3)
     ! Matrix-free solve: only the two rows next to each wall this rank owns
     ! are assembled (ys_mf_register).
+    ixN_owner = ubound(owner_src, 3)
+    ! ctx%phase (stage 3n): 0 both parts, 1 the matrix part (registration + matrix rows), 2 the right-hand-side part
+    if (ctx%phase /= 2_C_INT) then
     mf = ys_mf_register(YS_MF_BIHARMONIC, lambda_coeff, 0.0d0)
     nlow = merge(2_C_INT, 0_C_INT, ctx%has_lower_boundary)
     nrows = merge(nlow + merge(2_C_INT, 0_C_INT, ctx%has_upper_boundary), row_end - row_start + 1_C_INT, mf)
-    ixN_owner = ubound(owner_src, 3)
 
     ! The bands depend on iy and k^2 only and are written z-fastest, as the
     ! solver reads them: no transpose, so a plain z-innermost loop.  Only the
@@ -288,12 +290,15 @@ contains
     end do
     !$omp end target teams distribute parallel do
     if (emu_matv) call emu_round_array(system_matrix)
+    end if
+    if (ctx%phase /= 1_C_INT) then
     kcomp = fused_rhs_next()
     c1 = rk_c1; o2 = rk_o2; o3 = rk_o3; iPhi = 0
     if (kcomp == 2) then
 $:assemble_rhs_fused('v')
     else
 $:assemble_rhs_tiles()
+    end if
     end if
   end subroutine assemble_compact_biharmonic_system
 
@@ -325,10 +330,11 @@ $:assemble_rhs_tiles()
     ix0_owner = lbound(owner_src, 3)
     ! Matrix-free solve: only the two rows next to each wall this rank owns
     ! are assembled (ys_mf_register).
+    ixN_owner = ubound(owner_src, 3)
+    if (ctx%phase /= 2_C_INT) then
     mf = ys_mf_register(YS_MF_HELMHOLTZ, lambda_coeff, diffusion_coeff)
     nlow = merge(2_C_INT, 0_C_INT, ctx%has_lower_boundary)
     nrows = merge(nlow + merge(2_C_INT, 0_C_INT, ctx%has_upper_boundary), row_end - row_start + 1_C_INT, mf)
-    ixN_owner = ubound(owner_src, 3)
 
     ! Bands untiled, right-hand side tiled: see the biharmonic system above.
     !$omp target teams distribute parallel do collapse(3) default(none) &
@@ -347,6 +353,8 @@ $:assemble_rhs_tiles()
     end do
     !$omp end target teams distribute parallel do
     if (emu_math) call emu_round_array(system_matrix)
+    end if
+    if (ctx%phase /= 1_C_INT) then
     kcomp = fused_rhs_next()
     c1 = rk_c1; o2 = rk_o2; o3 = rk_o3; iPhi = max(0_C_INT, kcomp - 2_C_INT)
     if (kcomp == 1) then
@@ -355,6 +363,7 @@ $:assemble_rhs_fused('eta')
 $:assemble_rhs_fused('scalar')
     else
 $:assemble_rhs_tiles()
+    end if
     end if
   end subroutine assemble_compact_helmholtz_system
 
