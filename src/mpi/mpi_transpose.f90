@@ -113,7 +113,7 @@
         yslab_line_count_by_rank(rank) = x_count*nlines_z
         yslab_first_line_by_rank(rank) = first_x*nlines_z + 1
 
-        yslab_active_first_y_by_rank(rank) = 1 + rank*(ny - 1)/npy_grid
+        yslab_active_first_y_by_rank(rank) = y_split_first(rank, ny, npy_grid)
       end do
 
       yslab_owned_first_line = yslab_first_line_by_rank(ipy)
@@ -123,6 +123,28 @@
       !$omp& yslab_active_first_y_by_rank, yslab_send_counts, yslab_recv_counts, &
       !$omp& yslab_send_displs, yslab_recv_displs)
     end subroutine setup_y_decomposition
+
+    ! First interior y row (1 .. ny-1) of y rank `rank`; rank = np gives ny, one past the last.  The even split of
+    ! ny+1 rows, from which the two wall ranks give back one row each (they do the extra boundary work), e.g.
+    ! ny = 751 on 16 ranks: 46, 47 x 14, 46; with fewer than 3 ranks the even split of the ny-1 interior rows.
+    ! ny0/nyN and the y-slab ranges both come from here, so they cannot disagree.
+    integer function y_split_first(rank, ny_value, np)
+      integer, intent(in) :: rank, ny_value, np
+      integer :: total
+
+      if (np < 3) then
+        y_split_first = 1 + rank*(ny_value - 1)/np
+        return
+      end if
+      total = ny_value + 1
+      if (rank <= 0) then
+        y_split_first = 1
+      else if (rank >= np) then
+        y_split_first = ny_value
+      else
+        y_split_first = rank*total/np
+      end if
+    end function y_split_first
 
     subroutine prepare_yslab_scratch(nrows, nlines)
       implicit none
@@ -812,8 +834,8 @@
       call MPI_Comm_split(MPI_COMM_WORLD, color, key, MPI_COMM_Y, ierr)
       ! Calculate domain division in wall-normal direction.
       ! ny0:nyN are the only persistent y-partition variables.
-      ny0 = 1 + ipy*(ny - 1)/npy_grid
-      nyN = (ipy + 1)*(ny - 1)/npy_grid
+      ny0 = y_split_first(ipy, ny, npy_grid)
+      nyN = y_split_first(ipy + 1, ny, npy_grid) - 1
 
       ! Local write extent, including physical ghost rows only on the end ranks.
       miny_local = ny0
