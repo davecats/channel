@@ -1967,7 +1967,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     logical :: has_up, has_down, meeting, mirror, twisted
     type(yc_request), allocatable :: factor_send_req(:), backward_recv_req(:), backward_send_req(:)
     type(yc_request), allocatable :: meet_send_req(:), meet_recv_req(:)
-    type(yc_request) :: factor_recv_req
+    type(yc_request), allocatable :: factor_recv_req(:)
     integer :: ierr
     logical :: timing_enabled
     real(C_DOUBLE) :: timing(10), time_start, time_t0
@@ -1993,6 +1993,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     call ys_ensure_pipeline_buffers(nbatches, batch_max_lines)
     call yc_connect()
     allocate (factor_send_req(nbatches), backward_recv_req(nbatches), backward_send_req(nbatches))
+    allocate (factor_recv_req(nbatches))
     allocate (meet_send_req(nbatches), meet_recv_req(nbatches))
 
     ! The solution halos need no message of their own: the one on the `down`
@@ -2012,9 +2013,23 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       call roctxPop("ys_pipeline post_backward_recvs")
     end if
 
-    ! The factor state of batch 1; each batch then posts the next one's as
-    ! soon as it has sent its own, so on NCCL the two go out in one group.
-    if (has_up) call post_factor_recv(1_C_INT)
+    ! The factor states from `up`.  MPI: all of them now, each into its own
+    ! slot, so that a large message (rendezvous) can travel while this rank
+    ! is still in the kernel of an earlier batch; posted one at a time, the
+    ! transfer only started after that kernel and every downstream rank waited
+    ! the whole transfer per batch.  NCCL: batch 1 now; each batch then posts
+    ! the next one's as soon as it has sent its own, so the two go out in one
+    ! group (a receive posted earlier would sit in its lane's stream ahead of
+    ! sends the partner is waiting for).
+    if (has_up) then
+      if (yc_nccl) then
+        call post_factor_recv(1_C_INT)
+      else
+        do batch = 1_C_INT, nbatches
+          call post_factor_recv(batch)
+        end do
+      end if
+    end if
 
     next_backward = 1_C_INT
     call roctxPush("ys_pipeline forward_sweep")
@@ -2029,7 +2044,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       ! buffer.  It replaced five synchronous kernels and two messages per batch.
       if (has_up) then
 #:call timed_step('wait factor_recv', 'T_FACTOR_WAIT')
-        call yc_wait(factor_recv_req)
+        call yc_wait(factor_recv_req(batch))
 #:endcall
       end if
 #:call timed_step('forward_fused', 'T_FACTOR_KERNEL')
@@ -2059,7 +2074,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
         call yc_isend(YC_FACTOR, factor_offset, factor_count, down, TAG_FACTOR + batch, factor_send_req(batch))
 #:endcall
       end if
-      if (has_up .and. batch < nbatches) call post_factor_recv(batch + 1_C_INT)
+      if (has_up .and. yc_nccl .and. batch < nbatches) call post_factor_recv(batch + 1_C_INT)
       ! Meeting ranks: the previous batch's interface solve, its swap having
       ! travelled while this batch's forward kernel ran.
       if (meeting .and. batch > 1_C_INT) call finish_meet(batch - 1_C_INT)
@@ -2096,7 +2111,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       call ys_print_pipeline_timing(ys_pipeline_timing_solve_id, active_n, nlines, nbatches, timing)
     end if
 
-    deallocate (factor_send_req, backward_recv_req, backward_send_req)
+    deallocate (factor_send_req, backward_recv_req, backward_send_req, factor_recv_req)
     deallocate (meet_send_req, meet_recv_req)
 
   contains
@@ -2108,7 +2123,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
 
       call ys_pipeline_batch_slice(b, nbatches, nlines, batch_max_lines, fl, lc, fc, sc, fo, wo, bo)
 #:call timed_comm_post
-      call yc_irecv(YC_FACTOR, fo, fc, up, TAG_FACTOR + b, factor_recv_req, eager=.true.)
+      call yc_irecv(YC_FACTOR, fo, fc, up, TAG_FACTOR + b, factor_recv_req(b), eager=.true.)
 #:endcall
     end subroutine post_factor_recv
     ! Meeting ranks: waits for batch b's swap of reduced rows with the partner
