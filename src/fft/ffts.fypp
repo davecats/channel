@@ -13,12 +13,18 @@
 
 #include "build_options.h"
 
-#! Single-precision transforms (fft_kinds): the hipFFT entry points and plan
-#! types follow the kind.  Only the HIP backend has them.
+#! Single-precision transforms (fft_kinds): the hipFFT / cuFFT entry points and
+#! plan types follow the kind.  The GPU backends have them; FFTW does not.
 #ifdef CHANNEL_SINGLE
-#ifndef HAVE_HIP
-#error "CHANNEL_SINGLE needs the HIP backend"
+#if !defined(HAVE_HIP) && !defined(HAVE_CUDA)
+#error "CHANNEL_SINGLE needs the HIP or the CUDA backend"
 #endif
+#define CUFFT_ZEXEC cufftExecC2C
+#define CUFFT_ZTYPE CUFFT_C2C
+#define CUFFT_C2REXEC cufftExecC2R
+#define CUFFT_R2CEXEC cufftExecR2C
+#define CUFFT_C2RTYPE CUFFT_C2R
+#define CUFFT_R2CTYPE CUFFT_R2C
 #define HIPFFT_ZEXEC hipfftExecC2C
 #define HIPFFT_ZTYPE HIPFFT_C2C
 #define HIPFFT_C2REXEC hipfftExecC2R
@@ -26,6 +32,12 @@
 #define HIPFFT_C2RTYPE HIPFFT_C2R
 #define HIPFFT_R2CTYPE HIPFFT_R2C
 #else
+#define CUFFT_ZEXEC cufftExecZ2Z
+#define CUFFT_ZTYPE CUFFT_Z2Z
+#define CUFFT_C2REXEC cufftExecZ2D
+#define CUFFT_R2CEXEC cufftExecD2Z
+#define CUFFT_C2RTYPE CUFFT_Z2D
+#define CUFFT_R2CTYPE CUFFT_D2Z
 #define HIPFFT_ZEXEC hipfftExecZ2Z
 #define HIPFFT_ZTYPE HIPFFT_Z2Z
 #define HIPFFT_C2REXEC hipfftExecZ2D
@@ -65,8 +77,8 @@
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(x)
     istat = cudaDeviceSynchronize()
-    istat = cufftExecZ2Z(cu_p${name}$, x(1, 1, y0), x(1, 1, y0), CUFFT_${direction}$)
-    if (istat /= 0) print *, "cufftExecZ2Z ${name}$ failed:", istat
+    istat = CUFFT_ZEXEC(cu_p${name}$, x(1, 1, y0), x(1, 1, y0), CUFFT_${direction}$)
+    if (istat /= 0) print *, "cufftExec ${name}$ failed:", istat
     istat = cudaDeviceSynchronize()
     if (istat /= 0) print *, "cudaDeviceSynchronize ${name}$ failed:", istat
     !$omp end target data
@@ -371,14 +383,14 @@ CONTAINS
     call check_cufft_status("cufftCreate IFT", istat)
     istat = cufftSetAutoAllocation(cu_pIFT, 1)
     call check_cufft_status("cufftSetAutoAllocation IFT", istat)
-    istat = cufftPlan1d(cu_pIFT, nzd, CUFFT_Z2Z, fft_ny*nxB)
+    istat = cufftPlan1d(cu_pIFT, nzd, CUFFT_ZTYPE, fft_ny*nxB)
     call check_cufft_status("cufftPlan1d IFT", istat)
 
     istat = cufftCreate(cu_pFFT)
     call check_cufft_status("cufftCreate FFT", istat)
     istat = cufftSetAutoAllocation(cu_pFFT, 1)
     call check_cufft_status("cufftSetAutoAllocation FFT", istat)
-    istat = cufftPlan1d(cu_pFFT, nzd, CUFFT_Z2Z, fft_ny*nxB)
+    istat = cufftPlan1d(cu_pFFT, nzd, CUFFT_ZTYPE, fft_ny*nxB)
     call check_cufft_status("cufftPlan1d FFT", istat)
 
     n(1) = 2*nxd            ! length
@@ -395,7 +407,7 @@ CONTAINS
     istat = cufftSetAutoAllocation(cu_pRFT, 1)
     call check_cufft_status("cufftSetAutoAllocation RFT", istat)
     istat = cufftPlanMany(cu_pRFT, 1, n, inembed, istride, idist, &
-                          onembed, ostride, odist, CUFFT_Z2D, batch)
+                          onembed, ostride, odist, CUFFT_C2RTYPE, batch)
     call check_cufft_status("cufftPlanMany RFT", istat)
 
     istat = cufftCreate(cu_pHFT)
@@ -403,7 +415,7 @@ CONTAINS
     istat = cufftSetAutoAllocation(cu_pHFT, 1)
     call check_cufft_status("cufftSetAutoAllocation HFT", istat)
     istat = cufftPlanMany(cu_pHFT, 1, n, onembed, ostride, odist, &
-                          inembed, istride, idist, CUFFT_D2Z, nzB*fft_ny)
+                          inembed, istride, idist, CUFFT_R2CTYPE, nzB*fft_ny)
     call check_cufft_status("cufftPlanMany HFT", istat)
 
   END SUBROUTINE init_cufft
@@ -523,8 +535,8 @@ $:z2z_transform('IFT', 'INVERSE')
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(x, rx)
     istat = cudaDeviceSynchronize()
-    istat = cufftExecZ2D(cu_pRFT, x(1, 1, x_y0), rx(1, 1, rx_y0))
-    if (istat /= 0) print *, "cufftExecZ2D RFT failed:", istat
+    istat = CUFFT_C2REXEC(cu_pRFT, x(1, 1, x_y0), rx(1, 1, rx_y0))
+    if (istat /= 0) print *, "cufftExec RFT failed:", istat
     istat = cudaDeviceSynchronize()
     if (istat /= 0) print *, "cudaDeviceSynchronize RFT failed:", istat
     !$omp end target data
@@ -571,8 +583,8 @@ $:z2z_transform('IFT', 'INVERSE')
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(rx, x)
     istat = cudaDeviceSynchronize()
-    istat = cufftExecD2Z(cu_pHFT, rx(1, 1, rx_y0), x(1, 1, x_y0))
-    if (istat /= 0) print *, "cufftExecD2Z HFT failed:", istat
+    istat = CUFFT_R2CEXEC(cu_pHFT, rx(1, 1, rx_y0), x(1, 1, x_y0))
+    if (istat /= 0) print *, "cufftExec HFT failed:", istat
     istat = cudaDeviceSynchronize()
     if (istat /= 0) print *, "cudaDeviceSynchronize HFT failed:", istat
     !$omp end target data

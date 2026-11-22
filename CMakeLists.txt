@@ -193,7 +193,7 @@ endif()
 # terms kept between substeps) and rhs_stash (the transformed products
 # buildrhs differentiates in y), which are still computed in double.  The
 # state, the right-hand side and every wall-normal operation stay double.
-# HIP backend only.
+# GPU backends only (hipFFT or cuFFT); the FFTW build stops with an error.
 option(CHANNEL_SINGLE "Single-precision xz transforms and explicit-term storage" OFF)
 if(CHANNEL_SINGLE)
     target_compile_definitions(channel_core PUBLIC CHANNEL_SINGLE)
