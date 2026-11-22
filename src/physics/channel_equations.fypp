@@ -174,7 +174,6 @@ module channel_equations
   use channel_state
   use stencil_coefficients
   use compact_component_solve
-  use y_line_solvers, only: ys_mf_register, YS_MF_BIHARMONIC, YS_MF_HELMHOLTZ
   use mpi_transpose
   use roctx, only: roctxPush, roctxPop
   use ffts
@@ -192,6 +191,18 @@ module channel_equations
   real(C_DOUBLE), save :: rk_c1 = 0.0d0, rk_o2 = 0.0d0, rk_o3 = 0.0d0
   integer(C_INT), save :: fused_rhs_list(64), fused_rhs_n = 0, fused_rhs_pos = 0
 contains
+
+  ! ys_mf_register for the assembly callbacks.  y_line_solvers is used here and
+  ! nowhere else in this module: nvfortran lets the private module-level imports
+  ! of a used module (k2, nx0, ...) leak into the using scope, where a
+  ! default(none) kernel naming the same variable then fails with "must appear
+  ! in a SHARED or PRIVATE clause".  This routine has no kernels.
+  logical function register_matrix_free(biharmonic, lambda, diffusion)
+    use y_line_solvers, only: ys_mf_register, YS_MF_BIHARMONIC, YS_MF_HELMHOLTZ
+    logical, intent(in) :: biharmonic
+    real(C_DOUBLE), intent(in) :: lambda, diffusion
+    register_matrix_free = ys_mf_register(merge(YS_MF_BIHARMONIC, YS_MF_HELMHOLTZ, biharmonic), lambda, diffusion)
+  end function register_matrix_free
 
   !--------------------------------------------------------------!
   !---------------- integral in the y-direction -----------------!
@@ -265,7 +276,7 @@ contains
     ixN_owner = ubound(owner_src, 3)
     ! ctx%phase (stage 3n): 0 both parts, 1 the matrix part (registration + matrix rows), 2 the right-hand-side part
     if (ctx%phase /= 2_C_INT) then
-    mf = ys_mf_register(YS_MF_BIHARMONIC, lambda_coeff, 0.0d0)
+    mf = register_matrix_free(.true., lambda_coeff, 0.0d0)
     nlow = merge(2_C_INT, 0_C_INT, ctx%has_lower_boundary)
     nrows = merge(nlow + merge(2_C_INT, 0_C_INT, ctx%has_upper_boundary), row_end - row_start + 1_C_INT, mf)
 
@@ -332,7 +343,7 @@ $:assemble_rhs_tiles()
     ! are assembled (ys_mf_register).
     ixN_owner = ubound(owner_src, 3)
     if (ctx%phase /= 2_C_INT) then
-    mf = ys_mf_register(YS_MF_HELMHOLTZ, lambda_coeff, diffusion_coeff)
+    mf = register_matrix_free(.false., lambda_coeff, diffusion_coeff)
     nlow = merge(2_C_INT, 0_C_INT, ctx%has_lower_boundary)
     nrows = merge(nlow + merge(2_C_INT, 0_C_INT, ctx%has_upper_boundary), row_end - row_start + 1_C_INT, mf)
 

@@ -36,11 +36,11 @@
 #:set JJ = ['2', '1', '0', '-1', '-2'] if mir else ['-2', '-1', '0', '1', '2']
         stored = kind == YS_MF_OFF .or. (lower_wall .and. ph < 2) .or. (upper_wall .and. ph > active_n - 3)
         if (stored) then
-          ${a}$ = merge(${AA}$(p), YS_CZERO, i >= 2 .or. ${hl}$)
-          ${b}$ = merge(${BB}$(p), YS_CZERO, i >= 1 .or. ${hl}$)
+          ${a}$ = YS_CZERO; if (i >= 2 .or. ${hl}$) ${a}$ = ${AA}$(p)
+          ${b}$ = YS_CZERO; if (i >= 1 .or. ${hl}$) ${b}$ = ${BB}$(p)
           ${c}$ = ys_gpsv_d(p)
-          ${e}$ = merge(${EE}$(p), YS_CZERO, i <= active_n - 2 .or. ${hr}$)
-          ${f}$ = merge(${FF}$(p), YS_CZERO, i <= active_n - 3 .or. ${hr}$)
+          ${e}$ = YS_CZERO; if (i <= active_n - 2 .or. ${hr}$) ${e}$ = ${EE}$(p)
+          ${f}$ = YS_CZERO; if (i <= active_n - 3 .or. ${hr}$) ${f}$ = ${FF}$(p)
         else
           iy = row0 + ph
           if (kind == YS_MF_BIHARMONIC) then
@@ -99,6 +99,8 @@
   ! rank `up` (ys_fa_buf at recv_off + 2 per line, nearest-but-one first), else zero; stores a, b', 1/c', u1, u2 per
   ! row (see the header) and sends its own last two rows' (u1 + i u2) to send_off.
   subroutine ys_fa_factor${sfx}$(first_line, line_count, active_n, has_left, has_right, recv_off, send_off)
+    use stencil_coefficients, only: der
+    use channel_state, only: ni
     implicit none
     integer(C_INT), intent(in) :: first_line, line_count, active_n, recv_off, send_off
     logical, intent(in) :: has_left, has_right

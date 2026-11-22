@@ -218,8 +218,6 @@ module y_line_solvers
 
   use, intrinsic :: iso_c_binding
   use channel_grid, only: ny0, nyN, nx0, nxN, nxB, npy_grid, ipy, iproc, k2
-  use stencil_coefficients, only: der
-  use channel_state, only: ni
   ! ycomm_* and ensure_ycomm_buffers exist in every build; only MPI_COMM_Y is
   ! MPI-specific.  This use must stay outside the #ifdef below: with it inside,
   ! nvfortran rejects ycomm_sendbuf/ycomm_recvbuf in the shared() clauses of the
@@ -1580,6 +1578,8 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
   ! assembly kernels write -- and only rows 0, 1, n-2, n-1 (rewritten by the
   ! wall elimination) read from the band arrays.
   subroutine ys_solve_penta_matrix_free(n, batch_count, label)
+    use stencil_coefficients, only: der
+    use channel_state, only: ni
     implicit none
     integer(C_INT), intent(in) :: n, batch_count
     character(*), intent(in) :: label
@@ -1737,7 +1737,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     ngl = ys_workspace_ny - 1_C_INT
     allocate (loc(5, active_n), band(5, ngl), tab(ngl, 5, 2))
     !$omp target teams distribute parallel do default(none) map(from: loc) &
-    !$omp shared(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, active_n, nlines) private(i, p)
+    !$omp shared(loc, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, active_n, nlines) private(i, p)
     do i = 1, active_n
       p = 1_C_INT64_T + int(i - 1, C_INT64_T)*int(nlines, C_INT64_T)
       loc(1, i) = ys_gpsv_ds(p); loc(2, i) = ys_gpsv_dl(p); loc(3, i) = ys_gpsv_d(p)
@@ -2620,6 +2620,8 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
   ! reduced rows from `up` (offset in the receive buffer); this rank's last two
   ! go to the same offset in the send buffer.
   subroutine ys_pipelined_forward_fused${sfx}$(first_line, line_count, active_n, has_left, has_right, offset)
+    use stencil_coefficients, only: der
+    use channel_state, only: ni
     implicit none
     integer(C_INT), intent(in) :: first_line, line_count, active_n, offset
     logical, intent(in) :: has_left, has_right
