@@ -44,6 +44,16 @@ module mpi_autotune
 
   real(C_DOUBLE), parameter :: RK_SUBSTEPS = 3.0_C_DOUBLE
   real(C_DOUBLE), parameter :: Y_SOLVE_CHECK_TOL = 1.0e-6_C_DOUBLE
+  ! The Schur pass hierarchies of an (npxz, comm) pair are searched only when its
+  ! default hierarchy scores within this factor of the best candidate so far.
+  real(C_DOUBLE), parameter :: SCHUR_SEARCH_FACTOR = 1.5_C_DOUBLE
+  ! xz sweep of the (npxz, comm) pair being scanned (scan_xz_sweep).
+  logical, save :: xz_have = .false., xz_fft_ok = .false.
+  integer(C_INT), save :: xz_npxz = 0_C_INT, xz_comm = 0_C_INT
+  real(C_DOUBLE), save :: xz_forward = 0.0_C_DOUBLE, xz_back = 0.0_C_DOUBLE
+  ! Schur hierarchy already timed with alltoall, left out of enumerate_pass_paths
+  ! (skip_npass < 0: none).
+  integer(C_INT), save :: skip_npass = -1_C_INT, skip_path(MAXP) = 0_C_INT
   integer(C_INT), save, public :: mpi_autotune_selected_comm_backend = CHANNEL_COMM_BACKEND_AUTO
   integer(C_INT), save :: mpi_autotune_comm_mode = CHANNEL_COMM_BACKEND_AUTO
   public :: configure_mpi_decomposition, mpi_autotune_has_pass_sequence
@@ -179,20 +189,58 @@ contains
     integer(C_INT), intent(in) :: nranks, nxpp, nxd, nzd, nz, ny, nphi, node(0:)
     logical, intent(in) :: overlapping
     type(autotune_best), intent(inout) :: best
-    integer(C_INT) :: npxz, path(MAXP), icomm, comm_backend
+    integer(C_INT) :: npxz, path(MAXP), icomm, comm_backend, dpath(MAXP), ndef
+    integer(C_INT), allocatable :: default_passes(:)
+    real(C_DOUBLE) :: schur_score
     path = 1_C_INT
+    xz_have = .false.
     do npxz = 1_C_INT, nranks
       if (mod(nranks, npxz) == 0_C_INT) then
         if (.not. autotune_npxz_candidate(nranks, npxz, node)) cycle
         do icomm = 1_C_INT, autotune_comm_candidate_count()
           comm_backend = autotune_comm_candidate(icomm)
           call try_pipelined_candidate(nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, best)
+          ! Schur: the default pass hierarchy with alltoall first; the full search
+          ! over hierarchies and exchanges only if it comes close to the best so
+          ! far, or if the default is not a valid candidate here.
+          dpath = 1_C_INT
+          call ys_schur_default_pass_counts(nranks/npxz, default_passes)
+          ndef = int(size(default_passes), C_INT)
+          if (ndef > MAXP) error stop "autotune default pass list exceeds MAXP"
+          if (ndef > 0_C_INT) dpath(1:ndef) = default_passes
+          skip_npass = -1_C_INT
+          if (is_valid_candidate(nranks, npxz, nxpp, nzd, nz, ny, node, dpath, ndef)) then
+            call try_candidate(nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, dpath, &
+                               ndef, YS_SCHUR_EXCHANGE_ALLTOALL, best, schur_score)
+            skip_npass = ndef; skip_path = dpath
+            if (best%found .and. schur_score > SCHUR_SEARCH_FACTOR*best%score) cycle
+          end if
           call enumerate_pass_paths(nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, &
                                     nranks/npxz, path, 0_C_INT, best)
+          skip_npass = -1_C_INT
         end do
       end if
     end do
+    skip_npass = -1_C_INT
+    if (allocated(default_passes)) deallocate (default_passes)
   end subroutine scan_decompositions
+
+  ! The xz sweep does not depend on the y solver, so all y candidates of one
+  ! (npxz, comm) pair share one measurement (plans, workspace and transposes are
+  ! set up once per pair instead of once per candidate).
+  subroutine scan_xz_sweep(npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, npy, forward_cost, back_cost, &
+                           fft_ok)
+    integer(C_INT), intent(in) :: npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, npy
+    logical, intent(in) :: overlapping
+    real(C_DOUBLE), intent(out) :: forward_cost, back_cost
+    logical, intent(out) :: fft_ok
+
+    if (.not. (xz_have .and. xz_npxz == npxz .and. xz_comm == comm_backend)) then
+      call time_xz_sweep(nxpp, nxd, nzd, nz, ny, nphi, overlapping, npy, xz_forward, xz_back, xz_fft_ok)
+      xz_have = .true.; xz_npxz = npxz; xz_comm = comm_backend
+    end if
+    forward_cost = xz_forward; back_cost = xz_back; fft_ok = xz_fft_ok
+  end subroutine scan_xz_sweep
 
   subroutine try_pipelined_candidate(nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, best)
     integer(C_INT), intent(in) :: nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, node(0:)
@@ -212,7 +260,8 @@ contains
 
     call MPI_Comm_rank(MPI_COMM_WORLD, rank, ierr)
     call channel_comm_set_backend_override(comm_backend)
-    call time_xz_sweep(nxpp, nxd, nzd, nz, ny, nphi, overlapping, npy, xz_forward_cost, xz_back_cost, fft_ok)
+    call scan_xz_sweep(npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, npy, xz_forward_cost, xz_back_cost, &
+                       fft_ok)
     if (.not. fft_ok) then
       if (rank == 0) write (*, '(*(g0,1x))') "MPI autotune rejected: npxz=", npxz, &
         "npy=", npy, "comm=", trim(channel_comm_backend_name(comm_backend)), &
@@ -289,8 +338,9 @@ contains
     type(autotune_best), intent(inout) :: best
     integer(C_INT) :: i, next_path(MAXP), min_arity
     if (remaining == 1_C_INT) then
-      call try_candidate(nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, path, &
-                         npass, YS_SCHUR_EXCHANGE_ALLTOALL, best)
+      if (npass /= skip_npass .or. any(path(1:max(1, npass)) /= skip_path(1:max(1, npass)))) &
+        call try_candidate(nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, path, &
+                           npass, YS_SCHUR_EXCHANGE_ALLTOALL, best)
       if (npass > 0_C_INT) then
         if (path(npass) < 4_C_INT) &
           call try_candidate(nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, path, &
@@ -310,20 +360,25 @@ contains
     end do
   end subroutine enumerate_pass_paths
 
+  ! score_out: this candidate's score (huge if it was rejected).
   subroutine try_candidate(nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, path, &
-                           npass, exchange, best)
+                           npass, exchange, best, score_out)
     integer(C_INT), intent(in) :: nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi
     integer(C_INT), intent(in) :: node(0:), path(MAXP), npass, exchange
     logical, intent(in) :: overlapping
     type(autotune_best), intent(inout) :: best
+    real(C_DOUBLE), intent(out), optional :: score_out
     integer :: ierr, rank
     real(C_DOUBLE) :: xz_forward_cost, xz_back_cost, y_cost, score
     real(C_DOUBLE) :: y_error
     logical :: y_ok, fft_ok
+    if (present(score_out)) score_out = huge(0.0_C_DOUBLE)
+    score = huge(0.0_C_DOUBLE)
     if (.not. is_valid_candidate(nranks, npxz, nxpp, nzd, nz, ny, node, path, npass)) return
     call MPI_Comm_rank(MPI_COMM_WORLD, rank, ierr)
     call channel_comm_set_backend_override(comm_backend)
-    call time_xz_sweep(nxpp, nxd, nzd, nz, ny, nphi, overlapping, nranks/npxz, xz_forward_cost, xz_back_cost, fft_ok)
+    call scan_xz_sweep(npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, nranks/npxz, xz_forward_cost, &
+                       xz_back_cost, fft_ok)
     if (.not. fft_ok) then
       if (rank == 0) write (*, '(*(g0,1x))') "MPI autotune rejected: npxz=", npxz, &
         "npy=", nranks/npxz, "comm=", trim(channel_comm_backend_name(comm_backend)), &
@@ -333,6 +388,7 @@ contains
     end if
 
     call score_y_backend(Y_SOLVER_SCHUR, 0_C_INT)
+    if (present(score_out)) score_out = score
 
   contains
     subroutine score_y_backend(y_solver, y_batches)
