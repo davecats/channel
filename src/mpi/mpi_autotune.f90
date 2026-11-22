@@ -246,12 +246,13 @@ contains
     integer(C_INT), intent(in) :: nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, node(0:)
     logical, intent(in) :: overlapping
     type(autotune_best), intent(inout) :: best
-    real(C_DOUBLE) :: xz_forward_cost, xz_back_cost, y_cost, y_single_cost, score
-    real(C_DOUBLE) :: y_error, y_single_error
-    integer(C_INT) :: ib, batches, npy, nlines, placeholder_path(MAXP), placeholder_npass, batch_candidates(5)
+    real(C_DOUBLE) :: xz_forward_cost, xz_back_cost, y_single_cost(1), y_single_error(1), score
+    real(C_DOUBLE) :: y_cost(5), y_error(5)
+    integer(C_INT) :: ib, nb, ibest, npy, nlines, placeholder_path(MAXP), placeholder_npass, batch_candidates(5), batches(5)
     integer(C_INT) :: width, nstacked
     integer(C_INT), allocatable :: placeholder_passes(:)
-    logical :: y_ok, fft_ok
+    logical :: y_ok(5), y_single_ok(1)
+    logical :: fft_ok
     integer :: ierr, rank
 
     if (.not. valid_decomposition(nranks, npxz, nxpp, nzd, ny, node)) return
@@ -278,52 +279,76 @@ contains
     nlines = (nxpp/npxz)*(2_C_INT*nz + 1_C_INT)
     ! The twisted pipeline (default for even npy) is npy/2 deep, so fewer
     ! batches can pay off: npy/4 is a candidate too; 16 is the count measured
-    ! best on MI300A from 4 to 32 y ranks.  Duplicates are skipped.
+    ! best on MI300A from 4 to 32 y ranks.  Counts below min(8, npy) are left
+    ! out: they were the slowest in every measured case (at npy = 2 the best is
+    ! 1-2 batches, which stays a candidate), and the slowest to time.
     batch_candidates = [max(1_C_INT, npy/4_C_INT), max(1_C_INT, npy/2_C_INT), npy, 2_C_INT*npy, 16_C_INT]
+    nb = 0_C_INT
+    do ib = 1_C_INT, int(size(batch_candidates), C_INT)
+      if (batch_candidates(ib) > nlines .or. batch_candidates(ib) < min(8_C_INT, npy)) cycle
+      if (nb > 0_C_INT) then
+        if (any(batches(1:nb) == batch_candidates(ib))) cycle
+      end if
+      nb = nb + 1_C_INT; batches(nb) = batch_candidates(ib)
+    end do
+    if (nb == 0_C_INT) then
+      nb = 1_C_INT; batches(1) = max(1_C_INT, min(npy, nlines))
+    end if
     ! linsolve stacks v, eta and the scalars (2 + nphi systems) into solves of
     ! `width` systems, which pay the pipeline latency once each; apply_dy (dv/dy)
     ! is one more solve of a single system (timed as one; its table kernels are
-    ! somewhat cheaper).
+    ! somewhat cheaper).  All batch counts are timed in one workspace; the
+    ! single solve, which adds the same to every batch count of this candidate,
+    ! only with the fastest of them.
     width = max(1_C_INT, min(2_C_INT + nphi, ys_stack_limit(npy)))
     nstacked = (2_C_INT + nphi + width - 1_C_INT)/width
-    do ib = 1_C_INT, int(size(batch_candidates), C_INT)
-      batches = batch_candidates(ib)
-      if (batches > nlines) cycle
-      if (ib > 1_C_INT) then
-        if (any(batch_candidates(1:ib - 1) == batches)) cycle
+    call time_y_set(nxpp, nzd, nz, ny, nphi, overlapping, npy, placeholder_path, placeholder_npass, &
+                    YS_SCHUR_EXCHANGE_AUTO, Y_SOLVER_PIPELINED_LU, batches(1:nb), width, y_cost(1:nb), y_ok(1:nb), &
+                    y_error(1:nb))
+    ibest = 0_C_INT
+    do ib = 1_C_INT, nb
+      if (.not. y_ok(ib)) cycle
+      if (ibest == 0_C_INT) then
+        ibest = ib
+      else if (y_cost(ib) < y_cost(ibest)) then
+        ibest = ib
       end if
-      y_cost = time_y(nxpp, nzd, nz, ny, nphi, overlapping, npy, placeholder_path, placeholder_npass, &
-                      YS_SCHUR_EXCHANGE_AUTO, Y_SOLVER_PIPELINED_LU, batches, width, y_ok, y_error)
-      y_single_cost = y_cost
-      if (y_ok .and. width > 1_C_INT) then
-        y_single_cost = time_y(nxpp, nzd, nz, ny, nphi, overlapping, npy, placeholder_path, placeholder_npass, &
-                               YS_SCHUR_EXCHANGE_AUTO, Y_SOLVER_PIPELINED_LU, batches, 1_C_INT, y_ok, y_single_error)
-        y_error = max(y_error, y_single_error)
+    end do
+    y_single_cost = 0.0_C_DOUBLE; y_single_error = 0.0_C_DOUBLE; y_single_ok = .true.
+    if (ibest > 0_C_INT) then
+      if (width > 1_C_INT) then
+        call time_y_set(nxpp, nzd, nz, ny, nphi, overlapping, npy, placeholder_path, placeholder_npass, &
+                        YS_SCHUR_EXCHANGE_AUTO, Y_SOLVER_PIPELINED_LU, batches(ibest:ibest), 1_C_INT, y_single_cost, &
+                        y_single_ok, y_single_error)
+      else
+        y_single_cost(1) = y_cost(ibest); y_single_error(1) = y_error(ibest)
       end if
-      if (.not. y_ok) then
+    end if
+    do ib = 1_C_INT, nb
+      if (.not. (y_ok(ib) .and. y_single_ok(1))) then
         if (rank == 0) write (*, '(*(g0,1x))') "MPI autotune rejected: npxz=", npxz, &
           "npy=", npy, "comm=", trim(channel_comm_backend_name(comm_backend)), &
           "passes=", trim(display_pass_string(placeholder_path, placeholder_npass, Y_SOLVER_PIPELINED_LU)), &
           "exchange= auto y_solver=", trim(y_solver_string(Y_SOLVER_PIPELINED_LU)), &
-          "y_batches=", batches, "y_correctness_error=", y_error
+          "y_batches=", batches(ib), "y_correctness_error=", max(y_error(ib), y_single_error(1))
         cycle
       end if
       score = RK_SUBSTEPS*(xz_forward_cost*real(3_C_INT + nphi, C_DOUBLE) + &
                            xz_back_cost*real(6_C_INT + 3_C_INT*nphi, C_DOUBLE) + &
-                           y_cost*real(nstacked, C_DOUBLE) + y_single_cost)
+                           y_cost(ib)*real(nstacked, C_DOUBLE) + y_single_cost(1))
       if (rank == 0) write (*, '(*(g0,1x))') "MPI autotune tested: npxz=", npxz, &
         "npy=", npy, "comm=", trim(channel_comm_backend_name(comm_backend)), &
         "passes=", trim(display_pass_string(placeholder_path, placeholder_npass, Y_SOLVER_PIPELINED_LU)), &
         "exchange= auto xz_forward_ms=", 1d3*xz_forward_cost, &
         "xz_back_ms=", 1d3*xz_back_cost, "y_solver=", trim(y_solver_string(Y_SOLVER_PIPELINED_LU)), &
-        "y_batches=", batches, "y_stack=", width, "y_ms=", 1d3*y_cost, "y_single_ms=", 1d3*y_single_cost, &
-        "y_correctness_error=", y_error, &
+        "y_batches=", batches(ib), "y_stack=", width, "y_ms=", 1d3*y_cost(ib), "y_single_ms=", 1d3*y_single_cost(1), &
+        "y_correctness_error=", max(y_error(ib), y_single_error(1)), &
         "score_timestep_ms=", 1d3*score
       if (.not. best%found .or. score < best%score) then
         best%found = .true.; best%score = score; best%npxz = npxz; best%npy = npy
         best%pass = placeholder_path; best%npass = placeholder_npass; best%exchange = YS_SCHUR_EXCHANGE_AUTO
         best%comm_backend = comm_backend
-        best%y_solver = Y_SOLVER_PIPELINED_LU; best%y_batches = batches
+        best%y_solver = Y_SOLVER_PIPELINED_LU; best%y_batches = batches(ib)
       end if
     end do
     if (allocated(placeholder_passes)) deallocate (placeholder_passes)
@@ -621,6 +646,22 @@ contains
     logical, intent(in) :: overlapping
     logical, intent(out) :: ok
     real(C_DOUBLE), intent(out) :: max_error
+    real(C_DOUBLE) :: cost(1), err(1)
+    logical :: oks(1)
+
+    call time_y_set(nxpp, nzd, nz, ny, nphi, overlapping, npy, path, npass, exchange, y_solver, [y_batches], stack, &
+                    cost, oks, err)
+    time_y = cost(1); ok = oks(1); max_error = err(1)
+  end function time_y
+
+  ! time_y for several batch counts in one decomposition and workspace.
+  subroutine time_y_set(nxpp, nzd, nz, ny, nphi, overlapping, npy, path, npass, exchange, &
+                        y_solver, y_batches, stack, cost, ok, max_error)
+    integer(C_INT), intent(in) :: nxpp, nzd, nz, ny, nphi, npy, path(MAXP), npass, exchange
+    integer(C_INT), intent(in) :: y_solver, y_batches(:), stack
+    logical, intent(in) :: overlapping
+    real(C_DOUBLE), intent(out) :: cost(:), max_error(:)
+    logical, intent(out) :: ok(:)
     integer(C_INT), allocatable :: passes(:)
     integer(C_INT) :: nlines
 
@@ -629,22 +670,23 @@ contains
     if (npass > 0_C_INT) passes = path(1:npass)
     nlines = stack*nxB*(2_C_INT*nz + 1_C_INT)
     call time_y_endpoint_solve(ny, nz, ny0, nyN, 1_C_INT, nlines, passes, exchange, &
-                               tune_repeats(), y_solver, y_batches, time_y, ok, max_error)
+                               tune_repeats(), y_solver, y_batches, cost, ok, max_error)
     deallocate (passes)
     call free_MPI()
-  end function time_y
+  end subroutine time_y_set
 
+  ! One workspace, one solve per entry of y_batches (repeats timed after a warm-up).
   subroutine time_y_endpoint_solve(ny, nz, row_start, row_end, line_start, nlines, &
                                    passes, exchange, repeats, y_solver, y_batches, elapsed, ok, max_error)
     integer(C_INT), intent(in) :: ny, nz, row_start, row_end, line_start, nlines
     integer(C_INT), intent(in) :: passes(:), exchange
     integer, intent(in) :: repeats
-    integer(C_INT), intent(in) :: y_solver, y_batches
-    real(C_DOUBLE), intent(out) :: elapsed
-    logical, intent(out) :: ok
-    real(C_DOUBLE), intent(out) :: max_error
+    integer(C_INT), intent(in) :: y_solver, y_batches(:)
+    real(C_DOUBLE), intent(out) :: elapsed(:)
+    logical, intent(out) :: ok(:)
+    real(C_DOUBLE), intent(out) :: max_error(:)
     complex(C_DOUBLE_COMPLEX), allocatable :: dst(:, :, :), expected(:, :, :)
-    integer(C_INT) :: active_n, nlines_z, nx_count
+    integer(C_INT) :: active_n, nlines_z, nx_count, ib
     integer(C_INT64_T) :: t0, t1, rate
     integer :: ierr, iter, bad_local, bad_global
     real(C_DOUBLE) :: local_elapsed, local_error, global_error
@@ -661,40 +703,42 @@ contains
     !$omp target enter data map(to: expected)
 
     call system_clock(count_rate=rate)
-    local_elapsed = 0.0_C_DOUBLE
-    max_error = 0.0_C_DOUBLE
-    ok = .true.
-    do iter = 0, repeats
-      call seed_y_endpoint_system(ny, row_start, active_n, nlines)
-      call MPI_Barrier(MPI_COMM_WORLD, ierr)
-      call system_clock(t0)
-      select case (y_solver)
-      case (Y_SOLVER_PIPELINED_LU)
-        call ys_solve_pipelined_lu(dst, y_batches)
-      case (Y_SOLVER_SCHUR)
-        call ys_solve_endpoint_schur(dst, .true.)
-      case default
-        error stop "unknown autotune y solver"
-      end select
-      call MPI_Barrier(MPI_COMM_WORLD, ierr)
-      call system_clock(t1)
-      call check_y_endpoint_solution_device(dst, expected, local_error, bad_local)
-      call MPI_Allreduce(local_error, global_error, 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, ierr)
-      call MPI_Allreduce(bad_local, bad_global, 1, MPI_INTEGER, MPI_MAX, MPI_COMM_WORLD, ierr)
-      max_error = max(max_error, global_error)
-      if (bad_global /= 0 .or. global_error > Y_SOLVE_CHECK_TOL) then
-        ok = .false.
-        exit
-      end if
-      if (iter > 0) local_elapsed = local_elapsed + real(t1 - t0, C_DOUBLE)/real(rate, C_DOUBLE)
-    end do
+    do ib = 1_C_INT, int(size(y_batches), C_INT)
+      local_elapsed = 0.0_C_DOUBLE
+      max_error(ib) = 0.0_C_DOUBLE
+      ok(ib) = .true.
+      do iter = 0, repeats
+        call seed_y_endpoint_system(ny, row_start, active_n, nlines)
+        call MPI_Barrier(MPI_COMM_WORLD, ierr)
+        call system_clock(t0)
+        select case (y_solver)
+        case (Y_SOLVER_PIPELINED_LU)
+          call ys_solve_pipelined_lu(dst, y_batches(ib))
+        case (Y_SOLVER_SCHUR)
+          call ys_solve_endpoint_schur(dst, .true.)
+        case default
+          error stop "unknown autotune y solver"
+        end select
+        call MPI_Barrier(MPI_COMM_WORLD, ierr)
+        call system_clock(t1)
+        call check_y_endpoint_solution_device(dst, expected, local_error, bad_local)
+        call MPI_Allreduce(local_error, global_error, 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, ierr)
+        call MPI_Allreduce(bad_local, bad_global, 1, MPI_INTEGER, MPI_MAX, MPI_COMM_WORLD, ierr)
+        max_error(ib) = max(max_error(ib), global_error)
+        if (bad_global /= 0 .or. global_error > Y_SOLVE_CHECK_TOL) then
+          ok(ib) = .false.
+          exit
+        end if
+        if (iter > 0) local_elapsed = local_elapsed + real(t1 - t0, C_DOUBLE)/real(rate, C_DOUBLE)
+      end do
 
-    if (ok) then
-      local_elapsed = local_elapsed/real(max(1, repeats), C_DOUBLE)
-      call MPI_Allreduce(local_elapsed, elapsed, 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, ierr)
-    else
-      elapsed = huge(0.0_C_DOUBLE)
-    end if
+      if (ok(ib)) then
+        local_elapsed = local_elapsed/real(max(1, repeats), C_DOUBLE)
+        call MPI_Allreduce(local_elapsed, elapsed(ib), 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, ierr)
+      else
+        elapsed(ib) = huge(0.0_C_DOUBLE)
+      end if
+    end do
 
     !$omp target exit data map(delete: dst)
     !$omp target exit data map(delete: expected)
