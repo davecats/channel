@@ -491,6 +491,10 @@ elseif (CMAKE_Fortran_COMPILER_ID MATCHES "Cray")
     target_compile_definitions(channel_core PRIVATE HAVE_HIP)
     message(STATUS "hipfort_DIR = ${hipfort_DIR}")
 elseif (CMAKE_Fortran_COMPILER_ID MATCHES "LLVMFlang")
+    # The offload linker requires position-independent host objects.
+    set_target_properties(channel_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    find_package(rocprofiler-sdk-roctx REQUIRED CONFIG)
+    target_link_libraries(channel_core PUBLIC rocprofiler-sdk-roctx::rocprofiler-sdk-roctx)
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cpp -O2 -fopenmp -fopenmp -fopenmp-targets=amdgcn-amd-amdhsa --offload-arch=gfx942")
 
     find_package(hipfort REQUIRED COMPONENTS hip hipfft)
