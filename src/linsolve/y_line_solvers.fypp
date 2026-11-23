@@ -1,4 +1,11 @@
 #include "build_options.h"
+#:include "channel_operators.fypph"
+#! Band coefficient j of physical row iy for a registered operator, the same
+#! expressions as assemble_compact_biharmonic_system / _helmholtz_system.
+#! Needs iz, ix (physical) for k2 and ni.
+#:def mf_band(kind, lam, dif, iy, j)
+merge(${lam}$*${helmholtz_op(iy, j)}$ - ni*${biharmonic_op(iy, j)}$, ${lam}$*der(${iy}$, 0, ${j}$) - ${dif}$*ni*${helmholtz_op(iy, j)}$, ${kind}$ == YS_MF_BIHARMONIC)
+#:enddef
 
 #! ===================================================================
 #! The interleaved pentadiagonal batch solve, expanded once per array
@@ -210,7 +217,7 @@ ${body.rstrip()}$
 module y_line_solvers
 
   use, intrinsic :: iso_c_binding
-  use channel_grid, only: ny0, nyN, nx0, nxN, nxB, npy_grid, ipy, iproc
+  use channel_grid, only: ny0, nyN, nx0, nxN, nxB, npy_grid, ipy, iproc, k2
   ! ycomm_* and ensure_ycomm_buffers exist in every build; only MPI_COMM_Y is
   ! MPI-specific.  This use must stay outside the #ifdef below: with it inside,
   ! nvfortran rejects ycomm_sendbuf/ycomm_recvbuf in the shared() clauses of the
@@ -220,15 +227,15 @@ module y_line_solvers
   use y_schur_solver, only: ys_schur_config, ys_schur_workspace, ys_schur_configure, &
                             ys_schur_prepare, ys_schur_release, ys_schur_solve_from_packed, &
                             YS_SCHUR_EXCHANGE_AUTO
-  use mpi_transpose, only: MPI_COMM_Y
+  use mpi_transpose, only: MPI_COMM_Y, y_split_first
   use y_pipeline_nccl, only: channel_comm_use_nccl, channel_comm_p2p_ensure, &
                              channel_comm_p2p_isend, channel_comm_p2p_irecv, channel_comm_p2p_sendrecv, &
                              channel_comm_p2p_flush, channel_comm_p2p_test, channel_comm_p2p_wait, &
                              channel_comm_p2p_complete, channel_comm_p2p_connect, &
                              channel_comm_cache, channel_comm_cache_reserve, channel_comm_cache_finalize
-  use roctx, only: roctxPush, roctxPop
+  use roctx, only: roctxPush, roctxPop, rt_mirror
   use byte_workspace, only: workspace_request, workspace_release, workspace_slice, workspace_align_offset
-  use env_options, only: env_flag, env_int, env_int64
+  use env_options, only: env_flag, env_int, env_int64, env_text
   use mpi_f08
 #ifdef HAVE_CUDA
   use cusparse
@@ -248,28 +255,31 @@ module y_line_solvers
   integer(C_INT), parameter, public :: Y_SOLVER_PIPELINED_LU = 2_C_INT
   integer(C_INT), save, public :: ys_selected_solver = Y_SOLVER_SCHUR
   integer(C_INT), save, public :: ys_selected_batches = 0_C_INT
-  ! Upper limit on the systems one stacked solve takes; see ys_stack_width.
-  integer(C_INT), save :: ys_stack_max = -1_C_INT
+  ! CHANNEL_Y_STACK_MAX (-2: not read yet, -1: unset); see ys_stack_limit.
+  integer(C_INT), save :: ys_stack_env = -2_C_INT
 
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_CONST = 1_C_INT
   integer(C_INT), parameter :: YS_ENDPOINT_RESPONSE_EVEN_Z = 2_C_INT
 
   ! How many complex values each pipelined-LU line contributes to a message:
-  ! six for the factor state of a batch, two for a solve state (forward or
-  ! backward).  Each number is read from two sides: ys_ensure_pipeline_buffers
+  ! four for the factor state of a batch, two for a solve state (forward or
+  ! backward).  The factor state of a row is (u1, u2, y); u1 and u2 are band
+  ! coefficients with real values (YS_COEF is a complex type on CUDA, but its
+  ! values are real there too), so one complex value carries both and the
+  ! state of the two rows is (u1 + i u2, y) twice.
+  ! Each number is read from two sides: ys_ensure_pipeline_buffers
   ! and ys_pipeline_batch_slice use it for the message counts and the per-batch
   ! strides, and the pack and continuation kernels below use it as the per-line
   ! stride they step q by.  A side that drifted would read a line's state from
   ! the wrong place rather than fail, since the buffer stays large enough
-  ! either way, so neither number is spelled as a literal anywhere.
-  !
-  ! The solution *halo* exchange also carries two values per line, but that is
-  ! a pair of adjacent rows rather than a batch's solve state; it is unrelated
-  ! to these and keeps its own count.
-  integer(C_INT), parameter :: YS_PIPELINE_FACTOR_ELEMS = 6_C_INT
+  ! either way, so neither number is spelled as a literal anywhere.  The factor
+  ! count of the solve under way is ys_pipe_fe: YS_PIPELINE_FACTOR_ELEMS, or
+  ! YS_PIPELINE_TABLE_ELEMS (y of two rows) for the dv/dy solve.
+  integer(C_INT), parameter :: YS_PIPELINE_FACTOR_ELEMS = 4_C_INT
   integer(C_INT), parameter :: YS_PIPELINE_SOLVE_ELEMS = 2_C_INT
 
-  public :: ys_prepare_assembled_workspace, ys_release_workspace, ys_get_workspace_bytes, ys_stack_width
+  public :: ys_prepare_assembled_workspace, ys_release_workspace, ys_get_workspace_bytes, ys_stack_width, &
+            ys_stack_limit
   public :: ys_get_gpusparse_buffer_bytes
   public :: ys_lower_ghost_rhs, ys_lower_boundary_rhs, ys_upper_boundary_rhs, ys_upper_ghost_rhs
   public :: ys_eqm1, ys_eq0, ys_eqn, ys_eqnp1
@@ -281,8 +291,10 @@ module y_line_solvers
   public :: ys_gpsv_owner_matrix, ys_gpsv_owner_rhs, ys_owner_nz, ys_owner_nx, ys_owner_ix0, ys_owner_ixN
   public :: ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x
   public :: ys_solve_packed_pentadiagonal, ys_solve_endpoint_schur, ys_solve_pipelined_lu
+  public :: ys_mf_register, ys_dvdy_register
   public :: ys_solve_pipelined_lu_lines, ys_unpack_pipelined_columns
   public :: ys_finalize_nccl_contexts
+  public :: ys_fa2_wanted, ys_fa2_begin, ys_fa2_progress
 
   integer(C_INT), save :: ys_workspace_ny = -1
   integer(C_INT), save :: ys_workspace_nz = -1
@@ -296,11 +308,44 @@ module y_line_solvers
   integer(C_INT), save :: ys_owner_nz = 0
   integer(C_INT), save :: ys_owner_nx = 0
   integer(C_INT), save :: ys_owner_ix0 = 1
+  ! Matrix-free interior rows.  An assembly callback that registers its
+  ! operator (ys_mf_register) writes the band matrix only for the two rows next
+  ! to a wall this rank owns -- the rows eliminate_assembled_boundaries rewrites
+  ! -- and the solve computes every other row's five coefficients from the
+  ! operator, so the band arrays are neither written nor read for them.  One
+  ! slot per system of the workspace (stacked solves hold up to
+  ! YS_MF_MAXSYS); a slot left OFF is solved from the stored bands.
+  integer(C_INT), parameter, public :: YS_MF_OFF = 0, YS_MF_HELMHOLTZ = 1, YS_MF_BIHARMONIC = 2
+  integer(C_INT), parameter :: YS_MF_MAXSYS = 8
+  integer(C_INT), save :: ys_mf_kinds(YS_MF_MAXSYS) = YS_MF_OFF
+  real(C_DOUBLE), save :: ys_mf_lambdas(YS_MF_MAXSYS) = 0.0d0, ys_mf_diffs(YS_MF_MAXSYS) = 0.0d0
+  integer(C_INT), save :: ys_mf_nsys = 0
+  integer(C_INT), save :: ys_mf_enabled = -1
   integer(C_INT), save :: ys_owner_ixN = 0
   integer(C_SIZE_T), parameter :: YS_BATCH_DEFAULT_COMPLEX_CAP = 120000000_C_SIZE_T
   integer(C_SIZE_T), save :: ys_batch_complex_cap = YS_BATCH_DEFAULT_COMPLEX_CAP
   logical, save :: ys_batch_complex_cap_initialized = .false.
   integer(C_INT), save :: ys_pipeline_timing_solve_id = 0_C_INT
+
+  ! The dv/dy solve (apply_dy): its matrix is the D0 stencil, the same for
+  ! every line and every step, so the factor quantities of the pipelined LU
+  ! (the recurrence of ys_pipelined_forward_fused, per global row) are computed
+  ! once, from the first assembled system (ys_dvdy_build_tables), and the solve
+  ! only eliminates the right-hand side with them.  The table has one row per
+  ! global row iy (1 .. ny-1) and the columns a, b' (b after its first update),
+  ! 1/c', u1, u2 of the plain sweep (ys_dvdy_tab_f) and of the mirrored one of
+  ! the twisted pipeline (ys_dvdy_tab_m).  The callback assembles only the wall
+  ! rows once the table exists (ys_dvdy_register).  Where the table solve is off
+  ! (CCE, too few rows) the system is solved from its stored bands.
+  integer(C_INT), parameter :: YS_PIPELINE_TABLE_ELEMS = 2_C_INT
+  ! ys_dy_pending: the assembly that just ran was a dv/dy one; ys_dy_tab_ny: the
+  ! ny the table was built for (0: not built).
+  logical, save :: ys_dy_pending = .false.
+  integer(C_INT), save :: ys_dy_tab_ny = 0_C_INT
+  real(C_DOUBLE), allocatable, save :: ys_dvdy_tab_f(:, :), ys_dvdy_tab_m(:, :)
+  ! Complex values per line of one factor-state message: ys_pipeline_batch_slice
+  ! and the buffer sizes read it, set by each solve (the table solve sends y only).
+  integer(C_INT), save :: ys_pipe_fe = YS_PIPELINE_FACTOR_ELEMS
 
   ! Messages of the pipelined solve, through yc_isend / yc_irecv / yc_test /
   ! yc_wait / yc_sendrecv, which call MPI or NCCL/RCCL (CHANNEL_COMM); the
@@ -310,12 +355,10 @@ module y_line_solvers
   ! and runs each communicator's operations in stream order.  So each kind of
   ! message travels in its own lane, a communicator with its own stream:
   ! factor state (and the meeting swap) flows along the elimination direction,
-  ! the backward state against it, and the solution halos in a lane of their
-  ! own because they are sent during the backward sweep but received only at
-  ! the end.  Within a lane both partners issue in batch order.  MPI ignores
-  ! the lanes and keeps its tags.
-  integer(C_INT), parameter :: YC_FACTOR = 1_C_INT, YC_BACKWARD = 2_C_INT, YC_HALO = 3_C_INT
-  integer(C_INT), parameter :: YC_LANES = 3_C_INT
+  ! and the backward state against it.  Within a lane both partners issue in
+  ! batch order.  MPI ignores the lanes and keeps its tags.
+  integer(C_INT), parameter :: YC_FACTOR = 1_C_INT, YC_BACKWARD = 2_C_INT
+  integer(C_INT), parameter :: YC_LANES = 2_C_INT
   type(channel_comm_cache), save :: ys_pipeline_nccl_contexts(YC_LANES)
   logical, save :: yc_nccl = .false.
   type(c_ptr), save :: yc_ctx(YC_LANES)
@@ -333,6 +376,10 @@ module y_line_solvers
     integer(C_INT) :: ticket = -1_C_INT
     integer(C_INT) :: offset = 0_C_INT, count = 0_C_INT, peer = -1_C_INT
   end type yc_request
+
+#:set FA_PART = 'decl'
+#:include "y_factor_ahead.fypph"
+
 
   ! The bands are YS_COEF (real except on CUDA, see build_options.h); the
   ! right-hand sides and solutions are complex.
@@ -367,6 +414,8 @@ module y_line_solvers
   real(C_DOUBLE), pointer, contiguous, save :: ys_boundary_lower_eq_owner(:, :, :), ys_boundary_upper_eq_owner(:, :, :)
 
   complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_reduced_rows_send(:, :) => null()
+  ! The solution halos: per line the two nearest values of the neighbouring
+  ! ranks ipy-1 (left) and ipy+1 (right), npy > 1 only.
   complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_left_interface_values(:, :) => null(), ys_right_interface_values(:, :) => null()
   complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_reduced_rhs(:, :) => null()
   integer(C_INT), allocatable, save :: ys_reduced_pass_counts(:)
@@ -438,17 +487,20 @@ contains
   subroutine ys_bind_core_views(row_start, row_end, line_start, nlines)
     implicit none
     integer(C_INT), intent(in) :: row_start, row_end, line_start, nlines
-    integer(C_INT) :: active_n, line_end, nall
+    integer(C_INT) :: active_n, line_end
+    ! 64-bit: a stacked solve's five band planes exceed 2**31 elements on a
+    ! full-node mesh (5 systems of the Re1000 mesh on 4 GPUs: 3.3e9)
+    integer(C_INT64_T) :: nall
 
     active_n = row_end - row_start + 1
     line_end = line_start + nlines - 1
-    nall = nlines*active_n
+    nall = int(nlines, C_INT64_T)*int(active_n, C_INT64_T)
 
     ys_gpsv_ds(1:nall) => ys_gpsv_matrix_store(1:nall)
-    ys_gpsv_dl(1:nall) => ys_gpsv_matrix_store(nall + 1:2*nall)
-    ys_gpsv_d(1:nall) => ys_gpsv_matrix_store(2*nall + 1:3*nall)
-    ys_gpsv_du(1:nall) => ys_gpsv_matrix_store(3*nall + 1:4*nall)
-    ys_gpsv_dw(1:nall) => ys_gpsv_matrix_store(4*nall + 1:5*nall)
+    ys_gpsv_dl(1:nall) => ys_gpsv_matrix_store(nall + 1:2_C_INT64_T*nall)
+    ys_gpsv_d(1:nall) => ys_gpsv_matrix_store(2_C_INT64_T*nall + 1:3_C_INT64_T*nall)
+    ys_gpsv_du(1:nall) => ys_gpsv_matrix_store(3_C_INT64_T*nall + 1:4_C_INT64_T*nall)
+    ys_gpsv_dw(1:nall) => ys_gpsv_matrix_store(4_C_INT64_T*nall + 1:5_C_INT64_T*nall)
     ys_gpsv_x(1:nall) => ys_gpsv_rhs_store(1:nall)
 
     ys_gpsv_line_matrix(line_start:line_end, row_start:row_end, -2:2) => ys_gpsv_matrix_store
@@ -572,10 +624,13 @@ contains
   ! that workspace_request has already handed back.  Both passes run the same
   ! list of slots, which is what keeps the reported size and the actual
   ! bindings from drifting apart.
-  subroutine ys_workspace_layout(active_n, nlines, nz, bind, nbytes)
+  ! `schur`: also the buffers only the Schur solver uses (the endpoint batch,
+  ! the reduced rows and right-hand sides) -- several GB per GPU that the
+  ! pipelined LU never touches.
+  subroutine ys_workspace_layout(active_n, nlines, nz, bind, nbytes, schur)
     implicit none
     integer(C_INT), intent(in) :: active_n, nlines, nz
-    logical, intent(in) :: bind
+    logical, intent(in) :: bind, schur
     integer(C_SIZE_T), intent(out) :: nbytes
     type(C_PTR) :: ptr
     complex(C_DOUBLE_COMPLEX), pointer :: cbuf(:)
@@ -614,18 +669,20 @@ contains
     call slot_real(n_real, ys_boundary_lower_eq_store)
     call slot_real(n_real, ys_boundary_upper_eq_store)
 
-    call slot_coef(batch_capacity, ys_batch_ds)
-    call slot_coef(batch_capacity, ys_batch_dl)
-    call slot_coef(batch_capacity, ys_batch_d)
-    call slot_coef(batch_capacity, ys_batch_du)
-    call slot_coef(batch_capacity, ys_batch_dw)
-    call slot_complex(batch_capacity, ys_batch_x)
+    if (schur) then
+      call slot_coef(batch_capacity, ys_batch_ds)
+      call slot_coef(batch_capacity, ys_batch_dl)
+      call slot_coef(batch_capacity, ys_batch_d)
+      call slot_coef(batch_capacity, ys_batch_du)
+      call slot_coef(batch_capacity, ys_batch_dw)
+      call slot_complex(batch_capacity, ys_batch_x)
+    end if
 
     if (npy_grid > 1) then
-      call slot_complex_2d(20_C_INT, nlines, ys_reduced_rows_send)
+      if (schur) call slot_complex_2d(20_C_INT, nlines, ys_reduced_rows_send)
       call slot_complex_2d(2_C_INT, nlines, ys_left_interface_values)
       call slot_complex_2d(2_C_INT, nlines, ys_right_interface_values)
-      call slot_complex_2d(4_C_INT*npy_grid, nlines, ys_reduced_rhs)
+      if (schur) call slot_complex_2d(4_C_INT*npy_grid, nlines, ys_reduced_rhs)
     end if
 
     nbytes = offset
@@ -637,8 +694,8 @@ contains
 
       if (bind) then
         call workspace_slice(offset, ptr)
-        call c_f_pointer(ptr, cbuf, [int(count)])
-        view(1:int(count)) => cbuf
+        call c_f_pointer(ptr, cbuf, [count])
+        view(1:count) => cbuf
       end if
       offset = workspace_align_offset(offset + count*complex_bytes)
     end subroutine slot_complex
@@ -649,8 +706,8 @@ contains
 
       if (bind) then
         call workspace_slice(offset, ptr)
-        call c_f_pointer(ptr, kbuf, [int(count)])
-        view(1:int(count)) => kbuf
+        call c_f_pointer(ptr, kbuf, [count])
+        view(1:count) => kbuf
       end if
       offset = workspace_align_offset(offset + count*coef_bytes)
     end subroutine slot_coef
@@ -661,8 +718,8 @@ contains
 
       if (bind) then
         call workspace_slice(offset, ptr)
-        call c_f_pointer(ptr, rbuf, [int(count)])
-        view(1:int(count)) => rbuf
+        call c_f_pointer(ptr, rbuf, [count])
+        view(1:count) => rbuf
       end if
       offset = workspace_align_offset(offset + count*real_bytes)
     end subroutine slot_real
@@ -675,49 +732,63 @@ contains
       count = int(nrows, C_SIZE_T)*int(ncols, C_SIZE_T)
       if (bind) then
         call workspace_slice(offset, ptr)
-        call c_f_pointer(ptr, cbuf, [int(count)])
+        call c_f_pointer(ptr, cbuf, [count])
         view(1:nrows, 1:ncols) => cbuf
       end if
       offset = workspace_align_offset(offset + count*complex_bytes)
     end subroutine slot_complex_2d
   end subroutine ys_workspace_layout
 
-  subroutine ys_bind_workspace_storage(active_n, nlines, nz)
+  subroutine ys_bind_workspace_storage(active_n, nlines, nz, schur)
     implicit none
     integer(C_INT), intent(in) :: active_n, nlines, nz
+    logical, intent(in) :: schur
     type(C_PTR) :: base
     integer(C_SIZE_T) :: total_bytes
 
-    ys_batch_capacity = int(ys_endpoint_batch_capacity(active_n, nlines, nz), C_INT64_T)
+    ys_batch_capacity = 0_C_INT64_T
+    if (schur) ys_batch_capacity = int(ys_endpoint_batch_capacity(active_n, nlines, nz), C_INT64_T)
 
-    call ys_workspace_layout(active_n, nlines, nz, .false., total_bytes)
+    call ys_workspace_layout(active_n, nlines, nz, .false., total_bytes, schur)
     call workspace_request(total_bytes, "y_line_solver", base)
-    call ys_workspace_layout(active_n, nlines, nz, .true., total_bytes)
+    call ys_workspace_layout(active_n, nlines, nz, .true., total_bytes, schur)
   end subroutine ys_bind_workspace_storage
 
   ! How many of nsys independent wall-normal systems one solve takes together
   ! (solve_wall_normal_systems).  Stacking K systems along x pays the fixed
   ! message and stage latency of the distributed pipelined solve once instead of
   ! K times, but the solver workspace grows K-fold, so the memory estimate asks
-  ! here too.  Only the pipelined solver stacks.  The limit is CHANNEL_Y_STACK_MAX,
-  ! by default 1 on one y rank (the solve is bandwidth bound there) and on CUDA,
-  ! 8 otherwise.  On A100s (HoreKa, npy=2, NCCL) stacking measured no faster:
-  ! 474 ms/step at 15 GB per GPU unstacked, 480 ms/step at 37 GB with 4.
+  ! here too.  Only the pipelined solver stacks; the limit is ys_stack_limit.
   integer(C_INT) function ys_stack_width(nsys) result(width)
     integer(C_INT), intent(in) :: nsys
+
+    width = 1_C_INT
+    if (ys_selected_solver == Y_SOLVER_PIPELINED_LU) width = max(1_C_INT, min(nsys, ys_stack_limit(npy_grid)))
+  end function ys_stack_width
+
+  ! Most systems a pipelined solve on npy y ranks stacks: CHANNEL_Y_STACK_MAX,
+  ! by default 1 on one y rank (the solve is bandwidth bound there) and on CUDA,
+  ! 8 otherwise.  On A100s (HoreKa, npy=2, NCCL) stacking measured no faster:
+  ! 474 ms/step at 15 GB per GPU unstacked, 480 ms/step at 37 GB with 4.  Takes
+  ! npy as an argument because the autotuner asks for candidate decompositions.
+  integer(C_INT) function ys_stack_limit(npy) result(limit)
+    integer(C_INT), intent(in) :: npy
     integer(C_INT) :: requested
 
-    if (ys_stack_max < 0_C_INT) then
-#if defined(HAVE_CUDA)
-      ys_stack_max = 1_C_INT
-#else
-      ys_stack_max = merge(8_C_INT, 1_C_INT, npy_grid > 1)
-#endif
-      if (env_int("CHANNEL_Y_STACK_MAX", requested)) ys_stack_max = max(1_C_INT, requested)
+    if (ys_stack_env == -2_C_INT) then
+      ys_stack_env = -1_C_INT
+      if (env_int("CHANNEL_Y_STACK_MAX", requested)) ys_stack_env = max(1_C_INT, requested)
     end if
-    width = 1_C_INT
-    if (ys_selected_solver == Y_SOLVER_PIPELINED_LU) width = max(1_C_INT, min(nsys, ys_stack_max))
-  end function ys_stack_width
+    if (ys_stack_env > 0_C_INT) then
+      limit = ys_stack_env
+    else
+#if defined(HAVE_CUDA)
+      limit = 1_C_INT
+#else
+      limit = merge(8_C_INT, 1_C_INT, npy > 1_C_INT)
+#endif
+    end if
+  end function ys_stack_limit
 
   subroutine ys_get_workspace_bytes(ny, nz, row_start, row_end, line_start, nlines, nbytes)
     implicit none
@@ -732,7 +803,7 @@ contains
     if (mod(line_start - 1, nlines_z) /= 0) error stop "ys_get_workspace_bytes requires ix-aligned line_start"
     if (mod(nlines, nlines_z) /= 0) error stop "ys_get_workspace_bytes requires full ix columns"
 
-    call ys_workspace_layout(active_n, nlines, nz, .false., nbytes)
+    call ys_workspace_layout(active_n, nlines, nz, .false., nbytes, ys_selected_solver == Y_SOLVER_SCHUR)
   end subroutine ys_get_workspace_bytes
 
   subroutine ys_get_gpusparse_buffer_bytes(nbytes)
@@ -765,7 +836,7 @@ contains
     if (associated(ys_gpsv_rhs_store)) error stop "ys_allocate_workspace called with core workspace already allocated"
     if (associated(ys_batch_ds)) error stop "ys_allocate_workspace called with batch workspace already allocated"
     if (associated(ys_reduced_rows_send)) error stop "ys_allocate_workspace called with reduced workspace already allocated"
-    call ys_bind_workspace_storage(active_n, nlines, nz)
+    call ys_bind_workspace_storage(active_n, nlines, nz, prepare_schur_value)
 
     call ys_bind_core_views(row_start, row_end, line_start, nlines)
 
@@ -775,7 +846,9 @@ contains
     !$omp& ys_boundary_lower_rhs0_store, ys_boundary_upper_rhsn_store, &
     !$omp& ys_boundary_lower_eq_store, ys_boundary_upper_eq_store)
 
-    !$omp target enter data map(alloc: ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
+    if (prepare_schur_value) then
+      !$omp target enter data map(alloc: ys_batch_ds, ys_batch_dl, ys_batch_d, ys_batch_du, ys_batch_dw, ys_batch_x)
+    end if
 
     if (npy_grid > 1 .and. prepare_schur_value) then
       if (allocated(ys_reduced_pass_counts)) deallocate (ys_reduced_pass_counts)
@@ -804,6 +877,7 @@ contains
 
     active_n = row_end - row_start + 1
     nlines_z = 2*nz + 1
+    ys_mf_kinds = YS_MF_OFF; ys_mf_nsys = 0
     wanted_exchange_mode = YS_SCHUR_EXCHANGE_AUTO
     if (present(schur_exchange_mode)) wanted_exchange_mode = schur_exchange_mode
     prepare_schur_value = .true.
@@ -1469,6 +1543,305 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     call ys_unpack_pipelined_columns(dst, 0_C_INT)
   end subroutine ys_solve_pipelined_lu
 
+  ! Called by an assembly callback for its operator, in the order the systems
+  ! sit in the workspace (one call per system since ys_prepare_assembled_workspace).
+  ! True: the callback assembles only the wall rows and the solve computes the
+  ! rest.  Off with CHANNEL_Y_MATRIX_FREE=0, for the Schur solver, and on CCE
+  ! (whose scalar optimiser miscompiles the register form of the sweep, see
+  ! custom_penta_kernel).
+  logical function ys_mf_register(kind, lambda, diffusion)
+    integer(C_INT), intent(in) :: kind
+    real(C_DOUBLE), intent(in) :: lambda, diffusion
+    integer(C_INT) :: per, nsys
+    logical :: want
+    ys_mf_register = .false.
+#if !defined(_CRAYFTN)
+    if (ys_mf_enabled < 0) then
+      want = .true.
+      call env_flag("CHANNEL_Y_MATRIX_FREE", want)
+      ys_mf_enabled = merge(1, 0, want)
+    end if
+    if (ys_mf_enabled /= 1 .or. ys_selected_solver /= Y_SOLVER_PIPELINED_LU) return
+    per = (2*ys_workspace_nz + 1)*nxB
+    if (per <= 0 .or. ys_workspace_active_n < 6) return
+    if (mod(ys_workspace_nlines, per) /= 0) return
+    nsys = ys_workspace_nlines/per
+    if (nsys > YS_MF_MAXSYS .or. ys_mf_nsys >= nsys) return
+    ys_mf_nsys = ys_mf_nsys + 1
+    ys_mf_kinds(ys_mf_nsys) = kind; ys_mf_lambdas(ys_mf_nsys) = lambda; ys_mf_diffs(ys_mf_nsys) = diffusion
+    ys_mf_register = .true.
+#endif
+  end function ys_mf_register
+
+  ! The packed solve (custom_penta_kernel, register form) with the bands of
+  ! rows 2 .. n-3 computed from the operator -- the same expressions the
+  ! assembly kernels write -- and only rows 0, 1, n-2, n-1 (rewritten by the
+  ! wall elimination) read from the band arrays.
+  subroutine ys_solve_penta_matrix_free(n, batch_count, label)
+    use stencil_coefficients, only: der
+    use channel_state, only: ni
+    implicit none
+    integer(C_INT), intent(in) :: n, batch_count
+    character(*), intent(in) :: label
+    integer(C_INT) :: iline, pr_i, iz, ix, iy, col, slot, kind, nzw, nzl, ix0, row0, nxb_l
+    integer(C_INT) :: kinds(YS_MF_MAXSYS)
+    real(C_DOUBLE) :: lams(YS_MF_MAXSYS), difs(YS_MF_MAXSYS), lam, dif
+    logical :: lower_wall, upper_wall, stored
+    integer(C_INT64_T) :: pr_p
+    YS_COEF :: pr_a, pr_b, pr_c, pr_e, pr_f, pr_inv, pr_u1, pr_u2, pr_u1m2, pr_u2m2, pr_u1m1, pr_u2m1
+    complex(C_DOUBLE_COMPLEX) :: pr_r, pr_y, pr_ym2, pr_ym1, pr_xn1, pr_xn2
+
+    call roctxPush(label)
+    kinds = ys_mf_kinds; lams = ys_mf_lambdas; difs = ys_mf_diffs
+    nzw = ys_workspace_nz; nzl = 2*nzw + 1; ix0 = ys_owner_ix0; row0 = ny0; nxb_l = nxB
+    lower_wall = (ny0 == 1); upper_wall = (nyN == ys_workspace_ny - 1)
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, n, batch_count) &
+    !$omp shared(der, k2, ni, kinds, lams, difs, nzw, nzl, ix0, row0, nxb_l, lower_wall, upper_wall) &
+    !$omp private(iline, pr_i, pr_p, iz, ix, iy, col, slot, kind, lam, dif, stored, pr_a, pr_b, pr_c, pr_e, pr_f, pr_r, pr_inv, &
+    !$omp& pr_u1m2, pr_u2m2, pr_ym2, pr_u1m1, pr_u2m1, pr_ym1, pr_u1, pr_u2, pr_y, pr_xn1, pr_xn2)
+    do iline = 1, batch_count
+      iz = mod(iline - 1, nzl) - nzw
+      col = (iline - 1)/nzl
+      slot = col/nxb_l + 1
+      ix = ix0 + mod(col, nxb_l)
+      kind = kinds(slot); lam = lams(slot); dif = difs(slot)
+      pr_u1m2 = YS_CZERO; pr_u2m2 = YS_CZERO; pr_ym2 = (0.0d0, 0.0d0)
+      pr_u1m1 = YS_CZERO; pr_u2m1 = YS_CZERO; pr_ym1 = (0.0d0, 0.0d0)
+      do pr_i = 0, n - 1
+        pr_p = int(iline, C_INT64_T) + int(pr_i, C_INT64_T)*int(batch_count, C_INT64_T)
+        stored = kind == YS_MF_OFF .or. (lower_wall .and. pr_i < 2) .or. (upper_wall .and. pr_i > n - 3)
+        if (stored) then
+          pr_a = YS_CZERO; if (pr_i >= 2) pr_a = ys_gpsv_ds(pr_p)
+          pr_b = YS_CZERO; if (pr_i >= 1) pr_b = ys_gpsv_dl(pr_p)
+          pr_c = ys_gpsv_d(pr_p)
+          pr_e = YS_CZERO; if (pr_i <= n - 2) pr_e = ys_gpsv_du(pr_p)
+          pr_f = YS_CZERO; if (pr_i <= n - 3) pr_f = ys_gpsv_dw(pr_p)
+        else
+          iy = row0 + pr_i
+          pr_a = ${mf_band('kind', 'lam', 'dif', 'iy', '-2')}$
+          pr_b = ${mf_band('kind', 'lam', 'dif', 'iy', '-1')}$
+          pr_c = ${mf_band('kind', 'lam', 'dif', 'iy', '0')}$
+          pr_e = ${mf_band('kind', 'lam', 'dif', 'iy', '1')}$
+          pr_f = ${mf_band('kind', 'lam', 'dif', 'iy', '2')}$
+        end if
+        pr_r = ys_gpsv_x(pr_p)
+        pr_b = pr_b - pr_a*pr_u1m2; pr_c = pr_c - pr_a*pr_u2m2; pr_r = pr_r - pr_a*pr_ym2
+        pr_c = pr_c - pr_b*pr_u1m1; pr_e = pr_e - pr_b*pr_u2m1; pr_r = pr_r - pr_b*pr_ym1
+        pr_inv = 1.0d0/pr_c
+        pr_u1 = pr_e*pr_inv; pr_u2 = pr_f*pr_inv; pr_y = pr_r*pr_inv
+        ys_gpsv_du(pr_p) = pr_u1; ys_gpsv_dw(pr_p) = pr_u2; ys_gpsv_x(pr_p) = pr_y
+        pr_u1m2 = pr_u1m1; pr_u2m2 = pr_u2m1; pr_ym2 = pr_ym1
+        pr_u1m1 = pr_u1; pr_u2m1 = pr_u2; pr_ym1 = pr_y
+      end do
+      pr_xn1 = (0.0d0, 0.0d0); pr_xn2 = (0.0d0, 0.0d0)
+      do pr_i = n - 1, 0, -1
+        pr_p = int(iline, C_INT64_T) + int(pr_i, C_INT64_T)*int(batch_count, C_INT64_T)
+        pr_y = ys_gpsv_x(pr_p) - ys_gpsv_du(pr_p)*pr_xn1 - ys_gpsv_dw(pr_p)*pr_xn2
+        ys_gpsv_x(pr_p) = pr_y
+        pr_xn2 = pr_xn1; pr_xn1 = pr_y
+      end do
+    end do
+    !$omp end target teams distribute parallel do
+    call roctxPop(label)
+  end subroutine ys_solve_penta_matrix_free
+
+  ! ys_pipeline_meet for the dv/dy solve: the same interface system, with the
+  ! coefficients of the four rows from the table instead of the message (the
+  ! top rank's last two rows A, B in the plain sweep, the bottom rank's first
+  ! two C, D in the mirrored one) and only y in the messages: (ya, yb) from the
+  ! top rank, (zd, zc) from the bottom rank, in sweep order.
+  subroutine ys_dvdy_meet(line_count, factor_offset, recv_offset, seed_offset, mirror)
+    implicit none
+    integer(C_INT), intent(in) :: line_count, factor_offset, recv_offset, seed_offset
+    logical, intent(in) :: mirror
+    integer(C_INT) :: local_line, iyb, iyc
+    integer(C_INT64_T) :: qt, qr, qs
+    real(C_DOUBLE) :: u1a, u2a, u1b, u2b, l1c, l2c, l1d, l2d, b1, b2, g1, g2
+    complex(C_DOUBLE_COMPLEX) :: ya, yb, zc, zd, b0, g0, va, vb, vc, vd
+
+    ! global rows of B (last row of the top rank) and C (first row of the bottom rank)
+    if (mirror) then
+      iyc = ny0; iyb = ny0 - 1_C_INT
+    else
+      iyb = nyN; iyc = nyN + 1_C_INT
+    end if
+    u1a = ys_dvdy_tab_f(iyb - 1, 4); u2a = ys_dvdy_tab_f(iyb - 1, 5)
+    u1b = ys_dvdy_tab_f(iyb, 4); u2b = ys_dvdy_tab_f(iyb, 5)
+    l1c = ys_dvdy_tab_m(iyc, 4); l2c = ys_dvdy_tab_m(iyc, 5)
+    l1d = ys_dvdy_tab_m(iyc + 1, 4); l2d = ys_dvdy_tab_m(iyc + 1, 5)
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(ycomm_sendbuf, ycomm_recvbuf, line_count, factor_offset, recv_offset, seed_offset, mirror) &
+    !$omp shared(u1a, u2a, u1b, u2b, l1c, l2c, l1d, l2d) &
+    !$omp private(local_line, qt, qr, qs, ya, yb, zc, zd, b0, b1, b2, g0, g1, g2, va, vb, vc, vd)
+    do local_line = 1_C_INT, line_count
+      qt = int(factor_offset + YS_PIPELINE_TABLE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
+      qr = int(recv_offset + YS_PIPELINE_TABLE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
+      qs = int(seed_offset + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
+      if (mirror) then
+        ya = ycomm_recvbuf(qr + 1); yb = ycomm_recvbuf(qr + 2)
+        zd = ycomm_sendbuf(qt + 1); zc = ycomm_sendbuf(qt + 2)
+      else
+        ya = ycomm_sendbuf(qt + 1); yb = ycomm_sendbuf(qt + 2)
+        zd = ycomm_recvbuf(qr + 1); zc = ycomm_recvbuf(qr + 2)
+      end if
+      ! as ys_pipeline_meet
+      b2 = 1.0d0 - u2b*l2d; b0 = yb - u2b*zd; b1 = u1b - u2b*l1d
+      g1 = 1.0d0 - l2c*u2a; g2 = l1c - l2c*u1a; g0 = zc - l2c*ya
+      vc = (g0*b2 - g2*b0)/(g1*b2 - g2*b1)
+      vb = (b0 - b1*vc)/b2
+      vd = zd - l1d*vc - l2d*vb
+      va = ya - u1a*vb - u2a*vc
+      if (mirror) then
+        ycomm_recvbuf(qs + 1) = vb; ycomm_recvbuf(qs + 2) = va
+      else
+        ycomm_recvbuf(qs + 1) = vc; ycomm_recvbuf(qs + 2) = vd
+      end if
+    end do
+    !$omp end target teams distribute parallel do
+  end subroutine ys_dvdy_meet
+
+  ! Called by the assembly callback of a dv/dy (D0) system.  True: the callback
+  ! assembles only the wall rows of the band (the table solve reads the rest
+  ! from the table), false: all rows (the table does not exist yet and is built
+  ! from this system, or the table solve is off).  The solve that follows is
+  ! ys_solve_dvdy unless the table solve is off: on CCE, like ys_mf_register,
+  ! for the Schur solver, and for a workspace not holding one system of rows
+  ! enough for the sweeps; then it is the stored-band solve.  The row test
+  ! uses the fewest rows of any y rank, not this rank's: the table is built
+  ! collectively on MPI_COMM_Y (ys_dvdy_build_tables), so every y rank must
+  ! take the same branch; a rank-local count deadlocks an uneven y split
+  ! (ny = 16 on 3 y ranks: 4, 6, 5 rows).
+  logical function ys_dvdy_register()
+    ys_dvdy_register = .false.
+    ys_dy_pending = .false.
+#if !defined(_CRAYFTN)
+    if (ys_selected_solver /= Y_SOLVER_PIPELINED_LU) return
+    if (ys_min_y_rows(ys_workspace_ny) < 6 .or. ys_workspace_nlines /= (2*ys_workspace_nz + 1)*nxB) return
+    ys_dy_pending = .true.
+    ys_dvdy_register = ys_dy_tab_ny == ys_workspace_ny
+#endif
+  end function ys_dvdy_register
+
+  ! Fewest interior rows any y rank holds for ny_value (the split of
+  ! mpi_transpose's y_split_first), the same number on every rank.
+  integer(C_INT) function ys_min_y_rows(ny_value)
+    integer(C_INT), intent(in) :: ny_value
+    integer :: r
+    ys_min_y_rows = ny_value - 1_C_INT
+    do r = 0, npy_grid - 1
+      ys_min_y_rows = min(ys_min_y_rows, int(y_split_first(r + 1, ny_value, npy_grid) - y_split_first(r, ny_value, npy_grid), C_INT))
+    end do
+  end function ys_min_y_rows
+
+  ! Builds the tables from the system just assembled and wall-eliminated: the
+  ! bands of line 1 are the same for every line (the stencil weights, the
+  ! eliminated rows at the walls), gathered over the ranks into one global
+  ! band; then the recurrence of the sweep, row by row in the order of the
+  ! plain sweep (ys_dvdy_tab_f) and of the mirrored one (ys_dvdy_tab_m), with
+  ! the operations of the forward sweep above (on the device, so that the
+  ! compiler contracts them the same way).
+  subroutine ys_dvdy_build_tables()
+    integer(C_INT) :: active_n, nlines, ngl, i, k, g, r, dir, ierr, mine(2)
+    integer(C_INT), allocatable :: rows(:, :), counts(:), displs(:)
+    real(C_DOUBLE), allocatable :: loc(:, :), band(:, :), tab(:, :, :)
+    real(C_DOUBLE) :: a, b, c, e, f, inv, u1, u2, u1m2, u2m2, u1m1, u2m1
+    integer(C_INT64_T) :: p
+
+    active_n = ys_workspace_active_n; nlines = ys_workspace_nlines
+    ngl = ys_workspace_ny - 1_C_INT
+    allocate (loc(5, active_n), band(5, ngl), tab(ngl, 5, 2))
+    !$omp target teams distribute parallel do default(none) map(from: loc) &
+    !$omp shared(loc, ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, active_n, nlines) private(i, p)
+    do i = 1, active_n
+      p = 1_C_INT64_T + int(i - 1, C_INT64_T)*int(nlines, C_INT64_T)
+      loc(1, i) = ys_gpsv_ds(p); loc(2, i) = ys_gpsv_dl(p); loc(3, i) = ys_gpsv_d(p)
+      loc(4, i) = ys_gpsv_du(p); loc(5, i) = ys_gpsv_dw(p)
+    end do
+    !$omp end target teams distribute parallel do
+    if (npy_grid > 1_C_INT) then
+      allocate (rows(2, npy_grid), counts(npy_grid), displs(npy_grid))
+      mine = [ny0, active_n]
+      call MPI_Allgather(mine, 2, MPI_INTEGER, rows, 2, MPI_INTEGER, MPI_COMM_Y, ierr)
+      do r = 1, npy_grid
+        counts(r) = 5_C_INT*rows(2, r); displs(r) = 5_C_INT*(rows(1, r) - 1_C_INT)
+      end do
+      call MPI_Allgatherv(loc, 5*active_n, MPI_DOUBLE_PRECISION, band, counts, displs, MPI_DOUBLE_PRECISION, MPI_COMM_Y, ierr)
+      deallocate (rows, counts, displs)
+    else
+      band = loc
+    end if
+    ! The recurrence of the sweep, row by row, once for the plain sweep (rows
+    ! 1 .. ngl) and once for the mirrored one (rows ngl .. 1, bands reversed):
+    ! the operations of ys_pipelined_forward_fused, on the device so that they
+    ! contract the same way.  The zeroed couplings are the ones past the ends.
+    !$omp target map(to: band) map(from: tab) &
+    !$omp private(dir, k, g, a, b, c, e, f, inv, u1, u2, u1m2, u2m2, u1m1, u2m1)
+    do dir = 1, 2
+      u1m2 = 0.0d0; u2m2 = 0.0d0; u1m1 = 0.0d0; u2m1 = 0.0d0
+      do k = 1, ngl
+        if (dir == 1) then
+          g = k
+          a = band(1, g); b = band(2, g); c = band(3, g); e = band(4, g); f = band(5, g)
+        else
+          g = ngl + 1 - k
+          a = band(5, g); b = band(4, g); c = band(3, g); e = band(2, g); f = band(1, g)
+        end if
+        if (k < 3) a = 0.0d0
+        if (k < 2) b = 0.0d0
+        if (k > ngl - 1) e = 0.0d0
+        if (k > ngl - 2) f = 0.0d0
+        b = b - a*u1m2; c = c - a*u2m2
+        c = c - b*u1m1; e = e - b*u2m1
+        inv = 1.0d0/c
+        u1 = e*inv; u2 = f*inv
+        tab(g, 1, dir) = a; tab(g, 2, dir) = b; tab(g, 3, dir) = inv; tab(g, 4, dir) = u1; tab(g, 5, dir) = u2
+        u1m2 = u1m1; u2m2 = u2m1; u1m1 = u1; u2m1 = u2
+      end do
+    end do
+    !$omp end target
+    if (allocated(ys_dvdy_tab_f)) then
+      !$omp target exit data map(delete: ys_dvdy_tab_f, ys_dvdy_tab_m)
+      deallocate (ys_dvdy_tab_f, ys_dvdy_tab_m)
+    end if
+    allocate (ys_dvdy_tab_f(ngl, 5), ys_dvdy_tab_m(ngl, 5))
+    ys_dvdy_tab_f = tab(:, :, 1); ys_dvdy_tab_m = tab(:, :, 2)
+    !$omp target enter data map(to: ys_dvdy_tab_f, ys_dvdy_tab_m)
+    ys_dy_tab_ny = ys_workspace_ny
+    deallocate (loc, band, tab)
+  end subroutine ys_dvdy_build_tables
+
+  ! The dv/dy solve on the bound workspace, after a ys_dvdy_register assembly.
+  subroutine ys_solve_dvdy(active_n, nlines, nbatches, batch_max_lines)
+    implicit none
+    integer(C_INT), intent(in) :: active_n, nlines, nbatches, batch_max_lines
+
+    if (ys_dy_tab_ny /= ys_workspace_ny) call ys_dvdy_build_tables()
+    if (npy_grid == 1_C_INT) then
+      call ys_dvdy_forward(1_C_INT, nlines, active_n, .false., 0_C_INT, 0_C_INT, .false.)
+      call ys_dvdy_backward(1_C_INT, nlines, active_n, .false., 0_C_INT, 0_C_INT, .false., -1_C_INT, .false., .false.)
+    else
+      call ys_solve_pipelined_lu_distributed(active_n, nlines, nbatches, batch_max_lines, .true.)
+    end if
+  end subroutine ys_solve_dvdy
+
+  ! The stored-band solve of the workspace (every system but a dv/dy one on the
+  ! table path).
+  subroutine ys_solve_stored_bands(active_n, nlines, nbatches, batch_max_lines)
+    implicit none
+    integer(C_INT), intent(in) :: active_n, nlines, nbatches, batch_max_lines
+
+    if (npy_grid == 1_C_INT) then
+      if (any(ys_mf_kinds /= YS_MF_OFF)) then
+        call ys_solve_penta_matrix_free(active_n, nlines, "ys_pipelined_lu_local_mf")
+      else
+        call ys_solve_packed_pentadiagonal(active_n, nlines, "ys_pipelined_lu_local")
+      end if
+    else
+      call ys_solve_pipelined_lu_distributed(active_n, nlines, nbatches, batch_max_lines, .false.)
+    end if
+  end subroutine ys_solve_stored_bands
+
   ! Copies the solved lines of columns column_offset+1 .. column_offset+size(dst,3)
   ! of the workspace into dst.  With several systems stacked along x in one
   ! workspace (solve_wall_normal_systems) each one is unpacked by its offset.
@@ -1506,11 +1879,13 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     end if
     batch_max_lines = (nlines + nbatches - 1_C_INT)/nbatches
 
-    if (npy_grid == 1_C_INT) then
-      call ys_solve_packed_pentadiagonal(active_n, nlines, "ys_pipelined_lu_local")
+    if (ys_dy_pending) then
+      call ys_solve_dvdy(active_n, nlines, nbatches, batch_max_lines)
     else
-      call ys_solve_pipelined_lu_distributed(active_n, nlines, nbatches, batch_max_lines)
+      call ys_solve_stored_bands(active_n, nlines, nbatches, batch_max_lines)
     end if
+    ys_mf_kinds = YS_MF_OFF; ys_mf_nsys = 0
+    ys_dy_pending = .false.
   end subroutine ys_solve_pipelined_lu_lines
 
   integer(C_INT) function ys_pipeline_batch_count(nlines)
@@ -1555,13 +1930,14 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     integer(C_INT), intent(in) :: nbatches, batch_max_lines
     integer(C_INT) :: factor_total, solve_total
 
-    factor_total = YS_PIPELINE_FACTOR_ELEMS*batch_max_lines*nbatches
+    factor_total = ys_pipe_fe*batch_max_lines*nbatches
     solve_total = YS_PIPELINE_SOLVE_ELEMS*batch_max_lines*nbatches
     ! The send buffer holds one factor and one solve block; the receive buffer
-    ! keeps the forward and backward solve states apart.  Each gets one more
-    ! solve block at the end for the per-batch solution halo of the MPI path
-    ! (ys_pipeline_halo_offset).
-    call ensure_ycomm_buffers(factor_total + 2_C_INT*solve_total, factor_total + 3_C_INT*solve_total)
+    ! keeps the forward and backward solve states apart, and ends with one more
+    ! factor block, where the meeting ranks receive their partner's reduced rows
+    ! (ys_pipeline_meet_offset), so that the seed from `up` in the first block
+    ! stays until the backward sweep has used it.
+    call ensure_ycomm_buffers(factor_total + solve_total, 2_C_INT*factor_total + 2_C_INT*solve_total)
   end subroutine ys_ensure_pipeline_buffers
 
   ! The lines of one batch and where its three messages sit in the buffers.
@@ -1574,32 +1950,35 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     integer(C_INT) :: factor_total, solve_total
 
     call ys_pipeline_batch_range(batch, nbatches, nlines, first_line, line_count)
-    factor_count = YS_PIPELINE_FACTOR_ELEMS*line_count
+    factor_count = ys_pipe_fe*line_count
     solve_count = YS_PIPELINE_SOLVE_ELEMS*line_count
-    factor_total = YS_PIPELINE_FACTOR_ELEMS*batch_max_lines*nbatches
+    factor_total = ys_pipe_fe*batch_max_lines*nbatches
     solve_total = YS_PIPELINE_SOLVE_ELEMS*batch_max_lines*nbatches
-    factor_offset = YS_PIPELINE_FACTOR_ELEMS*batch_max_lines*(batch - 1_C_INT)
+    factor_offset = ys_pipe_fe*batch_max_lines*(batch - 1_C_INT)
     forward_offset = factor_total + YS_PIPELINE_SOLVE_ELEMS*batch_max_lines*(batch - 1_C_INT)
     backward_offset = forward_offset + solve_total
   end subroutine ys_pipeline_batch_slice
 
-  ! Where batch `batch`'s lower solution halo sits: after everything else, in
-  ! the send buffer (is_recv false) or the receive buffer (true).
-  integer(C_INT) function ys_pipeline_halo_offset(batch, nbatches, batch_max_lines, is_recv)
+  ! Where the meeting ranks receive batch `batch`'s swap of reduced rows: the
+  ! last block of the receive buffer.
+  integer(C_INT) function ys_pipeline_meet_offset(batch, nbatches, batch_max_lines)
     implicit none
     integer(C_INT), intent(in) :: batch, nbatches, batch_max_lines
-    logical, intent(in) :: is_recv
     integer(C_INT) :: factor_total, solve_total
 
-    factor_total = YS_PIPELINE_FACTOR_ELEMS*batch_max_lines*nbatches
+    factor_total = ys_pipe_fe*batch_max_lines*nbatches
     solve_total = YS_PIPELINE_SOLVE_ELEMS*batch_max_lines*nbatches
-    ys_pipeline_halo_offset = factor_total + merge(2_C_INT, 1_C_INT, is_recv)*solve_total + &
-                              YS_PIPELINE_SOLVE_ELEMS*batch_max_lines*(batch - 1_C_INT)
-  end function ys_pipeline_halo_offset
+    ys_pipeline_meet_offset = factor_total + 2_C_INT*solve_total + &
+                              ys_pipe_fe*batch_max_lines*(batch - 1_C_INT)
+  end function ys_pipeline_meet_offset
 
-  subroutine ys_solve_pipelined_lu_distributed(active_n, nlines, nbatches, batch_max_lines)
+  ! table: the dv/dy system, whose factor quantities come from the table
+  ! (ys_dvdy_tab_f/m), so only y travels in the factor state; the schedule is
+  ! the same.
+  subroutine ys_solve_pipelined_lu_distributed(active_n, nlines, nbatches, batch_max_lines, table)
     implicit none
     integer(C_INT), intent(in) :: active_n, nlines, nbatches, batch_max_lines
+    logical, intent(in) :: table
     ! Buckets of the timing array, in the order of the CSV header below.
     integer, parameter :: T_TOTAL = 1, T_FACTOR_WAIT = 2, T_FORWARD_WAIT = 3, T_BACKWARD_WAIT = 4
     integer, parameter :: T_FACTOR_KERNEL = 5, T_FORWARD_KERNEL = 6, T_BACKWARD_KERNEL = 7
@@ -1607,8 +1986,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     integer(C_INT), parameter :: TAG_FACTOR = 8410_C_INT
     integer(C_INT), parameter :: TAG_FORWARD = 8510_C_INT
     integer(C_INT), parameter :: TAG_BACKWARD = 8610_C_INT
-    integer(C_INT), parameter :: TAG_HALO = 8810_C_INT
-    integer(C_INT) :: batch, first_line, line_count, factor_count, solve_count, halo_offset
+        integer(C_INT) :: batch, first_line, line_count, factor_count, solve_count, meet_offset
     integer(C_INT) :: factor_offset, forward_offset, backward_offset
     integer(C_INT) :: next_backward
     ! Neighbours along the elimination direction.  The plain pipeline runs
@@ -1621,13 +1999,18 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     integer(C_INT) :: up, down
     logical :: has_up, has_down, meeting, mirror, twisted
     type(yc_request), allocatable :: factor_send_req(:), backward_recv_req(:), backward_send_req(:)
-    type(yc_request), allocatable :: halo_send_req(:), halo_recv_req(:)
-    type(yc_request) :: factor_recv_req
+    type(yc_request), allocatable :: meet_send_req(:), meet_recv_req(:)
+    type(yc_request), allocatable :: factor_recv_req(:)
     integer :: ierr
     logical :: timing_enabled
     real(C_DOUBLE) :: timing(10), time_start, time_t0
+    logical :: fa
 
     if (active_n < 2_C_INT) error stop "pipelined LU distributed solve requires at least two local rows"
+    ! Factor-ahead (ys_fa2_begin ran for this stacked solve): the chain moves y only, the factors travel in the
+    ! factor pipeline (y_factor_ahead.fypph).
+    fa = ys_fa_early .and. .not. table
+    ys_pipe_fe = merge(YS_PIPELINE_TABLE_ELEMS, YS_PIPELINE_FACTOR_ELEMS, table .or. fa)
     call yc_begin()
 
     timing_enabled = .false.
@@ -1643,24 +2026,25 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     twisted = mod(npy_grid, 2_C_INT) == 0_C_INT
     call env_flag("CHANNEL_Y_TWISTED", twisted)
     call ys_pipeline_directions(twisted, up, down, has_up, has_down, meeting, mirror)
+    rt_mirror = merge(1, 0, mirror)
 
     call ys_ensure_pipeline_buffers(nbatches, batch_max_lines)
     call yc_connect()
-    allocate (factor_send_req(nbatches), backward_recv_req(nbatches), backward_send_req(nbatches))
-    allocate (halo_send_req(nbatches), halo_recv_req(nbatches))
-
-    ! The solution halo: the one on the `down` side is the backward message
-    ! itself (that neighbour's two nearest values), stored by the backward
-    ! kernel.  The one on the `up` side comes per batch from `up`, sent as
-    ! soon as that rank's backward stage of the batch is done.
-    if (has_up) then
-      do batch = 1_C_INT, nbatches
-        call ys_pipeline_batch_slice(batch, nbatches, nlines, batch_max_lines, first_line, line_count, &
-                                     factor_count, solve_count, factor_offset, forward_offset, backward_offset)
-        halo_offset = ys_pipeline_halo_offset(batch, nbatches, batch_max_lines, .true.)
-        call yc_irecv(YC_HALO, halo_offset, solve_count, up, TAG_HALO + batch, halo_recv_req(batch))
-      end do
+    ! Factor-ahead: the factor pipeline, begun while the right-hand sides were assembled, runs to completion here.
+    if (fa) then
+      ! the plan must be the one computed here
+      if (any(ys_fa_early_plan /= [active_n, nlines, nbatches, batch_max_lines])) error stop "factor-ahead: plan mismatch"
+      ys_fa_early = .false.
+      call ys_factor_finish()
     end if
+    allocate (factor_send_req(nbatches), backward_recv_req(nbatches), backward_send_req(nbatches))
+    allocate (factor_recv_req(nbatches))
+    allocate (meet_send_req(nbatches), meet_recv_req(nbatches))
+
+    ! The solution halos need no message of their own: the one on the `down`
+    ! side is the backward message itself (that neighbour's two nearest values),
+    ! the one on the `up` side the backward kernel derives from the seed of
+    ! `up`, which stays in the receive buffer, and its own two nearest values.
 
     if (has_down .and. .not. meeting) then
       call roctxPush("ys_pipeline post_backward_recvs")
@@ -1674,9 +2058,23 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       call roctxPop("ys_pipeline post_backward_recvs")
     end if
 
-    ! The factor state of batch 1; each batch then posts the next one's as
-    ! soon as it has sent its own, so on NCCL the two go out in one group.
-    if (has_up) call post_factor_recv(1_C_INT)
+    ! The factor states from `up`.  MPI: all of them now, each into its own
+    ! slot, so that a large message (rendezvous) can travel while this rank
+    ! is still in the kernel of an earlier batch; posted one at a time, the
+    ! transfer only started after that kernel and every downstream rank waited
+    ! the whole transfer per batch.  NCCL: batch 1 now; each batch then posts
+    ! the next one's as soon as it has sent its own, so the two go out in one
+    ! group (a receive posted earlier would sit in its lane's stream ahead of
+    ! sends the partner is waiting for).
+    if (has_up) then
+      if (yc_nccl) then
+        call post_factor_recv(1_C_INT)
+      else
+        do batch = 1_C_INT, nbatches
+          call post_factor_recv(batch)
+        end do
+      end if
+    end if
 
     next_backward = 1_C_INT
     call roctxPush("ys_pipeline forward_sweep")
@@ -1691,32 +2089,48 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       ! buffer.  It replaced five synchronous kernels and two messages per batch.
       if (has_up) then
 #:call timed_step('wait factor_recv', 'T_FACTOR_WAIT')
-        call yc_wait(factor_recv_req)
+        call yc_wait(factor_recv_req(batch))
 #:endcall
       end if
 #:call timed_step('forward_fused', 'T_FACTOR_KERNEL')
-      if (mirror) then
+      if (table) then
+        if (mirror) then
+          call ys_dvdy_forward_mirror(first_line, line_count, active_n, has_up, factor_offset, factor_offset, has_down)
+        else
+          call ys_dvdy_forward(first_line, line_count, active_n, has_up, factor_offset, factor_offset, has_down)
+        end if
+      else if (fa) then
+        if (mirror) then
+          call ys_fa_forward_mirror(first_line, line_count, active_n, has_up, has_down, factor_offset, factor_offset)
+        else
+          call ys_fa_forward(first_line, line_count, active_n, has_up, has_down, factor_offset, factor_offset)
+        end if
+      else if (mirror) then
         call ys_pipelined_forward_fused_mirror(first_line, line_count, active_n, has_up, has_down, factor_offset)
       else
         call ys_pipelined_forward_fused(first_line, line_count, active_n, has_up, has_down, factor_offset)
       end if
 #:endcall
       if (meeting) then
-        ! Swap reduced rows with the partner (into the receive slot the
-        ! forward kernel has finished reading) and solve the interface: the
-        ! result is this rank's backward seed, so no backward message.
-#:call timed_step('meet_exchange', 'T_FACTOR_WAIT')
-        call yc_sendrecv(YC_FACTOR, factor_offset, factor_count, down, TAG_FACTOR + batch)
-#:endcall
-        call ys_pipeline_meet(line_count, factor_offset, backward_offset, mirror)
+        ! Swap reduced rows with the partner, into a receive slot of their own:
+        ! the seed from `up` in the factor slot is needed by the backward sweep.
+        ! The interface solve of this batch waits until the next batch's
+        ! forward kernel has run, so the swap (across a node boundary from
+        ! npy = 8 on) overlaps it.
+        meet_offset = ys_pipeline_meet_offset(batch, nbatches, batch_max_lines)
+        call yc_isendrecv(YC_FACTOR, factor_offset, factor_count, down, TAG_FACTOR + batch, &
+                          meet_send_req(batch), meet_recv_req(batch), recv_offset=meet_offset)
       else if (has_down) then
 #:call timed_comm_post(label='isend factor_state')
         call yc_isend(YC_FACTOR, factor_offset, factor_count, down, TAG_FACTOR + batch, factor_send_req(batch))
 #:endcall
       end if
-      if (has_up .and. batch < nbatches) call post_factor_recv(batch + 1_C_INT)
+      if (has_up .and. yc_nccl .and. batch < nbatches) call post_factor_recv(batch + 1_C_INT)
+      ! Meeting ranks: the previous batch's interface solve, its swap having
+      ! travelled while this batch's forward kernel ran.
+      if (meeting .and. batch > 1_C_INT) call finish_meet(batch - 1_C_INT)
       call roctxPush("ys_pipeline drain_backward_nonblocking")
-      call drain_backward_batches(batch, .false.)
+      call drain_backward_batches(merge(batch - 1_C_INT, batch, meeting), .false.)
       call roctxPop("ys_pipeline drain_backward_nonblocking")
       ! NCCL: whatever this batch queued (sends with no receive of their own
       ! lane behind them, e.g. on the first and last rank) leaves now.
@@ -1724,6 +2138,7 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       call roctxPop("ys_pipeline forward_batch")
     end do
     call roctxPop("ys_pipeline forward_sweep")
+    if (meeting) call finish_meet(nbatches)
     call roctxPush("ys_pipeline drain_backward_blocking")
     call drain_backward_batches(nbatches, .true.)
     call roctxPop("ys_pipeline drain_backward_blocking")
@@ -1733,29 +2148,23 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     call yc_waitall(backward_send_req)
 #:endcall
 
-#:call timed_step('exchange_solution_halos', 'T_HALO')
-    call yc_waitall(halo_send_req)
-    if (has_up) then
-      call yc_waitall(halo_recv_req)
-      do batch = 1_C_INT, nbatches
-        call ys_pipeline_batch_slice(batch, nbatches, nlines, batch_max_lines, first_line, line_count, &
-                                     factor_count, solve_count, factor_offset, forward_offset, backward_offset)
-        call ys_unpack_halo_batch(first_line, line_count, &
-                                  ys_pipeline_halo_offset(batch, nbatches, batch_max_lines, .true.), mirror)
-      end do
-    end if
-    ! NCCL: the sends finish here (MPI: they were waited for above).
+    ! NCCL: the sends finish here (MPI: they were waited for above).  The
+    ! halo_us column of the timing report has measured this since the solution
+    ! halos lost their message.
+#:call timed_step('complete_sends', 'T_HALO')
     call yc_complete()
 #:endcall
 
-    ! Reporting sits outside the halo range: it barriers across MPI_COMM_Y
-    ! once per rank, which a profiler would otherwise charge to the halo.
+
+    ! Reporting sits outside the timed regions: it barriers across MPI_COMM_Y
+    ! once per rank, which a profiler would otherwise charge to them.
     if (timing_enabled) then
       timing(T_TOTAL) = MPI_Wtime() - time_start
       call ys_print_pipeline_timing(ys_pipeline_timing_solve_id, active_n, nlines, nbatches, timing)
     end if
 
-    deallocate (factor_send_req, backward_recv_req, backward_send_req, halo_send_req, halo_recv_req)
+    deallocate (factor_send_req, backward_recv_req, backward_send_req, factor_recv_req)
+    deallocate (meet_send_req, meet_recv_req)
 
   contains
     ! Posts the factor-state receive of batch b from `up` (eagerly: on NCCL it
@@ -1766,9 +2175,29 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
 
       call ys_pipeline_batch_slice(b, nbatches, nlines, batch_max_lines, fl, lc, fc, sc, fo, wo, bo)
 #:call timed_comm_post
-      call yc_irecv(YC_FACTOR, fo, fc, up, TAG_FACTOR + b, factor_recv_req, eager=.true.)
+      call yc_irecv(YC_FACTOR, fo, fc, up, TAG_FACTOR + b, factor_recv_req(b), eager=.true.)
 #:endcall
     end subroutine post_factor_recv
+    ! Meeting ranks: waits for batch b's swap of reduced rows with the partner
+    ! and solves the interface; the result is this rank's backward seed, so
+    ! there is no backward message.
+    subroutine finish_meet(b)
+      integer(C_INT), intent(in) :: b
+      integer(C_INT) :: fl, lc, fc, sc, fo, wo, bo
+      call ys_pipeline_batch_slice(b, nbatches, nlines, batch_max_lines, fl, lc, fc, sc, fo, wo, bo)
+#:call timed_step('meet_exchange', 'T_FACTOR_WAIT')
+      call yc_wait(meet_recv_req(b))
+      call yc_wait(meet_send_req(b))
+#:endcall
+      if (table) then
+        call ys_dvdy_meet(lc, fo, ys_pipeline_meet_offset(b, nbatches, batch_max_lines), bo, mirror)
+      else if (fa) then
+        call ys_fa_meet(lc, fo, ys_pipeline_meet_offset(b, nbatches, batch_max_lines), bo, ys_fa_off(1_C_INT, b), &
+                        ys_fa_off(3_C_INT, b), mirror)
+      else
+        call ys_pipeline_meet(lc, fo, ys_pipeline_meet_offset(b, nbatches, batch_max_lines), bo, mirror)
+      end if
+    end subroutine finish_meet
 
     ! Timed regions never nest here, so one start stamp is enough.
     subroutine tic()
@@ -1831,15 +2260,32 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
         end if
         ! Fused backward sweep: seeded by the two nearest solution values on
         ! the `down` side, it also leaves this rank's two values nearest `up`
-        ! in the send buffer, and the halo for `down` at halo_offset.
-        halo_offset = ys_pipeline_halo_offset(next_backward, nbatches, batch_max_lines, .false.)
+        ! in the send buffer, and the solution halos of both neighbours in
+        ! the interface arrays (the one on the `up` side from the seed at
+        ! factor_offset).
 #:call timed_step('backward_fused', 'T_BACKWARD_KERNEL')
-        if (mirror) then
+        if (table) then
+          if (mirror) then
+            call ys_dvdy_backward_mirror(first_line, line_count, active_n, has_down, backward_offset, forward_offset, &
+                                         has_up, factor_offset, has_up, has_down)
+          else
+            call ys_dvdy_backward(first_line, line_count, active_n, has_down, backward_offset, forward_offset, &
+                                  has_up, factor_offset, has_up, has_down)
+          end if
+        else if (fa) then
+          if (mirror) then
+            call ys_fa_backward_mirror(first_line, line_count, active_n, has_up, has_down, backward_offset, forward_offset, &
+                                       factor_offset, ys_fa_off(2_C_INT, next_backward))
+          else
+            call ys_fa_backward(first_line, line_count, active_n, has_up, has_down, backward_offset, forward_offset, &
+                                factor_offset, ys_fa_off(2_C_INT, next_backward))
+          end if
+        else if (mirror) then
           call ys_pipelined_backward_fused_mirror(first_line, line_count, active_n, has_up, has_down, &
-                                                  backward_offset, forward_offset, halo_offset, has_down .and. .not. meeting)
+                                                  backward_offset, forward_offset, factor_offset)
         else
           call ys_pipelined_backward_fused(first_line, line_count, active_n, has_up, has_down, &
-                                           backward_offset, forward_offset, halo_offset, has_down .and. .not. meeting)
+                                           backward_offset, forward_offset, factor_offset)
         end if
 #:endcall
         if (has_up) then
@@ -1847,10 +2293,6 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
           call yc_isend(YC_BACKWARD, forward_offset, solve_count, up, TAG_BACKWARD + next_backward, &
                         backward_send_req(next_backward))
 #:endcall
-        end if
-        if (has_down .and. .not. meeting) then
-          call yc_isend(YC_HALO, halo_offset, solve_count, down, TAG_HALO + next_backward, &
-                        halo_send_req(next_backward))
         end if
         next_backward = next_backward + 1_C_INT
       end do
@@ -1864,6 +2306,48 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
       call channel_comm_cache_finalize(ys_pipeline_nccl_contexts(lane))
     end do
   end subroutine ys_finalize_nccl_contexts
+
+#if !defined(_CRAYFTN)
+#:set FA_PART = 'kernels'
+#:include "y_factor_ahead.fypph"
+#:set FA_PART = 'pipeline'
+#:include "y_factor_ahead.fypph"
+#else
+  ! CCE: factor-ahead is off (ys_fa2_wanted); the routines the solve names exist for the compiler only.
+  logical function ys_fa2_wanted()
+    ys_fa2_wanted = .false.
+  end function ys_fa2_wanted
+  subroutine ys_fa2_begin()
+  end subroutine ys_fa2_begin
+  subroutine ys_fa2_progress()
+  end subroutine ys_fa2_progress
+  integer(C_INT) function ys_fa_off(region, batch)
+    integer(C_INT), intent(in) :: region, batch
+    ys_fa_off = 0_C_INT
+  end function ys_fa_off
+  subroutine ys_factor_finish()
+  end subroutine ys_factor_finish
+  subroutine ys_fa_forward(first_line, line_count, active_n, has_left, has_right, recv_offset, send_offset)
+    integer(C_INT), intent(in) :: first_line, line_count, active_n, recv_offset, send_offset
+    logical, intent(in) :: has_left, has_right
+  end subroutine ys_fa_forward
+  subroutine ys_fa_forward_mirror(first_line, line_count, active_n, has_left, has_right, recv_offset, send_offset)
+    integer(C_INT), intent(in) :: first_line, line_count, active_n, recv_offset, send_offset
+    logical, intent(in) :: has_left, has_right
+  end subroutine ys_fa_forward_mirror
+  subroutine ys_fa_backward(first_line, line_count, active_n, has_left, has_right, recv_offset, send_offset, y_off, u_off)
+    integer(C_INT), intent(in) :: first_line, line_count, active_n, recv_offset, send_offset, y_off, u_off
+    logical, intent(in) :: has_left, has_right
+  end subroutine ys_fa_backward
+  subroutine ys_fa_backward_mirror(first_line, line_count, active_n, has_left, has_right, recv_offset, send_offset, y_off, u_off)
+    integer(C_INT), intent(in) :: first_line, line_count, active_n, recv_offset, send_offset, y_off, u_off
+    logical, intent(in) :: has_left, has_right
+  end subroutine ys_fa_backward_mirror
+  subroutine ys_fa_meet(line_count, y_own, y_recv, seed_offset, own_u, partner_u, mirror)
+    integer(C_INT), intent(in) :: line_count, y_own, y_recv, seed_offset, own_u, partner_u
+    logical, intent(in) :: mirror
+  end subroutine ys_fa_meet
+#endif
 
   ! ---------------------------------------------------------------------
   ! The message layer of the pipelined solve (see yc_request).  Buffers are
@@ -1987,23 +2471,52 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
   end subroutine yc_waitall
 
   ! Swaps `count` values with `peer`: from ycomm_sendbuf into ycomm_recvbuf
-  ! at the same offset, and returns when both are done.
-  subroutine yc_sendrecv(lane, offset, count, peer, tag)
+  ! at the same offset (or at recv_offset), and returns when both are done.
+  subroutine yc_sendrecv(lane, offset, count, peer, tag, recv_offset)
     integer(C_INT), intent(in) :: lane, offset, count, peer, tag
+    integer(C_INT), intent(in), optional :: recv_offset
+    integer(C_INT) :: roff
     integer :: ierr
 
+    roff = offset
+    if (present(recv_offset)) roff = recv_offset
     if (yc_nccl) call yc_flush()
     !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
     if (yc_nccl) then
       call channel_comm_p2p_sendrecv(yc_ctx(lane), c_loc(ycomm_sendbuf(offset + 1)), count, peer, &
-                                     c_loc(ycomm_recvbuf(offset + 1)), count, peer)
+                                     c_loc(ycomm_recvbuf(roff + 1)), count, peer)
     else
       call MPI_Sendrecv(ycomm_sendbuf(offset + 1), count, MPI_DOUBLE_COMPLEX, peer, tag, &
-                        ycomm_recvbuf(offset + 1), count, MPI_DOUBLE_COMPLEX, peer, tag, &
+                        ycomm_recvbuf(roff + 1), count, MPI_DOUBLE_COMPLEX, peer, tag, &
                         MPI_COMM_Y, MPI_STATUS_IGNORE, ierr)
     end if
     !$omp end target data
   end subroutine yc_sendrecv
+
+  ! Starts a swap of `count` values with `peer` (from ycomm_sendbuf into
+  ! ycomm_recvbuf at the same offset, or at recv_offset); completed by yc_wait
+  ! on both requests.
+  ! NCCL: the swap happens here, as yc_sendrecv, and both requests come back
+  ! complete -- a lane is one ordered stream, and a receive posted ahead of
+  ! the queued send could hold that send back.
+  subroutine yc_isendrecv(lane, offset, count, peer, tag, sreq, rreq, recv_offset)
+    integer(C_INT), intent(in) :: lane, offset, count, peer, tag
+    integer(C_INT), intent(in), optional :: recv_offset
+    type(yc_request), intent(inout) :: sreq, rreq
+    integer(C_INT) :: roff
+    integer :: ierr
+    roff = offset
+    if (present(recv_offset)) roff = recv_offset
+    if (yc_nccl) then
+      call yc_sendrecv(lane, offset, count, peer, tag, recv_offset)
+      sreq = yc_request(); rreq = yc_request()
+      return
+    end if
+    !$omp target data use_device_addr(ycomm_sendbuf, ycomm_recvbuf)
+    call MPI_Irecv(ycomm_recvbuf(roff + 1), count, MPI_DOUBLE_COMPLEX, peer, tag, MPI_COMM_Y, rreq%mpi, ierr)
+    call MPI_Isend(ycomm_sendbuf(offset + 1), count, MPI_DOUBLE_COMPLEX, peer, tag, MPI_COMM_Y, sreq%mpi, ierr)
+    !$omp end target data
+  end subroutine yc_isendrecv
 
   ! NCCL: sends the queued messages of every lane.  MPI: nothing to do.
   subroutine yc_flush()
@@ -2067,36 +2580,6 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     !$omp end target teams distribute parallel do
   end subroutine ys_unpack_lower_solution_halo
 
-  ! The per-batch solution halo from `up`: the rank below (ipy-1) for the
-  ! plain pipeline, the rank above (ipy+1) for the mirrored half.
-  subroutine ys_unpack_halo_batch(first_line, line_count, recv_offset, mirror)
-    implicit none
-    integer(C_INT), intent(in) :: first_line, line_count, recv_offset
-    logical, intent(in) :: mirror
-    integer(C_INT) :: local_line
-    integer(C_INT64_T) :: q
-
-    if (mirror) then
-      !$omp target teams distribute parallel do default(none) &
-      !$omp shared(ys_right_interface_values, ycomm_recvbuf, first_line, line_count, recv_offset) private(local_line, q)
-      do local_line = 1_C_INT, line_count
-        q = int(recv_offset + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
-        ys_right_interface_values(1, first_line + local_line - 1_C_INT) = ycomm_recvbuf(q + 1_C_INT64_T)
-        ys_right_interface_values(2, first_line + local_line - 1_C_INT) = ycomm_recvbuf(q + 2_C_INT64_T)
-      end do
-      !$omp end target teams distribute parallel do
-    else
-      !$omp target teams distribute parallel do default(none) &
-      !$omp shared(ys_left_interface_values, ycomm_recvbuf, first_line, line_count, recv_offset) private(local_line, q)
-      do local_line = 1_C_INT, line_count
-        q = int(recv_offset + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
-        ys_left_interface_values(1, first_line + local_line - 1_C_INT) = ycomm_recvbuf(q + 1_C_INT64_T)
-        ys_left_interface_values(2, first_line + local_line - 1_C_INT) = ycomm_recvbuf(q + 2_C_INT64_T)
-      end do
-      !$omp end target teams distribute parallel do
-    end if
-  end subroutine ys_unpack_halo_batch
-
   subroutine ys_unpack_upper_solution_halo(nlines, recv_offset)
     implicit none
     integer(C_INT), intent(in) :: nlines, recv_offset
@@ -2145,10 +2628,15 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
 #:set ROWN1 = '0_C_INT' if mir else '(active_n - 1_C_INT)'
 #:set ROW0 = '(active_n - 1_C_INT)' if mir else '0_C_INT'
 #:set ROW1 = '(active_n - 2_C_INT)' if mir else '1_C_INT'
+#! the row after i in the forward sweep, and the row before i in the backward one
+#:set ROWNX = '(active_n - 2_C_INT - i)' if mir else '(i + 1_C_INT)'
+#:set ROWPV = '(active_n - i)' if mir else '(i - 1_C_INT)'
   ! Forward stage, fused: factor and eliminate in one sweep, seeded by the two
   ! reduced rows from `up` (offset in the receive buffer); this rank's last two
   ! go to the same offset in the send buffer.
   subroutine ys_pipelined_forward_fused${sfx}$(first_line, line_count, active_n, has_left, has_right, offset)
+    use stencil_coefficients, only: der
+    use channel_state, only: ni
     implicit none
     integer(C_INT), intent(in) :: first_line, line_count, active_n, offset
     logical, intent(in) :: has_left, has_right
@@ -2157,14 +2645,31 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
     YS_COEF :: a, b, c, e, f, inv, u1, u2, u1m2, u2m2, u1m1, u2m1
     complex(C_DOUBLE_COMPLEX) :: r, y, ym2, ym1
     integer(C_INT64_T) :: p2
+    ! matrix-free rows (ys_mf_register): physical row ph = ${ROW}$
+    integer(C_INT) :: iz, ix, iy, ph, col, slot, kind, nzw, nzl, ix0, row0, nxb_l
+    integer(C_INT64_T) :: pn
+    complex(C_DOUBLE_COMPLEX) :: rn
+    integer(C_INT) :: kinds(YS_MF_MAXSYS)
+    real(C_DOUBLE) :: lams(YS_MF_MAXSYS), difs(YS_MF_MAXSYS), lam, dif
+    logical :: lower_wall, upper_wall, stored
     stride = ys_workspace_nlines
+    kinds = ys_mf_kinds; lams = ys_mf_lambdas; difs = ys_mf_diffs
+    nzw = ys_workspace_nz; nzl = 2*nzw + 1; ix0 = ys_owner_ix0; row0 = ny0; nxb_l = nxB
+    lower_wall = (ny0 == 1); upper_wall = (nyN == ys_workspace_ny - 1)
     !$omp target teams distribute parallel do default(none) &
     !$omp shared(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x, ycomm_recvbuf, ycomm_sendbuf) &
     !$omp shared(stride, first_line, line_count, active_n, has_left, has_right, offset) &
+    !$omp shared(der, k2, ni, kinds, lams, difs, nzw, nzl, ix0, row0, nxb_l, lower_wall, upper_wall) &
+    !$omp private(iz, ix, iy, ph, col, slot, kind, lam, dif, stored, pn, rn) &
     !$omp private(local_line, iline, i, p, p2, q, a, b, c, e, f, r, inv, u1, u2, y, u1m2, u2m2, ym2, u1m1, u2m1, ym1)
     do local_line = 1_C_INT, line_count
       iline = first_line + local_line - 1_C_INT
       q = int(offset + YS_PIPELINE_FACTOR_ELEMS*(local_line - 1_C_INT), C_INT64_T)
+      iz = mod(iline - 1, nzl) - nzw
+      col = (iline - 1)/nzl
+      slot = col/nxb_l + 1
+      ix = ix0 + mod(col, nxb_l)
+      kind = kinds(slot); lam = lams(slot); dif = difs(slot)
 #if defined(_CRAYFTN)
       ! CCE: the reduced rows i-1 and i-2 come from memory, or from the seed
       ! for the first two rows; no loop-carried copies (see custom_penta_kernel).
@@ -2181,19 +2686,19 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
           b = b - a*${EE}$(p2); c = c - a*${FF}$(p2); r = r - a*ys_gpsv_x(p2)
         else if (has_left) then
           if (i == 0) then
-            b = b - a*ycomm_recvbuf(q + 1_C_INT64_T); c = c - a*ycomm_recvbuf(q + 2_C_INT64_T)
-            r = r - a*ycomm_recvbuf(q + 3_C_INT64_T)
+            b = b - a*real(ycomm_recvbuf(q + 1_C_INT64_T), C_DOUBLE); c = c - a*aimag(ycomm_recvbuf(q + 1_C_INT64_T))
+            r = r - a*ycomm_recvbuf(q + 2_C_INT64_T)
           else
-            b = b - a*ycomm_recvbuf(q + 4_C_INT64_T); c = c - a*ycomm_recvbuf(q + 5_C_INT64_T)
-            r = r - a*ycomm_recvbuf(q + 6_C_INT64_T)
+            b = b - a*real(ycomm_recvbuf(q + 3_C_INT64_T), C_DOUBLE); c = c - a*aimag(ycomm_recvbuf(q + 3_C_INT64_T))
+            r = r - a*ycomm_recvbuf(q + 4_C_INT64_T)
           end if
         end if
         if (i >= 1) then
           p2 = p ${PREV}$ int(stride, C_INT64_T)
           c = c - b*${EE}$(p2); e = e - b*${FF}$(p2); r = r - b*ys_gpsv_x(p2)
         else if (has_left) then
-          c = c - b*ycomm_recvbuf(q + 4_C_INT64_T); e = e - b*ycomm_recvbuf(q + 5_C_INT64_T)
-          r = r - b*ycomm_recvbuf(q + 6_C_INT64_T)
+          c = c - b*real(ycomm_recvbuf(q + 3_C_INT64_T), C_DOUBLE); e = e - b*aimag(ycomm_recvbuf(q + 3_C_INT64_T))
+          r = r - b*ycomm_recvbuf(q + 4_C_INT64_T)
         end if
         inv = 1.0d0/c
         ${EE}$(p) = e*inv; ${FF}$(p) = f*inv; ys_gpsv_x(p) = r*inv
@@ -2202,28 +2707,60 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
         ! the last two rows in sweep order, nearest-but-one first
         p2 = int(iline, C_INT64_T) + int(${ROWN2}$, C_INT64_T)*int(stride, C_INT64_T)
         p = int(iline, C_INT64_T) + int(${ROWN1}$, C_INT64_T)*int(stride, C_INT64_T)
-        ycomm_sendbuf(q + 1_C_INT64_T) = ${EE}$(p2); ycomm_sendbuf(q + 2_C_INT64_T) = ${FF}$(p2)
-        ycomm_sendbuf(q + 3_C_INT64_T) = ys_gpsv_x(p2)
-        ycomm_sendbuf(q + 4_C_INT64_T) = ${EE}$(p); ycomm_sendbuf(q + 5_C_INT64_T) = ${FF}$(p)
-        ycomm_sendbuf(q + 6_C_INT64_T) = ys_gpsv_x(p)
+        ycomm_sendbuf(q + 1_C_INT64_T) = cmplx(real(${EE}$(p2), C_DOUBLE), real(${FF}$(p2), C_DOUBLE), C_DOUBLE_COMPLEX)
+        ycomm_sendbuf(q + 2_C_INT64_T) = ys_gpsv_x(p2)
+        ycomm_sendbuf(q + 3_C_INT64_T) = cmplx(real(${EE}$(p), C_DOUBLE), real(${FF}$(p), C_DOUBLE), C_DOUBLE_COMPLEX)
+        ycomm_sendbuf(q + 4_C_INT64_T) = ys_gpsv_x(p)
       end if
     end do
 #else
       if (has_left) then
-        u1m2 = ycomm_recvbuf(q + 1_C_INT64_T); u2m2 = ycomm_recvbuf(q + 2_C_INT64_T); ym2 = ycomm_recvbuf(q + 3_C_INT64_T)
-        u1m1 = ycomm_recvbuf(q + 4_C_INT64_T); u2m1 = ycomm_recvbuf(q + 5_C_INT64_T); ym1 = ycomm_recvbuf(q + 6_C_INT64_T)
+        u1m2 = real(ycomm_recvbuf(q + 1_C_INT64_T), C_DOUBLE); u2m2 = aimag(ycomm_recvbuf(q + 1_C_INT64_T))
+        ym2 = ycomm_recvbuf(q + 2_C_INT64_T)
+        u1m1 = real(ycomm_recvbuf(q + 3_C_INT64_T), C_DOUBLE); u2m1 = aimag(ycomm_recvbuf(q + 3_C_INT64_T))
+        ym1 = ycomm_recvbuf(q + 4_C_INT64_T)
       else
         u1m2 = YS_CZERO; u2m2 = YS_CZERO; ym2 = (0.0d0, 0.0d0)
         u1m1 = YS_CZERO; u2m1 = YS_CZERO; ym1 = (0.0d0, 0.0d0)
       end if
+      ! The rhs of the next row is loaded one row ahead: the stores of this row
+      ! (to the same arrays) would otherwise keep the compiler from issuing it early.
+      pn = int(iline, C_INT64_T) + int(${ROW0}$, C_INT64_T)*int(stride, C_INT64_T)
+      rn = ys_gpsv_x(pn)
       do i = 0, active_n - 1
-        p = int(iline, C_INT64_T) + int(${ROW}$, C_INT64_T)*int(stride, C_INT64_T)
-        a = YS_CZERO; if (i >= 2 .or. has_left) a = ${AA}$(p)
-        b = YS_CZERO; if (i >= 1 .or. has_left) b = ${BB}$(p)
-        c = ys_gpsv_d(p)
-        e = YS_CZERO; if (i <= active_n - 2 .or. has_right) e = ${EE}$(p)
-        f = YS_CZERO; if (i <= active_n - 3 .or. has_right) f = ${FF}$(p)
-        r = ys_gpsv_x(p)
+        p = pn; r = rn
+        if (i < active_n - 1) then
+          pn = int(iline, C_INT64_T) + int(${ROWNX}$, C_INT64_T)*int(stride, C_INT64_T)
+          rn = ys_gpsv_x(pn)
+        end if
+        ph = ${ROW}$
+        stored = kind == YS_MF_OFF .or. (lower_wall .and. ph < 2) .or. (upper_wall .and. ph > active_n - 3)
+        if (stored) then
+          a = YS_CZERO; if (i >= 2 .or. has_left) a = ${AA}$(p)
+          b = YS_CZERO; if (i >= 1 .or. has_left) b = ${BB}$(p)
+          c = ys_gpsv_d(p)
+          e = YS_CZERO; if (i <= active_n - 2 .or. has_right) e = ${EE}$(p)
+          f = YS_CZERO; if (i <= active_n - 3 .or. has_right) f = ${FF}$(p)
+        else
+          ! an interior row has neighbours on both sides in the sweep (the rows
+          ! without one are wall rows, always stored)
+          iy = row0 + ph
+#:set JJ = ['2', '1', '0', '-1', '-2'] if mir else ['-2', '-1', '0', '1', '2']
+          ! same expressions as mf_band, one operator evaluated
+          if (kind == YS_MF_BIHARMONIC) then
+            a = lam*${helmholtz_op('iy', JJ[0])}$ - ni*${biharmonic_op('iy', JJ[0])}$
+            b = lam*${helmholtz_op('iy', JJ[1])}$ - ni*${biharmonic_op('iy', JJ[1])}$
+            c = lam*${helmholtz_op('iy', JJ[2])}$ - ni*${biharmonic_op('iy', JJ[2])}$
+            e = lam*${helmholtz_op('iy', JJ[3])}$ - ni*${biharmonic_op('iy', JJ[3])}$
+            f = lam*${helmholtz_op('iy', JJ[4])}$ - ni*${biharmonic_op('iy', JJ[4])}$
+          else
+            a = lam*der(iy, 0, ${JJ[0]}$) - dif*ni*${helmholtz_op('iy', JJ[0])}$
+            b = lam*der(iy, 0, ${JJ[1]}$) - dif*ni*${helmholtz_op('iy', JJ[1])}$
+            c = lam*der(iy, 0, ${JJ[2]}$) - dif*ni*${helmholtz_op('iy', JJ[2])}$
+            e = lam*der(iy, 0, ${JJ[3]}$) - dif*ni*${helmholtz_op('iy', JJ[3])}$
+            f = lam*der(iy, 0, ${JJ[4]}$) - dif*ni*${helmholtz_op('iy', JJ[4])}$
+          end if
+        end if
         b = b - a*u1m2; c = c - a*u2m2; r = r - a*ym2
         c = c - b*u1m1; e = e - b*u2m1; r = r - b*ym1
         inv = 1.0d0/c
@@ -2233,8 +2770,10 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
         u1m1 = u1; u2m1 = u2; ym1 = y
       end do
       if (has_right) then
-        ycomm_sendbuf(q + 1_C_INT64_T) = u1m2; ycomm_sendbuf(q + 2_C_INT64_T) = u2m2; ycomm_sendbuf(q + 3_C_INT64_T) = ym2
-        ycomm_sendbuf(q + 4_C_INT64_T) = u1m1; ycomm_sendbuf(q + 5_C_INT64_T) = u2m1; ycomm_sendbuf(q + 6_C_INT64_T) = ym1
+        ycomm_sendbuf(q + 1_C_INT64_T) = cmplx(real(u1m2, C_DOUBLE), real(u2m2, C_DOUBLE), C_DOUBLE_COMPLEX)
+        ycomm_sendbuf(q + 2_C_INT64_T) = ym2
+        ycomm_sendbuf(q + 3_C_INT64_T) = cmplx(real(u1m1, C_DOUBLE), real(u2m1, C_DOUBLE), C_DOUBLE_COMPLEX)
+        ycomm_sendbuf(q + 4_C_INT64_T) = ym1
       end if
     end do
 #endif
@@ -2243,46 +2782,39 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
 
   ! Backward stage, fused: rows back towards `up`, seeded by the two nearest
   ! solution values on the `down` side (recv_offset); this rank's two values
-  ! nearest `up` go to send_offset.  With halo_offset (MPI path) the seed is
-  ! also stored as the solution halo on the `down` side, and with pack_halo
-  ! this rank's two values nearest `down` go to halo_offset for that rank.
+  ! nearest `up` go to send_offset.  The seed is also stored as the solution
+  ! halo on the `down` side.  The halo on the `up` side is derived: the two
+  ! reduced rows of `up` that the forward sweep received (seed_offset in the
+  ! receive buffer) are its last two back-substitution rows, so with this
+  ! rank's two nearest values their solution follows from the same expression
+  ! `up` evaluates, in the same operand order, hence to the bit.
   subroutine ys_pipelined_backward_fused${sfx}$(first_line, line_count, active_n, has_left, has_right, recv_offset, send_offset, &
-                                         halo_offset, pack_halo)
+                                         seed_offset)
     implicit none
-    integer(C_INT), intent(in) :: first_line, line_count, active_n, recv_offset, send_offset
+    integer(C_INT), intent(in) :: first_line, line_count, active_n, recv_offset, send_offset, seed_offset
     logical, intent(in) :: has_left, has_right
-    integer(C_INT), optional, intent(in) :: halo_offset
-    logical, optional, intent(in) :: pack_halo
-    integer(C_INT) :: local_line, iline, stride, i, halo_base
-    integer(C_INT64_T) :: p, q
-    complex(C_DOUBLE_COMPLEX) :: y, xn1, xn2
-    logical :: do_halo, do_pack
+    integer(C_INT) :: local_line, iline, stride, i
+    integer(C_INT64_T) :: p, q, pn
+    complex(C_DOUBLE_COMPLEX) :: y, xn1, xn2, xc, xp, ya, yb, xa, xb
+    YS_COEF :: ec, fc, ep, fp, u1a, u2a, u1b, u2b
     stride = ys_workspace_nlines
-    do_halo = present(halo_offset)
-    halo_base = 0_C_INT
-    if (do_halo) halo_base = halo_offset
-    do_pack = .false.
-    if (do_halo .and. present(pack_halo)) do_pack = pack_halo
     !$omp target teams distribute parallel do default(none) &
     !$omp shared(${EE}$, ${FF}$, ys_gpsv_x, ycomm_recvbuf, ycomm_sendbuf, ys_right_interface_values, ys_left_interface_values) &
-    !$omp shared(stride, first_line, line_count, active_n, has_left, has_right, recv_offset, send_offset) &
-    !$omp shared(do_halo, do_pack, halo_base) &
-    !$omp private(local_line, iline, i, p, q, y, xn1, xn2)
+    !$omp shared(stride, first_line, line_count, active_n, has_left, has_right, recv_offset, send_offset, seed_offset) &
+    !$omp private(local_line, iline, i, p, q, y, xn1, xn2, pn, xc, xp, ec, fc, ep, fp, ya, yb, xa, xb, u1a, u2a, u1b, u2b)
     do local_line = 1_C_INT, line_count
       iline = first_line + local_line - 1_C_INT
       if (has_right) then
         q = int(recv_offset + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
         xn1 = ycomm_recvbuf(q + 1_C_INT64_T); xn2 = ycomm_recvbuf(q + 2_C_INT64_T)
-        if (do_halo) then
 #:if mir
-          ! xn1, xn2 are the last two rows of ipy-1, nearest first
-          ys_left_interface_values(1, iline) = xn2
-          ys_left_interface_values(2, iline) = xn1
+        ! xn1, xn2 are the last two rows of ipy-1, nearest first
+        ys_left_interface_values(1, iline) = xn2
+        ys_left_interface_values(2, iline) = xn1
 #:else
-          ys_right_interface_values(1, iline) = xn1
-          ys_right_interface_values(2, iline) = xn2
+        ys_right_interface_values(1, iline) = xn1
+        ys_right_interface_values(2, iline) = xn2
 #:endif
-        end if
       else
         xn1 = (0.0d0, 0.0d0); xn2 = (0.0d0, 0.0d0)
       end if
@@ -2303,49 +2835,206 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
           y = y - ${FF}$(p)*merge(xn2, xn1, i == active_n - 1)
         end if
         ys_gpsv_x(p) = y
-        if (do_pack .and. i >= active_n - 2) then
-          q = int(halo_base + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
-#:if mir
-          ! physical rows 1, 2 (i = active_n-1, active_n-2) -> slots 1, 2
-          ycomm_sendbuf(q + int(active_n - i, C_INT64_T)) = y
-#:else
-          ! rows active_n-1 and active_n (1-based) -> slots 1 and 2
-          ycomm_sendbuf(q + int(i - active_n + 3, C_INT64_T)) = y
-#:endif
-        end if
       end do
       if (has_left) then
         ! this rank's two values nearest `up`, nearest first
+        xn1 = ys_gpsv_x(int(iline, C_INT64_T) + int(${ROW0}$, C_INT64_T)*int(stride, C_INT64_T))
+        xn2 = ys_gpsv_x(int(iline, C_INT64_T) + int(${ROW1}$, C_INT64_T)*int(stride, C_INT64_T))
         q = int(send_offset + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
-        ycomm_sendbuf(q + 1_C_INT64_T) = ys_gpsv_x(int(iline, C_INT64_T) + int(${ROW0}$, C_INT64_T)*int(stride, C_INT64_T))
-        ycomm_sendbuf(q + 2_C_INT64_T) = ys_gpsv_x(int(iline, C_INT64_T) + int(${ROW1}$, C_INT64_T)*int(stride, C_INT64_T))
+        ycomm_sendbuf(q + 1_C_INT64_T) = xn1
+        ycomm_sendbuf(q + 2_C_INT64_T) = xn2
+        ! solution of the last two rows of `up` (a: next to the last, b: the last),
+        ! from their reduced rows (u1 + i u2, y) in the receive buffer
+        q = int(seed_offset + YS_PIPELINE_FACTOR_ELEMS*(local_line - 1_C_INT), C_INT64_T)
+        u1a = real(ycomm_recvbuf(q + 1_C_INT64_T), C_DOUBLE); u2a = aimag(ycomm_recvbuf(q + 1_C_INT64_T))
+        ya = ycomm_recvbuf(q + 2_C_INT64_T)
+        u1b = real(ycomm_recvbuf(q + 3_C_INT64_T), C_DOUBLE); u2b = aimag(ycomm_recvbuf(q + 3_C_INT64_T))
+        yb = ycomm_recvbuf(q + 4_C_INT64_T)
+        xb = yb - u1b*xn1 - u2b*xn2
+        xa = ya - u1a*xb - u2a*xn1
+#:if mir
+        ys_right_interface_values(1, iline) = xb
+        ys_right_interface_values(2, iline) = xa
+#:else
+        ys_left_interface_values(1, iline) = xa
+        ys_left_interface_values(2, iline) = xb
+#:endif
       end if
     end do
 #else
+      ! the next row's x, u1, u2 are loaded one row ahead (see the forward sweep)
+      pn = int(iline, C_INT64_T) + int(${ROWN1}$, C_INT64_T)*int(stride, C_INT64_T)
+      xp = ys_gpsv_x(pn); ep = ${EE}$(pn); fp = ${FF}$(pn)
       do i = active_n - 1, 0, -1
-        p = int(iline, C_INT64_T) + int(${ROW}$, C_INT64_T)*int(stride, C_INT64_T)
-        y = ys_gpsv_x(p) - ${EE}$(p)*xn1 - ${FF}$(p)*xn2
-        ys_gpsv_x(p) = y
-        if (do_pack .and. i >= active_n - 2) then
-          q = int(halo_base + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
-#:if mir
-          ! physical rows 1, 2 (i = active_n-1, active_n-2) -> slots 1, 2
-          ycomm_sendbuf(q + int(active_n - i, C_INT64_T)) = y
-#:else
-          ! rows active_n-1 and active_n (1-based) -> slots 1 and 2
-          ycomm_sendbuf(q + int(i - active_n + 3, C_INT64_T)) = y
-#:endif
+        p = pn; xc = xp; ec = ep; fc = fp
+        if (i > 0) then
+          pn = int(iline, C_INT64_T) + int(${ROWPV}$, C_INT64_T)*int(stride, C_INT64_T)
+          xp = ys_gpsv_x(pn); ep = ${EE}$(pn); fp = ${FF}$(pn)
         end if
+        y = xc - ec*xn1 - fc*xn2
+        ys_gpsv_x(p) = y
         xn2 = xn1; xn1 = y
       end do
       if (has_left) then
         q = int(send_offset + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
         ycomm_sendbuf(q + 1_C_INT64_T) = xn1; ycomm_sendbuf(q + 2_C_INT64_T) = xn2
+        ! solution of the last two rows of `up` (a: next to the last, b: the last),
+        ! from their reduced rows (u1 + i u2, y) in the receive buffer
+        q = int(seed_offset + YS_PIPELINE_FACTOR_ELEMS*(local_line - 1_C_INT), C_INT64_T)
+        u1a = real(ycomm_recvbuf(q + 1_C_INT64_T), C_DOUBLE); u2a = aimag(ycomm_recvbuf(q + 1_C_INT64_T))
+        ya = ycomm_recvbuf(q + 2_C_INT64_T)
+        u1b = real(ycomm_recvbuf(q + 3_C_INT64_T), C_DOUBLE); u2b = aimag(ycomm_recvbuf(q + 3_C_INT64_T))
+        yb = ycomm_recvbuf(q + 4_C_INT64_T)
+        xb = yb - u1b*xn1 - u2b*xn2
+        xa = ya - u1a*xb - u2a*xn1
+#:if mir
+        ys_right_interface_values(1, iline) = xb
+        ys_right_interface_values(2, iline) = xa
+#:else
+        ys_left_interface_values(1, iline) = xa
+        ys_left_interface_values(2, iline) = xb
+#:endif
       end if
     end do
 #endif
     !$omp end target teams distribute parallel do
   end subroutine ys_pipelined_backward_fused${sfx}$
+
+#:set TAB = 'ys_dvdy_tab_m' if mir else 'ys_dvdy_tab_f'
+#:set UPB = '(iy0 + active_n)' if mir else '(iy0 - 1_C_INT)'
+#:set UPA = '(iy0 + active_n + 1_C_INT)' if mir else '(iy0 - 2_C_INT)'
+  ! dv/dy solve, forward stage: only the right-hand side is eliminated, with
+  ! the table row of each row (a, b', 1/c'): y = ((r - a*y2) - b'*y1)/c', the
+  ! operations and their order of the forward sweep above, so the same bits.
+  ! seed: y of the two rows before this rank's from the receive buffer
+  ! (recv_offset), else zero.  dosend: y of the last two rows of the rank to the
+  ! send buffer (send_offset).
+  subroutine ys_dvdy_forward${sfx}$(first_line, line_count, active_n, seed, recv_offset, send_offset, dosend)
+    implicit none
+    integer(C_INT), intent(in) :: first_line, line_count, active_n, recv_offset, send_offset
+    logical, intent(in) :: seed, dosend
+    integer(C_INT) :: local_line, iline, stride, i, iy0, iy
+    integer(C_INT64_T) :: p, pn, q, qs
+    complex(C_DOUBLE_COMPLEX) :: r, y, ym2, ym1, rn
+    stride = ys_workspace_nlines
+    iy0 = ny0
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(${TAB}$, ys_gpsv_x, ycomm_recvbuf, ycomm_sendbuf) &
+    !$omp shared(stride, first_line, line_count, active_n, seed, recv_offset, send_offset, dosend, iy0) &
+    !$omp private(local_line, iline, i, iy, p, pn, q, qs, r, y, ym2, ym1, rn)
+    do local_line = 1_C_INT, line_count
+      iline = first_line + local_line - 1_C_INT
+      q = int(recv_offset + YS_PIPELINE_TABLE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
+      qs = int(send_offset + YS_PIPELINE_TABLE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
+      ym2 = (0.0d0, 0.0d0); ym1 = (0.0d0, 0.0d0)
+      if (seed) then
+        ym2 = ycomm_recvbuf(q + 1_C_INT64_T); ym1 = ycomm_recvbuf(q + 2_C_INT64_T)
+      end if
+      pn = int(iline, C_INT64_T) + int(${ROW0}$, C_INT64_T)*int(stride, C_INT64_T)
+      rn = ys_gpsv_x(pn)
+      do i = 0, active_n - 1
+        ! the next row's rhs is loaded one row ahead (see the forward sweep above)
+        p = pn; r = rn
+        if (i < active_n - 1) then
+          pn = int(iline, C_INT64_T) + int(${ROWNX}$, C_INT64_T)*int(stride, C_INT64_T)
+          rn = ys_gpsv_x(pn)
+        end if
+        iy = iy0 + ${ROW}$
+        y = (r - ${TAB}$(iy, 1)*ym2 - ${TAB}$(iy, 2)*ym1)*${TAB}$(iy, 3)
+        ys_gpsv_x(p) = y
+        ym2 = ym1; ym1 = y
+      end do
+      if (dosend) then
+        ycomm_sendbuf(qs + 1_C_INT64_T) = ym2; ycomm_sendbuf(qs + 2_C_INT64_T) = ym1
+      end if
+    end do
+    !$omp end target teams distribute parallel do
+  end subroutine ys_dvdy_forward${sfx}$
+
+  ! dv/dy solve, backward stage (seed: the two nearest solution values on the
+  ! `down` side from the receive buffer at recv_offset, else zero).  dosend: the
+  ! two values nearest `up` to send_offset.
+  ! halo_offset >= 0: also the solution halos of the interface arrays, the one
+  ! on the `down` side from the seed, the one on the `up` side derived as in
+  ! ys_pipelined_backward_fused: y of the last two rows of `up` is at
+  ! halo_offset in the receive buffer, its u1, u2 are table rows.
+  subroutine ys_dvdy_backward${sfx}$(first_line, line_count, active_n, seed, recv_offset, send_offset, &
+                                     dosend, halo_offset, has_left, has_right)
+    implicit none
+    integer(C_INT), intent(in) :: first_line, line_count, active_n, recv_offset, send_offset, halo_offset
+    logical, intent(in) :: seed, dosend, has_left, has_right
+    integer(C_INT) :: local_line, iline, stride, i, iy0, iy
+    integer(C_INT64_T) :: p, pn, q, qh
+    complex(C_DOUBLE_COMPLEX) :: y, xn1, xn2, xc, xp, s1, s2, ya, yb, xa, xb
+    real(C_DOUBLE) :: ec, fc, u1a, u2a, u1b, u2b
+    stride = ys_workspace_nlines
+    iy0 = ny0
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(${TAB}$, ys_gpsv_x, ycomm_recvbuf, ycomm_sendbuf, ys_right_interface_values, ys_left_interface_values) &
+    !$omp shared(stride, first_line, line_count, active_n, seed, recv_offset, send_offset, dosend) &
+    !$omp shared(halo_offset, has_left, has_right, iy0) &
+    !$omp private(local_line, iline, i, iy, p, pn, q, qh, y, xn1, xn2, xc, xp, s1, s2, ya, yb, xa, xb, ec, fc, u1a, u2a, u1b, u2b)
+    do local_line = 1_C_INT, line_count
+      iline = first_line + local_line - 1_C_INT
+      q = int(recv_offset + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
+      xn1 = (0.0d0, 0.0d0); xn2 = (0.0d0, 0.0d0)
+      if (seed) then
+        xn1 = ycomm_recvbuf(q + 1_C_INT64_T); xn2 = ycomm_recvbuf(q + 2_C_INT64_T)
+      end if
+      s1 = xn1; s2 = xn2
+      pn = int(iline, C_INT64_T) + int(${ROWN1}$, C_INT64_T)*int(stride, C_INT64_T)
+      xp = ys_gpsv_x(pn)
+      do i = active_n - 1, 0, -1
+        p = pn; xc = xp
+        if (i > 0) then
+          pn = int(iline, C_INT64_T) + int(${ROWPV}$, C_INT64_T)*int(stride, C_INT64_T)
+          xp = ys_gpsv_x(pn)
+        end if
+        iy = iy0 + ${ROW}$
+        ec = ${TAB}$(iy, 4); fc = ${TAB}$(iy, 5)
+        y = xc - ec*xn1 - fc*xn2
+        ys_gpsv_x(p) = y
+        xn2 = xn1; xn1 = y
+      end do
+      if (dosend) then
+        ! the two nearest `up` are the last two rows of the sweep, nearest first
+        q = int(send_offset + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
+        ycomm_sendbuf(q + 1_C_INT64_T) = xn1; ycomm_sendbuf(q + 2_C_INT64_T) = xn2
+      end if
+      if (halo_offset >= 0_C_INT) then
+        if (has_right) then
+#:if mir
+          ! s1, s2 are the last two rows of ipy-1, nearest first
+          ys_left_interface_values(1, iline) = s2
+          ys_left_interface_values(2, iline) = s1
+#:else
+          ys_right_interface_values(1, iline) = s1
+          ys_right_interface_values(2, iline) = s2
+#:endif
+        end if
+        if (has_left) then
+          ! this rank's two values nearest `up`, then the solution of the last two
+          ! rows of `up` (a: next to the last, b: the last)
+          xn1 = ys_gpsv_x(int(iline, C_INT64_T) + int(${ROW0}$, C_INT64_T)*int(stride, C_INT64_T))
+          xn2 = ys_gpsv_x(int(iline, C_INT64_T) + int(${ROW1}$, C_INT64_T)*int(stride, C_INT64_T))
+          qh = int(halo_offset + YS_PIPELINE_TABLE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
+          ya = ycomm_recvbuf(qh + 1_C_INT64_T); yb = ycomm_recvbuf(qh + 2_C_INT64_T)
+          u1a = ${TAB}$(${UPA}$, 4); u2a = ${TAB}$(${UPA}$, 5)
+          u1b = ${TAB}$(${UPB}$, 4); u2b = ${TAB}$(${UPB}$, 5)
+          xb = yb - u1b*xn1 - u2b*xn2
+          xa = ya - u1a*xb - u2a*xn1
+#:if mir
+          ys_right_interface_values(1, iline) = xb
+          ys_right_interface_values(2, iline) = xa
+#:else
+          ys_left_interface_values(1, iline) = xa
+          ys_left_interface_values(2, iline) = xb
+#:endif
+        end if
+      end if
+    end do
+    !$omp end target teams distribute parallel do
+  end subroutine ys_dvdy_backward${sfx}$
 
 #:endfor
   ! Which way this rank's pipeline runs; see ys_solve_pipelined_lu_distributed.
@@ -2380,33 +3069,36 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
   !     B + u1b C + u2b D = yb        D + l1d C + l2d B = zd
   ! Both ranks solve it with the same operands in the same order, so they
   ! agree to the bit, and keep their backward seed: (C, D) on top, (B, A) below.
-  subroutine ys_pipeline_meet(line_count, factor_offset, seed_offset, mirror)
+  subroutine ys_pipeline_meet(line_count, factor_offset, recv_offset, seed_offset, mirror)
     implicit none
-    integer(C_INT), intent(in) :: line_count, factor_offset, seed_offset
+    integer(C_INT), intent(in) :: line_count, factor_offset, recv_offset, seed_offset
     logical, intent(in) :: mirror
     integer(C_INT) :: local_line
-    integer(C_INT64_T) :: qt, qb, qs
-    complex(C_DOUBLE_COMPLEX) :: u1a, u2a, ya, u1b, u2b, yb, l1c, l2c, zc, l1d, l2d, zd
-    complex(C_DOUBLE_COMPLEX) :: b0, b1, b2, g0, g1, g2, va, vb, vc, vd
+    integer(C_INT64_T) :: qt, qr, qs
+    ! band coefficients (u, l) and their combinations (b1, b2, g1, g2) are real
+    real(C_DOUBLE) :: u1a, u2a, u1b, u2b, l1c, l2c, l1d, l2d, b1, b2, g1, g2
+    complex(C_DOUBLE_COMPLEX) :: ya, yb, zc, zd, b0, g0, va, vb, vc, vd
 
     !$omp target teams distribute parallel do default(none) &
-    !$omp shared(ycomm_sendbuf, ycomm_recvbuf, line_count, factor_offset, seed_offset, mirror) &
-    !$omp private(local_line, qt, qb, qs, u1a, u2a, ya, u1b, u2b, yb, l1c, l2c, zc, l1d, l2d, zd) &
+    !$omp shared(ycomm_sendbuf, ycomm_recvbuf, line_count, factor_offset, recv_offset, seed_offset, mirror) &
+    !$omp private(local_line, qt, qr, qs, u1a, u2a, ya, u1b, u2b, yb, l1c, l2c, zc, l1d, l2d, zd) &
     !$omp private(b0, b1, b2, g0, g1, g2, va, vb, vc, vd)
     do local_line = 1_C_INT, line_count
       qt = int(factor_offset + YS_PIPELINE_FACTOR_ELEMS*(local_line - 1_C_INT), C_INT64_T)
+      qr = int(recv_offset + YS_PIPELINE_FACTOR_ELEMS*(local_line - 1_C_INT), C_INT64_T)
       qs = int(seed_offset + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
+      ! (u1 + i u2, y) per row, see YS_PIPELINE_FACTOR_ELEMS
       if (mirror) then
-        u1a = ycomm_recvbuf(qt + 1); u2a = ycomm_recvbuf(qt + 2); ya = ycomm_recvbuf(qt + 3)
-        u1b = ycomm_recvbuf(qt + 4); u2b = ycomm_recvbuf(qt + 5); yb = ycomm_recvbuf(qt + 6)
+        u1a = real(ycomm_recvbuf(qr + 1), C_DOUBLE); u2a = aimag(ycomm_recvbuf(qr + 1)); ya = ycomm_recvbuf(qr + 2)
+        u1b = real(ycomm_recvbuf(qr + 3), C_DOUBLE); u2b = aimag(ycomm_recvbuf(qr + 3)); yb = ycomm_recvbuf(qr + 4)
         ! own reduced rows, in sweep order: row 1 (D) then row 0 (C)
-        l1d = ycomm_sendbuf(qt + 1); l2d = ycomm_sendbuf(qt + 2); zd = ycomm_sendbuf(qt + 3)
-        l1c = ycomm_sendbuf(qt + 4); l2c = ycomm_sendbuf(qt + 5); zc = ycomm_sendbuf(qt + 6)
+        l1d = real(ycomm_sendbuf(qt + 1), C_DOUBLE); l2d = aimag(ycomm_sendbuf(qt + 1)); zd = ycomm_sendbuf(qt + 2)
+        l1c = real(ycomm_sendbuf(qt + 3), C_DOUBLE); l2c = aimag(ycomm_sendbuf(qt + 3)); zc = ycomm_sendbuf(qt + 4)
       else
-        u1a = ycomm_sendbuf(qt + 1); u2a = ycomm_sendbuf(qt + 2); ya = ycomm_sendbuf(qt + 3)
-        u1b = ycomm_sendbuf(qt + 4); u2b = ycomm_sendbuf(qt + 5); yb = ycomm_sendbuf(qt + 6)
-        l1d = ycomm_recvbuf(qt + 1); l2d = ycomm_recvbuf(qt + 2); zd = ycomm_recvbuf(qt + 3)
-        l1c = ycomm_recvbuf(qt + 4); l2c = ycomm_recvbuf(qt + 5); zc = ycomm_recvbuf(qt + 6)
+        u1a = real(ycomm_sendbuf(qt + 1), C_DOUBLE); u2a = aimag(ycomm_sendbuf(qt + 1)); ya = ycomm_sendbuf(qt + 2)
+        u1b = real(ycomm_sendbuf(qt + 3), C_DOUBLE); u2b = aimag(ycomm_sendbuf(qt + 3)); yb = ycomm_sendbuf(qt + 4)
+        l1d = real(ycomm_recvbuf(qr + 1), C_DOUBLE); l2d = aimag(ycomm_recvbuf(qr + 1)); zd = ycomm_recvbuf(qr + 2)
+        l1c = real(ycomm_recvbuf(qr + 3), C_DOUBLE); l2c = aimag(ycomm_recvbuf(qr + 3)); zc = ycomm_recvbuf(qr + 4)
       end if
       ! B = (b0 - b1 C)/b2 from the two outer equations; C from the inner ones.
       b2 = 1.0d0 - u2b*l2d; b0 = yb - u2b*zd; b1 = u1b - u2b*l1d

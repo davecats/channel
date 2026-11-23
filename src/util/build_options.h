@@ -30,6 +30,18 @@
 ! Verbose echo of parallel parameters
 #define mpiverbose
 
+! Storage type of the explicit terms kept between Runge-Kutta substeps (oldrhs)
+! and of the transformed nonlinear products buildrhs differentiates in y
+! (rhs_stash).  CMake option CHANNEL_SINGLE.  Both are computed in double
+! and only stored in single: validation showed the rounding there 2-3 orders
+! of magnitude below that of a single-precision state.  V and the solver
+! stay double (rounding those measurably perturbs the flow).
+#ifdef CHANNEL_SINGLE
+#define RHS_COMPLEX complex(C_FLOAT_COMPLEX)
+#else
+#define RHS_COMPLEX complex(C_DOUBLE_COMPLEX)
+#endif
+
 ! Coefficient type of the wall-normal band matrices (the y-solver workspace).
 ! Every one of them is real -- stencil weights, k^2, lambda, the wall closure
 ! rows -- and only the right-hand sides and solutions are complex, so real

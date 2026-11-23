@@ -140,10 +140,12 @@ add_library(channel_core
     # util/ -- no domain vocabulary, depends on nothing in the code
     ${CHANNEL_SOURCE_DIR}/util/env_options.f90
     ${CHANNEL_SOURCE_DIR}/util/roctx.f90
+    ${CHANNEL_SOURCE_DIR}/util/emu_round.f90
     # numerics/ -- grid, stencils and dense linear algebra
     ${CHANNEL_SOURCE_DIR}/numerics/channel_grid.f90
     ${CHANNEL_SOURCE_DIR}/numerics/stencil_coefficients.f90
     ${CHANNEL_SOURCE_DIR}/numerics/banded_lu.f90
+    ${CHANNEL_SOURCE_DIR}/fft/fft_kinds.f90
     # physics/ -- the state the equations act on
     ${CHANNEL_SOURCE_DIR}/physics/channel_state.f90
     ${CHANNEL_SOURCE_DIR}/physics/channel_bcs.f90
@@ -181,6 +183,30 @@ if(CHANNEL_HALF_CHANNEL)
     target_compile_definitions(channel_core PUBLIC halfchannel)
     message(STATUS "Physics option: half channel")
 endif()
+
+# --------------------------------------------------------------------
+# Single precision (src/fft/fft_kinds.f90, RHS_COMPLEX in build_options.h)
+# --------------------------------------------------------------------
+# The xz round trip in single precision -- the z and x transforms, the
+# physical-space fields and their products (VVdz, VVdx, rVVdx, products) and
+# the xz transpose buffers -- and the storage of oldrhs/newrhs (the explicit
+# terms kept between substeps) and rhs_stash (the transformed products
+# buildrhs differentiates in y), which are still computed in double.  The
+# state, the right-hand side and every wall-normal operation stay double.
+# GPU backends only (hipFFT or cuFFT); the FFTW build stops with an error.
+option(CHANNEL_SINGLE "Single-precision xz transforms and explicit-term storage" OFF)
+if(CHANNEL_SINGLE)
+    target_compile_definitions(channel_core PUBLIC CHANNEL_SINGLE)
+    message(STATUS "Precision option: single-precision xz transforms and explicit-term storage")
+endif()
+# The three options CHANNEL_SINGLE replaced: a build tree that still sets one
+# would otherwise build in double without a word.
+foreach(_old CHANNEL_FFT_Z_SINGLE CHANNEL_FFT_X_SINGLE CHANNEL_RHS_SINGLE)
+    if(${_old})
+        message(FATAL_ERROR "${_old} is gone: reconfigure with -U${_old} -DCHANNEL_SINGLE=ON.")
+    endif()
+    unset(${_old} CACHE)
+endforeach()
 
 # The scalar wall condition used to be the compile-time option
 # CHANNEL_PHI_NEUMANN, all scalars or none.  It is a deck setting now, per
@@ -495,41 +521,6 @@ elseif (CMAKE_Fortran_COMPILER_ID MATCHES "LLVMFlang")
     endif()
     target_compile_definitions(channel_core PRIVATE HAVE_HIP)
     message(STATUS "hipfort_DIR = ${hipfort_DIR}")
-
-    # hipFFT JIT callbacks for the xz transposes (src/fft/hipfft_xz_*): the
-    # callbacks are compiled to SPIR-V, embedded into hipfft_xz_plans.c and
-    # linked into rocFFT's kernels at run time.  CHANNEL_FFT_CALLBACKS=0 turns
-    # them off at run time.
-    option(CHANNEL_HIPFFT_CALLBACKS "Fold the xz transpose packing into hipFFT JIT callbacks" ON)
-    find_program(CHANNEL_AMDCLANGXX amdclang++ HINTS ENV ROCM_PATH PATH_SUFFIXES bin llvm/bin)
-    find_path(CHANNEL_HIPFFTXT_INCLUDE_DIR NAMES hipfft/hipfftXt.h HINTS ENV ROCM_PATH /opt/rocm PATH_SUFFIXES include)
-    if(CHANNEL_HIPFFT_CALLBACKS AND CHANNEL_AMDCLANGXX AND CHANNEL_HIPFFTXT_INCLUDE_DIR)
-        set(_xz_cb_hip "${CHANNEL_SOURCE_DIR}/fft/hipfft_xz_callbacks.hip")
-        set(_xz_cb_spv "${CMAKE_CURRENT_BINARY_DIR}/hipfft_xz_callbacks.spv")
-        set(_xz_cb_c "${CHANNEL_SOURCE_DIR}/fft/hipfft_xz_plans.c")
-        set(_xz_cb_spv2 "${CMAKE_CURRENT_BINARY_DIR}/hipfft_xz_callbacks_hft_load.spv")
-        # CPLUS_INCLUDE_PATH of the Hunter TheRock module puts include/thrust
-        # first, whose limits.h then shadows the system one.
-        set(_xz_cb_cmd ${CMAKE_COMMAND} -E env --unset=CPLUS_INCLUDE_PATH --unset=CPATH
-                       "${CHANNEL_AMDCLANGXX}" -x hip --offload-arch=amdgcnspirv --offload-device-only -c -O3
-                       -D__HIP_PLATFORM_AMD__=1)
-        add_custom_command(OUTPUT "${_xz_cb_spv}"
-            COMMAND ${_xz_cb_cmd} "${_xz_cb_hip}" -o "${_xz_cb_spv}"
-            DEPENDS "${_xz_cb_hip}"
-            COMMENT "Compiling hipFFT xz callbacks to SPIR-V")
-        add_custom_command(OUTPUT "${_xz_cb_spv2}"
-            COMMAND ${_xz_cb_cmd} -DCHANNEL_CB_HFT_LOAD_ONLY "${_xz_cb_hip}" -o "${_xz_cb_spv2}"
-            DEPENDS "${_xz_cb_hip}"
-            COMMENT "Compiling the hipFFT products callback to SPIR-V")
-        set_source_files_properties("${_xz_cb_c}" PROPERTIES
-            OBJECT_DEPENDS "${_xz_cb_spv};${_xz_cb_spv2}"
-            COMPILE_DEFINITIONS "CHANNEL_XZ_CB_SPV=\"${_xz_cb_spv}\";CHANNEL_XZ_CB_HFT_LOAD_SPV=\"${_xz_cb_spv2}\";__HIP_PLATFORM_AMD__=1")
-        target_sources(channel_core PRIVATE "${_xz_cb_c}")
-        target_include_directories(channel_core PRIVATE "${CHANNEL_HIPFFTXT_INCLUDE_DIR}")
-        target_compile_definitions(channel_core PRIVATE HAVE_XZ_CALLBACKS)
-        message(STATUS "hipFFT xz callbacks enabled (${CHANNEL_AMDCLANGXX})")
-    endif()
-
 endif()
 
 # --------------------------------------------------------------------

@@ -27,6 +27,38 @@
 ! It contains no MPI, no FFT and no linear algebra of its own.
 #! The right-hand side of an assembled system: the y-fastest field copied to
 #! the z-fastest system layout in (iz, iy) tiles.
+#! The right-hand side of system component k computed in the assembly (fused
+#! buildrhs), in the same (iz, iy) tiles as assemble_rhs_tiles:
+#!   v   (k = 2):  dcmplx(m2r + o2*Re N, m2i + o2*Im N),  m2 from rhs_linear_real
+#!   eta (k = 1):  dcmplx(m1r + o2*Re N, m1i + o2*Im N),  m1 from rhs_linear_real
+#!   phi (k = 2+iPhi):  (c1*phi + ni*pra*(D2 - k^2) phi - ODE(3)*oldrhs) + ODE(2)*N
+#! with N = newrhs.  rhs_linear_real reads c1, o3, oldrhs, V and the der scalars.
+#:def assemble_rhs_fused(kind)
+    !$omp target teams distribute parallel do collapse(5) default(none) &
+    !$omp shared(V, oldrhs, newrhs, system_rhs, der, k2, ialfa, ibeta, pra, ni, c1, o2, o3, iPhi) &
+    !$omp shared(nz, ix0_owner, ixN_owner, row_start, row_end) &
+    !$omp private(ix, iz, iy, izb, iyb, izi, iyi, mean, kk, a, b, s0c, s2c, tmpc, ${RHS_DER_NAMES}$, ${RHS_LIN_NAMES}$)
+$:tile_zy_open(ix0='ix0_owner', ix1='ixN_owner', y0='row_start', y1='row_end')
+#:if kind == 'scalar'
+              s0c = ${apply_d('V', '3 + iPhi', 0)}$
+              s2c = ${apply_d('V', '3 + iPhi', 2)}$
+              tmpc = ni*(s2c - k2(iz, ix)*s0c)
+              tmpc = c1*s0c + tmpc*pra(iPhi) - o3*oldrhs(iy, iz, ix, 2 + iPhi)
+              system_rhs(iz, ix, iy) = tmpc + o2*newrhs(iy, iz, ix, 2 + iPhi)
+#:else
+              kk = k2(iz, ix); a = dimag(ialfa(ix)); b = dimag(ibeta(iz))
+              mean = (ix == 0 .AND. iz == 0)
+$:rhs_linear_real()
+#:if kind == 'v'
+              system_rhs(iz, ix, iy) = dcmplx(m2r + o2*real(newrhs(iy, iz, ix, 2)), m2i + o2*aimag(newrhs(iy, iz, ix, 2)))
+#:else
+              system_rhs(iz, ix, iy) = dcmplx(m1r + o2*real(newrhs(iy, iz, ix, 1)), m1i + o2*aimag(newrhs(iy, iz, ix, 1)))
+#:endif
+#:endif
+$:tile_zy_close()
+    !$omp end target teams distribute parallel do
+#:enddef
+
 #:def assemble_rhs_tiles()
     !$omp target teams distribute parallel do collapse(5) default(none) &
     !$omp shared(owner_src, system_rhs, nz, ix0_owner, ixN_owner, row_start, row_end) &
@@ -59,10 +91,11 @@ $:tile_zy_close()
 #! One part ('dreal' or 'dimag') of the y stencil with coefficients cf<row>
 #! applied to component comp of a y-fastest field.
 #:def rhs_rsum(part, cf, field, comp)
-(${' + '.join('{}{}*{}({}(iy + ({}), iz, ix, {}))'.format(cf, t, part, field, j, comp) for j, t in RJ)}$)
+#:set gpart = {'dreal': 'real', 'dimag': 'aimag'}.get(part, part)
+(${' + '.join('{}{}*{}({}(iy + ({}), iz, ix, {}))'.format(cf, t, gpart, field, j, comp) for j, t in RJ)}$)
 #:enddef
 #:set RHS_DER_NAMES = ', '.join('d{}{}'.format(o, t) for o in range(4) for j, t in RJ) + ', ' + ', '.join('e{}'.format(t) for j, t in RJ)
-#! The explicit terms of all six velocity products (VEL_RHS above, expanded):
+#! The explicit terms of all six velocity products:
 #!   d2v:  -a^2 D1(uu) + k^2 D1(vv) - b^2 D1(ww) - 2ab D1(uw) + i [a (D2 + k^2 D0)(uv) + b (D2 + k^2 D0)(vw)]
 #!   eta:  ab [D0(uu) - D0(ww)] + (b^2 - a^2) D0(uw) + i [a D1(vw) - b D1(uv)]
 #!   mean (ix = iz = 0):  (-Re D1(uv), -Re D1(vw))
@@ -127,48 +160,12 @@ $:rhs_load_der([0, 2, 3])
           ${nm}$${p}$ = ${' + '.join('d{}{}*w{}{}'.format(o, t, t, p) for j, t in RJ)}$
 #:endfor
 #:endfor
-          m2r = c1*(s2r - kk*s0r) + ni*(s4r - 2.0d0*kk*s2r + kk*kk*s0r) - o3*dreal(oldrhs(iy, iz, ix, 2))
-          m2i = c1*(s2i - kk*s0i) + ni*(s4i - 2.0d0*kk*s2i + kk*kk*s0i) - o3*dimag(oldrhs(iy, iz, ix, 2))
-          m1r = -(c1*t0i + ni*(t2i - kk*t0i)) - o3*dreal(oldrhs(iy, iz, ix, 1))
-          m1i = c1*t0r + ni*(t2r - kk*t0r) - o3*dimag(oldrhs(iy, iz, ix, 1))
+          m2r = c1*(s2r - kk*s0r) + ni*(s4r - 2.0d0*kk*s2r + kk*kk*s0r) - o3*real(oldrhs(iy, iz, ix, 2))
+          m2i = c1*(s2i - kk*s0i) + ni*(s4i - 2.0d0*kk*s2i + kk*kk*s0i) - o3*aimag(oldrhs(iy, iz, ix, 2))
+          m1r = -(c1*t0i + ni*(t2i - kk*t0i)) - o3*real(oldrhs(iy, iz, ix, 1))
+          m1i = c1*t0r + ni*(t2r - kk*t0r) - o3*aimag(oldrhs(iy, iz, ix, 1))
 #:enddef
 #:set RHS_LIN_NAMES = 's0r, s0i, s2r, s2i, s4r, s4i, t0r, t0i, t2r, t2i, m1r, m1i, m2r, m2i, ' + ', '.join('{}{}{}'.format(x, t, p) for x in 'uw' for j, t in RJ for p in 'ri')
-
-#! The buildrhs_prepare kernel for the velocity equations.  zero: also reset
-#! oldrhs for kernels that accumulate into it (and add the mean-pressure
-#! drive); without it oldrhs is only read.  ix outermost: the loop runs in
-#! memory order.  All loads come before the first store (memrhs is a pointer
-#! and V a target).
-#:def prepare_velocity_kernel(zero)
-      !$omp target teams distribute parallel do collapse(3) default(none)  &
-      !$omp private(iz, ix, iy, mean, kk, a, b, ${RHS_DER_NAMES}$, ${RHS_LIN_NAMES}$) &
-      !$omp shared(nz, nx0, nxN, y_first, y_last, ialfa, ibeta, k2, der, memrhs, oldrhs, V) &
-      !$omp shared(ni, c1, o2, o3, meanpx, meanpz)
-      DO ix = nx0, nxN
-        DO iz = -nz, nz
-          DO iy = y_first, y_last
-          kk = k2(iz, ix); a = dimag(ialfa(ix)); b = dimag(ibeta(iz))
-          mean = (ix == 0 .AND. iz == 0)
-$:rhs_linear_real()
-#:if zero
-          if (mean) then
-            m1r = m1r + o2*meanpx; m1i = m1i + o2*meanpz
-          end if
-#:endif
-          memrhs(iy, iz, ix, 1) = dcmplx(m1r, m1i)
-          memrhs(iy, iz, ix, 2) = dcmplx(m2r, m2i)
-#:if zero
-          if (mean) then
-            oldrhs(iy, iz, ix, 1) = dcmplx(meanpx, meanpz)
-          else
-            oldrhs(iy, iz, ix, 1) = 0.0
-          end if
-          oldrhs(iy, iz, ix, 2) = 0.0
-#:endif
-          END DO
-        END DO
-      END DO
-#:enddef
 
 module channel_equations
 
@@ -180,11 +177,32 @@ module channel_equations
   use mpi_transpose
   use roctx, only: roctxPush, roctxPop
   use ffts
+  use emu_round
   implicit none
   ! VVdz products stashed y-fastest for the fused buildrhs (buildrhs_stash).
-  complex(C_DOUBLE_COMPLEX), allocatable, target, save :: rhs_stash(:, :, :, :)
-  logical, save :: rhs_fuse_decided = .false., rhs_fuse = .false.
+  RHS_COMPLEX, allocatable, target, save :: rhs_stash(:, :, :, :)
+  ! Fused right-hand side: the buildrhs kernels only write newrhs, and the
+  ! solves' assembly computes  rhs = (linear part of V - ODE(3)*oldrhs) +
+  ! ODE(2)*newrhs  itself (assemble_rhs_fused), with the coefficients of the
+  ! substep kept here (buildrhs_prepare).  linsolve lists the components of
+  ! the systems it solves (fused_rhs_order) and each assembly callback takes
+  ! the next one; the systems' sources point at a V column the fused assembly
+  ! never reads.
+  real(C_DOUBLE), save :: rk_c1 = 0.0d0, rk_o2 = 0.0d0, rk_o3 = 0.0d0
+  integer(C_INT), save :: fused_rhs_list(64), fused_rhs_n = 0, fused_rhs_pos = 0
 contains
+
+  ! ys_mf_register for the assembly callbacks.  y_line_solvers is used here and
+  ! nowhere else in this module: nvfortran lets the private module-level imports
+  ! of a used module (k2, nx0, ...) leak into the using scope, where a
+  ! default(none) kernel naming the same variable then fails with "must appear
+  ! in a SHARED or PRIVATE clause".  This routine has no kernels.
+  logical function register_matrix_free(biharmonic, lambda, diffusion)
+    use y_line_solvers, only: ys_mf_register, YS_MF_BIHARMONIC, YS_MF_HELMHOLTZ
+    logical, intent(in) :: biharmonic
+    real(C_DOUBLE), intent(in) :: lambda, diffusion
+    register_matrix_free = ys_mf_register(merge(YS_MF_BIHARMONIC, YS_MF_HELMHOLTZ, biharmonic), lambda, diffusion)
+  end function register_matrix_free
 
   !--------------------------------------------------------------!
   !---------------- integral in the y-direction -----------------!
@@ -207,6 +225,27 @@ contains
     END DO
   END FUNCTION yintegr
 
+  ! Fused right-hand side: the components (1 eta, 2 v, 2+iPhi phi) of the
+  ! systems linsolve is about to solve, in the order they are assembled.
+  subroutine fused_rhs_order(components)
+    integer(C_INT), intent(in) :: components(:)
+    fused_rhs_pos = 0
+    fused_rhs_n = size(components, kind=C_INT)
+    fused_rhs_list(1:fused_rhs_n) = components
+  end subroutine fused_rhs_order
+
+  ! The component of the system an assembly callback is assembling, 0 when it
+  ! is not one of a listed solve (then the source is copied as before).
+  integer(C_INT) function fused_rhs_next()
+    fused_rhs_next = 0
+    if (fused_rhs_pos >= fused_rhs_n) return
+    fused_rhs_pos = fused_rhs_pos + 1
+    fused_rhs_next = fused_rhs_list(fused_rhs_pos)
+    if (fused_rhs_pos == fused_rhs_n) then
+      fused_rhs_n = 0; fused_rhs_pos = 0
+    end if
+  end function fused_rhs_next
+
   subroutine assemble_compact_biharmonic_system(ctx)
     implicit none
     type(compact_assembly_context), intent(in) :: ctx
@@ -215,7 +254,14 @@ contains
     complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
     YS_COEF, pointer :: system_matrix(:, :, :, :)
     complex(C_DOUBLE_COMPLEX), pointer :: system_rhs(:, :, :)
-    integer(C_INT) :: row_start, row_end
+    integer(C_INT) :: row_start, row_end, ir, nrows, nlow
+    logical :: mf
+    integer(C_INT) :: kcomp, iPhi
+    logical :: mean
+    real(C_DOUBLE) :: c1, o2, o3, kk, a, b
+    complex(C_DOUBLE_COMPLEX) :: s0c, s2c, tmpc
+    real(C_DOUBLE) :: ${RHS_DER_NAMES}$
+    real(C_DOUBLE) :: ${RHS_LIN_NAMES}$
     real(C_DOUBLE) :: lambda_coeff
 
     owner_src => ctx%src
@@ -225,7 +271,14 @@ contains
     row_end = ctx%row_end
     lambda_coeff = ctx%lambda
     ix0_owner = lbound(owner_src, 3)
+    ! Matrix-free solve: only the two rows next to each wall this rank owns
+    ! are assembled (ys_mf_register).
     ixN_owner = ubound(owner_src, 3)
+    ! ctx%phase (stage 3n): 0 both parts, 1 the matrix part (registration + matrix rows), 2 the right-hand-side part
+    if (ctx%phase /= 2_C_INT) then
+    mf = register_matrix_free(.true., lambda_coeff, 0.0d0)
+    nlow = merge(2_C_INT, 0_C_INT, ctx%has_lower_boundary)
+    nrows = merge(nlow + merge(2_C_INT, 0_C_INT, ctx%has_upper_boundary), row_end - row_start + 1_C_INT, mf)
 
     ! The bands depend on iy and k^2 only and are written z-fastest, as the
     ! solver reads them: no transpose, so a plain z-innermost loop.  Only the
@@ -233,11 +286,12 @@ contains
     ! tiled kernel for both cost 34% more: the tile bookkeeping outweighed
     ! coalescing for the five band stores, which needed none.
     !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(der, k2, ni, lambda_coeff, system_matrix, nz, ix0_owner, ixN_owner, row_start, row_end) &
-    !$omp private(ix, iz, iy)
-    do iy = row_start, row_end
+    !$omp shared(nrows, nlow, mf, der, k2, ni, lambda_coeff, system_matrix, nz, ix0_owner, ixN_owner, row_start, row_end) &
+    !$omp private(ix, iz, iy, ir)
+    do ir = 0, nrows - 1
       do ix = ix0_owner, ixN_owner
         do iz = -nz, nz
+          iy = merge(row_start + ir, row_end - (nrows - 1 - ir), (.not. mf) .or. ir < nlow)
           ! v equation, implicit half:  lambda*(D^2 - k^2) - ni*(D^2 - k^2)^2
 #:for k in range(-2, 3)
           system_matrix(iz, ix, iy, ${k}$) = lambda_coeff*${helmholtz_op('iy', str(k))}$ - ni*${biharmonic_op('iy', str(k))}$
@@ -246,7 +300,17 @@ contains
       end do
     end do
     !$omp end target teams distribute parallel do
+    if (emu_matv) call emu_round_array(system_matrix)
+    end if
+    if (ctx%phase /= 1_C_INT) then
+    kcomp = fused_rhs_next()
+    c1 = rk_c1; o2 = rk_o2; o3 = rk_o3; iPhi = 0
+    if (kcomp == 2) then
+$:assemble_rhs_fused('v')
+    else
 $:assemble_rhs_tiles()
+    end if
+    end if
   end subroutine assemble_compact_biharmonic_system
 
   subroutine assemble_compact_helmholtz_system(ctx)
@@ -257,7 +321,14 @@ $:assemble_rhs_tiles()
     complex(C_DOUBLE_COMPLEX), pointer :: owner_src(:, :, :)
     YS_COEF, pointer :: system_matrix(:, :, :, :)
     complex(C_DOUBLE_COMPLEX), pointer :: system_rhs(:, :, :)
-    integer(C_INT) :: row_start, row_end
+    integer(C_INT) :: row_start, row_end, ir, nrows, nlow
+    logical :: mf
+    integer(C_INT) :: kcomp, iPhi
+    logical :: mean
+    real(C_DOUBLE) :: c1, o2, o3, kk, a, b
+    complex(C_DOUBLE_COMPLEX) :: s0c, s2c, tmpc
+    real(C_DOUBLE) :: ${RHS_DER_NAMES}$
+    real(C_DOUBLE) :: ${RHS_LIN_NAMES}$
     real(C_DOUBLE) :: lambda_coeff, diffusion_coeff
 
     owner_src => ctx%src
@@ -268,15 +339,22 @@ $:assemble_rhs_tiles()
     lambda_coeff = ctx%lambda
     diffusion_coeff = ctx%diffusion
     ix0_owner = lbound(owner_src, 3)
+    ! Matrix-free solve: only the two rows next to each wall this rank owns
+    ! are assembled (ys_mf_register).
     ixN_owner = ubound(owner_src, 3)
+    if (ctx%phase /= 2_C_INT) then
+    mf = register_matrix_free(.false., lambda_coeff, diffusion_coeff)
+    nlow = merge(2_C_INT, 0_C_INT, ctx%has_lower_boundary)
+    nrows = merge(nlow + merge(2_C_INT, 0_C_INT, ctx%has_upper_boundary), row_end - row_start + 1_C_INT, mf)
 
     ! Bands untiled, right-hand side tiled: see the biharmonic system above.
     !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(der, k2, ni, lambda_coeff, diffusion_coeff, system_matrix, nz, ix0_owner, ixN_owner, row_start, row_end) &
-    !$omp private(ix, iz, iy)
-    do iy = row_start, row_end
+    !$omp shared(nrows, nlow, mf, der, k2, ni, lambda_coeff, diffusion_coeff, system_matrix, nz, ix0_owner, ixN_owner, row_start, row_end) &
+    !$omp private(ix, iz, iy, ir)
+    do ir = 0, nrows - 1
       do ix = ix0_owner, ixN_owner
         do iz = -nz, nz
+          iy = merge(row_start + ir, row_end - (nrows - 1 - ir), (.not. mf) .or. ir < nlow)
           ! eta / scalar equation, implicit half:  lambda - diffusion*ni*(D^2 - k^2)
 #:for k in range(-2, 3)
           system_matrix(iz, ix, iy, ${k}$) = lambda_coeff*der(iy, 0, ${k}$) - diffusion_coeff*ni*${helmholtz_op('iy', str(k))}$
@@ -285,7 +363,19 @@ $:assemble_rhs_tiles()
       end do
     end do
     !$omp end target teams distribute parallel do
+    if (emu_math) call emu_round_array(system_matrix)
+    end if
+    if (ctx%phase /= 1_C_INT) then
+    kcomp = fused_rhs_next()
+    c1 = rk_c1; o2 = rk_o2; o3 = rk_o3; iPhi = max(0_C_INT, kcomp - 2_C_INT)
+    if (kcomp == 1) then
+$:assemble_rhs_fused('eta')
+    else if (kcomp >= 3) then
+$:assemble_rhs_fused('scalar')
+    else
 $:assemble_rhs_tiles()
+    end if
+    end if
   end subroutine assemble_compact_helmholtz_system
 
   SUBROUTINE solve_mean_correction_line(x, lower_bc, lower_ghost_bc, upper_bc, upper_ghost_bc, lambda_coeff, diffusion_coeff)
@@ -316,28 +406,39 @@ $:assemble_rhs_tiles()
     integer(C_INT) :: ix, iz, j, y_first, y_last
     real(C_DOUBLE) :: a, b, rk, er, ei, dr, di
     complex(C_DOUBLE_COMPLEX) :: zero_mode_u(-1:ny + 1), zero_mode_w(-1:ny + 1), zero_mode_ucor(-1:ny + 1)
-    type(wall_normal_system) :: systems(2)
+    type(wall_normal_system), allocatable :: systems(:)
+    integer(C_INT) :: iPhi
 
-    ! v and eta are independent: one stacked solve (see solve_wall_normal_systems).
-    ! The right-hand sides are read from memrhs, where buildrhs left them; V
-    ! receives the solution.
-    call roctxPush("linsolve solve_v_eta")
+    ! v, eta and the scalars are independent: one stacked solve (see
+    ! solve_wall_normal_systems), so a pipelined y-solve fills and drains once
+    ! for all of them.  The right-hand sides are assembled from V, oldrhs and
+    ! newrhs (assemble_rhs_fused); V receives the solution.
+    allocate (systems(2 + nPhi))
+    call roctxPush("linsolve solve_v_eta_phi")
+    call roctxPush("linsolve setup_systems")
     systems(1)%ctx = compact_component_boundaries(v0bc, v0m1bc, vnbc, vnp1bc, &
                                                   bc0(:, :, 2), bc0(:, :, 4), bcn(:, :, 2), bcn(:, :, 4))
     systems(1)%field => V(:, :, :, 2)
-    systems(1)%source => memrhs(:, :, :, 2)
+    ! fused right-hand side: the assembly computes it; the source is a V column
+    ! it does not read (and not the system's own field)
+    systems(1)%source => V(:, :, :, 1)
     systems(1)%assemble => assemble_compact_biharmonic_system
     systems(2)%ctx = compact_component_boundaries(eta0bc, eta0m1bc, etanbc, etanp1bc, &
                                                   bc0(:, :, 5), zero_bc, bcn(:, :, 5), zero_bc)
     systems(2)%field => V(:, :, :, 1)
-    systems(2)%source => memrhs(:, :, :, 1)
+    systems(2)%source => V(:, :, :, 2)
     systems(2)%assemble => assemble_compact_helmholtz_system
     systems(:)%ctx%lambda = lambda
     systems(:)%ctx%diffusion = 1.0d0
     systems(1)%boundary => assemble_selected_compact_component_boundaries
     systems(2)%boundary => assemble_selected_compact_component_boundaries
+    do iPhi = 1, nPhi
+      call scalar_system(systems(2 + iPhi), lambda, iPhi)
+    end do
+    call fused_rhs_order([2_C_INT, 1_C_INT, (2_C_INT + iPhi, iPhi = 1, nPhi)])
+    call roctxPop("linsolve setup_systems")
     call solve_wall_normal_systems(systems)
-    call roctxPop("linsolve solve_v_eta")
+    call roctxPop("linsolve solve_v_eta_phi")
     call roctxPush("linsolve d_v_dy")
     call apply_dy(V(:, :, :, 2), V(:, :, :, 3))
     call roctxPop("linsolve d_v_dy")
@@ -394,6 +495,9 @@ $:assemble_rhs_tiles()
       END DO
     END DO
     call roctxPop("linsolve recover_u_w")
+    do iPhi = 1, nPhi
+      call correct_scalar_mean(lambda, iPhi)
+    end do
   END SUBROUTINE linsolve
 
   SUBROUTINE linsolve_scalar(lambda, iPhi)
@@ -403,27 +507,10 @@ $:assemble_rhs_tiles()
     type(wall_normal_system) :: systems(1)
 
     call scalar_system(systems(1), lambda, iPhi)
+    call fused_rhs_order([2_C_INT + iPhi])
     call solve_wall_normal_systems(systems)
     call correct_scalar_mean(lambda, iPhi)
   END SUBROUTINE linsolve_scalar
-
-  ! All scalars at once: they are independent, so one stacked solve.
-  SUBROUTINE linsolve_scalars(lambda)
-    IMPLICIT NONE
-    real(C_DOUBLE), intent(in) :: lambda
-    type(wall_normal_system), allocatable :: systems(:)
-    integer(C_INT) :: iPhi
-
-    if (nPhi < 1) return
-    allocate (systems(nPhi))
-    do iPhi = 1, nPhi
-      call scalar_system(systems(iPhi), lambda, iPhi)
-    end do
-    call solve_wall_normal_systems(systems)
-    do iPhi = 1, nPhi
-      call correct_scalar_mean(lambda, iPhi)
-    end do
-  END SUBROUTINE linsolve_scalars
 
   subroutine scalar_system(sys, lambda, iPhi)
     IMPLICIT NONE
@@ -436,7 +523,7 @@ $:assemble_rhs_tiles()
     sys%ctx%lambda = lambda
     sys%ctx%diffusion = pra(iPhi)
     sys%field => V(:, :, :, 3 + iPhi)
-    sys%source => memrhs(:, :, :, 2 + iPhi)
+    sys%source => V(:, :, :, 1)
     sys%assemble => assemble_compact_helmholtz_system
     sys%boundary => assemble_selected_compact_component_boundaries
   end subroutine scalar_system
@@ -462,23 +549,6 @@ $:assemble_rhs_tiles()
       !$omp target update to(V(:, 0, 0, 3 + iPhi))
     end if
   END SUBROUTINE correct_scalar_mean
-
-  ! The two rVVdx components whose product is nonlinear term m (the pairs
-  ! build_products below multiplies).
-  SUBROUTINE product_factors(m, a, b)
-    integer(C_INT), intent(in) :: m
-    integer(C_INT), intent(out) :: a, b
-    if (m > 6) then
-      a = mod(m - 4, 3) + 1
-      b = 3 + (m - 4)/3
-    else if (m > 3) then
-      a = mod(m - 1, 3) + 1
-      b = mod(m, 3) + 1
-    else
-      a = m
-      b = m
-    end if
-  END SUBROUTINE product_factors
 
   SUBROUTINE build_products(m, to)
     IMPLICIT NONE
@@ -534,184 +604,59 @@ $:assemble_rhs_tiles()
   ! (u,v,w) = (1,2,3)
   ! (uu,vv,ww,uv,vw,uw) = (1,2,3,4,5,6)
 
-  ! The contributions known a priori, for both velocity equations in one
-  ! pass: memrhs = ODE(1)/deltat*unknown + viscous term - ODE(3)*oldrhs.
-  !
-  ! memrhs is where the right-hand side stays: linsolve reads it from there
-  ! (V is not overwritten, so there is no copy back into V), and the buildrhs
-  ! kernels add the explicit terms to it.
-  !
-  ! With the fused buildrhs (rhs_fuse) oldrhs is left untouched here:
-  ! buildrhs_fused_velocity overwrites it with the new explicit terms without
-  ! reading it.  The per-product kernels accumulate into oldrhs instead, so
-  ! for them it is zeroed here (and the mean-pressure drive added) as before.
+  ! The coefficients of the substep, for the assembly of each solve's
+  ! right-hand side (assemble_rhs_fused): the parts known a priori,
+  ! ODE(1)/deltat*unknown + viscous term - ODE(3)*oldrhs, are computed there,
+  ! from V and oldrhs, together with ODE(2) times the explicit terms in newrhs.
   SUBROUTINE buildrhs_prepare(ODE)
     IMPLICIT NONE
     real(C_DOUBLE), intent(in) :: ODE(1:3)
-    integer(C_INT) :: iy, iz, ix, iPhi, y_first, y_last
-    complex(C_DOUBLE_COMPLEX) :: tmp, unkn, s0, s2
-    logical :: mean
-    real(C_DOUBLE) :: c1, o2, o3, kk, a, b
-    real(C_DOUBLE) :: ${RHS_DER_NAMES}$
-    real(C_DOUBLE) :: ${RHS_LIN_NAMES}$
-    y_first = ny0
-    y_last = nyN
-    if (.not. rhs_fuse_decided) call buildrhs_decide_fusion()
-    c1 = ODE(1)/deltat; o2 = ODE(2); o3 = ODE(3)
-
-    ! Two copies of the kernel, with the oldrhs reset compiled in or out: as a
-    ! run-time flag inside one kernel the reset cost 6 ms per call even when off.
-    if (rhs_fuse) then
-$:prepare_velocity_kernel(False)
-    else
-$:prepare_velocity_kernel(True)
-    end if
-
-    !initialize phi
-    DO iPhi = 1, nPhi
-      !$omp target teams distribute parallel do collapse(3) default(none)  &
-      !$omp private(tmp, iz, ix, iy, unkn, s0, s2) &
-      !$omp shared(nz, nx0, nxN, ny, y_first, y_last, pra, V, memrhs, ode, c1, oldrhs, iphi, der, k2, ni)
-      DO ix = nx0, nxN
-        DO iz = -nz, nz
-          DO iy = y_first, y_last
-            s0 = ${apply_d('V', '3 + iPhi', 0)}$
-            s2 = ${apply_d('V', '3 + iPhi', 2)}$
-            tmp = ni*(s2 - k2(iz, ix)*s0)
-            unkn = s0
-            memrhs(iy, iz, ix, 2 + iPhi) = c1*unkn + tmp*pra(iPhi) - ODE(3)*oldrhs(iy, iz, ix, 2 + iPhi)
-            oldrhs(iy, iz, ix, 2 + iPhi) = 0.0
-          END DO
-        END DO
-      END DO
-    END DO
-
+    rk_c1 = ODE(1)/deltat; rk_o2 = ODE(2); rk_o3 = ODE(3)
   END SUBROUTINE buildrhs_prepare
 
-#! ===================================================================
-#! buildrhs kernels: every VVdz product is one tiled target region; only the
-#! expressions differ.  Each wavefront covers an 8x8 tile of (iz, iy), iz
-#! fastest: VVdz is z-fastest while V and oldrhs are y-fastest, so with iy
-#! alone fastest every VVdz load hit a different 4 MB-strided line.  A tile
-#! reads 8 full z-lines of VVdz and updates 8 full y-lines of V and oldrhs.
-#! ===================================================================
-#! tile_zy_open / tile_zy_close live in stencil_macros.fypph.
-#! Velocity products: expl feeds the d2v equation; rhsu/rhsw, when given,
-#! feed the eta equation (and the mean flow for ix = iz = 0).  The kernels add
-#! only to oldrhs; buildrhs_finish adds ODE(2) times the sum to memrhs once, which
-#! halves the traffic of each of these kernels (both got the same terms).
-#:def rhs_velocity_kernel(expl, rhsu=None, rhsw=None)
-      !$omp target teams distribute parallel do collapse(5) default(none) &
-      !$omp private(rhsu, rhsw, expl, iz, ix, iy, izb, iyb, izi, iyi) &
-      !$omp shared(nz, nx0, nxN, ny, y_first, y_last, from, ialfa, ibeta, der, V, oldrhs, izd, ode, k2, VVdz)
-$:tile_zy_open()
-                ! All VVdz loads before the first store: VVdz points into the shared
-                ! workspace, so a store to V or oldrhs would force them to be reloaded.
-#:if rhsu is not None
-                rhsu = ${rhsu}$
-                rhsw = ${rhsw}$
-#:endif
-                expl = ${expl}$
-                $:accum_d2v(None, 'expl')
-#:if rhsu is not None
-                $:accum_eta_uw(None, 'rhsu', 'rhsw')
-#:endif
-$:tile_zy_close()
-#:enddef
-#! Scalar products u*phi, v*phi, w*phi for scalar iPhi.
-#:def rhs_scalar_kernel(rhst)
-      !$omp target teams distribute parallel do collapse(5) default(none) &
-      !$omp private(rhst, iz, ix, iy, izb, iyb, izi, iyi) &
-      !$omp shared(nz, nx0, nxN, ny, y_first, y_last, ialfa, ibeta, V, ode, der, oldrhs, iPhi, VVdz, izd, from)
-$:tile_zy_open()
-                rhst = ${rhst}$
-                $:rk_accum(None, 'oldrhs(iy, iz, ix, 2 + iPhi)', 'rhst')
-$:tile_zy_close()
-#:enddef
-#! The explicit terms of every VVdz product, written once.  {D0}, {D1}, {D2}
-#! stand for the wall-normal derivatives of the product; expl feeds d2v, and
-#! rhsu/rhsw (None: no contribution) feed eta.  The per-product kernels apply
-#! them to VVdz, the fused ones to rhs_stash.
-#:set VEL_RHS = [dict(expl='ialfa(ix)*ialfa(ix)*{D1}', rhsu='-ialfa(ix)*{D0}', rhsw='0.0'), dict(expl='{D1}*k2(iz, ix)', rhsu=None, rhsw=None), dict(expl='ibeta(iz)*ibeta(iz)*{D1}', rhsu='0.0', rhsw='-ibeta(iz)*{D0}'), dict(expl='ialfa(ix)*{D2}+ialfa(ix)*{D0}*k2(iz, ix)', rhsu='-{D1}', rhsw='0.0'), dict(expl='ibeta(iz)*{D2}+ibeta(iz)*{D0}*k2(iz, ix)', rhsu='0.0', rhsw='-{D1}'), dict(expl='2*ialfa(ix)*ibeta(iz)*{D1}', rhsu='-ibeta(iz)*{D0}', rhsw='-ialfa(ix)*{D0}')]
+#! The explicit terms of the scalar products u*phi, v*phi, w*phi: {D0}, {D1}
+#! stand for the wall-normal derivatives of the product.
 #:set SCA_RHS = ['-ialfa(ix)*{D0}', '-{D1}', '-ibeta(iz)*{D0}']
-#:def rhs_case(c)
-#:set e = VEL_RHS[c - 1]
-#:set dv = dict(D0=apply_d_vvdz(0, 'from'), D1=apply_d_vvdz(1, 'from'), D2=apply_d_vvdz(2, 'from'))
-$:rhs_velocity_kernel(expl=e['expl'].format(**dv), rhsu=None if e['rhsu'] is None else e['rhsu'].format(**dv), rhsw=None if e['rhsw'] is None else e['rhsw'].format(**dv))
-#:enddef
-#:def rhs_scalar_case(c)
-$:rhs_scalar_kernel(SCA_RHS[c - 1].format(D0=apply_d_vvdz(0, 'from'), D1=apply_d_vvdz(1, 'from')))
-#:enddef
+  ! component = the VVdz product held in VVdz(:, :, :, from):
+  ! (uu, vv, ww, uv, vw, uw) = (1 .. 6), then (u, v, w)*phi per scalar.
+  ! The product is stashed; once a group is complete, one fused kernel applies
+  ! all of its terms.  buildrhs_stash copies each product out of VVdz as soon
+  ! as it has arrived, so with overlapping the alltoall of the next product
+  ! still overlaps it.
   SUBROUTINE buildrhs(ODE, component, from)
     IMPLICIT NONE
     real(C_DOUBLE), intent(in) :: ODE(1:3)
     integer(C_INT), intent(in) :: component, from
-    integer(C_INT) :: iy, iz, ix, iPhi, y_first, y_last
-    integer(C_INT) :: izb, iyb, izi, iyi
-    integer(C_INT), parameter :: RHS_TILE = 8
-    complex(C_DOUBLE_COMPLEX) :: rhsu, rhsw, rhst, expl
-    y_first = ny0
-    y_last = nyN
 
-    ! component = the VVdz product held in VVdz(:, :, :, from):
-    ! (uu, vv, ww, uv, vw, uw) = (1 .. 6), then (u, v, w)*phi per scalar.
-    if (.not. rhs_fuse_decided) call buildrhs_decide_fusion()
-    if (rhs_fuse) then
-      ! Stash the product; once a group is complete, one fused kernel applies
-      ! all of its terms and updates oldrhs once instead of once per product.
-      call buildrhs_stash(component, from)
-      if (component == 6) call buildrhs_fused_velocity(ODE)
-      if (component > 6) then
-        if (MODULO(component - 4, 3) == 2) call buildrhs_fused_scalar((component - 4)/3)
-      end if
-      return
+    call buildrhs_stash(component, from)
+    if (component == 6) call buildrhs_fused_velocity(ODE)
+    if (component > 6) then
+      if (MODULO(component - 4, 3) == 2) call buildrhs_fused_scalar((component - 4)/3)
     end if
-    SELECT CASE (component)
-    CASE (1)
-$:rhs_case(1)
-    CASE (2)
-$:rhs_case(2)
-    CASE (3)
-$:rhs_case(3)
-    CASE (4)
-$:rhs_case(4)
-    CASE (5)
-$:rhs_case(5)
-    CASE (6)
-$:rhs_case(6)
-    CASE DEFAULT
-      iPhi = (component - 4)/3
-      SELECT CASE (MODULO((component - 4), 3) + 1)
-      CASE (1)
-$:rhs_scalar_case(1)
-      CASE (2)
-$:rhs_scalar_case(2)
-      CASE (3)
-$:rhs_scalar_case(3)
-      END SELECT
-    END SELECT
   END SUBROUTINE buildrhs
 
-  ! Fusion needs all products of a group in memory before their terms are
-  ! applied, which ends the overlap of each product's xz alltoall with the
-  ! previous product's buildrhs.  So it is on where the transposes are local
-  ! or nothing is overlapped; CHANNEL_BUILDRHS_FUSED overrides either way.
-  subroutine buildrhs_decide_fusion()
-    use env_options, only: env_flag
-    rhs_fuse = fft_transpose_is_local .or. fft_nflds == 1
-    call env_flag("CHANNEL_BUILDRHS_FUSED", rhs_fuse)
-    if (rhs_fuse) then
-      allocate (rhs_stash(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 6))
-      !$omp target enter data map(alloc: rhs_stash)
-    end if
-    rhs_fuse_decided = .true.
-  end subroutine buildrhs_decide_fusion
+  ! End of a substep: this substep's explicit terms become the previous ones.
+  subroutine rhs_swap()
+    RHS_COMPLEX, pointer :: t(:, :, :, :)
+    t => oldrhs; oldrhs => newrhs; newrhs => t
+  end subroutine rhs_swap
+
+  ! Called from init_memory: the stash of the products and the second buffer
+  ! of explicit terms (newrhs; oldrhs is allocated there).
+  subroutine buildrhs_allocate()
+    allocate (rhs_stash(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 6))
+    !$omp target enter data map(alloc: rhs_stash)
+    allocate (rhs_store_b(ny0 - 2:nyN + 2, -nz:nz, nx0:nxN, 1:2 + nPhi))
+    rhs_store_b = 0.0
+    !$omp target enter data map(to: rhs_store_b)
+    newrhs => rhs_store_b
+  end subroutine buildrhs_allocate
 
   ! Copy the spectral modes buildrhs needs from VVdz (z-fastest) into
   ! rhs_stash (y-fastest), slot 1..6 for the velocity products and 1..3 for a
-  ! scalar's.  (iz, iy) tiles as in the kernels it replaces, with the tile
-  ! origins moved down by (sz, sy) elements so that every tile row is exactly
-  ! one 128-byte line of VVdz and every tile column one line of rhs_stash:
+  ! scalar's.  (iz, iy) tiles, with the tile origins moved down by (sz, sy)
+  ! elements so that every tile row is exactly one 128-byte line of VVdz and
+  ! every tile column one line of rhs_stash:
   ! each wavefront then reads 8 whole lines and writes 8 whole lines.  With
   ! the origin at (-nz, y_first - 2) the rows straddled two lines each (3.2 ->
   ! 2.6 ms per call at 1364 x 1365 x 116; only one of the eight z phases is
@@ -729,9 +674,9 @@ $:rhs_scalar_case(3)
     ! VVdz(k, ...) holds iz = k - 1 - nzd for the negative modes: the tile that
     ! starts at iz = -nz - sz starts at element nzd - nz - sz of its z line.
     addr = transfer(c_loc(VVdz(1, 1, lbound(VVdz, 3), from)), addr)
-    sz = int(modulo(addr/16 + int(nzd - nz, C_INTPTR_T), int(RHS_TILE, C_INTPTR_T)), C_INT)
+    sz = int(modulo(addr/(storage_size(VVdz)/8) + int(nzd - nz, C_INTPTR_T), int(RHS_TILE, C_INTPTR_T)), C_INT)
     addr = transfer(c_loc(rhs_stash(y_first - 2, -nz, nx0, slot)), addr)
-    sy = int(modulo(addr/16, int(RHS_TILE, C_INTPTR_T)), C_INT)
+    sy = int(modulo(addr/(storage_size(rhs_stash)/8), int(RHS_TILE, C_INTPTR_T)), C_INT)
     !$omp target teams distribute parallel do collapse(5) default(none) &
     !$omp shared(rhs_stash, VVdz, nz, nzd, nx0, nxN, y_first, y_last, slot, from, sz, sy) &
     !$omp private(iz, ix, iy, izb, iyb, izi, iyi)
@@ -750,15 +695,15 @@ $:rhs_scalar_case(3)
         END DO
       END DO
     END DO
+#ifndef CHANNEL_SINGLE
+    if (emu_stash) call emu_round_array(rhs_stash(:, :, :, slot:slot))
+#endif
   end subroutine buildrhs_stash
 
-  ! All six velocity products' terms in one pass, and the end of the substep
-  ! for the velocity equations: memrhs += ODE(2)*N and oldrhs = N, with N the
-  ! explicit terms (plus the mean-pressure drive in the mean mode).  oldrhs is
-  ! written without being read -- buildrhs_prepare has already used the
-  ! previous substep's value -- so buildrhs_finish has nothing left to do for
-  ! the velocity.  Every array is y-fastest: iy innermost reads and writes
-  ! contiguous lines.
+  ! All six velocity products' terms in one pass: newrhs = N, with N the
+  ! explicit terms (plus the mean-pressure drive in the mean mode); the
+  ! assembly adds ODE(2)*N to the right-hand side.  Every array is y-fastest:
+  ! iy innermost reads and writes contiguous lines.
   subroutine buildrhs_fused_velocity(ODE)
     real(C_DOUBLE), intent(in) :: ODE(1:3)
     integer(C_INT) :: iy, iz, ix, y_first, y_last
@@ -769,8 +714,8 @@ $:rhs_scalar_case(3)
     y_last = nyN
     o2 = ODE(2)
     !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(rhs_stash, oldrhs, memrhs, der, ialfa, ibeta, k2, nz, nx0, nxN, y_first, y_last, o2, meanpx, meanpz) &
-    !$omp private(iz, ix, iy, kk, a, b, m1r, m1i, m2r, m2i, ${RHS_DER_NAMES}$, ${RHS_NL_NAMES}$)
+    !$omp shared(rhs_stash, newrhs, der, ialfa, ibeta, k2, nz, nx0, nxN, y_first, y_last, meanpx, meanpz) &
+    !$omp private(iz, ix, iy, kk, a, b, ${RHS_DER_NAMES}$, ${RHS_NL_NAMES}$)
     DO ix = nx0, nxN
       DO iz = -nz, nz
         DO iy = y_first, y_last
@@ -780,13 +725,9 @@ $:rhs_nonlinear_real('rhs_stash')
           if (ix == 0 .AND. iz == 0) then
             n1r = n1r + meanpx; n1i = n1i + meanpz
           end if
-          ! memrhs is a pointer: load it before the stores.
-          m1r = dreal(memrhs(iy, iz, ix, 1)) + o2*n1r; m1i = dimag(memrhs(iy, iz, ix, 1)) + o2*n1i
-          m2r = dreal(memrhs(iy, iz, ix, 2)) + o2*n2r; m2i = dimag(memrhs(iy, iz, ix, 2)) + o2*n2i
-          memrhs(iy, iz, ix, 1) = dcmplx(m1r, m1i)
-          memrhs(iy, iz, ix, 2) = dcmplx(m2r, m2i)
-          oldrhs(iy, iz, ix, 1) = dcmplx(n1r, n1i)
-          oldrhs(iy, iz, ix, 2) = dcmplx(n2r, n2i)
+          ! the assembly adds ODE(2)*newrhs to the right-hand side
+          newrhs(iy, iz, ix, 1) = dcmplx(n1r, n1i)
+          newrhs(iy, iz, ix, 2) = dcmplx(n2r, n2i)
         END DO
       END DO
     END DO
@@ -800,7 +741,7 @@ $:rhs_nonlinear_real('rhs_stash')
     y_first = ny0
     y_last = nyN
     !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(rhs_stash, oldrhs, der, ialfa, ibeta, nz, nx0, nxN, y_first, y_last, iPhi) &
+    !$omp shared(rhs_stash, newrhs, der, ialfa, ibeta, nz, nx0, nxN, y_first, y_last, iPhi) &
     !$omp private(iz, ix, iy, rhst)
     DO ix = nx0, nxN
       DO iz = -nz, nz
@@ -809,47 +750,11 @@ $:rhs_nonlinear_real('rhs_stash')
 #:for c in range(1, 4)
           rhst = rhst + ${SCA_RHS[c - 1].format(D0=apply_d('rhs_stash', c, 0), D1=apply_d('rhs_stash', c, 1))}$
 #:endfor
-          oldrhs(iy, iz, ix, 2 + iPhi) = oldrhs(iy, iz, ix, 2 + iPhi) + rhst
+          ! = 0 + rhst as before (buildrhs_prepare used to zero oldrhs here first)
+          newrhs(iy, iz, ix, 2 + iPhi) = rhst
         END DO
       END DO
     END DO
   end subroutine buildrhs_fused_scalar
 
-  ! After all buildrhs calls of a substep: memrhs += ODE(2)*(what buildrhs
-  ! added to oldrhs), for the equations whose kernels accumulate into oldrhs
-  ! only -- the scalars, and the velocity unless buildrhs_fused_velocity has
-  ! done it already.  buildrhs_prepare left oldrhs zero in these components
-  ! except the mean pressure drive in the (0,0) mode of component 1, which
-  ! memrhs already holds.
-  SUBROUTINE buildrhs_finish(ODE)
-    IMPLICIT NONE
-    real(C_DOUBLE), intent(in) :: ODE(1:3)
-    integer(C_INT) :: iy, iz, ix, iPhi, y_first, y_last
-    complex(C_DOUBLE_COMPLEX) :: mean_drive
-    logical :: velocity
-    y_first = ny0
-    y_last = nyN
-    velocity = .not. rhs_fuse
-    if (.not. velocity .and. nPhi == 0) return
-    mean_drive = dcmplx(meanpx, meanpz)
-    !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(memrhs, oldrhs, ODE, mean_drive, nz, nx0, nxN, y_first, y_last, nPhi, velocity) private(iy, iz, ix, iPhi)
-    DO ix = nx0, nxN
-      DO iz = -nz, nz
-        DO iy = y_first, y_last
-          if (velocity) then
-            if (ix == 0 .AND. iz == 0) then
-              memrhs(iy, iz, ix, 1) = memrhs(iy, iz, ix, 1) + ODE(2)*(oldrhs(iy, iz, ix, 1) - mean_drive)
-            else
-              memrhs(iy, iz, ix, 1) = memrhs(iy, iz, ix, 1) + ODE(2)*oldrhs(iy, iz, ix, 1)
-            end if
-            memrhs(iy, iz, ix, 2) = memrhs(iy, iz, ix, 2) + ODE(2)*oldrhs(iy, iz, ix, 2)
-          end if
-          DO iPhi = 1, nPhi
-            memrhs(iy, iz, ix, 2 + iPhi) = memrhs(iy, iz, ix, 2 + iPhi) + ODE(2)*oldrhs(iy, iz, ix, 2 + iPhi)
-          END DO
-        END DO
-      END DO
-    END DO
-  END SUBROUTINE buildrhs_finish
 end module channel_equations

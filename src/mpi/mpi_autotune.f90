@@ -4,8 +4,8 @@ module mpi_autotune
   use, intrinsic :: iso_c_binding
   use, intrinsic :: ieee_arithmetic
   use channel_grid, only: nxB, nzB, ny0, nyN
-  use mpi_transpose, only: init_MPI, free_MPI, fft_transpose_is_local, repack_zTOx_local, pack_zTOx, alltoall, &
-                           unpack_zTOx, repack_xTOz_local, pack_xTOz, unpack_xTOz, sendbuf, recvbuf
+  use mpi_transpose, only: y_split_first, init_MPI, free_MPI, fft_transpose_is_local, repack_zTOx_local, pack_zTOx, alltoall, &
+                           unpack_zTOx, repack_xTOz_local, pack_xTOz, unpack_xTOz, sendbuf, recvbuf, sendbuf_t, recvbuf_t
 #ifdef HAVE_CUDA
   use ffts, only: init_cufft, free_fft, acquire_fft_workspace, release_fft_workspace, VVdz, VVdx, rVVdx, fft_plans_ok
 #elif defined(HAVE_HIP)
@@ -15,7 +15,7 @@ module mpi_autotune
 #endif
   use y_line_solvers, only: Y_SOLVER_SCHUR, Y_SOLVER_PIPELINED_LU, &
                             ys_selected_solver, ys_selected_batches, &
-                            ys_prepare_assembled_workspace, ys_release_workspace, &
+                            ys_prepare_assembled_workspace, ys_release_workspace, ys_stack_limit, &
                             ys_solve_endpoint_schur, ys_solve_pipelined_lu, ys_gpsv_ds, ys_gpsv_dl, &
                             ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_gpsv_x
   use y_schur_solver, only: ys_schur_default_pass_counts, YS_SCHUR_EXCHANGE_AUTO, &
@@ -198,9 +198,10 @@ contains
     integer(C_INT), intent(in) :: nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, node(0:)
     logical, intent(in) :: overlapping
     type(autotune_best), intent(inout) :: best
-    real(C_DOUBLE) :: xz_forward_cost, xz_back_cost, y_cost, score
-    real(C_DOUBLE) :: y_error
-    integer(C_INT) :: ib, batches, npy, nlines, placeholder_path(MAXP), placeholder_npass, batch_candidates(4)
+    real(C_DOUBLE) :: xz_forward_cost, xz_back_cost, y_cost, y_single_cost, score
+    real(C_DOUBLE) :: y_error, y_single_error
+    integer(C_INT) :: ib, batches, npy, nlines, placeholder_path(MAXP), placeholder_npass, batch_candidates(5)
+    integer(C_INT) :: width, nstacked
     integer(C_INT), allocatable :: placeholder_passes(:)
     logical :: y_ok, fft_ok
     integer :: ierr, rank
@@ -227,8 +228,15 @@ contains
 
     nlines = (nxpp/npxz)*(2_C_INT*nz + 1_C_INT)
     ! The twisted pipeline (default for even npy) is npy/2 deep, so fewer
-    ! batches can pay off: npy/4 is a candidate too.  Duplicates are skipped.
-    batch_candidates = [max(1_C_INT, npy/4_C_INT), max(1_C_INT, npy/2_C_INT), npy, 2_C_INT*npy]
+    ! batches can pay off: npy/4 is a candidate too; 16 is the count measured
+    ! best on MI300A from 4 to 32 y ranks.  Duplicates are skipped.
+    batch_candidates = [max(1_C_INT, npy/4_C_INT), max(1_C_INT, npy/2_C_INT), npy, 2_C_INT*npy, 16_C_INT]
+    ! linsolve stacks v, eta and the scalars (2 + nphi systems) into solves of
+    ! `width` systems, which pay the pipeline latency once each; apply_dy (dv/dy)
+    ! is one more solve of a single system (timed as one; its table kernels are
+    ! somewhat cheaper).
+    width = max(1_C_INT, min(2_C_INT + nphi, ys_stack_limit(npy)))
+    nstacked = (2_C_INT + nphi + width - 1_C_INT)/width
     do ib = 1_C_INT, int(size(batch_candidates), C_INT)
       batches = batch_candidates(ib)
       if (batches > nlines) cycle
@@ -236,7 +244,13 @@ contains
         if (any(batch_candidates(1:ib - 1) == batches)) cycle
       end if
       y_cost = time_y(nxpp, nzd, nz, ny, nphi, overlapping, npy, placeholder_path, placeholder_npass, &
-                      YS_SCHUR_EXCHANGE_AUTO, Y_SOLVER_PIPELINED_LU, batches, y_ok, y_error)
+                      YS_SCHUR_EXCHANGE_AUTO, Y_SOLVER_PIPELINED_LU, batches, width, y_ok, y_error)
+      y_single_cost = y_cost
+      if (y_ok .and. width > 1_C_INT) then
+        y_single_cost = time_y(nxpp, nzd, nz, ny, nphi, overlapping, npy, placeholder_path, placeholder_npass, &
+                               YS_SCHUR_EXCHANGE_AUTO, Y_SOLVER_PIPELINED_LU, batches, 1_C_INT, y_ok, y_single_error)
+        y_error = max(y_error, y_single_error)
+      end if
       if (.not. y_ok) then
         if (rank == 0) write (*, '(*(g0,1x))') "MPI autotune rejected: npxz=", npxz, &
           "npy=", npy, "comm=", trim(channel_comm_backend_name(comm_backend)), &
@@ -247,13 +261,14 @@ contains
       end if
       score = RK_SUBSTEPS*(xz_forward_cost*real(3_C_INT + nphi, C_DOUBLE) + &
                            xz_back_cost*real(6_C_INT + 3_C_INT*nphi, C_DOUBLE) + &
-                           y_cost*real(3_C_INT + nphi, C_DOUBLE))
+                           y_cost*real(nstacked, C_DOUBLE) + y_single_cost)
       if (rank == 0) write (*, '(*(g0,1x))') "MPI autotune tested: npxz=", npxz, &
         "npy=", npy, "comm=", trim(channel_comm_backend_name(comm_backend)), &
         "passes=", trim(display_pass_string(placeholder_path, placeholder_npass, Y_SOLVER_PIPELINED_LU)), &
         "exchange= auto xz_forward_ms=", 1d3*xz_forward_cost, &
         "xz_back_ms=", 1d3*xz_back_cost, "y_solver=", trim(y_solver_string(Y_SOLVER_PIPELINED_LU)), &
-        "y_batches=", batches, "y_ms=", 1d3*y_cost, "y_correctness_error=", y_error, &
+        "y_batches=", batches, "y_stack=", width, "y_ms=", 1d3*y_cost, "y_single_ms=", 1d3*y_single_cost, &
+        "y_correctness_error=", y_error, &
         "score_timestep_ms=", 1d3*score
       if (.not. best%found .or. score < best%score) then
         best%found = .true.; best%score = score; best%npxz = npxz; best%npy = npy
@@ -324,7 +339,7 @@ contains
       integer(C_INT), intent(in) :: y_solver, y_batches
 
       y_cost = time_y(nxpp, nzd, nz, ny, nphi, overlapping, nranks/npxz, path, npass, exchange, &
-                      y_solver, y_batches, y_ok, y_error)
+                      y_solver, y_batches, 1_C_INT, y_ok, y_error)
       if (.not. y_ok) then
         if (rank == 0) write (*, '(*(g0,1x))') "MPI autotune rejected: npxz=", npxz, &
           "npy=", nranks/npxz, "comm=", trim(channel_comm_backend_name(comm_backend)), &
@@ -369,8 +384,8 @@ contains
     if (mod(nxpp, npxz) /= 0_C_INT .or. mod(nzd, npxz) /= 0_C_INT) return
     if (npy > 1_C_INT) then
       do ipy = 0_C_INT, npy - 1_C_INT
-        y0 = 1_C_INT + ipy*(ny - 1_C_INT)/npy
-        yN = (ipy + 1_C_INT)*(ny - 1_C_INT)/npy
+        y0 = y_split_first(int(ipy), int(ny), int(npy))
+        yN = y_split_first(int(ipy) + 1, int(ny), int(npy)) - 1_C_INT
         if (yN - y0 + 1_C_INT < 4_C_INT) return
       end do
     end if
@@ -504,10 +519,10 @@ contains
       if (fft_transpose_is_local) then
         call repack_zTOx_local(VVdz(:, :, :, 1), VVdx(:, :, :, 1))
       else
-        call pack_zTOx(VVdz(:, :, :, 1), sendbuf(:, 1))
+        call pack_zTOx(VVdz(:, :, :, 1), sendbuf_t(:, 1))
         call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "zTOx autotune_xz_sweep")
         call MPI_Wait(request, status, ierr)
-        call unpack_zTOx(recvbuf(:, 1), VVdx(:, :, :, 1))
+        call unpack_zTOx(recvbuf_t(:, 1), VVdx(:, :, :, 1))
       end if
       call MPI_Barrier(MPI_COMM_WORLD, ierr)
       if (iter > 0) forward_elapsed = forward_elapsed + MPI_Wtime() - t0
@@ -516,10 +531,10 @@ contains
       if (fft_transpose_is_local) then
         call repack_xTOz_local(VVdx(:, :, :, 1), VVdz(:, :, :, 1))
       else
-        call pack_xTOz(VVdx(:, :, :, 1), sendbuf(:, 1))
+        call pack_xTOz(VVdx(:, :, :, 1), sendbuf_t(:, 1))
         call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "xTOz autotune_xz_sweep")
         call MPI_Wait(request, status, ierr)
-        call unpack_xTOz(recvbuf(:, 1), VVdz(:, :, :, 1))
+        call unpack_xTOz(recvbuf_t(:, 1), VVdz(:, :, :, 1))
       end if
 
       call MPI_Barrier(MPI_COMM_WORLD, ierr)
@@ -542,10 +557,11 @@ contains
     call free_MPI()
   end subroutine time_xz_sweep
 
+  ! One y solve of `stack` systems side by side (stack*nxB*(2*nz+1) lines).
   real(C_DOUBLE) function time_y(nxpp, nzd, nz, ny, nphi, overlapping, npy, path, npass, exchange, &
-                                 y_solver, y_batches, ok, max_error)
+                                 y_solver, y_batches, stack, ok, max_error)
     integer(C_INT), intent(in) :: nxpp, nzd, nz, ny, nphi, npy, path(MAXP), npass, exchange
-    integer(C_INT), intent(in) :: y_solver, y_batches
+    integer(C_INT), intent(in) :: y_solver, y_batches, stack
     logical, intent(in) :: overlapping
     logical, intent(out) :: ok
     real(C_DOUBLE), intent(out) :: max_error
@@ -555,7 +571,7 @@ contains
     call init_MPI(nxpp, nz, ny, nzd, nphi, overlapping, npy, .true.)
     allocate (passes(npass))
     if (npass > 0_C_INT) passes = path(1:npass)
-    nlines = nxB*(2_C_INT*nz + 1_C_INT)
+    nlines = stack*nxB*(2_C_INT*nz + 1_C_INT)
     call time_y_endpoint_solve(ny, nz, ny0, nyN, 1_C_INT, nlines, passes, exchange, &
                                tune_repeats(), y_solver, y_batches, time_y, ok, max_error)
     deallocate (passes)

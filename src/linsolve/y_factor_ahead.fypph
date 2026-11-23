@@ -1,0 +1,508 @@
+#! ===========================================================================
+#!  Factor-ahead y-solve (CHANNEL_Y_FACTOR_AHEAD): the factorisation of the stacked pipelined LU is split from the
+#!  right-hand side.  solve_stacked_systems assembles the matrix of all systems first, begins the factor pipeline
+#!  (ys_fa2_begin) and makes progress in it (ys_fa2_progress) while it assembles the right-hand sides; the solve
+#!  completes it (ys_factor_finish) before its chain, which then moves only y (32 B per line).  The factor state of
+#!  a batch (u1 + i u2 of the last two rows, 32 B per line) travels in that pipeline.  Same arithmetic as
+#!  ys_pipelined_forward_fused (the u recurrence does not depend on y, the y recurrence reads the stored per-row
+#!  factors), so the results are bit for bit those of the fused solve.
+#!
+#!  Included three times by y_line_solvers.fypp with FA_PART set before each include:
+#!      'decl'     specification part of the module
+#!      'kernels'  contains part: factor sweep, rhs sweep, backward sweep, meet (plain and mirrored)
+#!      'pipeline' contains part: the factor pipeline (buffers, requests, state machine)
+#!  Names the arrays and module variables of the host module directly in its target regions, as the fused kernels do;
+#!  needs helmholtz_op / biharmonic_op (channel_operators.fypph) to be included before.
+#!
+#!  Per line-row the factor sweep leaves, in the band arrays of the sweep (plain: ds, dl, d, du, dw; mirrored: the
+#!  arrays in the reverse roles, as the fused kernels use them):  a -> AA, b' -> BB, 1/c' -> d, u1 -> EE, u2 -> FF.
+#!  Nothing reads those arrays afterwards but the rhs and backward sweeps (matrix-free rows never read them;
+#!  stored rows have been read by the factor sweep).  So no memory is added for the factors; the factor messages
+#!  and the partner's factors for the meeting / backward step live in ys_fa_buf (96 B per chain line).
+#! ===========================================================================
+
+#! Band row of the current line for physical row ph (stored arrays or the operator).  Same expressions and
+#! masks as ys_pipelined_forward_fused: stored rows (system not matrix-free, or the rows next to a wall this
+#! rank owns) read the band arrays, with the couplings to the neighbours (rows 0, 1: a, b; rows n-2, n-1: e, f)
+#! masked unless the neighbour exists; the others come from the operator.  mir: the mirrored (bottom-up) sweep,
+#! whose a, b, e, f are the arrays ds, dl, du, dw in the reverse roles.  hl, hr: the neighbour on the side
+#! where the sweep starts / ends.  In scope: ph, p (= iline + ph*stride), i (the sweep step), kind, lam, dif,
+#! iz, ix, iy, row0, lower_wall, upper_wall, stored, active_n.
+#:def fa_band(mir, a, b, c, e, f, hl, hr)
+#:set AA = 'ys_gpsv_dw' if mir else 'ys_gpsv_ds'
+#:set BB = 'ys_gpsv_du' if mir else 'ys_gpsv_dl'
+#:set EE = 'ys_gpsv_dl' if mir else 'ys_gpsv_du'
+#:set FF = 'ys_gpsv_ds' if mir else 'ys_gpsv_dw'
+#:set JJ = ['2', '1', '0', '-1', '-2'] if mir else ['-2', '-1', '0', '1', '2']
+        stored = kind == YS_MF_OFF .or. (lower_wall .and. ph < 2) .or. (upper_wall .and. ph > active_n - 3)
+        if (stored) then
+          ${a}$ = YS_CZERO; if (i >= 2 .or. ${hl}$) ${a}$ = ${AA}$(p)
+          ${b}$ = YS_CZERO; if (i >= 1 .or. ${hl}$) ${b}$ = ${BB}$(p)
+          ${c}$ = ys_gpsv_d(p)
+          ${e}$ = YS_CZERO; if (i <= active_n - 2 .or. ${hr}$) ${e}$ = ${EE}$(p)
+          ${f}$ = YS_CZERO; if (i <= active_n - 3 .or. ${hr}$) ${f}$ = ${FF}$(p)
+        else
+          iy = row0 + ph
+          if (kind == YS_MF_BIHARMONIC) then
+            ${a}$ = lam*${helmholtz_op('iy', JJ[0])}$ - ni*${biharmonic_op('iy', JJ[0])}$
+            ${b}$ = lam*${helmholtz_op('iy', JJ[1])}$ - ni*${biharmonic_op('iy', JJ[1])}$
+            ${c}$ = lam*${helmholtz_op('iy', JJ[2])}$ - ni*${biharmonic_op('iy', JJ[2])}$
+            ${e}$ = lam*${helmholtz_op('iy', JJ[3])}$ - ni*${biharmonic_op('iy', JJ[3])}$
+            ${f}$ = lam*${helmholtz_op('iy', JJ[4])}$ - ni*${biharmonic_op('iy', JJ[4])}$
+          else
+            ${a}$ = lam*der(iy, 0, ${JJ[0]}$) - dif*ni*${helmholtz_op('iy', JJ[0])}$
+            ${b}$ = lam*der(iy, 0, ${JJ[1]}$) - dif*ni*${helmholtz_op('iy', JJ[1])}$
+            ${c}$ = lam*der(iy, 0, ${JJ[2]}$) - dif*ni*${helmholtz_op('iy', JJ[2])}$
+            ${e}$ = lam*der(iy, 0, ${JJ[3]}$) - dif*ni*${helmholtz_op('iy', JJ[3])}$
+            ${f}$ = lam*der(iy, 0, ${JJ[4]}$) - dif*ni*${helmholtz_op('iy', JJ[4])}$
+          end if
+        end if
+#:enddef
+
+#:if FA_PART == 'decl'
+  ! Factor-ahead state.  ys_fa_mode: CHANNEL_Y_FACTOR_AHEAD (0 off, the default; any other value on; -1: not read yet).
+  integer(C_INT), save :: ys_fa_mode = -1_C_INT
+  ! The pipeline was begun (ys_fa2_begin) for the solve to come; its plan, and the batches run per progress call.
+  logical, save :: ys_fa_early = .false.
+  integer(C_INT), save :: ys_fa_early_plan(4) = 0_C_INT
+  integer(C_INT), parameter :: YS_FA2_PER_CALL = 4_C_INT
+  integer(C_INT), parameter :: YS_FA_TAG_F = 9400_C_INT, YS_FA_TAG_M = 9600_C_INT
+#if defined(HAVE_HIP)
+  complex(C_DOUBLE_COMPLEX), pointer, contiguous, save :: ys_fa_buf(:) => null()
+  type(c_ptr), save :: ys_fa_ptr = c_null_ptr
+#else
+  complex(C_DOUBLE_COMPLEX), allocatable, target, save :: ys_fa_buf(:)
+#endif
+  integer(C_INT64_T), save :: ys_fa_capacity = 0_C_INT64_T
+  ! the running factor pipeline
+  integer(C_INT), save :: ys_fa_nb = 0_C_INT, ys_fa_bmax = 0_C_INT, ys_fa_nl = 0_C_INT, ys_fa_n = 0_C_INT, ys_fa_next = 1_C_INT
+  integer(C_INT), save :: ys_fa_up = -1_C_INT, ys_fa_down = -1_C_INT
+  logical, save :: ys_fa_has_up = .false., ys_fa_has_down = .false., ys_fa_meeting = .false., ys_fa_mirror = .false.
+  type(MPI_Request), allocatable, save :: ys_fa_rrecv(:), ys_fa_rsend(:), ys_fa_rmeet(:)
+#:endif
+
+#:if FA_PART == 'kernels'
+#:for mir in [False, True]
+#:set sfx = '_mirror' if mir else ''
+#:set ROW = '(active_n - 1_C_INT - i)' if mir else 'i'
+#:set ROW0 = '(active_n - 1_C_INT)' if mir else '0_C_INT'
+#:set ROW1 = '(active_n - 2_C_INT)' if mir else '1_C_INT'
+#:set ROWNX = '(active_n - 2_C_INT - i)' if mir else '(i + 1_C_INT)'
+#:set ROWPV = '(active_n - i)' if mir else '(i - 1_C_INT)'
+#:set ROWN1 = '0_C_INT' if mir else '(active_n - 1_C_INT)'
+#:set AA = 'ys_gpsv_dw' if mir else 'ys_gpsv_ds'
+#:set BB = 'ys_gpsv_du' if mir else 'ys_gpsv_dl'
+#:set EE = 'ys_gpsv_dl' if mir else 'ys_gpsv_du'
+#:set FF = 'ys_gpsv_ds' if mir else 'ys_gpsv_dw'
+  ! Factor sweep over the rows of the batch's lines: the u recurrence of ys_pipelined_forward_fused${sfx}$ (same
+  ! expressions, same order, matrix-free and stored rows, wall rows), seeded by (u1 + i u2) of the last two rows of the
+  ! rank `up` (ys_fa_buf at recv_off + 2 per line, nearest-but-one first), else zero; stores a, b', 1/c', u1, u2 per
+  ! row (see the header) and sends its own last two rows' (u1 + i u2) to send_off.
+  subroutine ys_fa_factor${sfx}$(first_line, line_count, active_n, has_left, has_right, recv_off, send_off)
+    use stencil_coefficients, only: der
+    use channel_state, only: ni
+    implicit none
+    integer(C_INT), intent(in) :: first_line, line_count, active_n, recv_off, send_off
+    logical, intent(in) :: has_left, has_right
+    integer(C_INT) :: local_line, iline, i, ph
+    integer(C_INT64_T) :: p, stride, q
+    integer(C_INT) :: iz, ix, iy, col, slot, kind, nzw, nzl, ix0, row0, nxb_l
+    integer(C_INT) :: kinds(YS_MF_MAXSYS)
+    real(C_DOUBLE) :: lams(YS_MF_MAXSYS), difs(YS_MF_MAXSYS), lam, dif
+    logical :: lower_wall, upper_wall, stored
+    YS_COEF :: a, b, c, e, f, inv, u1, u2, u1m2, u2m2, u1m1, u2m1
+
+    stride = ys_workspace_nlines
+    kinds = ys_mf_kinds; lams = ys_mf_lambdas; difs = ys_mf_diffs
+    nzw = ys_workspace_nz; nzl = 2*nzw + 1; ix0 = ys_owner_ix0; row0 = ny0; nxb_l = nxB
+    lower_wall = (ny0 == 1); upper_wall = (nyN == ys_workspace_ny - 1)
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(ys_gpsv_ds, ys_gpsv_dl, ys_gpsv_d, ys_gpsv_du, ys_gpsv_dw, ys_fa_buf) &
+    !$omp shared(stride, first_line, line_count, active_n, has_left, has_right, recv_off, send_off) &
+    !$omp shared(der, k2, ni, kinds, lams, difs, nzw, nzl, ix0, row0, nxb_l, lower_wall, upper_wall) &
+    !$omp private(iz, ix, iy, col, slot, kind, lam, dif, stored, p, q, ph) &
+    !$omp private(local_line, iline, i, a, b, c, e, f, inv, u1, u2, u1m2, u2m2, u1m1, u2m1)
+    do local_line = 1_C_INT, line_count
+      iline = first_line + local_line - 1_C_INT
+      iz = mod(iline - 1, nzl) - nzw
+      col = (iline - 1)/nzl
+      slot = col/nxb_l + 1
+      ix = ix0 + mod(col, nxb_l)
+      kind = kinds(slot); lam = lams(slot); dif = difs(slot)
+      q = int(recv_off + 2_C_INT*(local_line - 1_C_INT), C_INT64_T)
+      if (has_left) then
+        u1m2 = real(ys_fa_buf(q + 1_C_INT64_T), C_DOUBLE); u2m2 = aimag(ys_fa_buf(q + 1_C_INT64_T))
+        u1m1 = real(ys_fa_buf(q + 2_C_INT64_T), C_DOUBLE); u2m1 = aimag(ys_fa_buf(q + 2_C_INT64_T))
+      else
+        u1m2 = YS_CZERO; u2m2 = YS_CZERO; u1m1 = YS_CZERO; u2m1 = YS_CZERO
+      end if
+      do i = 0, active_n - 1
+        ph = ${ROW}$
+        p = int(iline, C_INT64_T) + int(ph, C_INT64_T)*stride
+$:fa_band(mir, 'a', 'b', 'c', 'e', 'f', 'has_left', 'has_right')
+        b = b - a*u1m2; c = c - a*u2m2
+        c = c - b*u1m1; e = e - b*u2m1
+        inv = 1.0d0/c
+        u1 = e*inv; u2 = f*inv
+        ${AA}$(p) = a; ${BB}$(p) = b; ys_gpsv_d(p) = inv; ${EE}$(p) = u1; ${FF}$(p) = u2
+        u1m2 = u1m1; u2m2 = u2m1
+        u1m1 = u1; u2m1 = u2
+      end do
+      if (has_right) then
+        q = int(send_off + 2_C_INT*(local_line - 1_C_INT), C_INT64_T)
+        ys_fa_buf(q + 1_C_INT64_T) = cmplx(real(u1m2, C_DOUBLE), real(u2m2, C_DOUBLE), C_DOUBLE_COMPLEX)
+        ys_fa_buf(q + 2_C_INT64_T) = cmplx(real(u1m1, C_DOUBLE), real(u2m1, C_DOUBLE), C_DOUBLE_COMPLEX)
+      end if
+    end do
+    !$omp end target teams distribute parallel do
+  end subroutine ys_fa_factor${sfx}$
+
+  ! Right-hand-side sweep with the stored factors: y = ((r - a*y2) - b'*y1)*(1/c'), the operations and their order of
+  ! the fused forward sweep (and of ys_dvdy_forward).  Seed: y of the last two rows of `up` from ycomm_recvbuf at
+  ! recv_offset, else zero; sends its own last two y to ycomm_sendbuf at send_offset when has_right.
+  subroutine ys_fa_forward${sfx}$(first_line, line_count, active_n, has_left, has_right, recv_offset, send_offset)
+    implicit none
+    integer(C_INT), intent(in) :: first_line, line_count, active_n, recv_offset, send_offset
+    logical, intent(in) :: has_left, has_right
+    integer(C_INT) :: local_line, iline, i
+    integer(C_INT64_T) :: p, pn, q, qs, stride
+    YS_COEF :: a, b, inv
+    complex(C_DOUBLE_COMPLEX) :: r, y, ym2, ym1, rn
+
+    stride = ys_workspace_nlines
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(${AA}$, ${BB}$, ys_gpsv_d, ys_gpsv_x, ycomm_recvbuf, ycomm_sendbuf) &
+    !$omp shared(stride, first_line, line_count, active_n, has_left, has_right, recv_offset, send_offset) &
+    !$omp private(local_line, iline, i, p, pn, q, qs, a, b, inv, r, y, ym2, ym1, rn)
+    do local_line = 1_C_INT, line_count
+      iline = first_line + local_line - 1_C_INT
+      q = int(recv_offset + 2_C_INT*(local_line - 1_C_INT), C_INT64_T)
+      qs = int(send_offset + 2_C_INT*(local_line - 1_C_INT), C_INT64_T)
+      ym2 = (0.0d0, 0.0d0); ym1 = (0.0d0, 0.0d0)
+      if (has_left) then
+        ym2 = ycomm_recvbuf(q + 1_C_INT64_T); ym1 = ycomm_recvbuf(q + 2_C_INT64_T)
+      end if
+      pn = int(iline, C_INT64_T) + int(${ROW0}$, C_INT64_T)*stride
+      rn = ys_gpsv_x(pn)
+      do i = 0, active_n - 1
+        ! the next row's rhs is loaded one row ahead (see the fused sweep)
+        p = pn; r = rn
+        if (i < active_n - 1) then
+          pn = int(iline, C_INT64_T) + int(${ROWNX}$, C_INT64_T)*stride
+          rn = ys_gpsv_x(pn)
+        end if
+        a = ${AA}$(p); b = ${BB}$(p); inv = ys_gpsv_d(p)
+        r = r - a*ym2
+        r = r - b*ym1
+        y = r*inv
+        ys_gpsv_x(p) = y
+        ym2 = ym1; ym1 = y
+      end do
+      if (has_right) then
+        ycomm_sendbuf(qs + 1_C_INT64_T) = ym2; ycomm_sendbuf(qs + 2_C_INT64_T) = ym1
+      end if
+    end do
+    !$omp end target teams distribute parallel do
+  end subroutine ys_fa_forward${sfx}$
+
+  ! Backward sweep of ys_pipelined_backward_fused${sfx}$ (u1, u2 from the band arrays), with the halo of the `up` side
+  ! derived from the u of its last two rows (ys_fa_buf at u_off, the factor pipeline's receive slot) and their y (the
+  ! y message at y_off in ycomm_recvbuf).
+  subroutine ys_fa_backward${sfx}$(first_line, line_count, active_n, has_left, has_right, recv_offset, send_offset, y_off, u_off)
+    implicit none
+    integer(C_INT), intent(in) :: first_line, line_count, active_n, recv_offset, send_offset, y_off, u_off
+    logical, intent(in) :: has_left, has_right
+    integer(C_INT) :: local_line, iline, i
+    integer(C_INT64_T) :: p, q, pn, stride, qy, qu
+    complex(C_DOUBLE_COMPLEX) :: y, xn1, xn2, xc, xp, ya, yb, xa, xb
+    YS_COEF :: ec, fc, ep, fp
+    real(C_DOUBLE) :: u1a, u2a, u1b, u2b
+
+    stride = ys_workspace_nlines
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(${EE}$, ${FF}$, ys_gpsv_x, ycomm_recvbuf, ycomm_sendbuf, ys_fa_buf, ys_right_interface_values, ys_left_interface_values) &
+    !$omp shared(stride, first_line, line_count, active_n, has_left, has_right, recv_offset, send_offset, y_off, u_off) &
+    !$omp private(local_line, iline, i, p, q, pn, qy, qu, y, xn1, xn2, xc, xp, ec, fc, ep, fp, ya, yb, xa, xb, u1a, u2a, u1b, u2b)
+    do local_line = 1_C_INT, line_count
+      iline = first_line + local_line - 1_C_INT
+      if (has_right) then
+        q = int(recv_offset + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
+        xn1 = ycomm_recvbuf(q + 1_C_INT64_T); xn2 = ycomm_recvbuf(q + 2_C_INT64_T)
+#:if mir
+        ys_left_interface_values(1, iline) = xn2
+        ys_left_interface_values(2, iline) = xn1
+#:else
+        ys_right_interface_values(1, iline) = xn1
+        ys_right_interface_values(2, iline) = xn2
+#:endif
+      else
+        xn1 = (0.0d0, 0.0d0); xn2 = (0.0d0, 0.0d0)
+      end if
+      pn = int(iline, C_INT64_T) + int(${ROWN1}$, C_INT64_T)*stride
+      xp = ys_gpsv_x(pn); ep = ${EE}$(pn); fp = ${FF}$(pn)
+      do i = active_n - 1, 0, -1
+        p = pn; xc = xp; ec = ep; fc = fp
+        if (i > 0) then
+          pn = int(iline, C_INT64_T) + int(${ROWPV}$, C_INT64_T)*stride
+          xp = ys_gpsv_x(pn); ep = ${EE}$(pn); fp = ${FF}$(pn)
+        end if
+        y = xc - ec*xn1 - fc*xn2
+        ys_gpsv_x(p) = y
+        xn2 = xn1; xn1 = y
+      end do
+      if (has_left) then
+        q = int(send_offset + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
+        ycomm_sendbuf(q + 1_C_INT64_T) = xn1; ycomm_sendbuf(q + 2_C_INT64_T) = xn2
+        qu = int(u_off + 2_C_INT*(local_line - 1_C_INT), C_INT64_T)
+        qy = int(y_off + 2_C_INT*(local_line - 1_C_INT), C_INT64_T)
+        u1a = real(ys_fa_buf(qu + 1_C_INT64_T), C_DOUBLE); u2a = aimag(ys_fa_buf(qu + 1_C_INT64_T))
+        u1b = real(ys_fa_buf(qu + 2_C_INT64_T), C_DOUBLE); u2b = aimag(ys_fa_buf(qu + 2_C_INT64_T))
+        ya = ycomm_recvbuf(qy + 1_C_INT64_T); yb = ycomm_recvbuf(qy + 2_C_INT64_T)
+        xb = yb - u1b*xn1 - u2b*xn2
+        xa = ya - u1a*xb - u2a*xn1
+#:if mir
+        ys_right_interface_values(1, iline) = xb
+        ys_right_interface_values(2, iline) = xa
+#:else
+        ys_left_interface_values(1, iline) = xa
+        ys_left_interface_values(2, iline) = xb
+#:endif
+      end if
+    end do
+    !$omp end target teams distribute parallel do
+  end subroutine ys_fa_backward${sfx}$
+#:endfor
+
+  ! The meeting ranks' interface system (see ys_pipeline_meet), with the partners' u from the factor pipeline
+  ! (ys_fa_buf: own last two rows at own_u, the partner's at partner_u) and the y of the rows from the y messages
+  ! (own at y_own in ycomm_sendbuf, partner's at y_recv in ycomm_recvbuf); seed as there.
+  subroutine ys_fa_meet(line_count, y_own, y_recv, seed_offset, own_u, partner_u, mirror)
+    implicit none
+    integer(C_INT), intent(in) :: line_count, y_own, y_recv, seed_offset, own_u, partner_u
+    logical, intent(in) :: mirror
+    integer(C_INT) :: local_line
+    integer(C_INT64_T) :: qy, qr, qs, qo, qp
+    real(C_DOUBLE) :: u1a, u2a, u1b, u2b, l1c, l2c, l1d, l2d, b1, b2, g1, g2
+    complex(C_DOUBLE_COMPLEX) :: ya, yb, zc, zd, b0, g0, va, vb, vc, vd
+
+    !$omp target teams distribute parallel do default(none) &
+    !$omp shared(ycomm_sendbuf, ycomm_recvbuf, ys_fa_buf, line_count, y_own, y_recv, seed_offset, own_u, partner_u, mirror) &
+    !$omp private(local_line, qy, qr, qs, qo, qp, u1a, u2a, ya, u1b, u2b, yb, l1c, l2c, zc, l1d, l2d, zd) &
+    !$omp private(b0, b1, b2, g0, g1, g2, va, vb, vc, vd)
+    do local_line = 1_C_INT, line_count
+      qy = int(y_own + 2_C_INT*(local_line - 1_C_INT), C_INT64_T)
+      qr = int(y_recv + 2_C_INT*(local_line - 1_C_INT), C_INT64_T)
+      qs = int(seed_offset + YS_PIPELINE_SOLVE_ELEMS*(local_line - 1_C_INT), C_INT64_T)
+      qo = int(own_u + 2_C_INT*(local_line - 1_C_INT), C_INT64_T)
+      qp = int(partner_u + 2_C_INT*(local_line - 1_C_INT), C_INT64_T)
+      if (mirror) then
+        u1a = real(ys_fa_buf(qp + 1), C_DOUBLE); u2a = aimag(ys_fa_buf(qp + 1)); ya = ycomm_recvbuf(qr + 1)
+        u1b = real(ys_fa_buf(qp + 2), C_DOUBLE); u2b = aimag(ys_fa_buf(qp + 2)); yb = ycomm_recvbuf(qr + 2)
+        l1d = real(ys_fa_buf(qo + 1), C_DOUBLE); l2d = aimag(ys_fa_buf(qo + 1)); zd = ycomm_sendbuf(qy + 1)
+        l1c = real(ys_fa_buf(qo + 2), C_DOUBLE); l2c = aimag(ys_fa_buf(qo + 2)); zc = ycomm_sendbuf(qy + 2)
+      else
+        u1a = real(ys_fa_buf(qo + 1), C_DOUBLE); u2a = aimag(ys_fa_buf(qo + 1)); ya = ycomm_sendbuf(qy + 1)
+        u1b = real(ys_fa_buf(qo + 2), C_DOUBLE); u2b = aimag(ys_fa_buf(qo + 2)); yb = ycomm_sendbuf(qy + 2)
+        l1d = real(ys_fa_buf(qp + 1), C_DOUBLE); l2d = aimag(ys_fa_buf(qp + 1)); zd = ycomm_recvbuf(qr + 1)
+        l1c = real(ys_fa_buf(qp + 2), C_DOUBLE); l2c = aimag(ys_fa_buf(qp + 2)); zc = ycomm_recvbuf(qr + 2)
+      end if
+      b2 = 1.0d0 - u2b*l2d; b0 = yb - u2b*zd; b1 = u1b - u2b*l1d
+      g1 = 1.0d0 - l2c*u2a; g2 = l1c - l2c*u1a; g0 = zc - l2c*ya
+      vc = (g0*b2 - g2*b0)/(g1*b2 - g2*b1)
+      vb = (b0 - b1*vc)/b2
+      vd = zd - l1d*vc - l2d*vb
+      va = ya - u1a*vb - u2a*vc
+      if (mirror) then
+        ycomm_recvbuf(qs + 1) = vb; ycomm_recvbuf(qs + 2) = va
+      else
+        ycomm_recvbuf(qs + 1) = vc; ycomm_recvbuf(qs + 2) = vd
+      end if
+    end do
+    !$omp end target teams distribute parallel do
+  end subroutine ys_fa_meet
+#:endif
+
+#:if FA_PART == 'pipeline'
+  ! ---------------------------------------------------------------------------------------------
+  ! The factor pipeline.  ys_fa_buf holds three regions of 2 complex per line slot (batch b at 2*bmax*(b-1)):
+  ! 1 own send (kept: the meet kernel reads the own last rows from it), 2 receive from `up` (kept: the backward
+  ! kernel derives the `up` halo from it), 3 the partner's rows of the meeting ranks.
+  ! ---------------------------------------------------------------------------------------------
+  integer(C_INT) function ys_fa_off(region, batch)
+    implicit none
+    integer(C_INT), intent(in) :: region, batch
+
+    ys_fa_off = (region - 1_C_INT)*2_C_INT*ys_fa_bmax*ys_fa_nb + 2_C_INT*ys_fa_bmax*(batch - 1_C_INT)
+  end function ys_fa_off
+
+  subroutine ys_fa_ensure(n)
+#if defined(HAVE_HIP)
+    use omp_lib, only: omp_target_alloc, omp_target_free, omp_get_default_device
+#endif
+    implicit none
+    integer(C_INT64_T), intent(in) :: n
+
+    if (n <= ys_fa_capacity) return
+#if defined(HAVE_HIP)
+    if (c_associated(ys_fa_ptr)) call omp_target_free(ys_fa_ptr, omp_get_default_device())
+    ys_fa_ptr = omp_target_alloc(int(max(1_C_INT64_T, n), c_size_t)*int(16, c_size_t), omp_get_default_device())
+    call c_f_pointer(ys_fa_ptr, ys_fa_buf, [max(1_C_INT64_T, n)])
+#else
+    if (allocated(ys_fa_buf)) then
+      !$omp target exit data map(delete: ys_fa_buf)
+      deallocate (ys_fa_buf)
+    end if
+    allocate (ys_fa_buf(max(1_C_INT64_T, n)))
+    !$omp target enter data map(alloc: ys_fa_buf)
+#endif
+    ys_fa_capacity = max(1_C_INT64_T, n)
+  end subroutine ys_fa_ensure
+
+  subroutine ys_fa_isend(off, count, peer, tag, req)
+    implicit none
+    integer(C_INT), intent(in) :: off, count, peer, tag
+    type(MPI_Request), intent(inout) :: req
+    integer :: ierr
+
+    !$omp target data use_device_addr(ys_fa_buf)
+    call MPI_Isend(ys_fa_buf(off + 1), count, MPI_DOUBLE_COMPLEX, peer, tag, MPI_COMM_Y, req, ierr)
+    !$omp end target data
+  end subroutine ys_fa_isend
+
+  subroutine ys_fa_irecv(off, count, peer, tag, req)
+    implicit none
+    integer(C_INT), intent(in) :: off, count, peer, tag
+    type(MPI_Request), intent(inout) :: req
+    integer :: ierr
+
+    !$omp target data use_device_addr(ys_fa_buf)
+    call MPI_Irecv(ys_fa_buf(off + 1), count, MPI_DOUBLE_COMPLEX, peer, tag, MPI_COMM_Y, req, ierr)
+    !$omp end target data
+  end subroutine ys_fa_irecv
+
+  ! Factor-ahead (CHANNEL_Y_FACTOR_AHEAD nonzero) applies to this stacked solve: the workspace is prepared (call it
+  ! after ys_prepare_assembled_workspace), MPI, more than one y rank, not the dv/dy solve, not CCE.
+  logical function ys_fa2_wanted() result(wanted)
+    implicit none
+    integer(C_INT) :: v
+
+    wanted = .false.
+    if (ys_fa_mode < 0_C_INT) then
+      ys_fa_mode = 0_C_INT
+      if (env_int("CHANNEL_Y_FACTOR_AHEAD", v)) ys_fa_mode = merge(1_C_INT, 0_C_INT, v /= 0_C_INT)
+    end if
+    if (ys_fa_mode == 0_C_INT .or. npy_grid < 2_C_INT .or. ys_dy_pending) return
+    if (ys_selected_solver /= Y_SOLVER_PIPELINED_LU) return
+    if (channel_comm_use_nccl() .or. ys_workspace_active_n < 4_C_INT) return
+    wanted = .true.
+  end function ys_fa2_wanted
+
+  ! Begins the factor pipeline of the stacked solve about to run (the matrix is assembled and the wall rows
+  ! eliminated), with the plan the solve will compute.
+  subroutine ys_fa2_begin()
+    implicit none
+    integer(C_INT) :: active_n, nlines, nb, bmax
+    logical :: twisted
+
+    ys_fa_early = .false.
+    active_n = ys_workspace_active_n; nlines = ys_workspace_nlines
+    if (ys_selected_batches >= 1_C_INT) then
+      nb = min(ys_selected_batches, nlines)
+    else
+      nb = ys_pipeline_batch_count(nlines)
+    end if
+    bmax = (nlines + nb - 1_C_INT)/nb
+    twisted = mod(npy_grid, 2_C_INT) == 0_C_INT
+    call env_flag("CHANNEL_Y_TWISTED", twisted)
+    call ys_factor_begin(active_n, nlines, nb, bmax, twisted)
+    ys_fa_early = .true.
+    ys_fa_early_plan = [active_n, nlines, nb, bmax]
+  end subroutine ys_fa2_begin
+
+  ! A few ready factor batches, without blocking.
+  subroutine ys_fa2_progress()
+    implicit none
+    integer(C_INT) :: nrun
+    logical :: done
+
+    if (.not. ys_fa_early) return
+    call ys_factor_progress(.false., YS_FA2_PER_CALL, nrun, done)
+  end subroutine ys_fa2_progress
+
+  ! Starts the factor pipeline of the first `nlines` lines of the workspace in batches of at most bmax lines
+  ! (the batches of the solve): directions as the solve's, all receives posted, nothing run yet.  The matrix must be
+  ! assembled (registered matrix-free operators, stored wall rows eliminated) and kept until the solve.
+  subroutine ys_factor_begin(active_n, nlines, nbatches, bmax, twisted)
+    implicit none
+    integer(C_INT), intent(in) :: active_n, nlines, nbatches, bmax
+    logical, intent(in) :: twisted
+    integer(C_INT) :: b, fl, lc
+
+    ys_fa_n = active_n; ys_fa_nl = nlines; ys_fa_nb = nbatches; ys_fa_bmax = bmax
+    call ys_pipeline_directions(twisted, ys_fa_up, ys_fa_down, ys_fa_has_up, ys_fa_has_down, ys_fa_meeting, ys_fa_mirror)
+    call ys_fa_ensure(6_C_INT64_T*int(bmax, C_INT64_T)*int(nbatches, C_INT64_T))
+    if (allocated(ys_fa_rrecv)) deallocate (ys_fa_rrecv, ys_fa_rsend, ys_fa_rmeet)
+    allocate (ys_fa_rrecv(nbatches), ys_fa_rsend(nbatches), ys_fa_rmeet(nbatches))
+    ys_fa_rrecv = MPI_REQUEST_NULL; ys_fa_rsend = MPI_REQUEST_NULL; ys_fa_rmeet = MPI_REQUEST_NULL
+    do b = 1, nbatches
+      call ys_pipeline_batch_range(b, nbatches, nlines, fl, lc)
+      if (ys_fa_has_up) call ys_fa_irecv(ys_fa_off(2_C_INT, b), 2_C_INT*lc, ys_fa_up, YS_FA_TAG_F + b, ys_fa_rrecv(b))
+      if (ys_fa_meeting) call ys_fa_irecv(ys_fa_off(3_C_INT, b), 2_C_INT*lc, ys_fa_down, YS_FA_TAG_M + b, ys_fa_rmeet(b))
+    end do
+    ys_fa_next = 1_C_INT
+  end subroutine ys_factor_begin
+
+  ! Runs the factor batches that are ready (at most maxb), without blocking unless `blocking`.  Returns the number
+  ! of batches run; .true. in `done` when all are.  Host-side, quick: the receive test, one kernel per batch, the send post.
+  subroutine ys_factor_progress(blocking, maxb, nrun, done)
+    implicit none
+    logical, intent(in) :: blocking
+    integer(C_INT), intent(in) :: maxb
+    integer(C_INT), intent(out) :: nrun
+    logical, intent(out) :: done
+    integer(C_INT) :: b, fl, lc
+    logical :: ready
+    integer :: ierr
+
+    nrun = 0_C_INT
+    do while (ys_fa_next <= ys_fa_nb .and. nrun < maxb)
+      b = ys_fa_next
+      if (ys_fa_has_up) then
+        if (blocking) then
+          call MPI_Wait(ys_fa_rrecv(b), MPI_STATUS_IGNORE, ierr)
+        else
+          call MPI_Test(ys_fa_rrecv(b), ready, MPI_STATUS_IGNORE, ierr)
+          if (.not. ready) exit
+        end if
+      end if
+      call ys_pipeline_batch_range(b, ys_fa_nb, ys_fa_nl, fl, lc)
+      if (ys_fa_mirror) then
+        call ys_fa_factor_mirror(fl, lc, ys_fa_n, ys_fa_has_up, ys_fa_has_down, ys_fa_off(2_C_INT, b), ys_fa_off(1_C_INT, b))
+      else
+        call ys_fa_factor(fl, lc, ys_fa_n, ys_fa_has_up, ys_fa_has_down, ys_fa_off(2_C_INT, b), ys_fa_off(1_C_INT, b))
+      end if
+      if (ys_fa_meeting) then
+        call ys_fa_isend(ys_fa_off(1_C_INT, b), 2_C_INT*lc, ys_fa_down, YS_FA_TAG_M + b, ys_fa_rsend(b))
+      else if (ys_fa_has_down) then
+        call ys_fa_isend(ys_fa_off(1_C_INT, b), 2_C_INT*lc, ys_fa_down, YS_FA_TAG_F + b, ys_fa_rsend(b))
+      end if
+      ys_fa_next = ys_fa_next + 1_C_INT
+      nrun = nrun + 1_C_INT
+    end do
+    done = ys_fa_next > ys_fa_nb
+  end subroutine ys_factor_progress
+
+  ! Completes the factor pipeline: all batches, all sends, the partner's rows of the meeting ranks.
+  subroutine ys_factor_finish()
+    implicit none
+    integer(C_INT) :: nrun
+    logical :: done
+    integer :: ierr, b
+
+    call ys_factor_progress(.true., ys_fa_nb, nrun, done)
+    do b = 1, ys_fa_nb
+      call MPI_Wait(ys_fa_rsend(b), MPI_STATUS_IGNORE, ierr)
+      call MPI_Wait(ys_fa_rmeet(b), MPI_STATUS_IGNORE, ierr)
+    end do
+  end subroutine ys_factor_finish
+#:endif

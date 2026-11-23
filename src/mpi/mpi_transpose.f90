@@ -38,6 +38,7 @@
 #endif
     use roctx
     use channel_grid
+    use fft_kinds, only: fk
     use y_pipeline_nccl, only: channel_comm_alltoall_complex, channel_comm_alltoall_wait, channel_comm_cache, &
                                channel_comm_cache_reserve, channel_comm_cache_finalize
 
@@ -70,6 +71,15 @@
     ! declared here.
     integer(C_INT), save :: ierr, sendcount
     !$omp declare target(sendcount)
+    ! The xz transposes move FFT data, so they travel in the FFT precision fk.  sendbuf_t / recvbuf_t view the
+    ! same memory as sendbuf / recvbuf (column j starts at the same byte), with blocks of sendcount_t elements
+    ! per peer (sendcount rounded up to whole 16-byte units).  alltoall counts in 16-byte units: xz_a2a_count.
+    ! With fk = double all of this is identical to sendbuf / recvbuf / sendcount.  sendbuf / recvbuf stay
+    ! double complex: the alltoall (MPI and NCCL) counts in double-complex elements, and the y-slab transposes
+    ! use them as double-complex scratch.
+    complex(fk), pointer, save :: sendbuf_t(:, :) => null(), recvbuf_t(:, :) => null()
+    integer(C_INT), save :: sendcount_t, xz_a2a_count
+    !$omp declare target(sendcount_t)
 
     logical, save :: fft_transpose_is_local
     logical, save :: mpi_transpose_initialized = .false.
@@ -112,7 +122,7 @@
         yslab_line_count_by_rank(rank) = x_count*nlines_z
         yslab_first_line_by_rank(rank) = first_x*nlines_z + 1
 
-        yslab_active_first_y_by_rank(rank) = 1 + rank*(ny - 1)/npy_grid
+        yslab_active_first_y_by_rank(rank) = y_split_first(rank, ny, npy_grid)
       end do
 
       yslab_owned_first_line = yslab_first_line_by_rank(ipy)
@@ -122,6 +132,28 @@
       !$omp& yslab_active_first_y_by_rank, yslab_send_counts, yslab_recv_counts, &
       !$omp& yslab_send_displs, yslab_recv_displs)
     end subroutine setup_y_decomposition
+
+    ! First interior y row (1 .. ny-1) of y rank `rank`; rank = np gives ny, one past the last.  The even split of
+    ! ny+1 rows, from which the two wall ranks give back one row each (they do the extra boundary work), e.g.
+    ! ny = 751 on 16 ranks: 46, 47 x 14, 46; with fewer than 3 ranks the even split of the ny-1 interior rows.
+    ! ny0/nyN and the y-slab ranges both come from here, so they cannot disagree.
+    integer function y_split_first(rank, ny_value, np)
+      integer, intent(in) :: rank, ny_value, np
+      integer :: total
+
+      if (np < 3) then
+        y_split_first = 1 + rank*(ny_value - 1)/np
+        return
+      end if
+      total = ny_value + 1
+      if (rank <= 0) then
+        y_split_first = 1
+      else if (rank >= np) then
+        y_split_first = ny_value
+      else
+        y_split_first = rank*total/np
+      end if
+    end function y_split_first
 
     subroutine prepare_yslab_scratch(nrows, nlines)
       implicit none
@@ -448,8 +480,8 @@
     SUBROUTINE repack_zTOx_local(Vz, Vx)
       use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
       implicit none
-      complex(C_DOUBLE_COMPLEX), intent(in) :: Vz(1:, 1:, :)
-      complex(C_DOUBLE_COMPLEX), intent(out) :: Vx(1:, 1:, :)
+      complex(fk), intent(in) :: Vz(1:, 1:, :)
+      complex(fk), intent(out) :: Vx(1:, 1:, :)
       integer(C_INT) :: iy, ix, iz, ixb, izb, ixi, izi
       integer(C_INT) :: ny_batch
       ! 4 (z) x 16 (x) tiles per wavefront, z fastest: each instruction reads
@@ -477,8 +509,8 @@
     SUBROUTINE repack_xTOz_local(Vx, Vz)
       use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
       implicit none
-      complex(C_DOUBLE_COMPLEX), intent(in) :: Vx(1:, 1:, :)
-      complex(C_DOUBLE_COMPLEX), intent(out) :: Vz(1:, 1:, :)
+      complex(fk), intent(in) :: Vx(1:, 1:, :)
+      complex(fk), intent(out) :: Vz(1:, 1:, :)
       integer(C_INT) :: iy, ix, iz, ixb, izb, ixi, izi
       integer(C_INT) :: ny_batch
       ! 8 x 8 (z, x) tiles per wavefront, x fastest: full x-lines of Vx are read
@@ -506,19 +538,19 @@
     SUBROUTINE pack_zTOx(Vz, send)
       use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
       implicit none
-      complex(C_DOUBLE_COMPLEX), intent(in)  :: Vz(1:, 1:, :)
-      complex(C_DOUBLE_COMPLEX), intent(out) :: send(:)
+      complex(fk), intent(in)  :: Vz(1:, 1:, :)
+      complex(fk), intent(out) :: send(:)
       integer(C_SIZE_T) :: iy, ix, iz, dest, p
       integer(C_INT) :: ny_batch
 
       ny_batch = size(Vz, 3)
       !$omp target teams distribute parallel do collapse(4) default(none) &
-      !$omp shared(Vz, send) shared(ny_batch, nxB, nzB, npxz, sendcount) private(iy, ix, iz, dest, p)
+      !$omp shared(Vz, send) shared(ny_batch, nxB, nzB, npxz, sendcount_t) private(iy, ix, iz, dest, p)
       do dest = 0, npxz - 1
         do iy = 1, ny_batch
           do ix = 1, nxB
             do iz = 1, nzB
-              p = dest*sendcount + iz + (nzB*(ix - 1)) + (nzB*nxB*(iy - 1))
+              p = dest*sendcount_t + iz + (nzB*(ix - 1)) + (nzB*nxB*(iy - 1))
               send(p) = Vz(dest*nzB + iz, ix, iy)
             end do
           end do
@@ -530,8 +562,8 @@
     SUBROUTINE unpack_zTOx(recv, Vx)
       use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
       implicit none
-      complex(C_DOUBLE_COMPLEX), intent(in)  :: recv(:)
-      complex(C_DOUBLE_COMPLEX), intent(out) :: Vx(1:, 1:, :)
+      complex(fk), intent(in)  :: recv(:)
+      complex(fk), intent(out) :: Vx(1:, 1:, :)
       integer(C_SIZE_T) :: p
       integer(C_INT) :: iy, ix, iz, src, ixb, izb, ixi, izi
       integer(C_INT) :: ny_batch
@@ -541,7 +573,7 @@
 
       ny_batch = size(Vx, 3)
       !$omp target teams distribute parallel do collapse(6) default(none) &
-      !$omp shared(Vx, recv) shared(ny_batch, nxB, nzB, npxz, sendcount) &
+      !$omp shared(Vx, recv) shared(ny_batch, nxB, nzB, npxz, sendcount_t) &
       !$omp private(iy, ix, iz, src, p, ixb, izb, ixi, izi)
       do src = 0, npxz - 1
         do iy = 1, ny_batch
@@ -552,7 +584,7 @@
                   iz = izb*TZ + izi + 1
                   ix = ixb*TX + ixi + 1
                   if (iz > nzB .or. ix > nxB) cycle
-                  p = int(src, C_SIZE_T)*sendcount + iz + (int(nzB, C_SIZE_T)*(ix - 1)) &
+                  p = int(src, C_SIZE_T)*sendcount_t + iz + (int(nzB, C_SIZE_T)*(ix - 1)) &
                       + (int(nzB, C_SIZE_T)*nxB*(iy - 1))
                   Vx(ix + src*nxB, iz, iy) = recv(p)
                 end do
@@ -566,19 +598,19 @@
     SUBROUTINE pack_xTOz(Vx, send)
       use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
       implicit none
-      complex(C_DOUBLE_COMPLEX), intent(in)  :: Vx(1:, 1:, :)
-      complex(C_DOUBLE_COMPLEX), intent(out) :: send(:)
+      complex(fk), intent(in)  :: Vx(1:, 1:, :)
+      complex(fk), intent(out) :: send(:)
       integer(C_SIZE_T) :: iy, ix, iz, dest, p
       integer(C_INT) :: ny_batch
 
       ny_batch = size(Vx, 3)
       !$omp target teams distribute parallel do collapse(4) default(none) &
-      !$omp shared(Vx, send) shared(ny_batch, nxB, nzB, npxz, sendcount) private(iy, ix, iz, dest, p)
+      !$omp shared(Vx, send) shared(ny_batch, nxB, nzB, npxz, sendcount_t) private(iy, ix, iz, dest, p)
       do dest = 0, npxz - 1
         do iy = 1, ny_batch
           do iz = 1, nzB
             do ix = 1, nxB
-              p = dest*sendcount + ix + (nxB*(iz - 1)) + (nxB*nzB*(iy - 1))
+              p = dest*sendcount_t + ix + (nxB*(iz - 1)) + (nxB*nzB*(iy - 1))
               send(p) = Vx(dest*nxB + ix, iz, iy)
             end do
           end do
@@ -589,8 +621,8 @@
     SUBROUTINE unpack_xTOz(recv, Vz)
       use iso_c_binding, only: C_INT, C_SIZE_T, C_DOUBLE_COMPLEX
       implicit none
-      complex(C_DOUBLE_COMPLEX), intent(in)  :: recv(:)
-      complex(C_DOUBLE_COMPLEX), intent(out) :: Vz(1:, 1:, :)
+      complex(fk), intent(in)  :: recv(:)
+      complex(fk), intent(out) :: Vz(1:, 1:, :)
       integer(C_SIZE_T) :: p
       integer(C_INT) :: iy, ix, iz, src, ixb, izb, ixi, izi
       integer(C_INT) :: ny_batch
@@ -600,7 +632,7 @@
 
       ny_batch = size(Vz, 3)
       !$omp target teams distribute parallel do collapse(6) default(none) &
-      !$omp shared(Vz, recv) shared(ny_batch, nxB, nzB, npxz, sendcount) &
+      !$omp shared(Vz, recv) shared(ny_batch, nxB, nzB, npxz, sendcount_t) &
       !$omp private(iy, ix, iz, src, p, ixb, izb, ixi, izi)
       do src = 0, npxz - 1
         do iy = 1, ny_batch
@@ -611,7 +643,7 @@
                   iz = izb*T + izi + 1
                   ix = ixb*T + ixi + 1
                   if (iz > nzB .or. ix > nxB) cycle
-                  p = int(src, C_SIZE_T)*sendcount + ix + (int(nxB, C_SIZE_T)*(iz - 1)) &
+                  p = int(src, C_SIZE_T)*sendcount_t + ix + (int(nxB, C_SIZE_T)*(iz - 1)) &
                       + (int(nxB, C_SIZE_T)*nzB*(iy - 1))
                   Vz(iz + src*nzB, ix, iy) = recv(p)
                 end do
@@ -637,7 +669,7 @@
       if (present(label)) range_name = "channel_comm_alltoall "//trim(label)
       call roctxPush(range_name)
       call channel_comm_cache_reserve(xcomm_nccl_contexts, npxz)
-      call channel_comm_alltoall_complex(send, recv, sendcount, MPI_COMM_X, xcomm_nccl_contexts%by_size(npxz), &
+      call channel_comm_alltoall_complex(send, recv, xz_a2a_count, MPI_COMM_X, xcomm_nccl_contexts%by_size(npxz), &
                                          request, slot, xz=.true.)
       call roctxPop(range_name)
 
@@ -662,8 +694,8 @@
     ! for the callers that transform one field and have nothing to overlap.
     SUBROUTINE transpose_zTOx(Vz, Vx, label)
       IMPLICIT NONE
-      complex(C_DOUBLE_COMPLEX), intent(in) :: Vz(1:, 1:, :)
-      complex(C_DOUBLE_COMPLEX), intent(out) :: Vx(1:, 1:, :)
+      complex(fk), intent(in) :: Vz(1:, 1:, :)
+      complex(fk), intent(out) :: Vx(1:, 1:, :)
       character(len=*), intent(in) :: label
       type(MPI_Request) :: request
       type(MPI_Status) :: status
@@ -671,19 +703,19 @@
       if (fft_transpose_is_local) then
         call repack_zTOx_local(Vz, Vx)
       else
-        call pack_zTOx(Vz, sendbuf(:, 1))
+        call pack_zTOx(Vz, sendbuf_t(:, 1))
         call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "zTOx "//label)
         call roctxPush("MPI_Wait zTOx "//label)
         call MPI_Wait(request, status, ierr)
         call roctxPop("MPI_Wait zTOx "//label)
-        call unpack_zTOx(recvbuf(:, 1), Vx)
+        call unpack_zTOx(recvbuf_t(:, 1), Vx)
       end if
     END SUBROUTINE transpose_zTOx
 
     SUBROUTINE transpose_xTOz(Vx, Vz, label)
       IMPLICIT NONE
-      complex(C_DOUBLE_COMPLEX), intent(in) :: Vx(1:, 1:, :)
-      complex(C_DOUBLE_COMPLEX), intent(out) :: Vz(1:, 1:, :)
+      complex(fk), intent(in) :: Vx(1:, 1:, :)
+      complex(fk), intent(out) :: Vz(1:, 1:, :)
       character(len=*), intent(in) :: label
       type(MPI_Request) :: request
       type(MPI_Status) :: status
@@ -691,12 +723,12 @@
       if (fft_transpose_is_local) then
         call repack_xTOz_local(Vx, Vz)
       else
-        call pack_xTOz(Vx, sendbuf(:, 1))
+        call pack_xTOz(Vx, sendbuf_t(:, 1))
         call alltoall(sendbuf(:, 1), recvbuf(:, 1), request, "xTOz "//label)
         call roctxPush("MPI_Wait xTOz "//label)
         call MPI_Wait(request, status, ierr)
         call roctxPop("MPI_Wait xTOz "//label)
-        call unpack_xTOz(recvbuf(:, 1), Vz)
+        call unpack_xTOz(recvbuf_t(:, 1), Vz)
       end if
     END SUBROUTINE transpose_xTOz
 
@@ -811,8 +843,8 @@
       call MPI_Comm_split(MPI_COMM_WORLD, color, key, MPI_COMM_Y, ierr)
       ! Calculate domain division in wall-normal direction.
       ! ny0:nyN are the only persistent y-partition variables.
-      ny0 = 1 + ipy*(ny - 1)/npy_grid
-      nyN = (ipy + 1)*(ny - 1)/npy_grid
+      ny0 = y_split_first(ipy, ny, npy_grid)
+      nyN = y_split_first(ipy + 1, ny, npy_grid) - 1
 
       ! Local write extent, including physical ghost rows only on the end ranks.
       miny_local = ny0
@@ -862,6 +894,11 @@
       end if
       sendcount = nxB*nzB*(nyN - ny0 + 5)
       !$omp target update to(sendcount)
+      ! fk elements per 16-byte unit: 1 (double) or 2 (single)
+      sendcount_t = sendcount
+      if (mod(sendcount_t, 16/(2*fk)) /= 0) sendcount_t = sendcount_t + 16/(2*fk) - mod(sendcount_t, 16/(2*fk))
+      xz_a2a_count = sendcount_t/(16/(2*fk))
+      !$omp target update to(sendcount_t)
       if (fft_transpose_is_local) then
         xcomm_size = 1_c_size_t
       else
@@ -883,6 +920,12 @@
       ALLOCATE (recvbuf(recvsize, merge(2, 1, overlapping))); recvbuf = 0
       !$omp target enter data map(alloc: sendbuf, recvbuf)
 #endif
+      ! FFT-precision views of the same buffers (see sendbuf_t); the npxz blocks of sendcount_t elements fit in
+      ! a column (sendcount_t*2*fk <= sendcount*16 bytes per block):
+      if (.not. fft_transpose_is_local .and. int(npxz, c_size_t)*int(sendcount_t, c_size_t) > &
+          sendsize*int(16/(2*fk), c_size_t)) error stop "init_MPI: xz transpose view larger than its buffer"
+      call c_f_pointer(c_loc(sendbuf), sendbuf_t, [sendsize*int(16/(2*fk), c_size_t), int(merge(2, 1, overlapping), c_size_t)])
+      call c_f_pointer(c_loc(recvbuf), recvbuf_t, [recvsize*int(16/(2*fk), c_size_t), int(merge(2, 1, overlapping), c_size_t)])
 
       ! For READING VELOCITY, SETTING VIEW: datatype that maps velocity on disk to memory (it differs from writing: halo cells are read twice!)
     CALL MPI_Type_create_subarray(ndims, [ny+3, 2*nz+1, nxpp, 3+nPhi], [nyN-ny0+5, 2*nz+1, nxB, 3+nPhi], [ny0-1,0,nx0,0], MPI_ORDER_FORTRAN, MPI_DOUBLE_COMPLEX, vel_read_type, ierror)
@@ -923,6 +966,7 @@
       end if
 #endif
 
+      nullify (sendbuf_t, recvbuf_t)
       if (allocated(yslab_workspace)) call release_yslab_scratch()
       if (allocated(yslab_first_line_by_rank)) then
         !$omp target exit data map(delete: yslab_first_line_by_rank, yslab_line_count_by_rank, &

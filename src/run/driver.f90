@@ -273,7 +273,9 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
     USE case_setup
     USE channel_transforms, only: transform_to_physical, transform_back_and_build_rhs, compute_cfl
     USE convvelo, only: advance_convvelo_runtime
+    USE emu_round
     USE mpi_f08, only: MPI_Wtime
+    USE roctx, only: roctx_step_begin, roctx_step_end   ! CHANNEL_TRACE_STEP
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
     USE ffts, only: acquire_fft_workspace, release_fft_workspace
 #endif
@@ -286,12 +288,17 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
     elapsed_run_time = 0.0d0
 #endif
 
+    call emu_init(has_terminal)
     DO WHILE ((time < t_max - deltat/2.0) .AND. (istep < nstep))
 #ifdef chron
       timei = MPI_Wtime()
 #endif
+      ! whole-step trace (CHANNEL_TRACE_STEP): starts at the beginning of step istep + 1, ends after its last range
+      call roctx_step_begin(int(istep + 1))
       call roctxPush("timestep")
+      call roctxPush("apply_wall_values")
       CALL apply_wall_values()
+      call roctxPop("apply_wall_values")
       ! Increment number of steps
       istep = istep + 1
 
@@ -312,8 +319,7 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
           call roctxPop("compute_cfl")
         END IF
 
-        !only depends on data from the previous substep; builds memrhs(:, :, :, 1:2) from V and oldrhs
-        !can be done in parallel to FFTs
+        !the coefficients of the substep for the assembly of the right-hand sides in linsolve
         call roctxPush("buildrhs_prepare")
         CALL buildrhs_prepare(RK_rai(:, i))
         call roctxPop("buildrhs_prepare")
@@ -321,18 +327,22 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
         call roctxPush("transform_back_and_build_rhs")
         CALL transform_back_and_build_rhs(RK_rai(:, i))
         call roctxPop("transform_back_and_build_rhs")
+#ifndef CHANNEL_SINGLE
+        if (emu_oldrhs) call emu_round_array(oldrhs)
+#endif
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
         call release_fft_workspace("rk_fft")
 #endif
 
-        !depends on memrhs(:, :, :, 1:2), updates V(:, :, :, 1:3)
-        call roctxPush("linsolve_velocity")
+        !depends on V, oldrhs and newrhs, updates V(:, :, :, 1:3+nPhi)
+        call roctxPush("linsolve")
         CALL linsolve(RK_rai(1, i)/deltat)
-        call roctxPop("linsolve_velocity")
-        call roctxPush("linsolve_scalar")
-        !depends on memrhs(:, :, :, 2+iPhi), updates V(:, :, :, 3+iPhi)
-        CALL linsolve_scalars(RK_rai(1, i)/deltat)
-        call roctxPop("linsolve_scalar")
+        call roctxPop("linsolve")
+        call roctxPush("rhs_swap")
+        CALL rhs_swap()
+        call roctxPop("rhs_swap")
+        if (emu_vel) call emu_round_array(V(:, :, :, 1:3))
+        if (emu_phi .and. nPhi > 0) call emu_round_array(V(:, :, :, 4:3 + nPhi))
         call roctxPop("rk_substep")
       end do
 
@@ -354,6 +364,7 @@ USE pressure_output, only: init_pressure_output, free_pressure_output, get_press
       end if
 #endif
       call roctxPop("timestep")
+      call roctx_step_end(ipy, npy_grid, ny0, nyN)
     END DO
   END SUBROUTINE timeloop
 

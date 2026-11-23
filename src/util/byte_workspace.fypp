@@ -35,6 +35,16 @@ module byte_workspace
   public :: layout_begin, layout_bytes, layout_real_3d, layout_complex_3d
   public :: layout_real_4d, layout_complex_4d
 
+  ! The slot routines below exist per element kind (double and single); each
+  ! generic name resolves on the kind of the view.
+#:for tag in ['real', 'complex']
+#:for rank in [3, 4]
+  interface layout_${tag}$_${rank}$d
+    module procedure layout_${tag}$_${rank}$d_dp, layout_${tag}$_${rank}$d_sp
+  end interface layout_${tag}$_${rank}$d
+#:endfor
+#:endfor
+
 contains
 
   subroutine workspace_reserve(nbytes)
@@ -159,16 +169,18 @@ contains
 #! One slot routine per (element type, rank).  These differ only in the type of
 #! the view and the size of an element, so they are generated rather than
 #! written out four times.
-#:set SLOT_TYPES = [('real', 'real(C_DOUBLE)', 'C_SIZEOF(0.0_C_DOUBLE)'), &
-                    ('complex', 'complex(C_DOUBLE_COMPLEX)', 'C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE))')]
+#:set SLOT_TYPES = [('real', 'dp', 'real(C_DOUBLE)', 'C_SIZEOF(0.0_C_DOUBLE)'), &
+                    ('complex', 'dp', 'complex(C_DOUBLE_COMPLEX)', 'C_SIZEOF((0.0_C_DOUBLE, 0.0_C_DOUBLE))'), &
+                    ('real', 'sp', 'real(C_FLOAT)', 'C_SIZEOF(0.0_C_FLOAT)'), &
+                    ('complex', 'sp', 'complex(C_FLOAT_COMPLEX)', 'C_SIZEOF((0.0_C_FLOAT, 0.0_C_FLOAT))')]
 #:set SLOT_RANKS = [3, 4]
-#:for tag, ftype, elem_bytes in SLOT_TYPES
+#:for tag, kt, ftype, elem_bytes in SLOT_TYPES
 #:for rank in SLOT_RANKS
 #:set bounds = ', '.join('l{0}, u{0}'.format(i) for i in range(1, rank + 1))
 #:set extent = '*'.join('int(u{0} - l{0} + 1, C_SIZE_T)'.format(i) for i in range(1, rank + 1))
 #:set slice = ', '.join('l{0}:u{0}'.format(i) for i in range(1, rank + 1))
 #:set colons = ', '.join(':' for i in range(rank))
-  subroutine layout_${tag}$_${rank}$d(lay, ${bounds}$, view)
+  subroutine layout_${tag}$_${rank}$d_${kt}$(lay, ${bounds}$, view)
     type(workspace_layout), intent(inout) :: lay
     integer(C_INT), intent(in) :: ${bounds}$
     ${ftype}$, pointer, contiguous, intent(inout) :: view(${colons}$)
@@ -183,7 +195,7 @@ contains
       view(${slice}$) => buf
     end if
     lay%offset = workspace_align_offset(lay%offset + count*int(${elem_bytes}$, C_SIZE_T))
-  end subroutine layout_${tag}$_${rank}$d
+  end subroutine layout_${tag}$_${rank}$d_${kt}$
 
 #:endfor
 #:endfor

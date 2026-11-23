@@ -13,6 +13,39 @@
 
 #include "build_options.h"
 
+#! Single-precision transforms (fft_kinds): the hipFFT / cuFFT entry points and
+#! plan types follow the kind.  The GPU backends have them; FFTW does not.
+#ifdef CHANNEL_SINGLE
+#if !defined(HAVE_HIP) && !defined(HAVE_CUDA)
+#error "CHANNEL_SINGLE needs the HIP or the CUDA backend"
+#endif
+#define CUFFT_ZEXEC cufftExecC2C
+#define CUFFT_ZTYPE CUFFT_C2C
+#define CUFFT_C2REXEC cufftExecC2R
+#define CUFFT_R2CEXEC cufftExecR2C
+#define CUFFT_C2RTYPE CUFFT_C2R
+#define CUFFT_R2CTYPE CUFFT_R2C
+#define HIPFFT_ZEXEC hipfftExecC2C
+#define HIPFFT_ZTYPE HIPFFT_C2C
+#define HIPFFT_C2REXEC hipfftExecC2R
+#define HIPFFT_R2CEXEC hipfftExecR2C
+#define HIPFFT_C2RTYPE HIPFFT_C2R
+#define HIPFFT_R2CTYPE HIPFFT_R2C
+#else
+#define CUFFT_ZEXEC cufftExecZ2Z
+#define CUFFT_ZTYPE CUFFT_Z2Z
+#define CUFFT_C2REXEC cufftExecZ2D
+#define CUFFT_R2CEXEC cufftExecD2Z
+#define CUFFT_C2RTYPE CUFFT_Z2D
+#define CUFFT_R2CTYPE CUFFT_D2Z
+#define HIPFFT_ZEXEC hipfftExecZ2Z
+#define HIPFFT_ZTYPE HIPFFT_Z2Z
+#define HIPFFT_C2REXEC hipfftExecZ2D
+#define HIPFFT_R2CEXEC hipfftExecD2Z
+#define HIPFFT_C2RTYPE HIPFFT_Z2D
+#define HIPFFT_R2CTYPE HIPFFT_D2Z
+#endif
+
 #! ===================================================================
 #! FFT and IFT are one in-place complex-to-complex transform of x along
 #! z, run in opposite directions.  Per backend they differ in exactly
@@ -30,9 +63,9 @@
 #:def z2z_transform(name, direction)
   SUBROUTINE ${name}$(x)
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
-    complex(C_DOUBLE_COMPLEX), intent(inout), target :: x(:, :, ny0 - 2:)
+    complex(fk), intent(inout), target :: x(:, :, ny0 - 2:)
 #else
-    complex(C_DOUBLE_COMPLEX), intent(inout) :: x(:, :, ny0 - 2:)
+    complex(fk), intent(inout) :: x(:, :, ny0 - 2:)
 #endif
     integer :: y0
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
@@ -44,15 +77,15 @@
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(x)
     istat = cudaDeviceSynchronize()
-    istat = cufftExecZ2Z(cu_p${name}$, x(1, 1, y0), x(1, 1, y0), CUFFT_${direction}$)
-    if (istat /= 0) print *, "cufftExecZ2Z ${name}$ failed:", istat
+    istat = CUFFT_ZEXEC(cu_p${name}$, x(1, 1, y0), x(1, 1, y0), CUFFT_${direction}$)
+    if (istat /= 0) print *, "cufftExec ${name}$ failed:", istat
     istat = cudaDeviceSynchronize()
     if (istat /= 0) print *, "cudaDeviceSynchronize ${name}$ failed:", istat
     !$omp end target data
 #elif defined(HAVE_HIP)
     !$omp target data use_device_addr(x)
     istat = hipStreamSynchronize(c_null_ptr)
-    istat = hipfftExecZ2Z(hip_p${name}$, c_loc(x(1, 1, y0)), c_loc(x(1, 1, y0)), HIPFFT_${direction}$)
+    istat = HIPFFT_ZEXEC(hip_p${name}$, c_loc(x(1, 1, y0)), c_loc(x(1, 1, y0)), HIPFFT_${direction}$)
     istat = hipStreamSynchronize(c_null_ptr)
     !$omp end target data
 #elif defined(HAVE_FFTW)
@@ -73,6 +106,7 @@ MODULE ffts
   use hipfort_hipfft
 #endif
   USE, intrinsic :: iso_c_binding
+  use fft_kinds, only: fk
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
   use omp_lib, only: omp_get_default_device, omp_get_mapped_ptr
 #endif
@@ -109,8 +143,9 @@ MODULE ffts
 #endif
 
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
-  complex(C_DOUBLE_COMPLEX), dimension(:, :, :, :), pointer, contiguous :: VVdz => null(), VVdx => null()
-  real(C_DOUBLE), dimension(:, :, :, :), pointer, contiguous :: rVVdx => null(), products => null()
+  complex(fk), dimension(:, :, :, :), pointer, contiguous :: VVdz => null()
+  complex(fk), dimension(:, :, :, :), pointer, contiguous :: VVdx => null()
+  real(fk), dimension(:, :, :, :), pointer, contiguous :: rVVdx => null(), products => null()
 #elif defined(HAVE_FFTW)
   INCLUDE 'fftw3.f03'
   integer, save        :: plan_type = FFTW_PATIENT
@@ -127,42 +162,6 @@ MODULE ffts
   integer :: cu_pFFT, cu_pIFT, cu_pRFT, cu_pHFT
 #elif HAVE_HIP
   type(c_ptr) :: hip_pFFT, hip_pIFT, hip_pRFT, hip_pHFT
-#endif
-#ifdef HAVE_XZ_CALLBACKS
-  ! Plans whose JIT load/store callbacks (hipfft_xz_callbacks.hip) do the xz
-  ! transpose packing and the nonlinear products inside the FFTs.  Created on
-  ! first use (rocFFT compiles them at run time), see xz_callbacks_enabled.
-  type(c_ptr), save :: hip_pIFTcb = c_null_ptr, hip_pFFTcb = c_null_ptr
-  type(c_ptr), save :: hip_pRFTcb = c_null_ptr, hip_pHFTcb = c_null_ptr
-  integer, save :: xz_cb_state = 0   ! 0: undecided, 1: plans ready, -1: off
-  interface
-    function channel_xz_cb_create(nzd, nxB, nzB, nxd, nyb, pIFT, pFFT, pRFT, pHFT) &
-      bind(c, name="channel_xz_cb_create")
-      import :: c_int, c_ptr
-      integer(c_int) :: channel_xz_cb_create
-      integer(c_int), value :: nzd, nxB, nzB, nxd, nyb
-      type(c_ptr) :: pIFT, pFFT, pRFT, pHFT
-    end function channel_xz_cb_create
-    function channel_xz_cb_set_buffers(zbuf, xbuf) bind(c, name="channel_xz_cb_set_buffers")
-      import :: c_int, c_ptr
-      integer(c_int) :: channel_xz_cb_set_buffers
-      type(c_ptr), value :: zbuf, xbuf
-    end function channel_xz_cb_set_buffers
-    function channel_xz_cb_set_products(a_off, b_off, factor) bind(c, name="channel_xz_cb_set_products")
-      import :: c_int, c_long_long, c_double
-      integer(c_int) :: channel_xz_cb_set_products
-      integer(c_long_long), value :: a_off, b_off
-      real(c_double), value :: factor
-    end function channel_xz_cb_set_products
-    function channel_xz_cb_hft_products() bind(c, name="channel_xz_cb_hft_products")
-      import :: c_int
-      integer(c_int) :: channel_xz_cb_hft_products
-    end function channel_xz_cb_hft_products
-    subroutine channel_xz_cb_destroy(pIFT, pFFT, pRFT, pHFT) bind(c, name="channel_xz_cb_destroy")
-      import :: c_ptr
-      type(c_ptr), value :: pIFT, pFFT, pRFT, pHFT
-    end subroutine channel_xz_cb_destroy
-  end interface
 #endif
   integer(C_INT), save :: fft_y0, fft_yN, fft_ny
   integer(C_INT), save :: fft_nxd = 0, fft_nxB = 0, fft_nzd = 0, fft_nzB = 0, fft_nPhi = 0, fft_nflds = 0
@@ -384,14 +383,14 @@ CONTAINS
     call check_cufft_status("cufftCreate IFT", istat)
     istat = cufftSetAutoAllocation(cu_pIFT, 1)
     call check_cufft_status("cufftSetAutoAllocation IFT", istat)
-    istat = cufftPlan1d(cu_pIFT, nzd, CUFFT_Z2Z, fft_ny*nxB)
+    istat = cufftPlan1d(cu_pIFT, nzd, CUFFT_ZTYPE, fft_ny*nxB)
     call check_cufft_status("cufftPlan1d IFT", istat)
 
     istat = cufftCreate(cu_pFFT)
     call check_cufft_status("cufftCreate FFT", istat)
     istat = cufftSetAutoAllocation(cu_pFFT, 1)
     call check_cufft_status("cufftSetAutoAllocation FFT", istat)
-    istat = cufftPlan1d(cu_pFFT, nzd, CUFFT_Z2Z, fft_ny*nxB)
+    istat = cufftPlan1d(cu_pFFT, nzd, CUFFT_ZTYPE, fft_ny*nxB)
     call check_cufft_status("cufftPlan1d FFT", istat)
 
     n(1) = 2*nxd            ! length
@@ -408,7 +407,7 @@ CONTAINS
     istat = cufftSetAutoAllocation(cu_pRFT, 1)
     call check_cufft_status("cufftSetAutoAllocation RFT", istat)
     istat = cufftPlanMany(cu_pRFT, 1, n, inembed, istride, idist, &
-                          onembed, ostride, odist, CUFFT_Z2D, batch)
+                          onembed, ostride, odist, CUFFT_C2RTYPE, batch)
     call check_cufft_status("cufftPlanMany RFT", istat)
 
     istat = cufftCreate(cu_pHFT)
@@ -416,7 +415,7 @@ CONTAINS
     istat = cufftSetAutoAllocation(cu_pHFT, 1)
     call check_cufft_status("cufftSetAutoAllocation HFT", istat)
     istat = cufftPlanMany(cu_pHFT, 1, n, onembed, ostride, odist, &
-                          inembed, istride, idist, CUFFT_D2Z, nzB*fft_ny)
+                          inembed, istride, idist, CUFFT_R2CTYPE, nzB*fft_ny)
     call check_cufft_status("cufftPlanMany HFT", istat)
 
   END SUBROUTINE init_cufft
@@ -458,11 +457,11 @@ CONTAINS
     !FFTs plans
     istat = hipfftCreate(hip_pIFT)
     istat = hipfftSetAutoAllocation(hip_pIFT, 0)
-    istat = hipfftPlan1d(hip_pIFT, nzd, HIPFFT_Z2Z, fft_ny*nxB)
+    istat = hipfftPlan1d(hip_pIFT, nzd, HIPFFT_ZTYPE, fft_ny*nxB)
 
     istat = hipfftCreate(hip_pFFT)
     istat = hipfftSetAutoAllocation(hip_pFFT, 0)
-    istat = hipfftPlan1d(hip_pFFT, nzd, HIPFFT_Z2Z, fft_ny*nxB)
+    istat = hipfftPlan1d(hip_pFFT, nzd, HIPFFT_ZTYPE, fft_ny*nxB)
 
     n(1) = 2*nxd            ! length
     batch = nzB*fft_ny
@@ -476,12 +475,12 @@ CONTAINS
     istat = hipfftCreate(hip_pRFT)
     istat = hipfftSetAutoAllocation(hip_pRFT, 0)
     istat = hipfftPlanMany(hip_pRFT, int(1, c_int), c_loc(n), c_loc(inembed), istride, idist, &
-                           c_loc(onembed), ostride, odist, HIPFFT_Z2D, batch)
+                           c_loc(onembed), ostride, odist, HIPFFT_C2RTYPE, batch)
 
     istat = hipfftCreate(hip_pHFT)
     istat = hipfftSetAutoAllocation(hip_pHFT, 0)
     istat = hipfftPlanMany(hip_pHFT, int(1, c_int), c_loc(n), c_loc(onembed), ostride, odist, &
-                           c_loc(inembed), istride, idist, HIPFFT_D2Z, int(nzB*fft_ny, c_int))
+                           c_loc(inembed), istride, idist, HIPFFT_R2CTYPE, int(nzB*fft_ny, c_int))
 
   END SUBROUTINE init_hipfft
 #endif
@@ -514,11 +513,11 @@ $:z2z_transform('IFT', 'INVERSE')
   SUBROUTINE RFT(x, rx)
     IMPLICIT NONE
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
-    complex(C_DOUBLE_COMPLEX), target :: x(:, :, ny0 - 2:)
-    real(C_DOUBLE), target :: rx(:, :, ny0 - 2:)
+    complex(fk), target :: x(:, :, ny0 - 2:)
+    real(fk), target :: rx(:, :, ny0 - 2:)
 #else
-    complex(C_DOUBLE_COMPLEX) :: x(:, :, ny0 - 2:)
-    real(C_DOUBLE) :: rx(:, :, ny0 - 2:)
+    complex(fk) :: x(:, :, ny0 - 2:)
+    real(fk) :: rx(:, :, ny0 - 2:)
 #endif
     integer :: x_y0, rx_y0, nreal
 #if defined(HAVE_HIP) || defined(HAVE_FFTW)
@@ -536,15 +535,15 @@ $:z2z_transform('IFT', 'INVERSE')
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(x, rx)
     istat = cudaDeviceSynchronize()
-    istat = cufftExecZ2D(cu_pRFT, x(1, 1, x_y0), rx(1, 1, rx_y0))
-    if (istat /= 0) print *, "cufftExecZ2D RFT failed:", istat
+    istat = CUFFT_C2REXEC(cu_pRFT, x(1, 1, x_y0), rx(1, 1, rx_y0))
+    if (istat /= 0) print *, "cufftExec RFT failed:", istat
     istat = cudaDeviceSynchronize()
     if (istat /= 0) print *, "cudaDeviceSynchronize RFT failed:", istat
     !$omp end target data
 #elif defined(HAVE_HIP)
     !$omp target data use_device_addr(x, rx)
     istat = hipStreamSynchronize(c_null_ptr)
-    istat = hipfftExecZ2D(hip_pRFT, c_loc(x(1, 1, x_y0)), c_loc(rx(1, 1, rx_y0)))
+    istat = HIPFFT_C2REXEC(hip_pRFT, c_loc(x(1, 1, x_y0)), c_loc(rx(1, 1, rx_y0)))
     istat = hipStreamSynchronize(c_null_ptr)
     if (nreal < size(rx, 1)) then
       !$omp target teams distribute parallel do collapse(3) default(none) shared(rx, nreal) private(i, j, k)
@@ -567,11 +566,11 @@ $:z2z_transform('IFT', 'INVERSE')
   SUBROUTINE HFT(rx, x)
     IMPLICIT NONE
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
-    complex(C_DOUBLE_COMPLEX), target :: x(:, :, ny0 - 2:)
-    real(C_DOUBLE), target :: rx(:, :, ny0 - 2:)
+    complex(fk), target :: x(:, :, ny0 - 2:)
+    real(fk), target :: rx(:, :, ny0 - 2:)
 #else
-    complex(C_DOUBLE_COMPLEX) :: x(:, :, ny0 - 2:)
-    real(C_DOUBLE) :: rx(:, :, ny0 - 2:)
+    complex(fk) :: x(:, :, ny0 - 2:)
+    real(fk) :: rx(:, :, ny0 - 2:)
 #endif
     integer :: x_y0, rx_y0
 #if defined(HAVE_CUDA) || defined(HAVE_HIP)
@@ -584,15 +583,15 @@ $:z2z_transform('IFT', 'INVERSE')
 #ifdef HAVE_CUDA
     !$omp target data use_device_addr(rx, x)
     istat = cudaDeviceSynchronize()
-    istat = cufftExecD2Z(cu_pHFT, rx(1, 1, rx_y0), x(1, 1, x_y0))
-    if (istat /= 0) print *, "cufftExecD2Z HFT failed:", istat
+    istat = CUFFT_R2CEXEC(cu_pHFT, rx(1, 1, rx_y0), x(1, 1, x_y0))
+    if (istat /= 0) print *, "cufftExec HFT failed:", istat
     istat = cudaDeviceSynchronize()
     if (istat /= 0) print *, "cudaDeviceSynchronize HFT failed:", istat
     !$omp end target data
 #elif defined(HAVE_HIP)
     !$omp target data use_device_addr(rx, x)
     istat = hipStreamSynchronize(c_null_ptr)
-    istat = hipfftExecD2Z(hip_pHFT, c_loc(rx(1, 1, rx_y0)), c_loc(x(1, 1, x_y0)))
+    istat = HIPFFT_R2CEXEC(hip_pHFT, c_loc(rx(1, 1, rx_y0)), c_loc(x(1, 1, x_y0)))
     istat = hipStreamSynchronize(c_null_ptr)
     !$omp end target data
 #elif defined(HAVE_FFTW)
@@ -601,153 +600,6 @@ $:z2z_transform('IFT', 'INVERSE')
     END DO
 #endif
   END SUBROUTINE HFT
-
-  ! ------------------------------------------------------------------
-  ! xz transposes folded into the FFTs (HAVE_XZ_CALLBACKS, see
-  ! hipfft_xz_callbacks.hip).  CHANNEL_FFT_CALLBACKS=0 turns them off.
-  ! ------------------------------------------------------------------
-  ! .true. when the callback HFT forms the nonlinear products itself; else
-  ! HFT_products must be given the product (build_products) as component a=b=1
-  ! of a one-component array and factor 1 -- see HFT_pack.
-  logical function xz_callbacks_products()
-#ifdef HAVE_XZ_CALLBACKS
-    xz_callbacks_products = xz_callbacks_enabled()
-    if (xz_callbacks_products) xz_callbacks_products = (channel_xz_cb_hft_products() == 1)
-#else
-    xz_callbacks_products = .false.
-#endif
-  end function xz_callbacks_products
-
-  logical function xz_callbacks_enabled()
-#ifdef HAVE_XZ_CALLBACKS
-    use env_options, only: env_flag
-    logical :: want
-    integer(C_INT) :: fails
-    if (xz_cb_state == 0) then
-      want = .true.
-      call env_flag("CHANNEL_FFT_CALLBACKS", want)
-      xz_cb_state = -1
-      if (want) then
-        fails = channel_xz_cb_create(fft_nzd, fft_nxB, fft_nzB, fft_nxd, fft_ny, &
-                                     hip_pIFTcb, hip_pFFTcb, hip_pRFTcb, hip_pHFTcb)
-        if (fails == 0) then
-          xz_cb_state = 1
-        else
-          print *, "ffts: hipFFT callback plans failed (", fails, "), using pack/unpack kernels"
-          call channel_xz_cb_destroy(hip_pIFTcb, hip_pFFTcb, hip_pRFTcb, hip_pHFTcb)
-          hip_pIFTcb = c_null_ptr; hip_pFFTcb = c_null_ptr; hip_pRFTcb = c_null_ptr; hip_pHFTcb = c_null_ptr
-        end if
-      end if
-    end if
-    xz_callbacks_enabled = (xz_cb_state == 1)
-#else
-    xz_callbacks_enabled = .false.
-#endif
-  end function xz_callbacks_enabled
-
-  ! IFT of x (VVdz layout) whose output goes straight into the zTOx send
-  ! buffer `send` (pack_zTOx layout); x itself is left unchanged.
-  SUBROUTINE IFT_pack(x, send)
-    complex(C_DOUBLE_COMPLEX), intent(inout), target :: x(:, :, ny0 - 2:)
-    type(c_ptr), intent(in) :: send
-    integer :: istat, y0
-    y0 = lbound(x, 3)
-#ifdef HAVE_XZ_CALLBACKS
-    !$omp target data use_device_addr(x)
-    istat = channel_xz_cb_set_buffers(send, c_null_ptr)
-    istat = hipfftExecZ2Z(hip_pIFTcb, c_loc(x(1, 1, y0)), c_loc(x(1, 1, y0)), HIPFFT_INVERSE)
-    istat = hipStreamSynchronize(c_null_ptr)
-    !$omp end target data
-#else
-    error stop "this build has no hipFFT xz callbacks"
-#endif
-  END SUBROUTINE IFT_pack
-
-  ! FFT into x (VVdz layout) reading its input from the xTOz receive buffer.
-  SUBROUTINE FFT_unpack(recv, x)
-    type(c_ptr), intent(in) :: recv
-    complex(C_DOUBLE_COMPLEX), intent(inout), target :: x(:, :, ny0 - 2:)
-    integer :: istat, y0
-    y0 = lbound(x, 3)
-#ifdef HAVE_XZ_CALLBACKS
-    !$omp target data use_device_addr(x)
-    istat = channel_xz_cb_set_buffers(recv, c_null_ptr)
-    istat = hipfftExecZ2Z(hip_pFFTcb, c_loc(x(1, 1, y0)), c_loc(x(1, 1, y0)), HIPFFT_FORWARD)
-    istat = hipStreamSynchronize(c_null_ptr)
-    !$omp end target data
-#else
-    error stop "this build has no hipFFT xz callbacks"
-#endif
-  END SUBROUTINE FFT_unpack
-
-  ! RFT whose input is read from the zTOx receive buffer (x padding as zero);
-  ! x is only the plan's nominal input and is not read.
-  SUBROUTINE RFT_unpack(recv, x, rx)
-    type(c_ptr), intent(in) :: recv
-    complex(C_DOUBLE_COMPLEX), target :: x(:, :, ny0 - 2:)
-    real(C_DOUBLE), target :: rx(:, :, ny0 - 2:)
-    integer :: istat, x_y0, rx_y0
-    x_y0 = lbound(x, 3)
-    rx_y0 = lbound(rx, 3)
-#ifdef HAVE_XZ_CALLBACKS
-    !$omp target data use_device_addr(x, rx)
-    istat = channel_xz_cb_set_buffers(c_null_ptr, recv)
-    istat = hipfftExecZ2D(hip_pRFTcb, c_loc(x(1, 1, x_y0)), c_loc(rx(1, 1, rx_y0)))
-    istat = hipStreamSynchronize(c_null_ptr)
-    !$omp end target data
-#else
-    error stop "this build has no hipFFT xz callbacks"
-#endif
-    ! The two padding columns rx(2*nxd+1:2*nxd+2, :, :) are left as they are:
-    ! in the nonlinear-term path nothing reads past 2*nxd (build_products,
-    ! the HFT plans and compute_cfl all stop there), unlike RFT's other callers.
-  END SUBROUTINE RFT_unpack
-
-  ! HFT of the product rx(:,:,:,a)*rx(:,:,:,b)*factor, formed in the load
-  ! callback, with the output going straight into the xTOz send buffer
-  ! (pack_xTOz layout).  x is the plan's nominal output and is not written.
-  SUBROUTINE HFT_products(rx, a, b, factor, x, send)
-    real(C_DOUBLE), target :: rx(:, :, ny0 - 2:, :)
-    integer(C_INT), intent(in) :: a, b
-    real(C_DOUBLE), intent(in) :: factor
-    complex(C_DOUBLE_COMPLEX), target :: x(:, :, ny0 - 2:)
-    type(c_ptr), intent(in) :: send
-    integer :: istat, x_y0, rx_y0
-    integer(c_long_long) :: comp
-    x_y0 = lbound(x, 3)
-    rx_y0 = lbound(rx, 3)
-    comp = int(size(rx, 1), c_long_long)*int(size(rx, 2), c_long_long)*int(size(rx, 3), c_long_long)
-#ifdef HAVE_XZ_CALLBACKS
-    !$omp target data use_device_addr(x, rx)
-    istat = channel_xz_cb_set_products(int(a - 1, c_long_long)*comp, int(b - 1, c_long_long)*comp, factor)
-    istat = channel_xz_cb_set_buffers(c_null_ptr, send)
-    istat = hipfftExecD2Z(hip_pHFTcb, c_loc(rx(1, 1, rx_y0, 1)), c_loc(x(1, 1, x_y0)))
-    istat = hipStreamSynchronize(c_null_ptr)
-    !$omp end target data
-#else
-    error stop "this build has no hipFFT xz callbacks"
-#endif
-  END SUBROUTINE HFT_products
-
-  ! HFT of rx with the output going straight into the xTOz send buffer
-  ! (store callback only; used when the products callback is unavailable).
-  SUBROUTINE HFT_pack(rx, x, send)
-    real(C_DOUBLE), target :: rx(:, :, ny0 - 2:)
-    complex(C_DOUBLE_COMPLEX), target :: x(:, :, ny0 - 2:)
-    type(c_ptr), intent(in) :: send
-    integer :: istat, x_y0, rx_y0
-    x_y0 = lbound(x, 3)
-    rx_y0 = lbound(rx, 3)
-#ifdef HAVE_XZ_CALLBACKS
-    !$omp target data use_device_addr(x, rx)
-    istat = channel_xz_cb_set_buffers(c_null_ptr, send)
-    istat = hipfftExecD2Z(hip_pHFTcb, c_loc(rx(1, 1, rx_y0)), c_loc(x(1, 1, x_y0)))
-    istat = hipStreamSynchronize(c_null_ptr)
-    !$omp end target data
-#else
-    error stop "this build has no hipFFT xz callbacks"
-#endif
-  END SUBROUTINE HFT_pack
 
 #if defined(HAVE_FFTW)
   SUBROUTINE free_fft()
@@ -779,11 +631,6 @@ $:z2z_transform('IFT', 'INVERSE')
     istat = hipfftDestroy(hip_pIFT)
     istat = hipfftDestroy(hip_pRFT)
     istat = hipfftDestroy(hip_pHFT)
-#ifdef HAVE_XZ_CALLBACKS
-    if (xz_cb_state == 1) call channel_xz_cb_destroy(hip_pIFTcb, hip_pFFTcb, hip_pRFTcb, hip_pHFTcb)
-    hip_pIFTcb = c_null_ptr; hip_pFFTcb = c_null_ptr; hip_pRFTcb = c_null_ptr; hip_pHFTcb = c_null_ptr
-    xz_cb_state = 0
-#endif
     call unbind_fft_workspace()
   END SUBROUTINE free_fft
 #endif
