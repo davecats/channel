@@ -227,7 +227,7 @@ module y_line_solvers
   use y_schur_solver, only: ys_schur_config, ys_schur_workspace, ys_schur_configure, &
                             ys_schur_prepare, ys_schur_release, ys_schur_solve_from_packed, &
                             YS_SCHUR_EXCHANGE_AUTO
-  use mpi_transpose, only: MPI_COMM_Y
+  use mpi_transpose, only: MPI_COMM_Y, y_split_first
   use y_pipeline_nccl, only: channel_comm_use_nccl, channel_comm_p2p_ensure, &
                              channel_comm_p2p_isend, channel_comm_p2p_irecv, channel_comm_p2p_sendrecv, &
                              channel_comm_p2p_flush, channel_comm_p2p_test, channel_comm_p2p_wait, &
@@ -1707,17 +1707,32 @@ $:interleaved_penta_solver('ys_solve_batch_pentadiagonal', 'ys_batch_ds', 'ys_ba
   ! from this system, or the table solve is off).  The solve that follows is
   ! ys_solve_dvdy unless the table solve is off: on CCE, like ys_mf_register,
   ! for the Schur solver, and for a workspace not holding one system of rows
-  ! enough for the sweeps; then it is the stored-band solve.
+  ! enough for the sweeps; then it is the stored-band solve.  The row test
+  ! uses the fewest rows of any y rank, not this rank's: the table is built
+  ! collectively on MPI_COMM_Y (ys_dvdy_build_tables), so every y rank must
+  ! take the same branch; a rank-local count deadlocks an uneven y split
+  ! (ny = 16 on 3 y ranks: 4, 6, 5 rows).
   logical function ys_dvdy_register()
     ys_dvdy_register = .false.
     ys_dy_pending = .false.
 #if !defined(_CRAYFTN)
     if (ys_selected_solver /= Y_SOLVER_PIPELINED_LU) return
-    if (ys_workspace_active_n < 6 .or. ys_workspace_nlines /= (2*ys_workspace_nz + 1)*nxB) return
+    if (ys_min_y_rows(ys_workspace_ny) < 6 .or. ys_workspace_nlines /= (2*ys_workspace_nz + 1)*nxB) return
     ys_dy_pending = .true.
     ys_dvdy_register = ys_dy_tab_ny == ys_workspace_ny
 #endif
   end function ys_dvdy_register
+
+  ! Fewest interior rows any y rank holds for ny_value (the split of
+  ! mpi_transpose's y_split_first), the same number on every rank.
+  integer(C_INT) function ys_min_y_rows(ny_value)
+    integer(C_INT), intent(in) :: ny_value
+    integer :: r
+    ys_min_y_rows = ny_value - 1_C_INT
+    do r = 0, npy_grid - 1
+      ys_min_y_rows = min(ys_min_y_rows, int(y_split_first(r + 1, ny_value, npy_grid) - y_split_first(r, ny_value, npy_grid), C_INT))
+    end do
+  end function ys_min_y_rows
 
   ! Builds the tables from the system just assembled and wall-eliminated: the
   ! bands of line 1 are the same for every line (the stencil weights, the

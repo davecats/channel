@@ -4,7 +4,7 @@ module mpi_autotune
   use, intrinsic :: iso_c_binding
   use, intrinsic :: ieee_arithmetic
   use channel_grid, only: nxB, nzB, ny0, nyN
-  use mpi_transpose, only: init_MPI, free_MPI, fft_transpose_is_local, repack_zTOx_local, pack_zTOx, alltoall, &
+  use mpi_transpose, only: y_split_first, init_MPI, free_MPI, fft_transpose_is_local, repack_zTOx_local, pack_zTOx, alltoall, &
                            unpack_zTOx, repack_xTOz_local, pack_xTOz, unpack_xTOz, sendbuf, recvbuf, sendbuf_t, recvbuf_t
 #ifdef HAVE_CUDA
   use ffts, only: init_cufft, free_fft, acquire_fft_workspace, release_fft_workspace, VVdz, VVdx, rVVdx, fft_plans_ok
@@ -384,8 +384,8 @@ contains
     if (mod(nxpp, npxz) /= 0_C_INT .or. mod(nzd, npxz) /= 0_C_INT) return
     if (npy > 1_C_INT) then
       do ipy = 0_C_INT, npy - 1_C_INT
-        y0 = 1_C_INT + ipy*(ny - 1_C_INT)/npy
-        yN = (ipy + 1_C_INT)*(ny - 1_C_INT)/npy
+        y0 = y_split_first(int(ipy), int(ny), int(npy))
+        yN = y_split_first(int(ipy) + 1, int(ny), int(npy)) - 1_C_INT
         if (yN - y0 + 1_C_INT < 4_C_INT) return
       end do
     end if
