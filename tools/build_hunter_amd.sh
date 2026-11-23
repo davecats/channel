@@ -1,4 +1,5 @@
-ld channel on HLRS Hunter with the TheRock/amdflang toolchain.
+#!/bin/bash
+# Build channel on HLRS Hunter with the TheRock/amdflang toolchain.
 #
 # hipfort is built and installed only when it is missing or when the
 # toolchain / hipfort source revision changed (or HIPFORT_REBUILD=1).
