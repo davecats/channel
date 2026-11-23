@@ -44,6 +44,16 @@ module mpi_autotune
 
   real(C_DOUBLE), parameter :: RK_SUBSTEPS = 3.0_C_DOUBLE
   real(C_DOUBLE), parameter :: Y_SOLVE_CHECK_TOL = 1.0e-6_C_DOUBLE
+  ! The Schur pass hierarchies of an (npxz, comm) pair are searched only when its
+  ! default hierarchy scores within this factor of the best candidate so far.
+  real(C_DOUBLE), parameter :: SCHUR_SEARCH_FACTOR = 1.5_C_DOUBLE
+  ! xz sweep of the (npxz, comm) pair being scanned (scan_xz_sweep).
+  logical, save :: xz_have = .false., xz_fft_ok = .false.
+  integer(C_INT), save :: xz_npxz = 0_C_INT, xz_comm = 0_C_INT
+  real(C_DOUBLE), save :: xz_forward = 0.0_C_DOUBLE, xz_back = 0.0_C_DOUBLE
+  ! Schur hierarchy already timed with alltoall, left out of enumerate_pass_paths
+  ! (skip_npass < 0: none).
+  integer(C_INT), save :: skip_npass = -1_C_INT, skip_path(MAXP) = 0_C_INT
   integer(C_INT), save, public :: mpi_autotune_selected_comm_backend = CHANNEL_COMM_BACKEND_AUTO
   integer(C_INT), save :: mpi_autotune_comm_mode = CHANNEL_COMM_BACKEND_AUTO
   public :: configure_mpi_decomposition, mpi_autotune_has_pass_sequence
@@ -179,31 +189,70 @@ contains
     integer(C_INT), intent(in) :: nranks, nxpp, nxd, nzd, nz, ny, nphi, node(0:)
     logical, intent(in) :: overlapping
     type(autotune_best), intent(inout) :: best
-    integer(C_INT) :: npxz, path(MAXP), icomm, comm_backend
+    integer(C_INT) :: npxz, path(MAXP), icomm, comm_backend, dpath(MAXP), ndef
+    integer(C_INT), allocatable :: default_passes(:)
+    real(C_DOUBLE) :: schur_score
     path = 1_C_INT
+    xz_have = .false.
     do npxz = 1_C_INT, nranks
       if (mod(nranks, npxz) == 0_C_INT) then
         if (.not. autotune_npxz_candidate(nranks, npxz, node)) cycle
         do icomm = 1_C_INT, autotune_comm_candidate_count()
           comm_backend = autotune_comm_candidate(icomm)
           call try_pipelined_candidate(nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, best)
+          ! Schur: the default pass hierarchy with alltoall first; the full search
+          ! over hierarchies and exchanges only if it comes close to the best so
+          ! far, or if the default is not a valid candidate here.
+          dpath = 1_C_INT
+          call ys_schur_default_pass_counts(nranks/npxz, default_passes)
+          ndef = int(size(default_passes), C_INT)
+          if (ndef > MAXP) error stop "autotune default pass list exceeds MAXP"
+          if (ndef > 0_C_INT) dpath(1:ndef) = default_passes
+          skip_npass = -1_C_INT
+          if (is_valid_candidate(nranks, npxz, nxpp, nzd, nz, ny, node, dpath, ndef)) then
+            call try_candidate(nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, dpath, &
+                               ndef, YS_SCHUR_EXCHANGE_ALLTOALL, best, schur_score)
+            skip_npass = ndef; skip_path = dpath
+            if (best%found .and. schur_score > SCHUR_SEARCH_FACTOR*best%score) cycle
+          end if
           call enumerate_pass_paths(nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, &
                                     nranks/npxz, path, 0_C_INT, best)
+          skip_npass = -1_C_INT
         end do
       end if
     end do
+    skip_npass = -1_C_INT
+    if (allocated(default_passes)) deallocate (default_passes)
   end subroutine scan_decompositions
+
+  ! The xz sweep does not depend on the y solver, so all y candidates of one
+  ! (npxz, comm) pair share one measurement (plans, workspace and transposes are
+  ! set up once per pair instead of once per candidate).
+  subroutine scan_xz_sweep(npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, npy, forward_cost, back_cost, &
+                           fft_ok)
+    integer(C_INT), intent(in) :: npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, npy
+    logical, intent(in) :: overlapping
+    real(C_DOUBLE), intent(out) :: forward_cost, back_cost
+    logical, intent(out) :: fft_ok
+
+    if (.not. (xz_have .and. xz_npxz == npxz .and. xz_comm == comm_backend)) then
+      call time_xz_sweep(nxpp, nxd, nzd, nz, ny, nphi, overlapping, npy, xz_forward, xz_back, xz_fft_ok)
+      xz_have = .true.; xz_npxz = npxz; xz_comm = comm_backend
+    end if
+    forward_cost = xz_forward; back_cost = xz_back; fft_ok = xz_fft_ok
+  end subroutine scan_xz_sweep
 
   subroutine try_pipelined_candidate(nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, best)
     integer(C_INT), intent(in) :: nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, node(0:)
     logical, intent(in) :: overlapping
     type(autotune_best), intent(inout) :: best
-    real(C_DOUBLE) :: xz_forward_cost, xz_back_cost, y_cost, y_single_cost, score
-    real(C_DOUBLE) :: y_error, y_single_error
-    integer(C_INT) :: ib, batches, npy, nlines, placeholder_path(MAXP), placeholder_npass, batch_candidates(5)
+    real(C_DOUBLE) :: xz_forward_cost, xz_back_cost, y_single_cost(1), y_single_error(1), score
+    real(C_DOUBLE) :: y_cost(5), y_error(5)
+    integer(C_INT) :: ib, nb, ibest, npy, nlines, placeholder_path(MAXP), placeholder_npass, batch_candidates(5), batches(5)
     integer(C_INT) :: width, nstacked
     integer(C_INT), allocatable :: placeholder_passes(:)
-    logical :: y_ok, fft_ok
+    logical :: y_ok(5), y_single_ok(1)
+    logical :: fft_ok
     integer :: ierr, rank
 
     if (.not. valid_decomposition(nranks, npxz, nxpp, nzd, ny, node)) return
@@ -212,7 +261,8 @@ contains
 
     call MPI_Comm_rank(MPI_COMM_WORLD, rank, ierr)
     call channel_comm_set_backend_override(comm_backend)
-    call time_xz_sweep(nxpp, nxd, nzd, nz, ny, nphi, overlapping, npy, xz_forward_cost, xz_back_cost, fft_ok)
+    call scan_xz_sweep(npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, npy, xz_forward_cost, xz_back_cost, &
+                       fft_ok)
     if (.not. fft_ok) then
       if (rank == 0) write (*, '(*(g0,1x))') "MPI autotune rejected: npxz=", npxz, &
         "npy=", npy, "comm=", trim(channel_comm_backend_name(comm_backend)), &
@@ -229,52 +279,76 @@ contains
     nlines = (nxpp/npxz)*(2_C_INT*nz + 1_C_INT)
     ! The twisted pipeline (default for even npy) is npy/2 deep, so fewer
     ! batches can pay off: npy/4 is a candidate too; 16 is the count measured
-    ! best on MI300A from 4 to 32 y ranks.  Duplicates are skipped.
+    ! best on MI300A from 4 to 32 y ranks.  Counts below min(8, npy) are left
+    ! out: they were the slowest in every measured case (at npy = 2 the best is
+    ! 1-2 batches, which stays a candidate), and the slowest to time.
     batch_candidates = [max(1_C_INT, npy/4_C_INT), max(1_C_INT, npy/2_C_INT), npy, 2_C_INT*npy, 16_C_INT]
+    nb = 0_C_INT
+    do ib = 1_C_INT, int(size(batch_candidates), C_INT)
+      if (batch_candidates(ib) > nlines .or. batch_candidates(ib) < min(8_C_INT, npy)) cycle
+      if (nb > 0_C_INT) then
+        if (any(batches(1:nb) == batch_candidates(ib))) cycle
+      end if
+      nb = nb + 1_C_INT; batches(nb) = batch_candidates(ib)
+    end do
+    if (nb == 0_C_INT) then
+      nb = 1_C_INT; batches(1) = max(1_C_INT, min(npy, nlines))
+    end if
     ! linsolve stacks v, eta and the scalars (2 + nphi systems) into solves of
     ! `width` systems, which pay the pipeline latency once each; apply_dy (dv/dy)
     ! is one more solve of a single system (timed as one; its table kernels are
-    ! somewhat cheaper).
+    ! somewhat cheaper).  All batch counts are timed in one workspace; the
+    ! single solve, which adds the same to every batch count of this candidate,
+    ! only with the fastest of them.
     width = max(1_C_INT, min(2_C_INT + nphi, ys_stack_limit(npy)))
     nstacked = (2_C_INT + nphi + width - 1_C_INT)/width
-    do ib = 1_C_INT, int(size(batch_candidates), C_INT)
-      batches = batch_candidates(ib)
-      if (batches > nlines) cycle
-      if (ib > 1_C_INT) then
-        if (any(batch_candidates(1:ib - 1) == batches)) cycle
+    call time_y_set(nxpp, nzd, nz, ny, nphi, overlapping, npy, placeholder_path, placeholder_npass, &
+                    YS_SCHUR_EXCHANGE_AUTO, Y_SOLVER_PIPELINED_LU, batches(1:nb), width, y_cost(1:nb), y_ok(1:nb), &
+                    y_error(1:nb))
+    ibest = 0_C_INT
+    do ib = 1_C_INT, nb
+      if (.not. y_ok(ib)) cycle
+      if (ibest == 0_C_INT) then
+        ibest = ib
+      else if (y_cost(ib) < y_cost(ibest)) then
+        ibest = ib
       end if
-      y_cost = time_y(nxpp, nzd, nz, ny, nphi, overlapping, npy, placeholder_path, placeholder_npass, &
-                      YS_SCHUR_EXCHANGE_AUTO, Y_SOLVER_PIPELINED_LU, batches, width, y_ok, y_error)
-      y_single_cost = y_cost
-      if (y_ok .and. width > 1_C_INT) then
-        y_single_cost = time_y(nxpp, nzd, nz, ny, nphi, overlapping, npy, placeholder_path, placeholder_npass, &
-                               YS_SCHUR_EXCHANGE_AUTO, Y_SOLVER_PIPELINED_LU, batches, 1_C_INT, y_ok, y_single_error)
-        y_error = max(y_error, y_single_error)
+    end do
+    y_single_cost = 0.0_C_DOUBLE; y_single_error = 0.0_C_DOUBLE; y_single_ok = .true.
+    if (ibest > 0_C_INT) then
+      if (width > 1_C_INT) then
+        call time_y_set(nxpp, nzd, nz, ny, nphi, overlapping, npy, placeholder_path, placeholder_npass, &
+                        YS_SCHUR_EXCHANGE_AUTO, Y_SOLVER_PIPELINED_LU, batches(ibest:ibest), 1_C_INT, y_single_cost, &
+                        y_single_ok, y_single_error)
+      else
+        y_single_cost(1) = y_cost(ibest); y_single_error(1) = y_error(ibest)
       end if
-      if (.not. y_ok) then
+    end if
+    do ib = 1_C_INT, nb
+      if (.not. (y_ok(ib) .and. y_single_ok(1))) then
         if (rank == 0) write (*, '(*(g0,1x))') "MPI autotune rejected: npxz=", npxz, &
           "npy=", npy, "comm=", trim(channel_comm_backend_name(comm_backend)), &
           "passes=", trim(display_pass_string(placeholder_path, placeholder_npass, Y_SOLVER_PIPELINED_LU)), &
           "exchange= auto y_solver=", trim(y_solver_string(Y_SOLVER_PIPELINED_LU)), &
-          "y_batches=", batches, "y_correctness_error=", y_error
+          "y_batches=", batches(ib), "y_correctness_error=", max(y_error(ib), y_single_error(1))
         cycle
       end if
       score = RK_SUBSTEPS*(xz_forward_cost*real(3_C_INT + nphi, C_DOUBLE) + &
                            xz_back_cost*real(6_C_INT + 3_C_INT*nphi, C_DOUBLE) + &
-                           y_cost*real(nstacked, C_DOUBLE) + y_single_cost)
+                           y_cost(ib)*real(nstacked, C_DOUBLE) + y_single_cost(1))
       if (rank == 0) write (*, '(*(g0,1x))') "MPI autotune tested: npxz=", npxz, &
         "npy=", npy, "comm=", trim(channel_comm_backend_name(comm_backend)), &
         "passes=", trim(display_pass_string(placeholder_path, placeholder_npass, Y_SOLVER_PIPELINED_LU)), &
         "exchange= auto xz_forward_ms=", 1d3*xz_forward_cost, &
         "xz_back_ms=", 1d3*xz_back_cost, "y_solver=", trim(y_solver_string(Y_SOLVER_PIPELINED_LU)), &
-        "y_batches=", batches, "y_stack=", width, "y_ms=", 1d3*y_cost, "y_single_ms=", 1d3*y_single_cost, &
-        "y_correctness_error=", y_error, &
+        "y_batches=", batches(ib), "y_stack=", width, "y_ms=", 1d3*y_cost(ib), "y_single_ms=", 1d3*y_single_cost(1), &
+        "y_correctness_error=", max(y_error(ib), y_single_error(1)), &
         "score_timestep_ms=", 1d3*score
       if (.not. best%found .or. score < best%score) then
         best%found = .true.; best%score = score; best%npxz = npxz; best%npy = npy
         best%pass = placeholder_path; best%npass = placeholder_npass; best%exchange = YS_SCHUR_EXCHANGE_AUTO
         best%comm_backend = comm_backend
-        best%y_solver = Y_SOLVER_PIPELINED_LU; best%y_batches = batches
+        best%y_solver = Y_SOLVER_PIPELINED_LU; best%y_batches = batches(ib)
       end if
     end do
     if (allocated(placeholder_passes)) deallocate (placeholder_passes)
@@ -289,8 +363,9 @@ contains
     type(autotune_best), intent(inout) :: best
     integer(C_INT) :: i, next_path(MAXP), min_arity
     if (remaining == 1_C_INT) then
-      call try_candidate(nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, path, &
-                         npass, YS_SCHUR_EXCHANGE_ALLTOALL, best)
+      if (npass /= skip_npass .or. any(path(1:max(1, npass)) /= skip_path(1:max(1, npass)))) &
+        call try_candidate(nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, path, &
+                           npass, YS_SCHUR_EXCHANGE_ALLTOALL, best)
       if (npass > 0_C_INT) then
         if (path(npass) < 4_C_INT) &
           call try_candidate(nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, path, &
@@ -310,20 +385,25 @@ contains
     end do
   end subroutine enumerate_pass_paths
 
+  ! score_out: this candidate's score (huge if it was rejected).
   subroutine try_candidate(nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, node, path, &
-                           npass, exchange, best)
+                           npass, exchange, best, score_out)
     integer(C_INT), intent(in) :: nranks, npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi
     integer(C_INT), intent(in) :: node(0:), path(MAXP), npass, exchange
     logical, intent(in) :: overlapping
     type(autotune_best), intent(inout) :: best
+    real(C_DOUBLE), intent(out), optional :: score_out
     integer :: ierr, rank
     real(C_DOUBLE) :: xz_forward_cost, xz_back_cost, y_cost, score
     real(C_DOUBLE) :: y_error
     logical :: y_ok, fft_ok
+    if (present(score_out)) score_out = huge(0.0_C_DOUBLE)
+    score = huge(0.0_C_DOUBLE)
     if (.not. is_valid_candidate(nranks, npxz, nxpp, nzd, nz, ny, node, path, npass)) return
     call MPI_Comm_rank(MPI_COMM_WORLD, rank, ierr)
     call channel_comm_set_backend_override(comm_backend)
-    call time_xz_sweep(nxpp, nxd, nzd, nz, ny, nphi, overlapping, nranks/npxz, xz_forward_cost, xz_back_cost, fft_ok)
+    call scan_xz_sweep(npxz, comm_backend, nxpp, nxd, nzd, nz, ny, nphi, overlapping, nranks/npxz, xz_forward_cost, &
+                       xz_back_cost, fft_ok)
     if (.not. fft_ok) then
       if (rank == 0) write (*, '(*(g0,1x))') "MPI autotune rejected: npxz=", npxz, &
         "npy=", nranks/npxz, "comm=", trim(channel_comm_backend_name(comm_backend)), &
@@ -333,6 +413,7 @@ contains
     end if
 
     call score_y_backend(Y_SOLVER_SCHUR, 0_C_INT)
+    if (present(score_out)) score_out = score
 
   contains
     subroutine score_y_backend(y_solver, y_batches)
@@ -565,6 +646,22 @@ contains
     logical, intent(in) :: overlapping
     logical, intent(out) :: ok
     real(C_DOUBLE), intent(out) :: max_error
+    real(C_DOUBLE) :: cost(1), err(1)
+    logical :: oks(1)
+
+    call time_y_set(nxpp, nzd, nz, ny, nphi, overlapping, npy, path, npass, exchange, y_solver, [y_batches], stack, &
+                    cost, oks, err)
+    time_y = cost(1); ok = oks(1); max_error = err(1)
+  end function time_y
+
+  ! time_y for several batch counts in one decomposition and workspace.
+  subroutine time_y_set(nxpp, nzd, nz, ny, nphi, overlapping, npy, path, npass, exchange, &
+                        y_solver, y_batches, stack, cost, ok, max_error)
+    integer(C_INT), intent(in) :: nxpp, nzd, nz, ny, nphi, npy, path(MAXP), npass, exchange
+    integer(C_INT), intent(in) :: y_solver, y_batches(:), stack
+    logical, intent(in) :: overlapping
+    real(C_DOUBLE), intent(out) :: cost(:), max_error(:)
+    logical, intent(out) :: ok(:)
     integer(C_INT), allocatable :: passes(:)
     integer(C_INT) :: nlines
 
@@ -573,22 +670,23 @@ contains
     if (npass > 0_C_INT) passes = path(1:npass)
     nlines = stack*nxB*(2_C_INT*nz + 1_C_INT)
     call time_y_endpoint_solve(ny, nz, ny0, nyN, 1_C_INT, nlines, passes, exchange, &
-                               tune_repeats(), y_solver, y_batches, time_y, ok, max_error)
+                               tune_repeats(), y_solver, y_batches, cost, ok, max_error)
     deallocate (passes)
     call free_MPI()
-  end function time_y
+  end subroutine time_y_set
 
+  ! One workspace, one solve per entry of y_batches (repeats timed after a warm-up).
   subroutine time_y_endpoint_solve(ny, nz, row_start, row_end, line_start, nlines, &
                                    passes, exchange, repeats, y_solver, y_batches, elapsed, ok, max_error)
     integer(C_INT), intent(in) :: ny, nz, row_start, row_end, line_start, nlines
     integer(C_INT), intent(in) :: passes(:), exchange
     integer, intent(in) :: repeats
-    integer(C_INT), intent(in) :: y_solver, y_batches
-    real(C_DOUBLE), intent(out) :: elapsed
-    logical, intent(out) :: ok
-    real(C_DOUBLE), intent(out) :: max_error
+    integer(C_INT), intent(in) :: y_solver, y_batches(:)
+    real(C_DOUBLE), intent(out) :: elapsed(:)
+    logical, intent(out) :: ok(:)
+    real(C_DOUBLE), intent(out) :: max_error(:)
     complex(C_DOUBLE_COMPLEX), allocatable :: dst(:, :, :), expected(:, :, :)
-    integer(C_INT) :: active_n, nlines_z, nx_count
+    integer(C_INT) :: active_n, nlines_z, nx_count, ib
     integer(C_INT64_T) :: t0, t1, rate
     integer :: ierr, iter, bad_local, bad_global
     real(C_DOUBLE) :: local_elapsed, local_error, global_error
@@ -605,40 +703,42 @@ contains
     !$omp target enter data map(to: expected)
 
     call system_clock(count_rate=rate)
-    local_elapsed = 0.0_C_DOUBLE
-    max_error = 0.0_C_DOUBLE
-    ok = .true.
-    do iter = 0, repeats
-      call seed_y_endpoint_system(ny, row_start, active_n, nlines)
-      call MPI_Barrier(MPI_COMM_WORLD, ierr)
-      call system_clock(t0)
-      select case (y_solver)
-      case (Y_SOLVER_PIPELINED_LU)
-        call ys_solve_pipelined_lu(dst, y_batches)
-      case (Y_SOLVER_SCHUR)
-        call ys_solve_endpoint_schur(dst, .true.)
-      case default
-        error stop "unknown autotune y solver"
-      end select
-      call MPI_Barrier(MPI_COMM_WORLD, ierr)
-      call system_clock(t1)
-      call check_y_endpoint_solution_device(dst, expected, local_error, bad_local)
-      call MPI_Allreduce(local_error, global_error, 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, ierr)
-      call MPI_Allreduce(bad_local, bad_global, 1, MPI_INTEGER, MPI_MAX, MPI_COMM_WORLD, ierr)
-      max_error = max(max_error, global_error)
-      if (bad_global /= 0 .or. global_error > Y_SOLVE_CHECK_TOL) then
-        ok = .false.
-        exit
-      end if
-      if (iter > 0) local_elapsed = local_elapsed + real(t1 - t0, C_DOUBLE)/real(rate, C_DOUBLE)
-    end do
+    do ib = 1_C_INT, int(size(y_batches), C_INT)
+      local_elapsed = 0.0_C_DOUBLE
+      max_error(ib) = 0.0_C_DOUBLE
+      ok(ib) = .true.
+      do iter = 0, repeats
+        call seed_y_endpoint_system(ny, row_start, active_n, nlines)
+        call MPI_Barrier(MPI_COMM_WORLD, ierr)
+        call system_clock(t0)
+        select case (y_solver)
+        case (Y_SOLVER_PIPELINED_LU)
+          call ys_solve_pipelined_lu(dst, y_batches(ib))
+        case (Y_SOLVER_SCHUR)
+          call ys_solve_endpoint_schur(dst, .true.)
+        case default
+          error stop "unknown autotune y solver"
+        end select
+        call MPI_Barrier(MPI_COMM_WORLD, ierr)
+        call system_clock(t1)
+        call check_y_endpoint_solution_device(dst, expected, local_error, bad_local)
+        call MPI_Allreduce(local_error, global_error, 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, ierr)
+        call MPI_Allreduce(bad_local, bad_global, 1, MPI_INTEGER, MPI_MAX, MPI_COMM_WORLD, ierr)
+        max_error(ib) = max(max_error(ib), global_error)
+        if (bad_global /= 0 .or. global_error > Y_SOLVE_CHECK_TOL) then
+          ok(ib) = .false.
+          exit
+        end if
+        if (iter > 0) local_elapsed = local_elapsed + real(t1 - t0, C_DOUBLE)/real(rate, C_DOUBLE)
+      end do
 
-    if (ok) then
-      local_elapsed = local_elapsed/real(max(1, repeats), C_DOUBLE)
-      call MPI_Allreduce(local_elapsed, elapsed, 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, ierr)
-    else
-      elapsed = huge(0.0_C_DOUBLE)
-    end if
+      if (ok(ib)) then
+        local_elapsed = local_elapsed/real(max(1, repeats), C_DOUBLE)
+        call MPI_Allreduce(local_elapsed, elapsed(ib), 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, ierr)
+      else
+        elapsed(ib) = huge(0.0_C_DOUBLE)
+      end if
+    end do
 
     !$omp target exit data map(delete: dst)
     !$omp target exit data map(delete: expected)
