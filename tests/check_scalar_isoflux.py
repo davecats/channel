@@ -40,7 +40,7 @@ PR = 1.0
 ALPHA = (1.0 / NI) / PR
 G = 1.0              # imposed dphi/dy: +G at the lower wall, -G at the upper
 NPHI = 2
-ROW_LENGTH = 1 + 8 * NPHI   # time + eight groups of nPhi columns, see run()
+ROW_LENGTH = 1 + 11 * NPHI  # time + eleven groups of nPhi columns, see run()
 
 DECK = f"""\
 [mesh]

@@ -340,3 +340,14 @@ add_test(NAME scalar_isoflux_balance
         ${MPIEXEC_EXECUTABLE}
 )
 set_tests_properties(scalar_isoflux_balance PROPERTIES PROCESSORS 1)
+
+# Drives the binary too: the active scalar ([scalars] ri) and the velocity-
+# weighted sink against the laminar mixed-convection solution, with the Cf and
+# Nu diagnostics.  Own temporary directories.
+add_test(NAME buoyancy_laminar
+    COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_SOURCE_DIR}/tests/check_buoyancy_laminar.py
+        $<TARGET_FILE:channel>
+        ${MPIEXEC_EXECUTABLE}
+)
+set_tests_properties(buoyancy_laminar PROPERTIES PROCESSORS 1)

@@ -15,13 +15,61 @@ module runtime_diagnostics
   use stencil_coefficients
   use mpi_transpose
   use restart_io, only: restart_write
+  use channel_equations, only: yintegr
   use roctx, only: roctxPush, roctxPop
 
   implicit none
 
   public :: outstats
 
+  ! The yintegr quadrature weights of the rows this rank owns (zero elsewhere,
+  ! so the halos are not counted twice), on the device: a bulk integral over
+  ! all modes is then one reduction per rank and one sum over the ranks.
+  real(C_DOUBLE), allocatable, save :: wy_own(:)
+
 contains
+
+  subroutine setup_bulk_weights()
+    IMPLICIT NONE
+    complex(C_DOUBLE_COMPLEX) :: e(-1:ny + 1)
+    integer(C_INT) :: iy
+
+    ! A rank owns its interior rows ny0..nyN, and the first and last slab also
+    ! the wall and ghost rows beyond them.  yintegr of a unit vector is the
+    ! weight of that row, summed in yintegr's own order.
+    allocate (wy_own(ny0 - 2:nyN + 2))
+    wy_own = 0.0d0
+    DO iy = merge(-1, ny0, ny0 == 1), merge(ny + 1, nyN, nyN == ny - 1)
+      e = 0.0d0; e(iy) = 1.0d0
+      wy_own(iy) = yintegr(e, y)
+    END DO
+    !$omp target enter data map(to: wy_own)
+  end subroutine setup_bulk_weights
+
+  ! This rank's part of INT <V(c1) V(c2)>_{x,z} dy, every mode included.
+  ! Parseval as in wall_plane_variance below, with the mean mode counted.
+  real(C_DOUBLE) function bulk_product(c1, c2)
+    IMPLICIT NONE
+    integer(C_INT), intent(in) :: c1, c2
+    real(C_DOUBLE) :: acc
+    integer(C_INT) :: ix, iz, iy, weight, ylo, yhi
+
+    if (.not. allocated(wy_own)) call setup_bulk_weights()
+    ylo = ny0 - 2; yhi = nyN + 2
+    acc = 0.0d0
+    !$omp target teams distribute parallel do collapse(3) reduction(+: acc) &
+    !$omp shared(V, wy_own, nx0, nxN, nz, ylo, yhi, c1, c2) private(ix, iz, iy, weight)
+    do ix = nx0, nxN
+      do iz = -nz, nz
+        do iy = ylo, yhi
+          weight = merge(1, 2, ix == 0)
+          acc = acc + weight*wy_own(iy)*(dreal(V(iy, iz, ix, c1))*dreal(V(iy, iz, ix, c2)) + &
+                                         dimag(V(iy, iz, ix, c1))*dimag(V(iy, iz, ix, c2)))
+        end do
+      end do
+    end do
+    bulk_product = acc
+  end function bulk_product
 
   ! Plane variance of one component on one wall plane: <phi'^2>_{x,z} there.
   !
@@ -76,6 +124,11 @@ contains
     ! Dirichlet by construction; under Neumann it is the H2 signature and the
     ! settling monitor -- see wall_plane_variance above.
     real(C_DOUBLE) :: phi_wall_var(1:nPhi, 1:2)
+    ! Skin friction at each wall, 2 tau_w/u_b^2 with u_b = flow rate/(ymax - ymin),
+    ! and the Nusselt number of each scalar at each wall, q_w D_h/(phi_w - phi_m)
+    ! with D_h = 2 (ymax - ymin), q_w = the flux into the fluid (-dphi/dy at y0,
+    ! +dphi/dy at yN) and phi_m the mixing-cup bulk INT <u phi> dy / INT <u> dy.
+    real(C_DOUBLE) :: cf(1:2), nu(1:nPhi, 1:2), phi_mix(1:nPhi), flow, gap
     character(len=40) :: istring, filename
     integer :: iPhi
     complex(C_DOUBLE_COMPLEX) :: mean_line_u(-1:ny + 1), mean_line_w(-1:ny + 1), mean_line_scalar(-1:ny + 1)
@@ -115,24 +168,41 @@ contains
       IF (ny0 == 1) phi_wall_var(iPhi, 1) = wall_plane_variance(3 + iPhi, 0)
       IF (nyN == ny - 1) phi_wall_var(iPhi, 2) = wall_plane_variance(3 + iPhi, ny)
     END DO
+    DO iPhi = 1, nPhi
+      phi_mix(iPhi) = bulk_product(1_C_INT, 3_C_INT + iPhi)
+    END DO
     IF (nPhi > 0) THEN
+      CALL MPI_Allreduce(MPI_IN_PLACE, phi_mix, nPhi, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, ierr)
       call roctxPush("MPI_Allreduce outstats_wall_var")
       CALL MPI_Allreduce(MPI_IN_PLACE, phi_wall_var, 2*nPhi, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, ierr)
       call roctxPop("MPI_Allreduce outstats_wall_var")
     END IF
     IF (has_terminal) THEN
       !$omp target update from(fr)
-      WRITE (*, "(F10.4,3X,4(F11.6,3X),4(F9.4,3X),2(F9.6,3X))") &
-           time,dudy(1,1),dudy(1,2),dudy(2,1),dudy(2,2),fr(1)+corrpx*fr(3),meanpx+corrpx,fr(2)+corrpz*fr(3),meanpz+corrpz,runtime_global*deltat,deltat
-      WRITE(121,*) time,dudy(1,1),dudy(1,2),dudy(2,1),dudy(2,2),fr(1)+corrpx*fr(3),meanpx+corrpx,fr(2)+corrpz*fr(3),meanpz+corrpz,runtime_global*deltat,deltat
+      gap = ymax - ymin
+      flow = fr(1) + corrpx*fr(3)
+      cf = 2.0d0*ni*dudy(1, :)/(flow/gap)**2
+      DO iPhi = 1, nPhi
+        phi_mix(iPhi) = phi_mix(iPhi)/flow
+        nu(iPhi, 1) = -dudy(2 + iPhi, 1)*2.0d0*gap/(phi_wall(iPhi, 1) - phi_mix(iPhi))
+        nu(iPhi, 2) = dudy(2 + iPhi, 2)*2.0d0*gap/(phi_wall(iPhi, 2) - phi_mix(iPhi))
+      END DO
+      ! Appended: Cf at y0 and yN, then Nu at y0 and yN of each scalar.
+      WRITE (*, "(F10.4,3X,4(F11.6,3X),4(F9.4,3X),2(F9.6,3X),2(ES11.4,3X),*(F9.3,3X))") &
+           time,dudy(1,1),dudy(1,2),dudy(2,1),dudy(2,2),fr(1)+corrpx*fr(3),meanpx+corrpx,fr(2)+corrpz*fr(3),meanpz+corrpz,runtime_global*deltat,deltat, &
+           cf, (nu(iPhi, 1), nu(iPhi, 2), iPhi = 1, nPhi)
+      WRITE(121,*) time,dudy(1,1),dudy(1,2),dudy(2,1),dudy(2,2),fr(1)+corrpx*fr(3),meanpx+corrpx,fr(2)+corrpz*fr(3),meanpz+corrpz,runtime_global*deltat,deltat, &
+           cf
       ! Runtimedata.phi, nPhi columns per group:
       !   time | dphi/dy at y0 | dphi/dy at yN | INT(phi) dy | corrtx + meantx
       !        | <phi> at y0   | <phi> at yN
       !        | <phi'^2> at y0 | <phi'^2> at yN
+      !        | Nu at y0 | Nu at yN | mixing-cup bulk phi_m
       ! Groups are appended rather than inserted, so a reader written against an
       ! older file keeps working.
       WRITE (195, *) time, dudy(3:, 1), dudy(3:, 2), fr(4:3 + nPhi) + corrtx(:)*fr(3 + nPhi + 1:3 + 2*nPhi), &
-        corrtx + meantx, phi_wall(:, 1), phi_wall(:, 2), phi_wall_var(:, 1), phi_wall_var(:, 2)
+        corrtx + meantx, phi_wall(:, 1), phi_wall(:, 2), phi_wall_var(:, 1), phi_wall_var(:, 2), &
+        nu(:, 1), nu(:, 2), phi_mix
       FLUSH (121); FLUSH (195)
     END IF
     runtime_global = 0

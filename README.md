@@ -25,7 +25,7 @@ at a friction Reynolds number of Re_tau = 500<br/>
 - Distributed wall-normal solves using a hierarchical y-Schur solver.
 - Optional autotuning of MPI decomposition, y-Schur pass hierarchy, and y-solve batch sizes.
 - Constant streamwise/spanwise flow-rate correction or prescribed mean pressure gradients.
-- Optional passive scalar fields.
+- Optional passive scalar fields, or one active scalar (Boussinesq buoyancy along x).
 - Optional pressure and `dpdy` post-processing.
 - Optional raw convection-velocity/statistics output through the `[convvelo]` input section.
 
@@ -278,6 +278,12 @@ scalar.
   value by a uniform volumetric source. The correction field solves the same
   Helmholtz problem with *homogeneous* rows, which under `neumann` means
   zero-gradient, so it adds no wall flux and the imposed `t0`/`tN` stay exact.
+- `sink`: what balances the wall heat flux. `uniform` (default) is the `meantb`
+  correction above. `velocity` adds `-gamma*u` (fully developed flow heated
+  along x), `gamma = (1/(Re*Pr))*(tN - t0)/meanflowx`, which balances the wall
+  fluxes exactly; needs `bc = neumann` and `meanflowx /= 0`.
+- `ri`: makes the scalar active (needs `nPhi = 1`): the explicit Boussinesq
+  force `ri*phi` along `+x`, i.e. `ri = Gr/Re^2` with gravity along `-x`.
 
 ## Optional Convvelo Output
 
@@ -351,11 +357,18 @@ where `nzd = 3*nz`, possibly adjusted by the FFT-fit logic.
 ## Output Files
 
 - `Runtimedata`: time, wall gradients, flow rates, pressure-gradient correction,
-  runtime proxy, and time step.
+  runtime proxy, time step, then the skin friction `Cf = 2 tau_w/u_b^2` at the
+  lower and at the upper wall (`u_b` = flow rate/(`ymax - ymin`)). The terminal
+  line carries the same columns followed by `Nu` at the lower and upper wall of
+  each scalar.
 - `Runtimedata.phi`: `nPhi` columns per group, in order — time, `dphi/dy` at the
   lower wall, `dphi/dy` at the upper wall, `INT(phi) dy`, the bulk-pinning
   correction, the mean scalar value at the lower and at the upper wall, then its
-  plane variance `<phi'^2>` at the lower and at the upper wall. Under
+  plane variance `<phi'^2>` at the lower and at the upper wall, then the Nusselt
+  number at the lower and at the upper wall and the mixing-cup bulk value
+  `phi_m = INT <u phi> dy / INT <u> dy`. `Nu = q_w D_h/(phi_w - phi_m)` with
+  `D_h = 2 (ymax - ymin)` and `q_w` the flux into the fluid (`-dphi/dy` at the
+  lower wall, `+dphi/dy` at the upper one); an insulated wall has `Nu = 0`. Under
   `bc = neumann` the gradient groups are constants, equal to `t0`/`tN`, and the
   wall value and variance are what move; under `bc = dirichlet` the wall value is
   `t0`/`tN` and the variance is identically zero, since a value row holds every

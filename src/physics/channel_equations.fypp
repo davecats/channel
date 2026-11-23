@@ -11,7 +11,7 @@
 !   v   : lambda*(D^2 - k^2) v - ni*(D^2 - k^2)^2 v = explicit terms
 !   eta : lambda*eta         - ni*(D^2 - k^2) eta  = explicit terms
 !
-! plus one Helmholtz problem per passive scalar.  The implicit halves are
+! plus one Helmholtz problem per scalar.  The implicit halves are
 ! assembled into banded matrices by the assemble_* routines below; the
 ! explicit halves -- the nonlinear products and the viscous terms carried over
 ! from the previous Runge-Kutta substep -- are built by build_products and
@@ -166,6 +166,24 @@ $:rhs_load_der([0, 2, 3])
           m1i = c1*t0r + ni*(t2r - kk*t0r) - o3*aimag(oldrhs(iy, iz, ix, 1))
 #:enddef
 #:set RHS_LIN_NAMES = 's0r, s0i, s2r, s2i, s4r, s4i, t0r, t0i, t2r, t2i, m1r, m1i, m2r, m2i, ' + ', '.join('{}{}{}'.format(x, t, p) for x in 'uw' for j, t in RJ for p in 'ri')
+#! Boussinesq force F = ri_buoy*phi_1 along x, an x-momentum term Hx = F in
+#! the convention of VEL_RHS: d2v gets -i a D1(F), eta i b D0(F), and the mean
+#! mode (mean) Re D0(F) into u.  Reads phi from V; needs der orders 0 and 1.
+#:def rhs_buoyancy_real(n1r, n1i, n2r, n2i, mean)
+          f0r = ri_buoy*${rhs_rsum('dreal', 'd0', 'V', 4)}$
+          f0i = ri_buoy*${rhs_rsum('dimag', 'd0', 'V', 4)}$
+          f1r = ri_buoy*${rhs_rsum('dreal', 'd1', 'V', 4)}$
+          f1i = ri_buoy*${rhs_rsum('dimag', 'd1', 'V', 4)}$
+          ${n2r}$ = ${n2r}$ + a*f1i
+          ${n2i}$ = ${n2i}$ - a*f1r
+          if (${mean}$) then
+            ${n1r}$ = ${n1r}$ + f0r
+          else
+            ${n1r}$ = ${n1r}$ - b*f0i
+            ${n1i}$ = ${n1i}$ + b*f0r
+          end if
+#:enddef
+#:set RHS_BUOY_NAMES = 'f0r, f0i, f1r, f1i'
 
 module channel_equations
 
@@ -710,11 +728,13 @@ $:assemble_rhs_tiles()
     real(C_DOUBLE) :: kk, a, b, o2, m1r, m1i, m2r, m2i
     real(C_DOUBLE) :: ${RHS_DER_NAMES}$
     real(C_DOUBLE) :: ${RHS_NL_NAMES}$
+    real(C_DOUBLE) :: ${RHS_BUOY_NAMES}$
     y_first = ny0
     y_last = nyN
     o2 = ODE(2)
     !$omp target teams distribute parallel do collapse(3) default(none) &
     !$omp shared(rhs_stash, newrhs, der, ialfa, ibeta, k2, nz, nx0, nxN, y_first, y_last, meanpx, meanpz) &
+    !$omp shared(V, ri_buoy, buoyant) private(${RHS_BUOY_NAMES}$) &
     !$omp private(iz, ix, iy, kk, a, b, ${RHS_DER_NAMES}$, ${RHS_NL_NAMES}$)
     DO ix = nx0, nxN
       DO iz = -nz, nz
@@ -724,6 +744,9 @@ $:rhs_load_der([0, 1, 2])
 $:rhs_nonlinear_real('rhs_stash')
           if (ix == 0 .AND. iz == 0) then
             n1r = n1r + meanpx; n1i = n1i + meanpz
+          end if
+          if (buoyant) then
+$:rhs_buoyancy_real('n1r', 'n1i', 'n2r', 'n2i', 'ix == 0 .AND. iz == 0')
           end if
           ! the assembly adds ODE(2)*newrhs to the right-hand side
           newrhs(iy, iz, ix, 1) = dcmplx(n1r, n1i)
@@ -738,10 +761,12 @@ $:rhs_nonlinear_real('rhs_stash')
     integer(C_INT), intent(in) :: iPhi
     integer(C_INT) :: iy, iz, ix, y_first, y_last
     complex(C_DOUBLE_COMPLEX) :: rhst
+    real(C_DOUBLE) :: gam
     y_first = ny0
     y_last = nyN
+    gam = phi_sink(iPhi)
     !$omp target teams distribute parallel do collapse(3) default(none) &
-    !$omp shared(rhs_stash, newrhs, der, ialfa, ibeta, nz, nx0, nxN, y_first, y_last, iPhi) &
+    !$omp shared(rhs_stash, newrhs, der, ialfa, ibeta, nz, nx0, nxN, y_first, y_last, iPhi, V, gam) &
     !$omp private(iz, ix, iy, rhst)
     DO ix = nx0, nxN
       DO iz = -nz, nz
@@ -750,6 +775,8 @@ $:rhs_nonlinear_real('rhs_stash')
 #:for c in range(1, 4)
           rhst = rhst + ${SCA_RHS[c - 1].format(D0=apply_d('rhs_stash', c, 0), D1=apply_d('rhs_stash', c, 1))}$
 #:endfor
+          ! [scalars] sink = velocity: -gamma*u
+          if (gam /= 0.0d0) rhst = rhst - gam*${apply_d('V', 1, 0)}$
           ! = 0 + rhst as before (buildrhs_prepare used to zero oldrhs here first)
           newrhs(iy, iz, ix, 2 + iPhi) = rhst
         END DO
